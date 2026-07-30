@@ -162,6 +162,16 @@ def _optional_sha256(path: Path) -> str | None:
     return _sha256(path) if path.is_file() else None
 
 
+def optional_sha256(path: Path | None) -> str | None:
+    """Return a file hash when a source file is available."""
+    return None if path is None else _optional_sha256(path)
+
+
+def git_commit(project_root: Path) -> str | None:
+    """Return the repository commit used for a prepared snapshot."""
+    return _git_commit(project_root)
+
+
 def _git_commit(project_root: Path) -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],

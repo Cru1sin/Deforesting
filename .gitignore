@@ -11,6 +11,10 @@
 !tests/**
 !configs/
 !configs/**
+!docs/
+!docs/**
+!scripts/
+!scripts/**
 
 # 日期级相机映射属于可复用配置；原始数据本身仍保持忽略。
 !data/

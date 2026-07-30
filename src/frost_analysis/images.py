@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -27,18 +28,19 @@ def match_images(
     for path, image_time, camera_id in records:
         if image_time is not None:
             usable.append((path, image_time, camera_id))
+    usable.sort(key=lambda record: (record[1], str(record[0])))
+    image_times = [record[1] for record in usable]
     used: set[Path] = set()
     rows: list[dict[str, object]] = []
     for timestamp in sensor_times:
         if pd.isna(timestamp):
             rows.append({"image_path": pd.NA, "image_time": pd.NaT, "image_camera_id": pd.NA})
             continue
-        candidates = [
-            record
-            for record in usable
-            if record[0] not in used
-            and abs((record[1] - timestamp).total_seconds()) <= tolerance_seconds
-        ]
+        lower = timestamp - pd.Timedelta(seconds=tolerance_seconds)
+        upper = timestamp + pd.Timedelta(seconds=tolerance_seconds)
+        left = bisect_left(image_times, lower)
+        right = bisect_right(image_times, upper)
+        candidates = [record for record in usable[left:right] if record[0] not in used]
         if not candidates:
             rows.append({"image_path": pd.NA, "image_time": pd.NaT, "image_camera_id": pd.NA})
             continue

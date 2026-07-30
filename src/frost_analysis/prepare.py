@@ -16,7 +16,7 @@ import pandas as pd
 from .config import Config
 from .cycles import label_cycles
 from .images import match_images
-from .io import discover_inputs
+from .io import discover_inputs, git_commit, optional_sha256
 
 
 def prepare(
@@ -75,6 +75,9 @@ def prepare(
         "sensor_file_count": len(inputs.sensor_files),
         "prepared_rows": len(prepared),
         "cycle_count": len(cycle_summary),
+        "config_sha256": optional_sha256(config.config_path),
+        "channels_sha256": optional_sha256(config.channels_path),
+        "git_commit": git_commit(config.project_root),
     }
     return prepared, cycle_summary, prepare_summary
 
@@ -115,6 +118,7 @@ def _read_sensor_table(path: Path) -> pd.DataFrame:
     sample = path.read_bytes()[:131_072]
     if sample.startswith((b"\xd0\xcf\x11\xe0", b"PK\x03\x04")):
         raise ValueError(f"binary Excel workbook is not a supported text export: {path}")
+    encoding_errors = "strict"
     for encoding in ("utf-8-sig", "gb18030"):
         try:
             decoded = sample.decode(encoding)
@@ -122,7 +126,9 @@ def _read_sensor_table(path: Path) -> pd.DataFrame:
         except UnicodeDecodeError:
             continue
     else:
-        raise UnicodeError(f"cannot decode {path}")
+        encoding = "gb18030"
+        encoding_errors = "replace"
+        decoded = sample.decode(encoding, errors=encoding_errors)
     delimiter = _detect_delimiter(decoded)
     table = pd.read_csv(
         path,
@@ -131,13 +137,14 @@ def _read_sensor_table(path: Path) -> pd.DataFrame:
         dtype=str,
         keep_default_na=False,
         engine="python",
+        encoding_errors=encoding_errors,
     )
     table.columns = [str(column).strip() for column in table.columns]
     time_column = _time_column(table.columns)
     if time_column is None:
         raise ValueError(f"no timestamp column in {path}")
     timestamps = pd.to_datetime(table.pop(time_column), errors="coerce")
-    table.insert(0, "timestamp", timestamps)
+    table = pd.concat([timestamps.rename("timestamp"), table], axis=1)
     return table.loc[table["timestamp"].notna()].reset_index(drop=True)
 
 
@@ -194,9 +201,9 @@ def _combine_channel(
         )
     result = pd.DataFrame(rows).set_index("timestamp")
     result = result.reindex(pd.DatetimeIndex(timestamps))
-    result["__missing"] = result["__missing"].fillna(True).astype(bool)
+    result["__missing"] = result["__missing"].astype("boolean").fillna(True).astype(bool)
     for column in ("__invalid", "__duplicate", "__conflict"):
-        result[column] = result[column].fillna(False).astype(bool)
+        result[column] = result[column].astype("boolean").fillna(False).astype(bool)
     return result.reset_index(drop=True)
 
 

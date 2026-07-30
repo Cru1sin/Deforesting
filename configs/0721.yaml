@@ -1,0 +1,29 @@
+experiment_id: exp_20260721
+experiment_date: "2026-07-21"
+input_dir: data/0721
+channels_path: configs/channels.yaml
+sensor_globs: ["*.xls", "*.xlsx"]
+image_extensions: [".jpg", ".png"]
+camera_mapping_file: IPlocation.yaml
+cycles:
+  defrost_channel: defrost_active
+  maximum_state_gap_seconds: 5
+  stable_heating_seconds: 180
+process:
+  resample_interval_seconds: 10
+  continuous_max_gap_seconds: 60
+  control_max_gap_seconds: 30
+  baseline:
+    stage: recovery
+    minimum_observed_coverage: 0.8
+    maximum_imputed_fraction: 0.15
+  features:
+    windows_minutes: [5, 10, 30]
+analysis:
+  performance_target: heating_capacity__baseline_residual
+  future_horizon_minutes: 10
+  reset_pre_window_minutes: 5
+  minimum_valid_cycles: 3
+  minimum_absolute_trend_effect: 0.3
+  minimum_direction_consistency: 0.7
+  maximum_context_association: 0.8
