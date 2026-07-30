@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -19,17 +20,108 @@ class SegmentationResult:
     warnings: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class CycleValidationResult:
+    """Validated row labels, cycle records, sampling interval, and warnings."""
+
+    frame: pd.DataFrame
+    cycles: pd.DataFrame
+    nominal_interval_seconds: float
+    warnings: tuple[str, ...] = ()
+
+
+def normalize_cycle_status(quality: object) -> str:
+    """Map detailed segmentation quality to the three public cycle states."""
+    status_mapping = {
+        "complete": "valid",
+        "contaminated": "invalid",
+        "abnormal": "invalid",
+        "excluded": "invalid",
+        "partial": "incomplete",
+    }
+    return status_mapping.get(str(quality), "incomplete")
+
+
+def append_issue(existing: object, issue: str) -> str:
+    """Append one reason without serializing missing values as ``"nan"``."""
+    previous = _text_or_empty(existing)
+    return ";".join(value for value in (previous, issue.strip()) if value)
+
+
+def _text_or_empty(value: object) -> str:
+    """Render one optional scalar as readable text instead of ``"nan"``."""
+    missing = value is None or bool(pd.isna(cast(Any, value)))
+    return "" if missing else str(value).strip()
+
+
+def infer_sampling_interval_seconds(
+    frame: pd.DataFrame,
+    *,
+    expected_sampling_interval_seconds: float | None = None,
+) -> float:
+    """Infer the median positive timestamp delta or use an explicit fallback."""
+    timestamps = pd.to_datetime(
+        frame.get("timestamp", pd.Series(dtype=object)), errors="coerce"
+    ).dropna()
+    deltas = timestamps.sort_values().drop_duplicates().diff().dt.total_seconds()
+    positive = deltas[deltas.gt(0)]
+    if not positive.empty:
+        inferred = float(positive.median())
+        if np.isfinite(inferred) and inferred > 0:
+            return inferred
+    if expected_sampling_interval_seconds is not None:
+        fallback = float(expected_sampling_interval_seconds)
+        if np.isfinite(fallback) and fallback > 0:
+            return fallback
+    raise ValueError("cannot infer positive sampling interval")
+
+
+def validate_cycles(
+    segmentation: SegmentationResult,
+    config: Mapping[str, object],
+) -> CycleValidationResult:
+    """Apply mode and gap checks after segmentation without reconstructing data."""
+    # Copy the read-only Mapping once; validation may need ordinary dict access.
+    settings = dict(config)
+    # The median positive delta represents normal sampling better than a mean with gaps.
+    nominal_interval = infer_sampling_interval_seconds(
+        segmentation.frame,
+        expected_sampling_interval_seconds=_optional_positive_float(
+            settings.get("expected_sampling_interval_seconds")
+        ),
+    )
+    # First reject non-heating rows, then classify unusually large observed gaps.
+    labeled, validated, mode_warnings = _enforce_heating_mode(
+        segmentation.frame,
+        segmentation.cycles,
+    )
+    labeled, validated, gap_warnings = _mark_long_gap_cycles(
+        labeled,
+        validated,
+        nominal_seconds=nominal_interval,
+        factor=as_optional_float(settings.get("gap_warning_factor", 3.0)) or 3.0,
+    )
+    warnings = (*segmentation.warnings, *mode_warnings, *gap_warnings)
+    # Keep warning order stable while removing duplicate messages.
+    return CycleValidationResult(
+        frame=labeled,
+        cycles=validated,
+        nominal_interval_seconds=nominal_interval,
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
 def segment_cycles(  # noqa: C901 - explicit boundary cases remain auditable in one flow
     frame: pd.DataFrame,
     state_column: str,
     config: dict[str, Any],
 ) -> SegmentationResult:
     """Split post-defrost heating through the next defrost, preserving partials."""
-    required = {"sensor_time", state_column}
+    required = {"timestamp", state_column}
     if not required <= set(frame.columns):
         raise ValueError(f"segmentation requires columns: {sorted(required)}")
-    labeled = frame.sort_values("sensor_time", kind="stable").reset_index(drop=True).copy()
-    labeled["sensor_time"] = pd.to_datetime(labeled["sensor_time"], errors="raise")
+    labeled = frame.sort_values("timestamp", kind="stable").reset_index(drop=True).copy()
+    labeled["timestamp"] = pd.to_datetime(labeled["timestamp"], errors="raise")
     manual = config.get("manual_overrides", [])
     if manual:
         cycles = pd.DataFrame([_manual_cycle(record, config) for record in manual])
@@ -49,18 +141,18 @@ def segment_cycles(  # noqa: C901 - explicit boundary cases remain auditable in 
     recognized = state.notna()
     state = state.ffill().bfill()
     debounced, debounce_events = _debounce(
-        labeled["sensor_time"], state, float(config.get("debounce_seconds", 20))
+        labeled["timestamp"], state, float(config.get("debounce_seconds", 20))
     )
     labeled["defrost_state_debounced"] = debounced
-    on_runs = _on_runs(labeled["sensor_time"], debounced)
+    on_runs = _on_runs(labeled["timestamp"], debounced)
     cycle_rows: list[dict[str, object]] = []
     warnings: list[str] = []
 
-    if on_runs and labeled["sensor_time"].iloc[0] < on_runs[0][0]:
+    if on_runs and labeled["timestamp"].iloc[0] < on_runs[0][0]:
         cycle_rows.append(
             _partial_row(
                 "partial_leading",
-                labeled["sensor_time"].iloc[0],
+                labeled["timestamp"].iloc[0],
                 on_runs[0][0],
                 "data_starts_mid_cycle",
             )
@@ -89,7 +181,7 @@ def segment_cycles(  # noqa: C901 - explicit boundary cases remain auditable in 
                 config,
                 state_coverage=float(
                     recognized.loc[
-                        labeled["sensor_time"].between(heating_start, defrost_end)
+                        labeled["timestamp"].between(heating_start, defrost_end)
                     ].mean()
                 ),
                 warnings=warnings,
@@ -98,12 +190,12 @@ def segment_cycles(  # noqa: C901 - explicit boundary cases remain auditable in 
 
     if on_runs:
         last_end = on_runs[-1][2]
-        if last_end is not None and last_end < labeled["sensor_time"].iloc[-1]:
+        if last_end is not None and last_end < labeled["timestamp"].iloc[-1]:
             cycle_rows.append(
                 _partial_row(
                     "partial_trailing",
                     last_end,
-                    labeled["sensor_time"].iloc[-1],
+                    labeled["timestamp"].iloc[-1],
                     "data_ends_before_next_defrost",
                 )
             )
@@ -111,8 +203,8 @@ def segment_cycles(  # noqa: C901 - explicit boundary cases remain auditable in 
         cycle_rows.append(
             _partial_row(
                 "partial_only",
-                labeled["sensor_time"].iloc[0],
-                labeled["sensor_time"].iloc[-1],
+                labeled["timestamp"].iloc[0],
+                labeled["timestamp"].iloc[-1],
                 "no_defrost_event",
             )
         )
@@ -213,7 +305,7 @@ def _automatic_cycle(
     frequency_column = str(config.get("compressor_frequency_column", "compressor_frequency"))
     if frequency_column in frame:
         normal = frame.loc[
-            frame["sensor_time"].between(heating_start, defrost_start, inclusive="left"),
+            frame["timestamp"].between(heating_start, defrost_start, inclusive="left"),
             frequency_column,
         ]
         zero_run = normal.fillna(0).le(0)
@@ -227,10 +319,10 @@ def _automatic_cycle(
             reasons.append("compressor_shutdown")
     evidence = "explicit_defrost_flag"
     corroboration = _corroboration(frame, defrost_start, config)
-    interval = frame.loc[frame["sensor_time"].between(heating_start, defrost_end)].sort_values(
-        "sensor_time"
+    interval = frame.loc[frame["timestamp"].between(heating_start, defrost_end)].sort_values(
+        "timestamp"
     )
-    interval_times = interval["sensor_time"]
+    interval_times = interval["timestamp"]
     deltas = interval_times.diff().dt.total_seconds().dropna()
     nominal = float(deltas[deltas.gt(0)].median()) if deltas.gt(0).any() else 1.0
     gap_columns = [
@@ -240,7 +332,7 @@ def _automatic_cycle(
     signal_gaps: list[float] = []
     for column_value in gap_columns:
         column = str(column_value)
-        observed_times = interval.loc[interval[column].notna(), "sensor_time"]
+        observed_times = interval.loc[interval[column].notna(), "timestamp"]
         observed_deltas = observed_times.diff().dt.total_seconds().dropna()
         signal_gap = float(observed_deltas.max()) if not observed_deltas.empty else 0.0
         signal_gaps.append(signal_gap)
@@ -306,12 +398,12 @@ def _corroboration(
         return {"status": "not_available", "evidence": "corroboration=not_available"}
     seconds = float(config.get("corroboration_window_seconds", 30))
     before = frame.loc[
-        frame["sensor_time"].between(
+        frame["timestamp"].between(
             boundary - pd.Timedelta(seconds=seconds), boundary, inclusive="left"
         )
     ]
     after = frame.loc[
-        frame["sensor_time"].between(
+        frame["timestamp"].between(
             boundary, boundary + pd.Timedelta(seconds=seconds), inclusive="both"
         )
     ]
@@ -430,7 +522,7 @@ def _label_rows(frame: pd.DataFrame, cycles: pd.DataFrame) -> pd.DataFrame:
             if pd.notna(row.defrost_end)
             else start + pd.Timedelta(seconds=float(row.cycle_duration))
         )
-        mask = labeled["sensor_time"].between(start, end, inclusive="left")
+        mask = labeled["timestamp"].between(start, end, inclusive="left")
         labeled.loc[mask, "cycle_id"] = row.cycle_id
         labeled.loc[mask, "cycle_quality"] = row.quality_flag
         if row.quality_flag == "partial":
@@ -438,17 +530,17 @@ def _label_rows(frame: pd.DataFrame, cycles: pd.DataFrame) -> pd.DataFrame:
             continue
         stable_start = pd.Timestamp(row.stable_heating_start)  # type: ignore[arg-type]
         defrost_start = pd.Timestamp(row.defrost_start)  # type: ignore[arg-type]
-        recovery = mask & labeled["sensor_time"].lt(stable_start)
+        recovery = mask & labeled["timestamp"].lt(stable_start)
         development = (
             mask
-            & labeled["sensor_time"].ge(stable_start)
-            & labeled["sensor_time"].lt(defrost_start)
+            & labeled["timestamp"].ge(stable_start)
+            & labeled["timestamp"].lt(defrost_start)
         )
-        defrost = mask & labeled["sensor_time"].ge(defrost_start)
+        defrost = mask & labeled["timestamp"].ge(defrost_start)
         labeled.loc[recovery, "stage"] = "recovery"
         labeled.loc[development, "stage"] = "frost_development"
         labeled.loc[defrost, "stage"] = "defrost"
-        development_times = pd.DatetimeIndex(labeled.loc[development, "sensor_time"])
+        development_times = pd.DatetimeIndex(labeled.loc[development, "timestamp"])
         labeled.loc[development, "cycle_time_s"] = (
             development_times - stable_start
         ).total_seconds()
@@ -488,13 +580,13 @@ def _cycle_columns() -> list[str]:
 def build_cycle_summary(
     cycles: pd.DataFrame,
     frame: pd.DataFrame,
-    multiview: pd.DataFrame,
+    multiview_index: pd.DataFrame,
     *,
     date: str,
     gap_warning_factor: float,
 ) -> pd.DataFrame:
     """Create the single human-readable sensor/RGB cycle quality table."""
-    groups = _prepare_multiview_groups(multiview)
+    groups = _prepare_multiview_groups(multiview_index)
     image_times = groups["group_time"].drop_duplicates().sort_values()
     image_deltas = image_times.diff().dt.total_seconds().dropna()
     image_cadence = (
@@ -504,8 +596,35 @@ def build_cycle_summary(
     )
     image_gap_limit = max(45.0, image_cadence * 1.5)
     sensor_times = pd.to_datetime(
-        frame.get("sensor_time", pd.Series(dtype=object)), errors="coerce"
+        frame.get("timestamp", pd.Series(dtype=object)), errors="coerce"
     )
+    # Only registered sensor values define sensor coverage; cycle labels are metadata.
+    sensor_columns = [
+        column
+        for column in frame.columns
+        if column
+        not in {
+            "timestamp",
+            "cycle_id",
+            "cycle_quality",
+            "stage",
+            "cycle_time_s",
+            "cycle_phase",
+            "cycle_stage",
+            "cycle_status",
+            "cycle_elapsed_seconds",
+            "cycle_progress",
+            "operating_mode",
+            "is_heating",
+            "defrost_flag",
+            "defrost_state_debounced",
+        }
+        and not str(column).startswith("image_")
+    ]
+    sensor_observed = pd.Series(False, index=frame.index)
+    for column in sensor_columns:
+        sensor_observed |= pd.to_numeric(frame[column], errors="coerce").notna()
+    sensor_observation_times = sensor_times.loc[sensor_observed]
     all_sensor_deltas = (
         sensor_times.dropna().drop_duplicates().sort_values().diff().dt.total_seconds()
     )
@@ -538,6 +657,14 @@ def build_cycle_summary(
             if start is not None and end is not None
             else 0.0
         )
+        scoped_observed_times = (
+            sensor_observation_times.loc[
+                sensor_observation_times.between(start, end, inclusive="both")
+            ]
+            if start is not None and end is not None
+            else sensor_observation_times.iloc[0:0]
+        )
+        sensor_coverage = _time_span_fraction(scoped_observed_times, start, end)
         sensor_expected = (
             max(1, int(round(sensor_duration / max(nominal_sensor, 1e-9))) + 1)
             if sensor_duration > 0
@@ -557,6 +684,10 @@ def build_cycle_summary(
         ).fillna(False).astype(bool)
         group_count = int(len(scoped))
         complete_count = int(complete.sum())
+        # RGB coverage uses complete multi-camera groups, not partial camera groups.
+        complete_group_times = scoped.loc[complete, "group_time"]
+        rgb_coverage = _time_span_fraction(complete_group_times, start, end)
+        multimodal_coverage = min(sensor_coverage, rgb_coverage)
         rgb_quality = (
             "missing"
             if group_count == 0
@@ -568,7 +699,7 @@ def build_cycle_summary(
                 "cycle_id": cycle_id,
                 "date": date,
                 "cycle_status": sensor_quality,
-                "cycle_status_reason": str(cycle.get("exclusion_reason", "")),
+                "cycle_status_reason": _text_or_empty(cycle.get("exclusion_reason", "")),
                 "heating_start": cycle.get("heating_start"),
                 "stable_heating_start": cycle.get("stable_heating_start"),
                 "defrost_start": cycle.get("defrost_start"),
@@ -581,15 +712,15 @@ def build_cycle_summary(
                 ),
                 "sensor_observation_count": sensor_count,
                 "sensor_expected_count": sensor_expected,
-                "sensor_coverage_fraction": sensor_count / sensor_expected
-                if sensor_expected
-                else np.nan,
+                "sensor_coverage_fraction": sensor_coverage,
                 "sensor_interruption_count": len(sensor_intervals),
                 "sensor_interruption_intervals": "; ".join(sensor_intervals),
                 "rgb_image_count": int(scoped.get("camera_count", pd.Series(dtype=float)).sum()),
                 "rgb_group_count": group_count,
                 "rgb_complete_group_count": complete_count,
                 "rgb_complete_fraction": complete_count / group_count if group_count else np.nan,
+                "rgb_coverage_fraction": rgb_coverage,
+                "multimodal_coverage_fraction": multimodal_coverage,
                 "rgb_max_gap_seconds": max(all_gaps) if all_gaps else np.nan,
                 "rgb_interruption_count": len(interruptions),
                 "rgb_partial_group_count": int((~complete).sum()),
@@ -621,6 +752,8 @@ def build_cycle_summary(
         "rgb_group_count",
         "rgb_complete_group_count",
         "rgb_complete_fraction",
+        "rgb_coverage_fraction",
+        "multimodal_coverage_fraction",
         "rgb_max_gap_seconds",
         "rgb_interruption_count",
         "rgb_partial_group_count",
@@ -630,6 +763,108 @@ def build_cycle_summary(
         "multimodal_quality",
     ]
     return pd.DataFrame(rows, columns=columns).sort_values("cycle_id", kind="stable")
+
+
+def _enforce_heating_mode(
+    frame: pd.DataFrame, cycles: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Invalidate complete cycles containing a non-heating normal-stage row."""
+    if "is_heating" not in frame or cycles.empty:
+        return frame, cycles, []
+    labeled = frame.copy()
+    validated = cycles.copy()
+    warnings: list[str] = []
+    for index, cycle in validated.iterrows():
+        if cycle.get("quality_flag") != "complete":
+            continue
+        cycle_mask = labeled["cycle_id"].eq(cycle["cycle_id"])
+        normal_mask = labeled["stage"].isin(["stable_clean", "frost_development"])
+        observed = labeled.loc[cycle_mask & normal_mask, "is_heating"].dropna()
+        if not observed.empty and not observed.astype("boolean").all():
+            validated.loc[index, "quality_flag"] = "abnormal"
+            validated.loc[index, "exclusion_reason"] = append_issue(
+                cycle.get("exclusion_reason"),
+                "nonheating_mode_inside_cycle",
+            )
+            labeled.loc[cycle_mask, "cycle_quality"] = "abnormal"
+            warnings.append(f"{cycle['cycle_id']}:nonheating_mode_inside_cycle")
+    return labeled, validated, warnings
+
+
+def _mark_long_gap_cycles(
+    frame: pd.DataFrame,
+    cycles: pd.DataFrame,
+    *,
+    nominal_seconds: float,
+    factor: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Mark complete cycles whose observed channel gap exceeds the threshold."""
+    labeled = frame.copy()
+    validated = cycles.copy()
+    warnings: list[str] = []
+    limit = nominal_seconds * factor
+    for index, cycle in validated.iterrows():
+        cycle_id = str(cycle.get("cycle_id", ""))
+        gap = as_optional_float(cycle.get("maximum_gap_seconds"))
+        if pd.notna(cycle.get("heating_start")) and pd.notna(cycle.get("defrost_end")):
+            channel_gap, _ = _sensor_gap_evidence(
+                labeled,
+                cycle_id,
+                pd.Timestamp(cycle["heating_start"]),
+                pd.Timestamp(cycle["defrost_end"]),
+                nominal_seconds,
+            )
+            candidates = [
+                value
+                for value in (gap, channel_gap)
+                if value is not None and np.isfinite(value)
+            ]
+            gap = max(candidates, default=0.0)
+            validated.loc[index, "maximum_gap_seconds"] = gap
+        if cycle.get("quality_flag") != "complete" or gap is None or gap <= limit:
+            continue
+        validated.loc[index, "quality_flag"] = "contaminated"
+        validated.loc[index, "exclusion_reason"] = append_issue(
+            cycle.get("exclusion_reason"),
+            "long_gap",
+        )
+        cycle_mask = labeled["cycle_id"].eq(cycle_id)
+        labeled.loc[cycle_mask, "cycle_quality"] = "contaminated"
+        labeled.loc[cycle_mask, "cycle_phase"] = np.nan
+        warnings.append(f"{cycle_id}:long_gap:{gap:.1f}s>{limit:.1f}s")
+    return labeled, validated, warnings
+
+
+def as_optional_float(value: object) -> float | None:
+    """Convert one scalar to float while preserving missingness as ``None``."""
+    number = pd.to_numeric(cast(Any, value), errors="coerce")
+    if pd.isna(number):
+        return None
+    return float(number)
+
+
+def _optional_positive_float(value: object) -> float | None:
+    """Return a positive numeric option or ``None`` when it is not supplied."""
+    number = as_optional_float(value)
+    return number if number is not None and number > 0 else None
+
+
+def _time_span_fraction(
+    observed_times: pd.Series,
+    start: pd.Timestamp | None,
+    end: pd.Timestamp | None,
+) -> float:
+    """Measure observed time span against one cycle interval."""
+    if start is None or end is None:
+        return 0.0
+    total_seconds = float((end - start).total_seconds())
+    if total_seconds <= 0:
+        return 0.0
+    valid = pd.to_datetime(observed_times, errors="coerce").dropna().drop_duplicates()
+    if valid.empty:
+        return 0.0
+    observed_seconds = float((valid.max() - valid.min()).total_seconds())
+    return float(np.clip(observed_seconds / total_seconds, 0.0, 1.0))
 
 
 def _sensor_gap_evidence(
@@ -643,12 +878,16 @@ def _sensor_gap_evidence(
     if start is None or end is None:
         return np.nan, []
     cycle_mask = frame.get("cycle_id", pd.Series(dtype=object)).astype("string").eq(cycle_id)
-    scoped = frame.loc[cycle_mask & frame["sensor_time"].between(start, end, inclusive="both")]
+    scoped = frame.loc[cycle_mask & frame["timestamp"].between(start, end, inclusive="both")]
     reserved = {
-        "sensor_time",
+        "timestamp",
         "cycle_id",
-        "heating_mode",
-        "mode",
+        "cycle_stage",
+        "cycle_status",
+        "cycle_elapsed_seconds",
+        "cycle_progress",
+        "is_heating",
+        "operating_mode",
         "defrost_flag",
     }
     threshold = max(3.0 * nominal, 30.0)
@@ -659,7 +898,7 @@ def _sensor_gap_evidence(
             continue
         values = pd.to_numeric(scoped[column], errors="coerce")
         times = (
-            scoped.loc[values.notna(), "sensor_time"]
+            scoped.loc[values.notna(), "timestamp"]
             .dropna()
             .drop_duplicates()
             .sort_values()
@@ -681,13 +920,19 @@ def _sensor_gap_evidence(
 
 
 def _as_float(value: object) -> float:
-    number = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    return float(number) if pd.notna(number) else 0.0
+    number = as_optional_float(value)
+    return number if number is not None else 0.0
 
 
 def _prepare_multiview_groups(multiview: pd.DataFrame) -> pd.DataFrame:
     if multiview.empty or "group_time" not in multiview:
-        return pd.DataFrame(columns=["group_time", "camera_count", "all_cameras_present"])
+        return pd.DataFrame(
+            {
+                "group_time": pd.Series(dtype="datetime64[ns]"),
+                "camera_count": pd.Series(dtype=float),
+                "all_cameras_present": pd.Series(dtype=bool),
+            }
+        )
     result = multiview.copy()
     result["group_time"] = pd.to_datetime(result["group_time"], errors="coerce")
     return result.loc[result["group_time"].notna()].sort_values("group_time")
@@ -699,13 +944,7 @@ def _coerce_cycle_time(value: object) -> pd.Timestamp | None:
 
 
 def _cycle_status(quality: str) -> str:
-    if quality == "complete":
-        return "valid"
-    if quality == "contaminated":
-        return "long_gap"
-    if quality in {"abnormal", "excluded"}:
-        return "invalid_mode"
-    return "incomplete"
+    return normalize_cycle_status(quality)
 
 
 def _cycle_boundary_gaps(

@@ -73,22 +73,39 @@ def load_feature_registry(path: Path) -> dict[str, FeatureSpec]:
     return result
 
 
-def apply_feature_registry(frame: pd.DataFrame, specs: dict[str, FeatureSpec]) -> RegistryResult:
+def apply_feature_registry(
+    frame: pd.DataFrame,
+    specs: dict[str, FeatureSpec],
+    *,
+    heating_mode_value: float = 3,
+) -> RegistryResult:
+    """Project raw columns into registered fields and derived relationships.
+
+    ``result`` keeps the source rows and receives one canonical column for each
+    Registry specification. ``operating_mode`` is the numeric source code;
+    ``is_heating`` is the separate nullable predicate used by cycle checks.
+    """
     result = frame.copy()
     for spec in specs.values():
         if spec.raw_source is None:
             continue
         if spec.raw_source not in result:
+            # Missing source columns remain explicit NaN fields for auditability.
             result[spec.canonical_name] = np.nan
+            if spec.canonical_name == "operating_mode":
+                result["is_heating"] = pd.Series(pd.NA, index=result.index, dtype="boolean")
             continue
         values = pd.to_numeric(result[spec.raw_source], errors="coerce")
         if spec.formula == "scale_0.01":
             values = values * 0.01
         elif spec.formula == "scale_0.001":
             values = values * 0.001
-        if spec.canonical_name == "mode":
-            result[spec.canonical_name] = result[spec.raw_source]
-            result["heating_mode"] = values.eq(3).astype("boolean").where(values.notna())
+        if spec.canonical_name == "operating_mode":
+            # Preserve code 3 as operating_mode; derive the nullable boolean separately.
+            result[spec.canonical_name] = values
+            result["is_heating"] = values.eq(heating_mode_value).astype("boolean").where(
+                values.notna()
+            )
         elif spec.canonical_name == "defrost_flag":
             result[spec.canonical_name] = result[spec.raw_source]
         else:

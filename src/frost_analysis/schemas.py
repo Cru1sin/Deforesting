@@ -24,11 +24,14 @@ class DatasetPaths:
 class PrepareOptions:
     timestamp_column: str
     duplicate_policy: str
+    heating_mode_value: int
+    images_required: bool
     image_tolerance_seconds: float
     multiview_tolerance_milliseconds: float
     camera_roles: dict[str, str]
     unknown_camera_role: str
     cycle_settings: dict[str, Any]
+    cycle_validation: dict[str, Any]
     gap_warning_factor: float
 
 
@@ -60,4 +63,3 @@ class AppConfig:
     prepare: PrepareOptions
     process: ProcessOptions
     analysis: AnalysisOptions
-

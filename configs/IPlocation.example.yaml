@@ -1,0 +1,6 @@
+# Copy this file to data/<MMDD>/IPlocation.yaml for a date-specific mapping.
+camera_roles:
+  "192.168.1.1": front
+  "192.168.1.2": left
+  "192.168.1.11": top
+unknown_role: unknown

@@ -3,13 +3,18 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from frost_analysis.data.cycles import segment_cycles
+from frost_analysis.data.cycles import (
+    append_issue,
+    infer_sampling_interval_seconds,
+    normalize_cycle_status,
+    segment_cycles,
+)
 
 
 def _frame(states: list[str], *, frequency: list[float] | None = None) -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "sensor_time": pd.date_range("2026-07-15", periods=len(states), freq="s"),
+            "timestamp": pd.date_range("2026-07-15", periods=len(states), freq="s"),
             "p1__Deforst": states,
             "compressor_frequency": frequency or [50.0] * len(states),
             "evidence_temperature": np.linspace(0, 1, len(states)),
@@ -135,7 +140,7 @@ def test_boundary_confidence_orders_corroboration_and_long_gap_evidence() -> Non
     conflict = supported.copy()
     conflict["evidence_temperature"] = -supported["evidence_temperature"]
     long_gap = supported.copy()
-    long_gap.loc[8:, "sensor_time"] += pd.Timedelta(seconds=20)
+    long_gap.loc[8:, "timestamp"] += pd.Timedelta(seconds=20)
 
     def confidence(frame: pd.DataFrame) -> float:
         result = segment_cycles(frame, "p1__Deforst", _config())
@@ -151,3 +156,26 @@ def test_boundary_confidence_orders_corroboration_and_long_gap_evidence() -> Non
     assert float(gap_cycle["maximum_gap_seconds"]) >= 20
     assert confidence(supported) > float(gap_cycle["segmentation_confidence"])
     assert any("long_gap" in warning for warning in gap_result.warnings)
+
+
+def test_cycle_status_normalizes_quality_to_three_states() -> None:
+    """Expose one stable status vocabulary to downstream stages."""
+    assert normalize_cycle_status("complete") == "valid"
+    assert normalize_cycle_status("contaminated") == "invalid"
+    assert normalize_cycle_status("excluded") == "invalid"
+    assert normalize_cycle_status("partial") == "incomplete"
+
+
+def test_append_issue_does_not_turn_nan_into_literal_text() -> None:
+    """Quality reasons must remain readable when the source cell is missing."""
+    assert append_issue(np.nan, "long_gap") == "long_gap"
+    assert append_issue("existing", "long_gap") == "existing;long_gap"
+
+
+def test_sampling_interval_uses_configured_fallback_when_no_positive_delta_exists() -> None:
+    """A configured interval is explicit; a hidden one-second default is not."""
+    frame = pd.DataFrame({"timestamp": pd.to_datetime(["2026-07-15"] * 2)})
+    assert infer_sampling_interval_seconds(
+        frame,
+        expected_sampling_interval_seconds=2.0,
+    ) == 2.0

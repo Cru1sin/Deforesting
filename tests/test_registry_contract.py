@@ -5,9 +5,45 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from frost_analysis.data.registry import apply_feature_registry, load_feature_registry
+from frost_analysis.data.registry import (
+    FeatureSpec,
+    apply_feature_registry,
+    load_feature_registry,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _mode_spec(raw_source: str) -> FeatureSpec:
+    """Build the smallest mode specification needed by the contract test."""
+    return FeatureSpec(
+        feature_id="mode",
+        canonical_name="operating_mode",
+        raw_source=raw_source,
+        meaning_zh="运行模式",
+        physical_family="event_quality",
+        source_type="event",
+        unit="code",
+        formula="",
+        data_role="M",
+        availability="current_history",
+        deployment_status="confirmed",
+        confidence="high",
+        primary_or_validation="primary",
+        analysis_enabled=False,
+        notes="",
+    )
+
+
+def test_registry_exposes_numeric_mode_and_boolean_heating_flag() -> None:
+    """Keep the raw mode code separate from its derived heating predicate."""
+    frame = pd.DataFrame({"mode_source": [3, 2, None]})
+    result = apply_feature_registry(frame, {"mode": _mode_spec("mode_source")})
+
+    assert result.frame["operating_mode"].iloc[:2].tolist() == [3, 2]
+    assert pd.isna(result.frame["operating_mode"].iloc[2])
+    assert result.frame["is_heating"].iloc[:2].tolist() == [True, False]
+    assert pd.isna(result.frame["is_heating"].iloc[2])
 
 
 def test_registry_uses_qcomp_as_the_only_heating_capacity_channel() -> None:

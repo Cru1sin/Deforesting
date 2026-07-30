@@ -10,286 +10,353 @@ cycle_summary.csv: 让人快速判断每个循环是否可用
 
 from __future__ import annotations
 
+import hashlib
 import json
-import re # 正则处理，将相机名称转换成安全的列名
-import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from uuid import uuid4
 
-import numpy as np
 import pandas as pd
 
-from ..core.artifacts import write_dataframe # 负责保存 DataFrame
-from ..data.alignment import build_multiview, match_images_to_sensors # 把时间相近的多机位图片分为一组，给每张图片寻找最近的传感器时间点
-from ..data.cycles import _sensor_gap_evidence, build_cycle_summary, segment_cycles # 检查单个循环中的传感器中断，划分结霜—除霜循环，汇总每个循环的数据质量
-from ..data.images import build_image_manifest # 扫描原始图片，建立图片记录表
-from ..data.inventory import inventory_directory # 扫描原始目录识别文件等信息
-from ..data.registry import apply_feature_registry, load_feature_registry # 加载标准字段定义，把原始点位映射成标准变量
-from ..data.sensors import preprocess_directory # 加载传感器文件，清洗数据
-from ..schemas import AppConfig # 数据配置：路径、编号、映射、阈值等
+from ..config import load_date_camera_mapping
+from ..core.artifacts import write_dataframe  # 保存主表
+from ..data.alignment import (
+    attach_image_paths,
+    build_multiview,
+    match_images_to_sensors,
+)
+from ..data.cycles import (
+    CycleValidationResult,
+    build_cycle_summary,
+    normalize_cycle_status,
+    segment_cycles,
+    validate_cycles,
+)
+from ..data.images import build_image_manifest  # 扫描原始图片，建立图片记录表
+from ..data.inventory import inventory_directory  # 扫描原始目录，识别文件和字段
+from ..data.registry import apply_feature_registry, load_feature_registry
+from ..data.sensors import preprocess_directory  # 加载并拼接传感器文件
+from ..schemas import AppConfig  # 阶段配置和路径合同
 
 
 @dataclass(frozen=True)
-class PrepareResult: # 准备结果类，包含准备后的数据、循环总结、警告信息和指标
-    prepared_data: pd.DataFrame
-    cycle_summary: pd.DataFrame
-    warnings: list[str]
-    metrics: dict[str, int]
+class PrepareResult:
+    """In-memory outputs passed from prepare validation to publication."""
+
+    prepared_data: pd.DataFrame  # 时间点级标准传感器表，附带紧凑循环和图片字段。
+    cycle_summary: pd.DataFrame  # 循环级质量表，保存完整度和详细原因。
+    warnings: tuple[str, ...]  # 不阻止发布、但需要人工关注的问题。
+    metrics: dict[str, int]  # 本次输入清点和图片分组的计数指标。
 
 
-def prepare_dataset(config: AppConfig) -> Path: # 正式的外部入口
-    """
-    把“如何组织数据”和“如何写文件”分开
-    创建 prepared_data.parquet 和规范化的循环总结，并保存到指定路径。
-    """
-    result = build_prepared_dataset(config) # 构建数据
-    config.paths.output_dir.mkdir(parents=True, exist_ok=True) # 创建输出目录
-    write_dataframe(result.prepared_data, config.paths.prepared_data) # 保存主数据
-    result.cycle_summary.to_csv(config.paths.cycle_summary, index=False)  # 保存循环摘要
-    _write_state(config, result) # 保存运行状态
-    return config.paths.prepared_data # 返回主输出路径
+def prepare_dataset(config: AppConfig) -> Path:
+    """Build, validate, and publish the two prepare-stage artifacts."""
+    result = build_prepared_dataset(config)  # 构建内存结果
+    validate_prepare_result(result, config)  # 发布前检查合同
+    return publish_prepare_result(result, config)  # 原子发布文件
 
 
-def build_prepared_dataset(config: AppConfig) -> PrepareResult: # 核心的处理函数
+def validate_prepare_result(result: PrepareResult, config: AppConfig) -> None:
+    """Reject malformed prepare output before any public file is replaced."""
+    prepared = result.prepared_data  # 时间点级输出。
+    required_prepared = {
+        "timestamp",
+        "cycle_id",
+        "cycle_stage",
+        "cycle_status",
+        "cycle_elapsed_seconds",
+        "cycle_progress",
+    }
+    missing_prepared = sorted(required_prepared - set(prepared.columns))
+    if missing_prepared:
+        raise ValueError(f"prepared data missing required columns: {missing_prepared}")
+    # Prepare may carry missing values, but it must never carry reconstructed values.
+    interpolation_columns = [
+        str(column) for column in prepared.columns if str(column).endswith("__interpolated")
+    ]
+    if interpolation_columns:
+        raise RuntimeError(
+            "Prepare stage produced interpolated columns: "
+            + ", ".join(interpolation_columns)
+        )
+    timestamps = pd.to_datetime(prepared["timestamp"], errors="raise")
+    if not timestamps.is_monotonic_increasing or not timestamps.is_unique:
+        raise ValueError("prepared timestamps must be sorted and unique")
+    if "cycle_status_reason" in prepared:
+        raise ValueError("cycle_status_reason belongs only in cycle_summary")
 
-    if not config.paths.raw_dir.is_dir(): # 确认原始数据目录存在
+    cycle_summary = result.cycle_summary  # 循环级输出，原因和完整度只在这里保存。
+    required_summary = {
+        "cycle_id",
+        "cycle_status",
+        "cycle_status_reason",
+        "sensor_coverage_fraction",
+        "rgb_coverage_fraction",
+        "multimodal_coverage_fraction",
+    }
+    missing_summary = sorted(required_summary - set(cycle_summary.columns))
+    if missing_summary:
+        raise ValueError(f"cycle summary missing required columns: {missing_summary}")
+    allowed_statuses = {"valid", "incomplete", "invalid"}
+    observed_statuses = set(cycle_summary["cycle_status"].dropna().astype(str))
+    unexpected_statuses = sorted(observed_statuses - allowed_statuses)
+    if unexpected_statuses:
+        raise ValueError(f"cycle summary has unknown statuses: {unexpected_statuses}")
+    for column in (
+        "sensor_coverage_fraction",
+        "rgb_coverage_fraction",
+        "multimodal_coverage_fraction",
+    ):
+        coverage = pd.to_numeric(cycle_summary[column], errors="coerce").dropna()
+        if not coverage.between(0.0, 1.0).all():
+            raise ValueError(f"cycle summary coverage outside [0, 1]: {column}")
+    if config.prepare.images_required and result.metrics.get("rgb_image_count", 0) == 0:
+        raise RuntimeError("No RGB images were found")
+
+
+def publish_prepare_result(result: PrepareResult, config: AppConfig) -> Path:
+    """Write validated prepare artifacts through temporary-file replacement."""
+    # The parquet and CSV writers replace sibling temporary files atomically.
+    config.paths.output_dir.mkdir(parents=True, exist_ok=True)
+    write_dataframe(result.prepared_data, config.paths.prepared_data)
+    _write_csv_atomic(result.cycle_summary, config.paths.cycle_summary)
+    _write_state(config, result)
+    return config.paths.prepared_data
+
+
+def build_prepared_dataset(config: AppConfig) -> PrepareResult:
+    """Build prepared observations in the readable sensor-to-RGB pipeline order."""
+    # Fail before inventorying when the configured date directory is absent.
+    if not config.paths.raw_dir.is_dir():
         raise FileNotFoundError(f"raw data directory does not exist: {config.paths.raw_dir}")
 
-    # 盘点原始目录，需要知道哪些文件是图片，图片所在目录，原始数据的字段
-    inventory, inventory_columns = inventory_directory(config.paths.raw_dir) 
+    # file_inventory 记录有哪些文件；source_field_inventory 记录原始表有哪些字段。
+    file_inventory, source_field_inventory = inventory_directory(config.paths.raw_dir)
 
-    # 把文件夹中的所有图片整理成一张标准表，结构化记录
-    image_manifest = build_image_manifest(
+    # 日期目录中的相机位置优先于旧配置，避免不同日期共用错误映射。
+    camera_roles, unknown_camera_role = load_date_camera_mapping(
         config.paths.raw_dir,
-        inventory,
-        experiment_id=config.experiment_id,
-        camera_roles=config.prepare.camera_roles,
-        unknown_role=config.prepare.unknown_camera_role,
+        fallback_roles=config.prepare.camera_roles,
+        fallback_unknown_role=config.prepare.unknown_camera_role,
+    )
+    camera_mapping_warning = (
+        "camera_mapping_fallback"
+        if not (config.paths.raw_dir / "IPlocation.yaml").is_file()
+        else ""
     )
 
-    # 
-    multiview = build_multiview(
-        image_manifest,
+    # image_records 是逐张图片的记录表，不是图片内容本身。
+    image_records = build_image_manifest(
+        config.paths.raw_dir,
+        file_inventory,
+        experiment_id=config.experiment_id,
+        camera_roles=camera_roles,
+        unknown_role=unknown_camera_role,
+    )
+    image_requirement_warning = validate_image_requirement(
+        image_records,
+        required=config.prepare.images_required,
+    )
+
+    # multiview_index 按时间把不同相机图片分组，不保存图像像素。
+    multiview_index = build_multiview(
+        image_records,
         tolerance_ms=config.prepare.multiview_tolerance_milliseconds,
     )
-    raw = preprocess_directory(
+
+    # sensor_load_result 已完成读取、拼接和时间解析，但没有数值插值。
+    sensor_load_result = preprocess_directory(
         config.paths.raw_dir,
         short_gap_max_seconds=0,
         transition_guard_seconds=0,
     )
-    specs = load_feature_registry(config.paths.registry)
-    registry = apply_feature_registry(raw.frame, specs)
-    prepared = _standardize_schema(registry.frame, registry.metadata)
-    internal = prepared.rename(columns={"timestamp": "sensor_time"})
-    defrost = specs["defrost_flag"].canonical_name
-    segmentation = segment_cycles(internal, defrost, dict(config.prepare.cycle_settings))
-    labeled, audited, mode_warnings = _enforce_heating_mode(
-        segmentation.frame, segmentation.cycles
+
+    # registry_specs 描述原始点位到标准字段的映射关系。
+    registry_specs = load_feature_registry(config.paths.registry)
+    registry_result = apply_feature_registry(
+        sensor_load_result.frame,
+        registry_specs,
+        heating_mode_value=config.prepare.heating_mode_value,
     )
-    labeled, audited, gap_warnings = _mark_long_gap_cycles(
-        labeled,
-        audited,
-        nominal_seconds=_nominal_seconds(labeled),
-        factor=config.prepare.gap_warning_factor,
+
+    # prepared_data 只保留标准字段，并把内部 sensor_time 统一为 timestamp。
+    prepared_data = build_prepared_sensor_table(
+        registry_result.frame,
+        registry_result.metadata,
     )
-    prepared = _attach_cycle_fields(prepared, labeled, audited)
-    alignment = match_images_to_sensors(
-        image_manifest,
-        prepared[["timestamp"]].rename(columns={"timestamp": "sensor_time"}),
+    defrost_column = registry_specs["defrost_flag"].canonical_name
+    cycle_input = prepared_data  # 循环函数只接收标准字段，不接收原始列名。
+    cycle_segmentation = segment_cycles(
+        cycle_input,
+        defrost_column,
+        dict(config.prepare.cycle_settings),
+    )
+    cycle_validation = validate_cycles(
+        cycle_segmentation,
+        config.prepare.cycle_validation,
+    )
+    validated_cycles = cycle_validation.cycles
+    prepared_data = attach_cycle_fields(
+        prepared_data,
+        cycle_validation,
+    )
+    image_alignment = match_images_to_sensors(
+        image_records,
+        prepared_data[["timestamp"]],
         tolerance_s=config.prepare.image_tolerance_seconds,
     )
-    prepared = _attach_image_columns(prepared, alignment)
+    prepared_data = attach_image_paths(prepared_data, image_alignment)
     cycle_summary = build_cycle_summary(
-        audited,
-        prepared.rename(columns={"timestamp": "sensor_time"}),
-        multiview,
+        validated_cycles,
+        prepared_data,
+        multiview_index,
         date=config.date,
-        gap_warning_factor=config.prepare.gap_warning_factor,
-    )
-    prepared = _drop_preparation_artifacts(prepared)
-    warnings = [
-        *mode_warnings,
-        *gap_warnings,
-        *[
-            f"registry source unavailable: {spec.feature_id}:{spec.raw_source}"
-            for spec in specs.values()
-            if spec.raw_source and spec.raw_source not in raw.frame
-        ],
-    ]
-    if image_manifest.empty:
-        warnings.append("no_images_found")
-    metrics = {
-        "raw_inventory_fields": int(len(inventory_columns)),
-        "raw_inventory_unique_fields": int(
-            inventory_columns.get("canonical_column", pd.Series(dtype=str)).nunique()
+        gap_warning_factor=float(
+            config.prepare.cycle_validation.get(
+                "gap_warning_factor", config.prepare.gap_warning_factor
+            )
         ),
-        "rgb_image_count": int(len(image_manifest)),
-        "rgb_group_count": int(len(multiview)),
+    )
+    prepared_data = select_prepared_output_columns(
+        prepared_data,
+        registered_columns=[
+            str(name)
+            for name in registry_result.metadata.get(
+                "canonical_name", pd.Series(dtype=str)
+            ).tolist()
+        ],
+    )
+    registry_warnings = [
+        f"registry source unavailable: {spec.feature_id}:{spec.raw_source}"
+        for spec in registry_specs.values()
+        if spec.raw_source and spec.raw_source not in sensor_load_result.frame
+    ]
+    warnings = [
+        *cycle_validation.warnings,
+        *([camera_mapping_warning] if camera_mapping_warning else []),
+        *registry_warnings,
+    ]
+    if image_requirement_warning:
+        warnings.append(image_requirement_warning)
+    metrics = summarize_prepare_metrics(
+        source_field_inventory=source_field_inventory,
+        image_records=image_records,
+        multiview_index=multiview_index,
+    )
+    return PrepareResult(
+        prepared_data=prepared_data,
+        cycle_summary=cycle_summary,
+        warnings=tuple(warnings),
+        metrics=metrics,
+    )
+
+
+def validate_image_requirement(image_records: pd.DataFrame, *, required: bool) -> str:
+    """Enforce the experiment's RGB policy and return a warning when optional."""
+    if not image_records.empty:
+        return ""
+    if required:
+        raise RuntimeError("No RGB images were found")
+    return "no_images_found"
+
+
+def select_prepared_output_columns(
+    frame: pd.DataFrame,
+    *,
+    registered_columns: list[str],
+) -> pd.DataFrame:
+    """Select public fields explicitly and reject interpolation markers."""
+    interpolated_columns = [
+        str(column) for column in frame.columns if str(column).endswith("__interpolated")
+    ]
+    if interpolated_columns:
+        raise RuntimeError(
+            "Prepare stage produced interpolated columns: " + ", ".join(interpolated_columns)
+        )
+    cycle_columns = [
+        "cycle_id",
+        "cycle_stage",
+        "cycle_status",
+        "cycle_elapsed_seconds",
+        "cycle_progress",
+    ]
+    # Keep registry fields first, then compact cycle labels, then stable image columns.
+    requested_columns = [
+        "timestamp",
+        *registered_columns,
+        "operating_mode",
+        "is_heating",
+        *cycle_columns,
+    ]
+    requested_columns.extend(
+        column for column in frame.columns if str(column).startswith("image_")
+    )
+    output_columns = list(dict.fromkeys(column for column in requested_columns if column in frame))
+    return frame.loc[:, output_columns].copy()
+
+
+def summarize_prepare_metrics(
+    *,
+    source_field_inventory: pd.DataFrame,
+    image_records: pd.DataFrame,
+    multiview_index: pd.DataFrame,
+) -> dict[str, int]:
+    """Summarize input inventory and image grouping without inspecting pixels."""
+    return {
+        "raw_inventory_fields": int(len(source_field_inventory)),
+        "raw_inventory_unique_fields": int(
+            source_field_inventory.get("canonical_column", pd.Series(dtype=str)).nunique()
+        ),
+        "rgb_image_count": int(len(image_records)),
+        "rgb_group_count": int(len(multiview_index)),
         "rgb_complete_group_count": int(
-            multiview.get("all_cameras_present", pd.Series(dtype=bool)).sum()
+            multiview_index.get("all_cameras_present", pd.Series(dtype=bool)).sum()
         ),
     }
-    return PrepareResult(prepared, cycle_summary, warnings, metrics)
 
 
-def _standardize_schema(frame: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
+def build_prepared_sensor_table(frame: pd.DataFrame, metadata: pd.DataFrame) -> pd.DataFrame:
+    """Select registered fields, parse timestamps, and return sorted data."""
+    # metadata names are the only sensor fields allowed to cross the prepare boundary.
     names = [
         str(name)
         for name in metadata.get("canonical_name", pd.Series(dtype=str)).tolist()
     ]
-    keep = ["sensor_time", *names, "heating_mode"]
+    keep = ["sensor_time", *names, "operating_mode", "is_heating"]
     keep = list(dict.fromkeys(column for column in keep if column in frame))
+    # Copy before parsing and sorting so callers retain the Registry result unchanged.
     result = frame.loc[:, keep].copy()
     result["sensor_time"] = pd.to_datetime(result["sensor_time"], errors="raise")
     result = result.sort_values("sensor_time", kind="stable").reset_index(drop=True)
     return result.rename(columns={"sensor_time": "timestamp"})
 
 
-def _attach_cycle_fields(
-    prepared: pd.DataFrame, labeled: pd.DataFrame, cycles: pd.DataFrame
+def attach_cycle_fields(
+    prepared: pd.DataFrame,
+    cycle_validation: CycleValidationResult,
 ) -> pd.DataFrame:
+    """Merge compact cycle labels while keeping detailed reasons in the summary."""
+    labeled = cycle_validation.frame
     labels = labeled[
-        ["sensor_time", "cycle_id", "cycle_quality", "stage", "cycle_time_s", "cycle_phase"]
+        ["timestamp", "cycle_id", "cycle_quality", "stage", "cycle_time_s", "cycle_phase"]
     ].copy()
     labels = labels.rename(
         columns={
-            "sensor_time": "timestamp",
             "cycle_quality": "cycle_status_raw",
             "stage": "cycle_stage",
             "cycle_time_s": "cycle_elapsed_seconds",
             "cycle_phase": "cycle_progress",
         }
     )
-    reasons = cycles.set_index("cycle_id")["exclusion_reason"].to_dict()
-    labels["cycle_status"] = labels["cycle_status_raw"].map(_cycle_status)
-    labels["cycle_status_reason"] = labels["cycle_id"].map(reasons).fillna("")
+    labels["cycle_status"] = labels["cycle_status_raw"].map(normalize_cycle_status)
     labels = labels.drop(columns=["cycle_status_raw"])
     result = prepared.merge(labels, on="timestamp", how="left", validate="one_to_one")
     return result
 
 
-def _attach_image_columns(prepared: pd.DataFrame, alignment: pd.DataFrame) -> pd.DataFrame:
-    matched = alignment.loc[
-        alignment.get("matched", pd.Series(False, index=alignment.index)).fillna(False).astype(bool)
-    ].copy()
-    if matched.empty:
-        return prepared
-    matched["camera_id"] = matched["camera_id"].astype(str)
-    matched["abs_offset"] = pd.to_numeric(matched["time_delta_s"], errors="coerce").abs()
-    matched = matched.sort_values("abs_offset", kind="stable").drop_duplicates(
-        ["sensor_time", "camera_id"], keep="first"
-    )
-    pieces: list[pd.DataFrame] = []
-    for camera_id, group in matched.groupby("camera_id", sort=True):
-        safe = re.sub(r"[^A-Za-z0-9]+", "_", str(camera_id)).strip("_").lower()
-        piece = group[["sensor_time", "image_path", "time_delta_s"]].rename(
-            columns={
-                "image_path": f"image_{safe}_path",
-                "time_delta_s": f"image_{safe}_offset_seconds",
-            }
-        )
-        pieces.append(piece)
-    result = prepared.copy()
-    for piece in pieces:
-        result = result.merge(
-            piece.rename(columns={"sensor_time": "timestamp"}),
-            on="timestamp",
-            how="left",
-            validate="one_to_one",
-        )
-    return result
-
-
-def _drop_preparation_artifacts(frame: pd.DataFrame) -> pd.DataFrame:
-    drop = [
-        column
-        for column in frame
-        if str(column).endswith(("__raw", "__invalid", "__missing", "__interpolated"))
-        or column in {"cycle_status_raw"}
-    ]
-    return frame.drop(columns=drop, errors="ignore")
-
-
-def _cycle_status(quality: object) -> str:
-    value = str(quality)
-    if value == "complete":
-        return "valid"
-    if value == "contaminated":
-        return "long_gap"
-    if value in {"abnormal", "excluded"}:
-        return "invalid_mode"
-    return "incomplete"
-
-
-def _enforce_heating_mode(
-    frame: pd.DataFrame, cycles: pd.DataFrame
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    if "heating_mode" not in frame or cycles.empty:
-        return frame, cycles, []
-    labeled = frame.copy()
-    audited = cycles.copy()
-    warnings: list[str] = []
-    for index, cycle in audited.iterrows():
-        if cycle.get("quality_flag") != "complete":
-            continue
-        mask = labeled["cycle_id"].eq(cycle["cycle_id"]) & labeled["stage"].isin(
-            ["stable_clean", "frost_development"]
-        )
-        observed = labeled.loc[mask, "heating_mode"].astype("boolean").dropna()
-        if not observed.empty and not observed.all():
-            audited.loc[index, "quality_flag"] = "abnormal"
-            audited.loc[index, "exclusion_reason"] = "nonheating_mode_inside_cycle"
-            labeled.loc[labeled["cycle_id"].eq(cycle["cycle_id"]), "cycle_quality"] = "abnormal"
-            warnings.append(f"{cycle['cycle_id']}:nonheating_mode_inside_cycle")
-    return labeled, audited, warnings
-
-
-def _mark_long_gap_cycles(
-    frame: pd.DataFrame,
-    cycles: pd.DataFrame,
-    *,
-    nominal_seconds: float,
-    factor: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    labeled = frame.copy()
-    audited = cycles.copy()
-    warnings: list[str] = []
-    limit = nominal_seconds * factor
-    for index, row in audited.iterrows():
-        gap = pd.to_numeric(pd.Series([row.get("maximum_gap_seconds")]), errors="coerce").iloc[0]
-        cycle_id = str(row.get("cycle_id", ""))
-        if pd.notna(row.get("heating_start")) and pd.notna(row.get("defrost_end")):
-            channel_gap, _ = _sensor_gap_evidence(
-                labeled,
-                cycle_id,
-                pd.Timestamp(row["heating_start"]),
-                pd.Timestamp(row["defrost_end"]),
-                nominal_seconds,
-            )
-            gap = max(float(gap) if pd.notna(gap) else 0.0, channel_gap)
-            audited.loc[index, "maximum_gap_seconds"] = gap
-        if row.get("quality_flag") == "complete" and pd.notna(gap) and float(gap) > limit:
-            audited.loc[index, "quality_flag"] = "contaminated"
-            old = str(row.get("exclusion_reason", ""))
-            audited.loc[index, "exclusion_reason"] = ";".join(
-                item for item in (old, "long_gap") if item
-            )
-            mask = labeled["cycle_id"].eq(cycle_id)
-            labeled.loc[mask, "cycle_quality"] = "contaminated"
-            labeled.loc[mask, "cycle_phase"] = np.nan
-            warnings.append(f"{cycle_id}:long_gap:{float(gap):.1f}s>{limit:.1f}s")
-    return labeled, audited, warnings
-
-
-def _nominal_seconds(frame: pd.DataFrame) -> float:
-    times = pd.to_datetime(frame.get("sensor_time", pd.Series(dtype=object)), errors="coerce")
-    deltas = times.sort_values().diff().dt.total_seconds()
-    positive = deltas[deltas.gt(0)]
-    value = float(positive.median()) if not positive.empty else 1.0
-    return value if np.isfinite(value) and value > 0 else 1.0
-
-
 def _write_state(config: AppConfig, result: PrepareResult) -> None:
+    """Persist a compact, human-readable record of the published prepare run."""
     config.paths.state_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "stage": "prepare",
@@ -297,9 +364,41 @@ def _write_state(config: AppConfig, result: PrepareResult) -> None:
         "prepared_rows": len(result.prepared_data),
         "cycle_rows": len(result.cycle_summary),
         "metrics": result.metrics,
-        "warnings": result.warnings,
-        "created_at": time.time(),
+        "warnings": list(result.warnings),
+        "prepared_data_path": str(config.paths.prepared_data),
+        "cycle_summary_path": str(config.paths.cycle_summary),
+        "config_fingerprint": _config_fingerprint(config),
+        "registry_fingerprint": _file_fingerprint(config.paths.registry),
+        "created_at": datetime.now(UTC).isoformat(),
     }
-    (config.paths.state_dir / "prepare.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    state_path = config.paths.state_dir / "prepare.json"
+    temporary_path = state_path.with_name(f".{state_path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary_path.replace(state_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
+    """Write one CSV via a sibling temporary file so readers see whole files."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        frame.to_csv(temporary_path, index=False)
+        temporary_path.replace(path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _file_fingerprint(path: Path) -> str:
+    """Hash one configuration file for state reproducibility."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _config_fingerprint(config: AppConfig) -> str:
+    """Hash the loaded application contract without storing its full contents."""
+    serialized = json.dumps(asdict(config), ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

@@ -12,10 +12,28 @@ from .schemas import AnalysisOptions, AppConfig, DatasetPaths, PrepareOptions, P
 
 
 def load_camera_mapping(path: Path) -> tuple[dict[str, str], str]:
-    """Load the legacy camera mapping format for callers outside the new CLI."""
+    """Load one YAML camera map and validate its IP-to-role contract."""
     loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     roles, unknown = _camera_roles(loaded.get("camera_roles"), loaded.get("unknown_role"))
     return roles, unknown
+
+
+def load_date_camera_mapping(
+    raw_dir: Path,
+    *,
+    fallback_roles: dict[str, str],
+    fallback_unknown_role: str,
+) -> tuple[dict[str, str], str]:
+    """Prefer the date-local map and retain the old config as a fallback.
+
+    ``raw_dir`` identifies one experiment date. Keeping the fallback here makes
+    old data folders readable while ensuring a present ``IPlocation.yaml`` is
+    always authoritative for that date.
+    """
+    local_mapping = raw_dir / "IPlocation.yaml"
+    if not local_mapping.is_file():
+        return dict(fallback_roles), fallback_unknown_role
+    return load_camera_mapping(local_mapping)
 
 
 def load_app_config(path: Path) -> AppConfig:
@@ -54,11 +72,14 @@ def load_app_config(path: Path) -> AppConfig:
         {
             "timestamp_column",
             "duplicate_policy",
+            "heating_mode_value",
+            "images",
             "image_tolerance_seconds",
             "multiview_tolerance_milliseconds",
             "camera_roles",
             "unknown_camera_role",
             "cycles",
+            "cycle_validation",
             "gap_warning_factor",
         },
         "prepare",
@@ -67,9 +88,14 @@ def load_app_config(path: Path) -> AppConfig:
         prepare["camera_roles"], prepare["unknown_camera_role"]
     )
     cycle_settings = _mapping(prepare["cycles"], "prepare.cycles")
+    cycle_validation = _mapping(prepare["cycle_validation"], "prepare.cycle_validation")
+    image_settings = _mapping(prepare["images"], "prepare.images")
+    _require_keys(image_settings, {"required"}, "prepare.images")
     prepare_options = PrepareOptions(
         timestamp_column=str(prepare["timestamp_column"]),
         duplicate_policy=str(prepare["duplicate_policy"]),
+        heating_mode_value=int(prepare["heating_mode_value"]),
+        images_required=bool(image_settings["required"]),
         image_tolerance_seconds=_positive_float(
             prepare["image_tolerance_seconds"], "prepare.image_tolerance_seconds"
         ),
@@ -80,6 +106,7 @@ def load_app_config(path: Path) -> AppConfig:
         camera_roles=camera_roles,
         unknown_camera_role=unknown_role,
         cycle_settings=cycle_settings,
+        cycle_validation=cycle_validation,
         gap_warning_factor=_positive_float(
             prepare["gap_warning_factor"], "prepare.gap_warning_factor"
         ),

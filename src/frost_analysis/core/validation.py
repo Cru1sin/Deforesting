@@ -240,8 +240,8 @@ def validate_image_artifacts(  # noqa: C901
         },
         "image_sensor_alignment": {
             "sample_id",
-            "candidate_sensor_time",
-            "sensor_time",
+            "candidate_timestamp",
+            "timestamp",
             "time_delta_s",
             "matched",
         },
@@ -267,19 +267,19 @@ def validate_image_artifacts(  # noqa: C901
         errors.append("image manifest and alignment sample_id sets differ")
     matched = alignment["matched"].fillna(False).astype(bool)
     if (
-        alignment.loc[matched, "sensor_time"].isna().any()
-        or alignment.loc[~matched, "sensor_time"].notna().any()
+        alignment.loc[matched, "timestamp"].isna().any()
+        or alignment.loc[~matched, "timestamp"].notna().any()
     ):
-        errors.append("image matched state and sensor_time disagree")
+        errors.append("image matched state and timestamp disagree")
     if tolerance_s is not None:
         delta = pd.to_numeric(alignment.loc[matched, "time_delta_s"], errors="coerce")
         if delta.isna().any() or delta.abs().gt(tolerance_s + 1e-12).any():
             errors.append("matched image exceeds tolerance")
     cycle_labels = _read_frame(root / "processed" / "cycle_labeled_timeseries")
-    if cycle_labels is not None and {"sensor_time", "cycle_id"} <= set(cycle_labels):
-        labels = cycle_labels[["sensor_time", "cycle_id"]].drop_duplicates("sensor_time")
-        matched_rows = alignment.loc[matched, ["sensor_time", "cycle_id"]].merge(
-            labels, on="sensor_time", how="left", suffixes=("_image", "_sensor")
+    if cycle_labels is not None and {"timestamp", "cycle_id"} <= set(cycle_labels):
+        labels = cycle_labels[["timestamp", "cycle_id"]].drop_duplicates("timestamp")
+        matched_rows = alignment.loc[matched, ["timestamp", "cycle_id"]].merge(
+            labels, on="timestamp", how="left", suffixes=("_image", "_sensor")
         )
         if (
             matched_rows["cycle_id_sensor"].notna().any()

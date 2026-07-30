@@ -115,7 +115,7 @@ def build_processed_dataset(
         interval_seconds=config.process.resample_interval_seconds,
         numeric_columns=active,
         control_columns=control,
-        state_columns=["cycle_status", "cycle_stage", "heating_mode"],
+        state_columns=["cycle_status", "cycle_stage", "is_heating"],
     )
     sampled = sampled.rename(columns={"timestamp": "sensor_time"})
     feature_result = engineer_features(
@@ -150,9 +150,8 @@ def _internal_cycle_columns(frame: pd.DataFrame) -> pd.DataFrame:
     result["cycle_quality"] = result["cycle_status"].map(
         {
             "valid": "complete",
-            "long_gap": "contaminated",
+            "invalid": "abnormal",
             "incomplete": "partial",
-            "invalid_mode": "abnormal",
         }
     )
     result["stage"] = result["cycle_stage"]
@@ -160,7 +159,7 @@ def _internal_cycle_columns(frame: pd.DataFrame) -> pd.DataFrame:
     result["cycle_phase"] = pd.to_numeric(cycle_progress, errors="coerce")
     elapsed = result.get("cycle_elapsed_seconds", pd.Series(np.nan, index=result.index))
     result["cycle_time_s"] = pd.to_numeric(elapsed, errors="coerce")
-    result["cycle_gap_contaminated"] = result["cycle_status"].eq("long_gap")
+    result["cycle_gap_contaminated"] = result["cycle_status"].eq("invalid")
     return result
 
 
@@ -169,9 +168,8 @@ def _internal_cycle_summary(summary: pd.DataFrame) -> pd.DataFrame:
     result["quality_flag"] = result["cycle_status"].map(
         {
             "valid": "complete",
-            "long_gap": "contaminated",
+            "invalid": "abnormal",
             "incomplete": "partial",
-            "invalid_mode": "abnormal",
         }
     )
     result["exclusion_reason"] = result.get(

@@ -10,6 +10,9 @@ paths:
 prepare:
   timestamp_column: "sensor_time"
   duplicate_policy: "keep_last"
+  heating_mode_value: 3
+  images:
+    required: false
   image_tolerance_seconds: 0.5
   multiview_tolerance_milliseconds: 10
   camera_roles:
@@ -21,6 +24,9 @@ prepare:
     192.168.1.14: "左侧斜视"
   unknown_camera_role: "未映射"
   gap_warning_factor: 3.0
+  cycle_validation:
+    expected_sampling_interval_seconds: 1.0
+    gap_warning_factor: 3.0
   cycles:
     defrost_on_values: ["ON", "1"]
     defrost_off_values: ["OFF", "0"]

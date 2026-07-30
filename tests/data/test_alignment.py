@@ -5,6 +5,7 @@ import pytest
 
 from frost_analysis.core.validation import validate_image_artifacts
 from frost_analysis.data.alignment import (
+    attach_image_paths,
     attach_cycle_labels,
     build_multiview,
     match_images_to_sensors,
@@ -21,20 +22,20 @@ def test_nearest_match_prefers_earlier_tie_and_keeps_unmatched_candidate() -> No
     )
     sensors = pd.DataFrame(
         {
-            "sensor_time": pd.to_datetime(["2026-07-15 09:00:00", "2026-07-15 09:00:01"]),
+            "timestamp": pd.to_datetime(["2026-07-15 09:00:00", "2026-07-15 09:00:01"]),
             "must_not_be_copied": [10, 20],
         }
     )
 
     matched = match_images_to_sensors(images, sensors, tolerance_s=0.5)
 
-    assert matched.loc[0, "candidate_sensor_time"] == pd.Timestamp("2026-07-15 09:00:00")
+    assert matched.loc[0, "candidate_timestamp"] == pd.Timestamp("2026-07-15 09:00:00")
     assert matched.loc[0, "time_delta_s"] == -0.5
     assert bool(matched.loc[0, "matched"]) is True
-    assert matched.loc[0, "sensor_time"] == pd.Timestamp("2026-07-15 09:00:00")
+    assert matched.loc[0, "timestamp"] == pd.Timestamp("2026-07-15 09:00:00")
     assert bool(matched.loc[1, "matched"]) is False
-    assert matched.loc[1, "candidate_sensor_time"] == pd.Timestamp("2026-07-15 09:00:01")
-    assert pd.isna(matched.loc[1, "sensor_time"])
+    assert matched.loc[1, "candidate_timestamp"] == pd.Timestamp("2026-07-15 09:00:01")
+    assert pd.isna(matched.loc[1, "timestamp"])
     assert "must_not_be_copied" not in matched
 
 
@@ -43,12 +44,12 @@ def test_cycle_labels_are_attached_only_to_matched_sensor_rows() -> None:
         {
             "sample_id": ["a", "b"],
             "matched": [True, False],
-            "sensor_time": pd.to_datetime(["2026-07-15 09:00:00", None]),
+            "timestamp": pd.to_datetime(["2026-07-15 09:00:00", None]),
         }
     )
     sensors = pd.DataFrame(
         {
-            "sensor_time": pd.to_datetime(["2026-07-15 09:00:00"]),
+            "timestamp": pd.to_datetime(["2026-07-15 09:00:00"]),
             "cycle_id": ["cycle_001"],
             "cycle_quality": ["complete"],
             "stage": ["frost_development"],
@@ -95,7 +96,7 @@ def test_multiview_uses_every_image_once_and_keeps_incomplete_groups() -> None:
 
 def test_alignment_validates_tolerances_and_empty_schemas() -> None:
     images = pd.DataFrame({"sample_id": ["bad"], "camera_id": ["cam_a"], "image_time": [pd.NaT]})
-    sensors = pd.DataFrame(columns=["sensor_time", "value"])
+    sensors = pd.DataFrame(columns=["timestamp", "value"])
 
     unmatched = match_images_to_sensors(images, sensors, tolerance_s=0)
     multiview = build_multiview(images, tolerance_ms=0)
@@ -107,6 +108,37 @@ def test_alignment_validates_tolerances_and_empty_schemas() -> None:
         match_images_to_sensors(images, sensors, tolerance_s=-0.1)
     with pytest.raises(ValueError):
         build_multiview(images, tolerance_ms=-1)
+
+
+def test_attach_image_paths_requires_contract_and_uses_camera_roles() -> None:
+    """Wide image columns must be keyed by stable roles and nearest deltas."""
+    prepared = pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2026-07-15 09:00:00", "2026-07-15 09:00:01"])}
+    )
+    alignment = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-15 09:00:00",
+                    "2026-07-15 09:00:00",
+                    "2026-07-15 09:00:01",
+                ]
+            ),
+            "matched": [True, True, True],
+            "camera_role": ["front", "front", "left"],
+            "image_path": ["front-old.jpg", "front-new.jpg", "left.jpg"],
+            "time_delta_s": [0.2, 0.1, -0.3],
+        }
+    )
+
+    result = attach_image_paths(prepared, alignment)
+
+    assert result.loc[0, "image_front_path"] == "front-new.jpg"
+    assert result.loc[0, "image_front_offset_seconds"] == 0.1
+    assert result.loc[1, "image_left_path"] == "left.jpg"
+    assert "front" in result.columns[1]
+    with pytest.raises(ValueError, match="camera_role"):
+        attach_image_paths(prepared, alignment.drop(columns="camera_role"))
 
 
 def test_multiview_separates_repeated_images_and_uses_exact_median() -> None:
@@ -154,8 +186,8 @@ def test_image_validator_rejects_duplicate_ids_tolerance_label_and_reuse(tmp_pat
     alignment = pd.DataFrame(
         {
             "sample_id": ["a"],
-            "candidate_sensor_time": pd.to_datetime(["2026-07-15 09:00:01"]),
-            "sensor_time": pd.to_datetime(["2026-07-15 09:00:01"]),
+            "candidate_timestamp": pd.to_datetime(["2026-07-15 09:00:01"]),
+            "timestamp": pd.to_datetime(["2026-07-15 09:00:01"]),
             "time_delta_s": [1.0],
             "matched": [True],
             "cycle_id": ["wrong_cycle"],
@@ -166,7 +198,7 @@ def test_image_validator_rejects_duplicate_ids_tolerance_label_and_reuse(tmp_pat
     )
     cycles = pd.DataFrame(
         {
-            "sensor_time": pd.to_datetime(["2026-07-15 09:00:01"]),
+            "timestamp": pd.to_datetime(["2026-07-15 09:00:01"]),
             "cycle_id": ["cycle_001"],
             "cycle_quality": ["complete"],
             "stage": ["frost_development"],

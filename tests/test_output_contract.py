@@ -36,10 +36,11 @@ def test_cycle_summary_reports_rgb_gaps_and_multimodal_quality() -> None:
     )
     frame = pd.DataFrame(
         {
-            "sensor_time": pd.to_datetime(
+            "timestamp": pd.to_datetime(
                 ["2026-07-15 10:00:00", "2026-07-15 10:03:30"]
             ),
             "cycle_id": ["cycle_001", "cycle_001"],
+            "sensor_signal": [1.0, 2.0],
         }
     )
     multiview = pd.DataFrame(
@@ -64,3 +65,50 @@ def test_cycle_summary_reports_rgb_gaps_and_multimodal_quality() -> None:
     assert row["rgb_max_gap_seconds"] == 90.0
     assert "10:00:30" in row["rgb_interruption_intervals"]
     assert row["multimodal_quality"] == "sensor_valid_rgb_incomplete"
+    assert row["sensor_coverage_fraction"] == 1.0
+    assert row["rgb_coverage_fraction"] == 120 / 210
+    assert row["multimodal_coverage_fraction"] == 120 / 210
+
+
+def test_sensor_coverage_ignores_cycle_annotation_columns() -> None:
+    """Cycle labels must not make an otherwise empty sensor interval look complete."""
+    cycles = pd.DataFrame(
+        [
+            {
+                "cycle_id": "cycle_001",
+                "quality_flag": "complete",
+                "heating_start": pd.Timestamp("2026-07-15 10:00:00"),
+                "stable_heating_start": pd.Timestamp("2026-07-15 10:00:30"),
+                "defrost_start": pd.Timestamp("2026-07-15 10:03:00"),
+                "defrost_end": pd.Timestamp("2026-07-15 10:03:30"),
+                "maximum_gap_seconds": 1.0,
+                "exclusion_reason": "",
+            }
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2026-07-15 10:00:00", "2026-07-15 10:03:30"]
+            ),
+            "cycle_id": ["cycle_001", "cycle_001"],
+            "cycle_stage": ["recovery", "defrost"],
+            "cycle_status": ["valid", "valid"],
+            "cycle_elapsed_seconds": [0.0, 180.0],
+            "cycle_progress": [0.0, 1.0],
+        }
+    )
+
+    empty_multiview = pd.DataFrame(
+        {
+            "group_time": pd.Series(dtype="datetime64[ns]"),
+            "camera_count": pd.Series(dtype=float),
+            "all_cameras_present": pd.Series(dtype=bool),
+        }
+    )
+    result = build_cycle_summary(
+        cycles, frame, empty_multiview, date="0715", gap_warning_factor=3.0
+    )
+
+    assert result.loc[0, "sensor_coverage_fraction"] == 0.0
+    assert result.loc[0, "max_sensor_gap_seconds"] == 1.0

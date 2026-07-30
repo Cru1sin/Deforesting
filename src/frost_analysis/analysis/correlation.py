@@ -106,10 +106,10 @@ def _screening_frame(frame: pd.DataFrame) -> pd.DataFrame:
         result["cycle_quality"] = "partial"
     if "stage" not in result:
         result["stage"] = "partial"
-    if "heating_mode" not in result:
-        result["heating_mode"] = True
+    if "is_heating" not in result:
+        result["is_heating"] = True
     result["cycle_quality"] = result["cycle_quality"].map(
-        {"valid": "complete", "long_gap": "contaminated", "incomplete": "partial"}
+        {"valid": "complete", "invalid": "abnormal", "incomplete": "partial"}
     ).fillna(result["cycle_quality"])
     return result
 
@@ -117,7 +117,7 @@ def _screening_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def _screening_cycles(summary: pd.DataFrame) -> pd.DataFrame:
     result = summary.copy()
     result["quality_flag"] = result["cycle_status"].map(
-        {"valid": "complete", "long_gap": "contaminated", "incomplete": "partial"}
+        {"valid": "complete", "invalid": "abnormal", "incomplete": "partial"}
     ).fillna(result["cycle_status"])
     if "maximum_gap_seconds" not in result and "max_sensor_gap_seconds" in result:
         result["maximum_gap_seconds"] = result["max_sensor_gap_seconds"]

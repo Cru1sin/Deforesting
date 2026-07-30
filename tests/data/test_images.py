@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from frost_analysis.config import load_camera_mapping
+from frost_analysis.config import load_camera_mapping, load_date_camera_mapping
 from frost_analysis.data.images import build_image_manifest, extract_ip
 from frost_analysis.data.inventory import inventory_directory
 
@@ -73,3 +73,21 @@ def test_repository_camera_mapping_contains_six_confirmed_views() -> None:
     assert roles["192.168.1.1"] == "中上俯视"
     assert roles["192.168.1.14"] == "左侧斜视"
     assert unknown == "未映射"
+
+
+def test_date_local_camera_mapping_overrides_legacy_mapping(tmp_path: Path) -> None:
+    """A date folder owns the camera roles used for that experiment day."""
+    local_mapping = tmp_path / "IPlocation.yaml"
+    local_mapping.write_text(
+        "camera_roles:\n  '192.168.1.1': front\nunknown_role: unknown\n",
+        encoding="utf-8",
+    )
+
+    roles, unknown = load_date_camera_mapping(
+        tmp_path,
+        fallback_roles={"192.168.1.1": "legacy"},
+        fallback_unknown_role="legacy_unknown",
+    )
+
+    assert roles == {"192.168.1.1": "front"}
+    assert unknown == "unknown"

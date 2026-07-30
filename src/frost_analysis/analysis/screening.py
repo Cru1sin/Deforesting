@@ -116,8 +116,8 @@ def _eligible_rows(frame: pd.DataFrame, cycles: pd.DataFrame) -> pd.DataFrame:
     stage = result["stage"] if "stage" in result else pd.Series("", index=result.index)
     mask = quality.eq("complete")
     mask &= stage.isin(["stable_clean", "frost_development"])
-    if "heating_mode" in result:
-        mask &= result["heating_mode"].fillna(False).astype(bool)
+    if "is_heating" in result:
+        mask &= result["is_heating"].fillna(False).astype(bool)
     if "cycle_gap_contaminated" in result:
         mask &= ~result["cycle_gap_contaminated"].fillna(False).astype(bool)
     if "analysis_bin_available" in result:

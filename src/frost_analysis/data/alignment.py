@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import deque
 from typing import Any, TypedDict, cast
 
@@ -19,6 +20,69 @@ _EMPTY_MULTIVIEW_COLUMNS = [
 ]
 
 
+def attach_image_paths(prepared: pd.DataFrame, alignment: pd.DataFrame) -> pd.DataFrame:
+    """Merge one nearest matched image path per timestamp and camera role."""
+    # These columns are the contract produced by match_images_to_sensors().
+    required_columns = {
+        "matched",
+        "camera_role",
+        "timestamp",
+        "image_path",
+        "time_delta_s",
+    }
+    missing_columns = required_columns - set(alignment.columns)
+    if missing_columns:
+        raise ValueError(f"Image alignment is missing columns: {sorted(missing_columns)}")
+
+    # Unmatched image candidates must not create empty wide-table columns.
+    matched_images = alignment.loc[
+        alignment["matched"].fillna(False).astype(bool)
+    ].copy()
+    if matched_images.empty:
+        return prepared.copy()
+    if matched_images["camera_role"].isna().any():
+        raise ValueError("Image alignment contains missing camera_role")
+
+    # Keep the closest image when several files map to one sensor row and role.
+    matched_images["camera_role"] = matched_images["camera_role"].astype(str).str.strip()
+    matched_images["absolute_time_delta"] = pd.to_numeric(
+        matched_images["time_delta_s"], errors="coerce"
+    ).abs()
+    matched_images = matched_images.sort_values(
+        ["absolute_time_delta", "camera_role", "image_path"],
+        kind="stable",
+        na_position="last",
+    ).drop_duplicates(["timestamp", "camera_role"], keep="first")
+
+    result = prepared.copy()  # 传感器行是主键，图片只补充路径和时间偏移。
+    for camera_role, group in matched_images.groupby("camera_role", sort=True):
+        role_key = _camera_role_key(camera_role)
+        # camera_role, rather than camera_id, keeps output names stable across days.
+        image_columns = group[["timestamp", "image_path", "time_delta_s"]].rename(
+            columns={
+                "image_path": f"image_{role_key}_path",
+                "time_delta_s": f"image_{role_key}_offset_seconds",
+            }
+        )
+        result = result.merge(
+            image_columns,
+            on="timestamp",
+            how="left",
+            validate="one_to_one",
+        )
+    return result
+
+
+def _camera_role_key(camera_role: object) -> str:
+    """Turn a configured role into a stable output suffix, independent of IP."""
+    role_text = str(camera_role).strip()
+    safe_role = re.sub(r"[^A-Za-z0-9]+", "_", role_text).strip("_").lower()
+    if safe_role:
+        return safe_role
+    digest = hashlib.sha1(role_text.encode("utf-8")).hexdigest()[:8]
+    return f"role_{digest}"
+
+
 class _MultiviewGroup(TypedDict):
     seed_time: pd.Timestamp
     cameras: dict[str, _ImageRecord]
@@ -29,32 +93,32 @@ class _MultiviewGroup(TypedDict):
 def match_images_to_sensors(
     image_frame: pd.DataFrame, sensor_frame: pd.DataFrame, *, tolerance_s: float
 ) -> pd.DataFrame:
-    """Match nearest sensor times, preferring the earlier sample on exact ties."""
+    """Match image times to canonical ``timestamp`` rows without copying data."""
     if tolerance_s < 0:
         raise ValueError("sensor matching tolerance must be non-negative")
     images = image_frame.reset_index(drop=True)
     matching = pd.DataFrame(
         {
-            "candidate_sensor_time": pd.Series(pd.NaT, index=images.index, dtype="datetime64[ns]"),
+            "candidate_timestamp": pd.Series(pd.NaT, index=images.index, dtype="datetime64[ns]"),
             "time_delta_s": np.nan,
             "matched": False,
-            "sensor_time": pd.Series(pd.NaT, index=images.index, dtype="datetime64[ns]"),
+            "timestamp": pd.Series(pd.NaT, index=images.index, dtype="datetime64[ns]"),
         }
     )
     result = pd.concat([images, matching], axis=1)
     if sensor_frame.empty or result.empty:
         return result
-    if "sensor_time" not in sensor_frame:
-        raise ValueError("sensor frame must contain sensor_time")
+    if "timestamp" not in sensor_frame:
+        raise ValueError("sensor frame must contain timestamp")
     sensors = (
-        sensor_frame[["sensor_time"]]
+        sensor_frame[["timestamp"]]
         .dropna()
         .drop_duplicates()
-        .sort_values("sensor_time", ignore_index=True)
+        .sort_values("timestamp", ignore_index=True)
     )
     if sensors.empty:
         return result
-    sensor_times = pd.to_datetime(sensors["sensor_time"]).astype("int64").to_numpy()
+    sensor_times = pd.to_datetime(sensors["timestamp"]).astype("int64").to_numpy()
     valid_mask = result["image_time"].notna().to_numpy()
     valid_indices = np.flatnonzero(valid_mask)
     if valid_indices.size == 0:
@@ -70,24 +134,24 @@ def match_images_to_sensors(
     chosen = np.where(left_distance <= right_distance, left, right)
     delta_s = (sensor_times[chosen] - image_times) / 1_000_000_000
     within_tolerance = np.abs(delta_s) <= tolerance_s
-    candidate_times = sensors.iloc[chosen]["sensor_time"].to_numpy()
-    result.loc[valid_indices, "candidate_sensor_time"] = candidate_times
+    candidate_times = sensors.iloc[chosen]["timestamp"].to_numpy()
+    result.loc[valid_indices, "candidate_timestamp"] = candidate_times
     result.loc[valid_indices, "time_delta_s"] = delta_s
     matched_indices = valid_indices[within_tolerance]
     result.loc[matched_indices, "matched"] = True
-    result.loc[matched_indices, "sensor_time"] = candidate_times[within_tolerance]
+    result.loc[matched_indices, "timestamp"] = candidate_times[within_tolerance]
     return result
 
 
 def attach_cycle_labels(alignment: pd.DataFrame, sensor_frame: pd.DataFrame) -> pd.DataFrame:
-    """Attach only cycle labels and aggregate sensor-quality evidence to matches."""
-    if "sensor_time" not in alignment or "sensor_time" not in sensor_frame:
-        raise ValueError("alignment and sensor frames must contain sensor_time")
+    """Attach cycle labels to matched rows using the canonical timestamp key."""
+    if "timestamp" not in alignment or "timestamp" not in sensor_frame:
+        raise ValueError("alignment and sensor frames must contain timestamp")
     label_columns = [column for column in _LABEL_COLUMNS if column in sensor_frame]
     conflict_columns = [
         column for column in sensor_frame if str(column).endswith("__duplicate_conflict")
     ]
-    labels = sensor_frame[["sensor_time", *label_columns]].copy()
+    labels = sensor_frame[["timestamp", *label_columns]].copy()
     if conflict_columns:
         labels["sensor_duplicate_conflict"] = (
             sensor_frame[conflict_columns].astype("boolean").fillna(False).any(axis=1)
@@ -103,7 +167,7 @@ def attach_cycle_labels(alignment: pd.DataFrame, sensor_frame: pd.DataFrame) -> 
         if column in alignment
     ]
     result = alignment.drop(columns=drop_existing).merge(
-        labels.drop_duplicates("sensor_time"), how="left", on="sensor_time", validate="many_to_one"
+        labels.drop_duplicates("timestamp"), how="left", on="timestamp", validate="many_to_one"
     )
     unmatched = ~result.get("matched", pd.Series(False, index=result.index)).fillna(False)
     for column in [*label_columns, "sensor_duplicate_conflict", "sensor_quality_flag"]:

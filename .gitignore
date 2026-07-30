@@ -12,6 +12,13 @@
 !configs/
 !configs/**
 
+# 日期级相机映射属于可复用配置；原始数据本身仍保持忽略。
+!data/
+data/*
+!data/*/
+data/*/*
+!data/*/IPlocation.yaml
+
 # 即使位于允许上传的目录中，也不上传系统文件和缓存。
 **/.DS_Store
 **/__pycache__/
