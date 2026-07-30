@@ -1,63 +1,84 @@
-"""Command line entry points for the independent data stages and tasks."""
+"""Command line entry points for the explicit three-stage pipeline."""
 
 from __future__ import annotations
 
 import argparse
-import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from .analysis.correlation import run_correlation_analysis
-from .config import load_app_config
-from .pipelines.prepare import prepare_dataset
-from .pipelines.process import process_dataset
+import pandas as pd
+
+from .analysis import analyze
+from .channels import load_channels
+from .config import load_config
+from .io import write_prepare_outputs
+from .pipeline import run_pipeline
+from .prepare import prepare
+from .process import process
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="frost_analysis")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for command in ("prepare", "process"):
-        subparser = subparsers.add_parser(command)
-        subparser.add_argument("--config", required=True, type=Path)
-    analyze = subparsers.add_parser("analyze")
-    analyze.add_argument("--task", required=True, choices=("correlation",))
-    analyze.add_argument("--config", required=True, type=Path)
+    run = subparsers.add_parser("run")
+    _add_config_and_output(run)
+    run.add_argument("--overwrite", action="store_true")
+    prepare_parser = subparsers.add_parser("prepare")
+    _add_config_and_output(prepare_parser)
+    prepare_parser.add_argument("--overwrite", action="store_true")
+    process_parser = subparsers.add_parser("process")
+    _add_config_input_cycles_output(process_parser)
+    analyze_parser = subparsers.add_parser("analyze")
+    _add_config_input_cycles_output(analyze_parser)
     arguments = parser.parse_args(argv)
-    config = load_app_config(arguments.config)
+    if arguments.command == "run":
+        print(run_pipeline(arguments.config, arguments.output, arguments.overwrite))
+        return 0
+    config = load_config(arguments.config)
+    channels = load_channels(config.channels_path)
     if arguments.command == "prepare":
-        output = prepare_dataset(config)
-        stage = "prepare"
-    elif arguments.command == "process":
-        output = process_dataset(config)
-        stage = "process"
-    else:
-        if arguments.task != config.analysis.task:
-            raise ValueError(
-                f"requested task {arguments.task!r} does not match config task "
-                f"{config.analysis.task!r}"
-            )
-        output = run_correlation_analysis(config)
-        stage = "analyze"
-    _write_manifest(config.paths.state_dir, stage, output)
-    print(output)
+        prepared, summary, prepare_summary = prepare(config, channels)
+        write_prepare_outputs(
+            prepared,
+            summary,
+            prepare_summary,
+            arguments.output,
+            config.input_dir,
+            overwrite=arguments.overwrite,
+        )
+        print(arguments.output)
+        return 0
+    cycle_summary = _read_cycle_summary(arguments.cycles)
+    input_frame = pd.read_parquet(arguments.input)
+    if arguments.command == "process":
+        processed, final_summary = process(input_frame, cycle_summary, config, channels)
+        arguments.output.mkdir(parents=True, exist_ok=True)
+        processed.to_parquet(arguments.output / "processed_data.parquet", index=False)
+        final_summary.to_csv(arguments.output / "cycle_summary.csv", index=False)
+        print(arguments.output)
+        return 0
+    evidence = analyze(input_frame, cycle_summary, config, channels)
+    arguments.output.mkdir(parents=True, exist_ok=True)
+    evidence.to_csv(arguments.output / "candidate_channel_evidence.csv", index=False)
+    print(arguments.output)
     return 0
 
 
-def _write_manifest(state_dir: Path, stage: str, output: Path) -> None:
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / "run_manifest.json"
-    previous: dict[str, object] = {}
-    if path.is_file():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                previous = loaded
-        except json.JSONDecodeError:
-            previous = {}
-    stages = previous.get("stages", {})
-    if not isinstance(stages, dict):
-        stages = {}
-    stages[stage] = {"output": str(output), "exists": output.is_file()}
-    path.write_text(
-        json.dumps({"stages": stages}, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+def _add_config_and_output(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+
+
+def _add_config_input_cycles_output(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--cycles", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+
+
+def _read_cycle_summary(path: Path) -> pd.DataFrame:
+    frame = pd.read_csv(path)
+    for column in ("heating_start", "stable_heating_start", "defrost_start", "defrost_end"):
+        if column in frame:
+            frame[column] = pd.to_datetime(frame[column], errors="coerce")
+    return frame
