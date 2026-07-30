@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frost-analysis"
+version = "0.1.0"
+description = "Unified image indexing and sensor analysis for heat-pump frost data"
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib>=3.9,<4",
+    "numpy>=2,<3",
+    "pandas>=2.1,<3",
+    "Pillow>=10,<12",
+    "pyarrow>=17,<22",
+    "PyYAML>=6,<7",
+    "scipy>=1.14,<2",
+    "seaborn>=0.13,<1",
+    "tabulate>=0.9,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8",
+    "pandas-stubs>=2.1",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.5",
+    "scipy-stubs>=1.14",
+    "types-PyYAML>=6",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "archive", "data", "outputs", "processed", "前期方案"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["frost_analysis"]
+
+[tool.coverage.run]
+branch = true
+source = ["frost_analysis"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

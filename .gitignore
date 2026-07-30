@@ -1,0 +1,22 @@
+# 默认忽略所有内容，避免误上传数据、缓存、文档和大型材料。
+*
+
+# 仅允许项目代码、测试、配置和 README 进入 Git。
+!.gitignore
+!README.md
+!pyproject.toml
+!src/
+!src/**
+!tests/
+!tests/**
+!configs/
+!configs/**
+
+# 即使位于允许上传的目录中，也不上传系统文件和缓存。
+**/.DS_Store
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/*.egg-info/

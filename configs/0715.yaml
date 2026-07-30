@@ -1,0 +1,84 @@
+project:
+  date: "0715"
+  experiment_id: "exp_20260715"
+
+paths:
+  raw_dir: "data/0715"
+  output_dir: "outputs/0715"
+  registry: "configs/feature_registry.yaml"
+
+prepare:
+  timestamp_column: "sensor_time"
+  duplicate_policy: "keep_last"
+  image_tolerance_seconds: 0.5
+  multiview_tolerance_milliseconds: 10
+  camera_roles:
+    192.168.1.1: "中上俯视"
+    192.168.1.2: "左侧近距斜视"
+    192.168.1.11: "中上近距俯视"
+    192.168.1.12: "右上极端斜视"
+    192.168.1.13: "中部正视"
+    192.168.1.14: "左侧斜视"
+  unknown_camera_role: "未映射"
+  gap_warning_factor: 3.0
+  cycles:
+    defrost_on_values: ["ON", "1"]
+    defrost_off_values: ["OFF", "0"]
+    debounce_seconds: 20
+    recovery_seconds: 180
+    min_heating_seconds: 1800
+    max_heating_seconds: 21600
+    min_defrost_seconds: 60
+    max_defrost_seconds: 1200
+    corroboration_window_seconds: 30
+    corroboration_min_normalized_change: 1.0
+    corroboration_min_supporting_signals: 1
+    corroboration_expected_directions:
+      evaporating_temperature: positive
+      water_out_temperature: negative
+    manual_overrides: []
+
+process:
+  missing:
+    continuous_max_gap_seconds: 60
+    control_max_gap_seconds: 30
+  baseline:
+    recovery_exclusion_seconds: 180
+    search_end_fraction: 0.35
+    window_seconds: 300
+    step_seconds: 60
+    minimum_coverage: 0.8
+    maximum_anchor_stability_score: 3.0
+    minimum_anchor_pass_fraction: 0.8
+    required_anchor_columns:
+      - evaporating_temperature
+      - water_in_temperature
+      - water_out_temperature
+    default_anchor_scale_floor: 1.0
+    anchor_scale_floors:
+      evaporating_temperature: 0.5
+      compressor_frequency: 2.0
+      water_in_temperature: 0.3
+      water_out_temperature: 0.3
+      power_total: 100.0
+    anchor_maximum_absolute_change:
+      evaporating_temperature: 0.5
+      water_in_temperature: 0.5
+      water_out_temperature: 0.5
+    relative_epsilon: 0.001
+  resample_interval_seconds: 30
+  windows_minutes: [5, 10, 30]
+  minimum_coverage: 0.7
+
+analysis:
+  task: "correlation"
+  targets:
+    - "cop"
+    - "heating_capacity"
+    - "power_total"
+  methods:
+    - "pearson"
+    - "spearman"
+  lags_minutes: [0, 5, 10, 20]
+  minimum_cycles: 3
+  save_figures: false
