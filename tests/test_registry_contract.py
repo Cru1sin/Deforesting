@@ -4,11 +4,13 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from frost_analysis.data.registry import (
     FeatureSpec,
     apply_feature_registry,
     load_feature_registry,
+    recompute_derived_features,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,6 +55,27 @@ def test_registry_uses_qcomp_as_the_only_heating_capacity_channel() -> None:
     assert all("CCQ_Comp" not in (spec.raw_source or "") for spec in specs.values())
 
 
+def test_registry_projects_source_states_to_standard_channel_names() -> None:
+    spec = _mode_spec("mode_source")
+    frame = pd.DataFrame(
+        {
+            "mode_source": [3, None],
+            "mode_source__missing": [False, True],
+            "mode_source__invalid": [False, False],
+            "mode_source__source_state": ["observed", "missing"],
+        }
+    )
+
+    result = apply_feature_registry(frame, {"mode": spec})
+
+    assert result.frame["operating_mode__missing"].tolist() == [False, True]
+    assert result.frame["operating_mode__invalid"].tolist() == [False, False]
+    assert result.frame["operating_mode__source_state"].tolist() == [
+        "observed",
+        "missing",
+    ]
+
+
 def test_registry_derives_absolute_pressure_ratio_and_keeps_pr_as_a_check() -> None:
     specs = load_feature_registry(ROOT / "configs" / "feature_registry.yaml")
     frame = pd.DataFrame(
@@ -93,3 +116,54 @@ def test_registry_counts_string_event_states_as_observed() -> None:
     result = apply_feature_registry(frame, specs)
     row = result.metadata.loc[result.metadata["canonical_name"].eq("defrost_flag")].iloc[0]
     assert int(row["observed_count"]) == 2
+
+
+def test_registry_loads_missing_policy_and_required_quality_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "registry.yaml"
+    path.write_text(
+        """
+registry_version: 1
+features:
+  - feature_id: temperature
+    canonical_name: temperature
+    raw_source: p1__temperature
+    data_kind: continuous
+    missing_policy: linear
+    resample_method: mean
+    required_for_sensor_quality: true
+""",
+        encoding="utf-8",
+    )
+
+    spec = load_feature_registry(path)["temperature"]
+
+    assert spec.data_kind == "continuous"
+    assert spec.missing_policy == "linear"
+    assert spec.resample_method == "mean"
+    assert spec.required_for_sensor_quality is True
+
+
+def test_derived_features_are_recomputed_from_processed_source_values() -> None:
+    frame = pd.DataFrame(
+        {
+            "heating_capacity": [10.0, np.nan],
+            "power_total": [2.0, 2.0],
+            "water_in_temperature": [10.0, 10.0],
+            "water_out_temperature": [12.0, 13.0],
+            "water_flow": [1.0, 1.0],
+        }
+    )
+
+    initial = recompute_derived_features(frame)
+    assert pd.isna(initial.loc[1, "cop"])
+
+    processed = frame.copy()
+    processed.loc[1, "heating_capacity"] = 12.0
+    result = recompute_derived_features(processed)
+
+    assert result["cop"].tolist() == [5.0, 6.0]
+    assert result["water_delta_temperature"].tolist() == [2.0, 3.0]
+    assert result["water_heating_capacity"].tolist() == [
+        pytest.approx(2.32556),
+        pytest.approx(3.48834),
+    ]

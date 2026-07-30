@@ -71,7 +71,7 @@ def load_app_config(path: Path) -> AppConfig:
         prepare,
         {
             "timestamp_column",
-            "duplicate_policy",
+            "duplicate_timestamps",
             "heating_mode_value",
             "images",
             "image_tolerance_seconds",
@@ -87,13 +87,27 @@ def load_app_config(path: Path) -> AppConfig:
     camera_roles, unknown_role = _camera_roles(
         prepare["camera_roles"], prepare["unknown_camera_role"]
     )
+    duplicate_timestamps = _mapping(prepare["duplicate_timestamps"], "prepare.duplicate_timestamps")
+    _require_keys(
+        duplicate_timestamps,
+        {"exact_duplicate", "conflicting_duplicate"},
+        "prepare.duplicate_timestamps",
+    )
+    if str(duplicate_timestamps["exact_duplicate"]) != "drop":
+        raise ValueError("prepare.duplicate_timestamps.exact_duplicate must be 'drop'")
+    duplicate_conflict_policy = str(duplicate_timestamps["conflicting_duplicate"])
+    if duplicate_conflict_policy not in {"warn_keep_stable", "error"}:
+        raise ValueError(
+            "prepare.duplicate_timestamps.conflicting_duplicate must be "
+            "'warn_keep_stable' or 'error'"
+        )
     cycle_settings = _mapping(prepare["cycles"], "prepare.cycles")
     cycle_validation = _mapping(prepare["cycle_validation"], "prepare.cycle_validation")
     image_settings = _mapping(prepare["images"], "prepare.images")
     _require_keys(image_settings, {"required"}, "prepare.images")
     prepare_options = PrepareOptions(
         timestamp_column=str(prepare["timestamp_column"]),
-        duplicate_policy=str(prepare["duplicate_policy"]),
+        duplicate_conflict_policy=duplicate_conflict_policy,
         heating_mode_value=int(prepare["heating_mode_value"]),
         images_required=bool(image_settings["required"]),
         image_tolerance_seconds=_positive_float(
@@ -115,40 +129,129 @@ def load_app_config(path: Path) -> AppConfig:
         process,
         {
             "missing",
+            "resample",
             "baseline",
-            "resample_interval_seconds",
-            "windows_minutes",
-            "minimum_coverage",
+            "features",
         },
         "process",
     )
     missing = _mapping(process["missing"], "process.missing")
+    _require_keys(
+        missing,
+        {"group_columns", "continuous", "control", "protected", "audit"},
+        "process.missing",
+    )
+    continuous = _mapping(missing["continuous"], "process.missing.continuous")
+    control = _mapping(missing["control"], "process.missing.control")
+    protected = _mapping(missing["protected"], "process.missing.protected")
+    audit = _mapping(missing["audit"], "process.missing.audit")
+    _require_keys(
+        continuous,
+        {"method", "maximum_bracketing_gap_seconds", "require_both_sides"},
+        "process.missing.continuous",
+    )
+    _require_keys(
+        control,
+        {"method", "maximum_age_seconds"},
+        "process.missing.control",
+    )
+    _require_keys(protected, {"method"}, "process.missing.protected")
+    _require_keys(
+        audit,
+        {"keep_imputed_flag", "keep_imputation_method"},
+        "process.missing.audit",
+    )
+    resample = _mapping(process["resample"], "process.resample")
+    _require_keys(resample, {"interval_seconds"}, "process.resample")
+    feature_settings = _mapping(process["features"], "process.features")
+    _require_keys(
+        feature_settings,
+        {
+            "windows_minutes",
+            "minimum_observed_coverage",
+            "minimum_available_coverage",
+            "maximum_imputed_fraction",
+            "maximum_raw_gap_seconds",
+        },
+        "process.features",
+    )
     baseline = _mapping(process["baseline"], "process.baseline")
     process_options = ProcessOptions(
         continuous_max_gap_seconds=_positive_float(
-            missing.get("continuous_max_gap_seconds", 60),
+            continuous["maximum_bracketing_gap_seconds"],
             "process.missing.continuous_max_gap_seconds",
         ),
         control_max_gap_seconds=_positive_float(
-            missing.get("control_max_gap_seconds", 30),
+            control["maximum_age_seconds"],
             "process.missing.control_max_gap_seconds",
         ),
         resample_interval_seconds=int(
             _positive_float(
-                process["resample_interval_seconds"], "process.resample_interval_seconds"
+                resample["interval_seconds"], "process.resample.interval_seconds"
             )
         ),
-        windows_minutes=_positive_int_list(process["windows_minutes"], "process.windows_minutes"),
-        minimum_coverage=_fraction(process["minimum_coverage"], "process.minimum_coverage"),
+        windows_minutes=_positive_int_list(
+            feature_settings["windows_minutes"], "process.features.windows_minutes"
+        ),
+        minimum_coverage=_fraction(
+            feature_settings["minimum_available_coverage"],
+            "process.features.minimum_available_coverage",
+        ),
+        minimum_observed_coverage=_fraction(
+            feature_settings["minimum_observed_coverage"],
+            "process.features.minimum_observed_coverage",
+        ),
+        minimum_available_coverage=_fraction(
+            feature_settings["minimum_available_coverage"],
+            "process.features.minimum_available_coverage",
+        ),
+        maximum_imputed_fraction=_fraction(
+            feature_settings["maximum_imputed_fraction"],
+            "process.features.maximum_imputed_fraction",
+        ),
+        maximum_raw_gap_seconds=_positive_float(
+            feature_settings["maximum_raw_gap_seconds"],
+            "process.features.maximum_raw_gap_seconds",
+        ),
+        missing_settings=missing,
         baseline_settings=baseline,
     )
     _require_keys(
         analysis,
-        {"task", "targets", "methods", "lags_minutes", "minimum_cycles", "save_figures"},
+        {
+            "task",
+            "features",
+            "targets",
+            "methods",
+            "lags_minutes",
+            "minimum_cycles",
+            "save_figures",
+            "modalities",
+        },
         "analysis",
     )
+    modalities = _mapping(analysis["modalities"], "analysis.modalities")
+    _require_keys(modalities, {"sensor", "rgb"}, "analysis.modalities")
+    sensor_modality = _mapping(modalities["sensor"], "analysis.modalities.sensor")
+    rgb_modality = _mapping(modalities["rgb"], "analysis.modalities.rgb")
+    _require_keys(sensor_modality, {"required"}, "analysis.modalities.sensor")
+    _require_keys(
+        rgb_modality,
+        {"required", "required_camera_roles"},
+        "analysis.modalities.rgb",
+    )
+    required_camera_roles = rgb_modality["required_camera_roles"]
+    if not isinstance(required_camera_roles, list) or any(
+        not isinstance(role, str) or not role.strip() for role in required_camera_roles
+    ):
+        raise ValueError("analysis.modalities.rgb.required_camera_roles must be a list of strings")
+    if bool(rgb_modality["required"]) and not required_camera_roles:
+        raise ValueError(
+            "analysis.modalities.rgb.required_camera_roles must not be empty when RGB is required"
+        )
     analysis_options = AnalysisOptions(
         task=str(analysis["task"]),
+        features=_string_list(analysis["features"], "analysis.features"),
         targets=_string_list(analysis["targets"], "analysis.targets"),
         methods=_string_list(analysis["methods"], "analysis.methods"),
         lags_minutes=_nonnegative_int_list(analysis["lags_minutes"], "analysis.lags_minutes"),
@@ -156,6 +259,13 @@ def load_app_config(path: Path) -> AppConfig:
             _positive_float(analysis["minimum_cycles"], "analysis.minimum_cycles")
         ),
         save_figures=bool(analysis["save_figures"]),
+        modalities={
+            "sensor": dict(sensor_modality),
+            "rgb": {
+                **dict(rgb_modality),
+                "required_camera_roles": [str(role).strip() for role in required_camera_roles],
+            },
+        },
     )
     if not dataset_paths.registry.is_file():
         raise FileNotFoundError(f"feature registry does not exist: {dataset_paths.registry}")

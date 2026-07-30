@@ -28,6 +28,7 @@ from ..data.alignment import (
 )
 from ..data.cycles import (
     CycleValidationResult,
+    assess_sensor_quality,
     build_cycle_summary,
     normalize_cycle_status,
     segment_cycles,
@@ -36,7 +37,7 @@ from ..data.cycles import (
 from ..data.images import build_image_manifest  # 扫描原始图片，建立图片记录表
 from ..data.inventory import inventory_directory  # 扫描原始目录，识别文件和字段
 from ..data.registry import apply_feature_registry, load_feature_registry
-from ..data.sensors import preprocess_directory  # 加载并拼接传感器文件
+from ..data.sensors import load_sensor_data  # 只加载并拼接传感器文件
 from ..schemas import AppConfig  # 阶段配置和路径合同
 
 
@@ -57,7 +58,9 @@ def prepare_dataset(config: AppConfig) -> Path:
     return publish_prepare_result(result, config)  # 原子发布文件
 
 
-def validate_prepare_result(result: PrepareResult, config: AppConfig) -> None:
+def validate_prepare_result(  # noqa: C901 - output contract checks are intentionally explicit
+    result: PrepareResult, config: AppConfig
+) -> None:
     """Reject malformed prepare output before any public file is replaced."""
     prepared = result.prepared_data  # 时间点级输出。
     required_prepared = {
@@ -91,6 +94,12 @@ def validate_prepare_result(result: PrepareResult, config: AppConfig) -> None:
         "cycle_id",
         "cycle_status",
         "cycle_status_reason",
+        "sensor_quality",
+        "sensor_quality_reason",
+        "sensor_max_gap_seconds",
+        "sensor_gap_intervals",
+        "sensor_min_coverage",
+        "sensor_low_coverage_channels",
         "sensor_coverage_fraction",
         "rgb_coverage_fraction",
         "multimodal_coverage_fraction",
@@ -103,10 +112,18 @@ def validate_prepare_result(result: PrepareResult, config: AppConfig) -> None:
     unexpected_statuses = sorted(observed_statuses - allowed_statuses)
     if unexpected_statuses:
         raise ValueError(f"cycle summary has unknown statuses: {unexpected_statuses}")
+    allowed_sensor_quality = {"complete", "partial", "missing"}
+    observed_sensor_quality = set(cycle_summary["sensor_quality"].dropna().astype(str))
+    unexpected_sensor_quality = sorted(observed_sensor_quality - allowed_sensor_quality)
+    if unexpected_sensor_quality:
+        raise ValueError(
+            f"cycle summary has unknown sensor qualities: {unexpected_sensor_quality}"
+        )
     for column in (
         "sensor_coverage_fraction",
         "rgb_coverage_fraction",
         "multimodal_coverage_fraction",
+        "sensor_min_coverage",
     ):
         coverage = pd.to_numeric(cycle_summary[column], errors="coerce").dropna()
         if not coverage.between(0.0, 1.0).all():
@@ -166,10 +183,9 @@ def build_prepared_dataset(config: AppConfig) -> PrepareResult:
     )
 
     # sensor_load_result 已完成读取、拼接和时间解析，但没有数值插值。
-    sensor_load_result = preprocess_directory(
+    sensor_load_result = load_sensor_data(
         config.paths.raw_dir,
-        short_gap_max_seconds=0,
-        transition_guard_seconds=0,
+        duplicate_conflict_policy=config.prepare.duplicate_conflict_policy,
     )
 
     # registry_specs 描述原始点位到标准字段的映射关系。
@@ -201,6 +217,17 @@ def build_prepared_dataset(config: AppConfig) -> PrepareResult:
         prepared_data,
         cycle_validation,
     )
+    required_sensor_channels = [
+        spec.canonical_name
+        for spec in registry_specs.values()
+        if spec.required_for_sensor_quality
+    ]
+    sensor_quality = assess_sensor_quality(
+        cycle_validation.frame,
+        validated_cycles,
+        required_channels=required_sensor_channels,
+        expected_interval_seconds=cycle_validation.nominal_interval_seconds,
+    )
     image_alignment = match_images_to_sensors(
         image_records,
         prepared_data[["timestamp"]],
@@ -217,6 +244,8 @@ def build_prepared_dataset(config: AppConfig) -> PrepareResult:
                 "gap_warning_factor", config.prepare.gap_warning_factor
             )
         ),
+        sensor_quality=sensor_quality,
+        required_sensor_channels=required_sensor_channels,
     )
     prepared_data = select_prepared_output_columns(
         prepared_data,
@@ -233,6 +262,7 @@ def build_prepared_dataset(config: AppConfig) -> PrepareResult:
         if spec.raw_source and spec.raw_source not in sensor_load_result.frame
     ]
     warnings = [
+        *sensor_load_result.warnings,
         *cycle_validation.warnings,
         *([camera_mapping_warning] if camera_mapping_warning else []),
         *registry_warnings,
@@ -282,13 +312,14 @@ def select_prepared_output_columns(
         "cycle_progress",
     ]
     # Keep registry fields first, then compact cycle labels, then stable image columns.
-    requested_columns = [
-        "timestamp",
-        *registered_columns,
-        "operating_mode",
-        "is_heating",
-        *cycle_columns,
-    ]
+    requested_columns = ["timestamp"]
+    for name in registered_columns:
+        requested_columns.append(name)
+        requested_columns.extend(
+            f"{name}{suffix}"
+            for suffix in ("__missing", "__invalid", "__source_state")
+        )
+    requested_columns.extend(["operating_mode", "is_heating", *cycle_columns])
     requested_columns.extend(
         column for column in frame.columns if str(column).startswith("image_")
     )
@@ -323,7 +354,12 @@ def build_prepared_sensor_table(frame: pd.DataFrame, metadata: pd.DataFrame) -> 
         str(name)
         for name in metadata.get("canonical_name", pd.Series(dtype=str)).tolist()
     ]
-    keep = ["sensor_time", *names, "operating_mode", "is_heating"]
+    state_columns = [
+        f"{name}{suffix}"
+        for name in names
+        for suffix in ("__missing", "__invalid", "__source_state")
+    ]
+    keep = ["sensor_time", *names, *state_columns, "operating_mode", "is_heating"]
     keep = list(dict.fromkeys(column for column in keep if column in frame))
     # Copy before parsing and sorting so callers retain the Registry result unchanged.
     result = frame.loc[:, keep].copy()

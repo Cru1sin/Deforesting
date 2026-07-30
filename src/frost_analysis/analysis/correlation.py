@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,8 @@ def run_correlation_analysis(config: AppConfig) -> Path:
         lags_minutes=config.analysis.lags_minutes,
         targets=config.analysis.targets,
         minimum_cycles=config.analysis.minimum_cycles,
+        features=config.analysis.features,
+        modalities=config.analysis.modalities,
     )
     config.paths.output_dir.mkdir(parents=True, exist_ok=True)
     results.to_csv(config.paths.correlation_results, index=False)
@@ -50,16 +53,24 @@ def build_correlation_results(
     lags_minutes: list[int],
     targets: list[str],
     minimum_cycles: int,
+    features: list[str] | None = None,
+    modalities: Mapping[str, object] | None = None,
 ) -> pd.DataFrame:
     """Combine four evidence layers without producing a composite rank."""
     internal = _screening_frame(processed)
     cycles = _screening_cycles(cycle_summary)
     registry = pd.DataFrame([vars(spec) for spec in specs.values()])
+    if features:
+        requested = {str(value) for value in features}
+        registry = registry.loc[registry["canonical_name"].isin(requested)].copy()
     screen_config: dict[str, Any] = {
         "minimum_valid_cycles": minimum_cycles,
         "minimum_coverage": 0.7,
         "lead_horizons_minutes": [value for value in lags_minutes if value > 0],
     }
+    # RGB qualification is intentionally not consulted by this sensor-only
+    # task unless a future task explicitly adds a modality-aware analyzer.
+    del modalities
     evidence = screen_candidate_channels(internal, cycles, registry, screen_config)
     if evidence.empty:
         return evidence
@@ -141,7 +152,9 @@ def _trend_method_summary(
             coefficients: list[float] = []
             p_values: list[float] = []
             samples = 0
-            for _, group in _eligible(frame).groupby("cycle_id", sort=False):
+            for _, group in _eligible(frame, required_variables=[channel]).groupby(
+                "cycle_id", sort=False
+            ):
                 phase_source = group.get(
                     "cycle_phase", pd.Series(np.nan, index=group.index)
                 )
@@ -173,7 +186,6 @@ def _lagged_summary(
     lags_minutes: list[int],
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    eligible = _eligible(frame)
     for channel in channels:
         row: dict[str, object] = {"canonical_name": channel}
         for target in targets:
@@ -187,6 +199,7 @@ def _lagged_summary(
                     coefficients: list[float] = []
                     p_values: list[float] = []
                     sample_count = 0
+                    eligible = _eligible(frame, required_variables=[channel, target])
                     for _, group in eligible.groupby("cycle_id", sort=False):
                         paired = _future_pairs(group, channel, target, lag)
                         if len(paired) < 3:
@@ -238,15 +251,28 @@ def _json_value(value: object) -> object:
     return value
 
 
-def _eligible(frame: pd.DataFrame) -> pd.DataFrame:
+def _eligible(
+    frame: pd.DataFrame,
+    *,
+    required_variables: list[str] | None = None,
+) -> pd.DataFrame:
     quality = frame.get("cycle_quality", pd.Series("partial", index=frame.index))
     stage = frame.get("stage", pd.Series("partial", index=frame.index))
     mask = quality.eq("complete") & stage.isin(["stable_clean", "frost_development"])
-    if "cycle_gap_contaminated" in frame:
-        mask &= ~frame["cycle_gap_contaminated"].fillna(False).astype(bool)
     if "analysis_bin_available" in frame:
         mask &= frame["analysis_bin_available"].fillna(False).astype(bool)
-    return frame.loc[mask].sort_values(["cycle_id", "sensor_time"], kind="stable")
+    result = frame.loc[mask].sort_values(["cycle_id", "sensor_time"], kind="stable")
+    for variable in required_variables or []:
+        candidates = [f"{variable}__baseline_offset", variable]
+        signal_name = next((column for column in candidates if column in result), "")
+        if not signal_name:
+            return result.iloc[0:0]
+        available_cycles = set(
+            result.loc[pd.to_numeric(result[signal_name], errors="coerce").notna(), "cycle_id"]
+            .astype(str)
+        )
+        result = result.loc[result["cycle_id"].astype(str).isin(available_cycles)]
+    return result
 
 
 def _signal(frame: pd.DataFrame, channel: str) -> pd.Series:

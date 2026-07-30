@@ -10,11 +10,16 @@ import numpy as np
 import pandas as pd
 
 from ..core.artifacts import write_dataframe
-from ..data.registry import FeatureSpec, load_feature_registry
+from ..data.registry import (
+    FeatureSpec,
+    derived_feature_names,
+    load_feature_registry,
+    recompute_derived_features,
+)
 from ..processing.baseline import select_clean_baselines
 from ..processing.features import engineer_features
-from ..processing.missing import handle_missing_data
-from ..processing.resample import resample_data
+from ..processing.missing import apply_missing_policy, assess_missing_data
+from ..processing.resample import resample_observations
 from ..schemas import AppConfig
 
 
@@ -66,33 +71,55 @@ def build_processed_dataset(
     config: AppConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     internal = _internal_cycle_columns(prepared)
-    active = [
-        spec.canonical_name
+    active_specs = {
+        spec.canonical_name: spec
         for spec in specs.values()
         if spec.data_role in {"X", "C"}
         and spec.analysis_enabled
         and spec.canonical_name in internal
-    ]
-    control = [
-        spec.canonical_name
-        for spec in specs.values()
-        if spec.data_role == "C" and spec.canonical_name in internal
-    ]
-    target_columns = {
-        "heating_capacity",
-        "power_total",
-        "cop",
-        "water_heating_capacity",
-        "water_cop",
     }
-    filled = handle_missing_data(
-        internal,
-        active,
-        control,
-        continuous_max_gap_seconds=config.process.continuous_max_gap_seconds,
-        control_max_gap_seconds=config.process.control_max_gap_seconds,
-        target_columns=target_columns,
+    source_specs = {
+        name: spec for name, spec in active_specs.items() if spec.data_kind != "derived"
+    }
+    active = list(active_specs)
+    processing_input = internal.rename(columns={"sensor_time": "timestamp"})
+    derived_names = derived_feature_names(specs)
+    processing_input = processing_input.drop(
+        columns=[
+            column
+            for column in processing_input.columns
+            if str(column).split("__", 1)[0] in derived_names
+        ],
+        errors="ignore",
     )
+    missing_report = assess_missing_data(
+        processing_input,
+        source_specs,
+        config.process.missing_settings,
+    )
+    resampled = resample_observations(
+        processing_input,
+        source_specs,
+        interval_seconds=config.process.resample_interval_seconds,
+        state_columns=[
+            "cycle_status",
+            "cycle_stage",
+            "is_heating",
+            "cycle_quality",
+            "stage",
+            "cycle_phase",
+            "cycle_time_s",
+            "cycle_gap_contaminated",
+        ],
+    )
+    missing_result = apply_missing_policy(
+        resampled,
+        missing_report,
+        source_specs,
+        config.process.missing_settings,
+    )
+    filled = missing_result.data.rename(columns={"timestamp": "sensor_time"})
+    filled = recompute_derived_features(filled, specs)
     anchors = [
         name
         for name in (
@@ -110,19 +137,16 @@ def build_processed_dataset(
         list(anchors or active[:4]),
         config.process.baseline_settings,
     )
-    sampled = resample_data(
-        baseline.frame.rename(columns={"sensor_time": "timestamp"}),
-        interval_seconds=config.process.resample_interval_seconds,
-        numeric_columns=active,
-        control_columns=control,
-        state_columns=["cycle_status", "cycle_stage", "is_heating"],
-    )
-    sampled = sampled.rename(columns={"timestamp": "sensor_time"})
+    sampled = baseline.frame
     feature_result = engineer_features(
         sampled,
         {name: specs[name] for name in active},
         windows_minutes=config.process.windows_minutes,
         minimum_coverage=config.process.minimum_coverage,
+        minimum_observed_coverage=config.process.minimum_observed_coverage,
+        minimum_available_coverage=config.process.minimum_available_coverage,
+        maximum_imputed_fraction=config.process.maximum_imputed_fraction,
+        maximum_raw_gap_seconds=config.process.maximum_raw_gap_seconds,
     )
     processed = feature_result.frame.rename(
         columns={
@@ -141,7 +165,12 @@ def build_processed_dataset(
         processed = processed.merge(
             image_frame, on=["timestamp", "cycle_id"], how="left", validate="many_to_one"
         )
-    updated_summary = _update_cycle_summary(cycle_summary, baseline.cycles, processed)
+    updated_summary = _update_cycle_summary(
+        cycle_summary,
+        baseline.cycles,
+        processed,
+        missing_result.cycle_summary_updates,
+    )
     return processed.sort_values("timestamp", kind="stable").reset_index(drop=True), updated_summary
 
 
@@ -184,7 +213,10 @@ def _internal_cycle_summary(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def _update_cycle_summary(
-    summary: pd.DataFrame, baseline_cycles: pd.DataFrame, processed: pd.DataFrame
+    summary: pd.DataFrame,
+    baseline_cycles: pd.DataFrame,
+    processed: pd.DataFrame,
+    missing_updates: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     result = summary.copy()
     baseline = baseline_cycles.set_index("cycle_id")
@@ -193,9 +225,16 @@ def _update_cycle_summary(
             result[column] = result["cycle_id"].map(baseline[column])
     result["baseline_start"] = result["clean_start"]
     result["baseline_end"] = result["clean_end"]
+    if missing_updates is not None and not missing_updates.empty:
+        result = result.merge(missing_updates, on="cycle_id", how="left", validate="one_to_one")
     rates = _cycle_missing_rate(processed)
     result["missing_rate"] = result["cycle_id"].map(rates)
-    result["is_processable"] = result["cycle_status"].eq("valid") & result["clean_start"].notna()
+    result["baseline_status"] = result["clean_start"].notna().map(
+        {True: "available", False: "unavailable"}
+    )
+    result["baseline_status_reason"] = result["baseline_status"].map(
+        {"available": "", "unavailable": "no_clean_window"}
+    )
     return result
 
 

@@ -90,12 +90,12 @@ def validate_cycles(
             settings.get("expected_sampling_interval_seconds")
         ),
     )
-    # First reject non-heating rows, then classify unusually large observed gaps.
+    # First reject non-heating rows, then audit unusually large observed gaps.
     labeled, validated, mode_warnings = _enforce_heating_mode(
         segmentation.frame,
         segmentation.cycles,
     )
-    labeled, validated, gap_warnings = _mark_long_gap_cycles(
+    labeled, validated, gap_warnings = _assess_long_gap_cycles(
         labeled,
         validated,
         nominal_seconds=nominal_interval,
@@ -584,8 +584,18 @@ def build_cycle_summary(
     *,
     date: str,
     gap_warning_factor: float,
+    sensor_quality: pd.DataFrame | None = None,
+    required_sensor_channels: list[str] | tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Create the single human-readable sensor/RGB cycle quality table."""
+    assessed_sensor_quality = sensor_quality
+    if assessed_sensor_quality is None:
+        assessed_sensor_quality = assess_sensor_quality(
+            frame,
+            cycles,
+            required_channels=required_sensor_channels,
+        )
+    quality_by_cycle = assessed_sensor_quality.set_index("cycle_id")
     groups = _prepare_multiview_groups(multiview_index)
     image_times = groups["group_time"].drop_duplicates().sort_values()
     image_deltas = image_times.diff().dt.total_seconds().dropna()
@@ -693,12 +703,17 @@ def build_cycle_summary(
             if group_count == 0
             else "complete" if not interruptions and not partial else "incomplete"
         )
-        sensor_quality = _cycle_status(str(cycle.get("quality_flag", "")))
+        cycle_status = _cycle_status(str(cycle.get("quality_flag", "")))
+        quality = (
+            cast(dict[str, object], quality_by_cycle.loc[cycle_id].to_dict())
+            if cycle_id in quality_by_cycle.index
+            else {}
+        )
         rows.append(
             {
                 "cycle_id": cycle_id,
                 "date": date,
-                "cycle_status": sensor_quality,
+                "cycle_status": cycle_status,
                 "cycle_status_reason": _text_or_empty(cycle.get("exclusion_reason", "")),
                 "heating_start": cycle.get("heating_start"),
                 "stable_heating_start": cycle.get("stable_heating_start"),
@@ -709,6 +724,14 @@ def build_cycle_summary(
                 "clean_end": cycle.get("clean_end"),
                 "max_sensor_gap_seconds": max(
                     _as_float(cycle.get("maximum_gap_seconds")), sensor_gap
+                ),
+                "sensor_quality": quality.get("sensor_quality", "missing"),
+                "sensor_quality_reason": quality.get("sensor_quality_reason", ""),
+                "sensor_max_gap_seconds": quality.get("sensor_max_gap_seconds", sensor_gap),
+                "sensor_gap_intervals": quality.get("sensor_gap_intervals", ""),
+                "sensor_min_coverage": quality.get("sensor_min_coverage", np.nan),
+                "sensor_low_coverage_channels": quality.get(
+                    "sensor_low_coverage_channels", ""
                 ),
                 "sensor_observation_count": sensor_count,
                 "sensor_expected_count": sensor_expected,
@@ -727,7 +750,7 @@ def build_cycle_summary(
                 "rgb_interruption_intervals": "; ".join(interruptions),
                 "rgb_partial_intervals": "; ".join(partial),
                 "rgb_quality": rgb_quality,
-                "multimodal_quality": _multimodal_status(sensor_quality, rgb_quality),
+                "multimodal_quality": _multimodal_status(cycle_status, rgb_quality),
             }
         )
     columns = [
@@ -743,6 +766,12 @@ def build_cycle_summary(
         "clean_start",
         "clean_end",
         "max_sensor_gap_seconds",
+        "sensor_quality",
+        "sensor_quality_reason",
+        "sensor_max_gap_seconds",
+        "sensor_gap_intervals",
+        "sensor_min_coverage",
+        "sensor_low_coverage_channels",
         "sensor_observation_count",
         "sensor_expected_count",
         "sensor_coverage_fraction",
@@ -791,14 +820,14 @@ def _enforce_heating_mode(
     return labeled, validated, warnings
 
 
-def _mark_long_gap_cycles(
+def _assess_long_gap_cycles(
     frame: pd.DataFrame,
     cycles: pd.DataFrame,
     *,
     nominal_seconds: float,
     factor: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
-    """Mark complete cycles whose observed channel gap exceeds the threshold."""
+    """Audit long gaps without changing structural cycle labels."""
     labeled = frame.copy()
     validated = cycles.copy()
     warnings: list[str] = []
@@ -823,14 +852,6 @@ def _mark_long_gap_cycles(
             validated.loc[index, "maximum_gap_seconds"] = gap
         if cycle.get("quality_flag") != "complete" or gap is None or gap <= limit:
             continue
-        validated.loc[index, "quality_flag"] = "contaminated"
-        validated.loc[index, "exclusion_reason"] = append_issue(
-            cycle.get("exclusion_reason"),
-            "long_gap",
-        )
-        cycle_mask = labeled["cycle_id"].eq(cycle_id)
-        labeled.loc[cycle_mask, "cycle_quality"] = "contaminated"
-        labeled.loc[cycle_mask, "cycle_phase"] = np.nan
         warnings.append(f"{cycle_id}:long_gap:{gap:.1f}s>{limit:.1f}s")
     return labeled, validated, warnings
 
@@ -917,6 +938,92 @@ def _sensor_gap_evidence(
                     _format_cycle_interval(times.iloc[position - 1], times.iloc[position])
                 )
     return maximum, sorted(intervals)
+
+
+def assess_sensor_quality(
+    frame: pd.DataFrame,
+    cycles: pd.DataFrame,
+    *,
+    required_channels: list[str] | tuple[str, ...] = (),
+    expected_interval_seconds: float | None = None,
+) -> pd.DataFrame:
+    """Measure channel coverage without changing structural cycle labels."""
+    required = list(dict.fromkeys(str(column) for column in required_channels))
+    nominal = infer_sampling_interval_seconds(
+        frame, expected_sampling_interval_seconds=expected_interval_seconds
+    )
+    timestamps = pd.to_datetime(frame.get("timestamp", pd.Series(dtype=object)), errors="coerce")
+    rows: list[dict[str, object]] = []
+    for cycle in cycles.itertuples(index=False):
+        cycle_id = str(getattr(cycle, "cycle_id", ""))
+        start = _coerce_cycle_time(getattr(cycle, "heating_start", pd.NaT))
+        end = _coerce_cycle_time(getattr(cycle, "defrost_end", pd.NaT))
+        mask = frame.get("cycle_id", pd.Series(dtype=object)).astype("string").eq(cycle_id)
+        if start is not None and end is not None:
+            mask &= timestamps.between(start, end, inclusive="both")
+        scoped = frame.loc[mask]
+        scoped_times = timestamps.loc[mask].dropna().drop_duplicates().sort_values()
+        duration = float((end - start).total_seconds()) if start and end else 0.0
+        expected = max(1, int(round(duration / max(nominal, 1e-9))) + 1) if duration else len(scoped)
+        coverage: dict[str, float] = {}
+        gap_values: list[float] = []
+        gap_intervals: set[str] = set()
+        for channel in required:
+            if channel not in scoped:
+                coverage[channel] = 0.0
+                continue
+            values = pd.to_numeric(scoped[channel], errors="coerce")
+            observed_times = (
+                pd.to_datetime(scoped.loc[values.notna(), "timestamp"], errors="coerce")
+                .dropna()
+                .drop_duplicates()
+                .sort_values()
+            )
+            coverage[channel] = min(1.0, float(len(observed_times) / max(expected, 1)))
+            deltas = observed_times.diff().dt.total_seconds().dropna()
+            if not deltas.empty:
+                gap_values.append(float(deltas.max()))
+                for position, gap in enumerate(deltas):
+                    if position > 0 and float(gap) > nominal:
+                        gap_intervals.add(
+                            _format_cycle_interval(
+                                observed_times.iloc[position - 1], observed_times.iloc[position]
+                            )
+                        )
+        minimum = min(coverage.values(), default=0.0)
+        low = sorted(channel for channel, value in coverage.items() if value < 1.0)
+        if scoped_times.empty:
+            quality = "missing"
+            reason = "no_sensor_observations"
+        elif low:
+            quality = "partial"
+            reason = "required_channel_low_coverage"
+        else:
+            quality = "complete"
+            reason = ""
+        rows.append(
+            {
+                "cycle_id": cycle_id,
+                "sensor_quality": quality,
+                "sensor_quality_reason": reason,
+                "sensor_max_gap_seconds": max(gap_values, default=np.nan),
+                "sensor_gap_intervals": "; ".join(sorted(gap_intervals)),
+                "sensor_min_coverage": minimum,
+                "sensor_low_coverage_channels": ", ".join(low),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "cycle_id",
+            "sensor_quality",
+            "sensor_quality_reason",
+            "sensor_max_gap_seconds",
+            "sensor_gap_intervals",
+            "sensor_min_coverage",
+            "sensor_low_coverage_channels",
+        ],
+    )
 
 
 def _as_float(value: object) -> float:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from frost_analysis.data.sensors import merge_parameter_fragments, preprocess_directory
+from frost_analysis.data.sensors import load_sensor_data, merge_parameter_fragments
 
 
 def _write(path: Path, rows: list[tuple[str, str, str]]) -> None:
@@ -47,7 +47,7 @@ def test_nonnumeric_tokens_have_separate_raw_clean_and_invalid_flags(tmp_path: P
     assert bool(result.frame.loc[1, "p1__温度__invalid"])
 
 
-def test_short_interpolation_is_limited_and_guarded_by_state_transition(tmp_path: Path) -> None:
+def test_loader_preserves_missing_values_without_interpolation(tmp_path: Path) -> None:
     path = tmp_path / "x参数1.xls"
     _write(
         path,
@@ -61,11 +61,9 @@ def test_short_interpolation_is_limited_and_guarded_by_state_transition(tmp_path
             ("2026-07-15 00:00:22", "22", "ON"),
         ],
     )
-    result = merge_parameter_fragments(
-        "1", [path], tmp_path, short_gap_max_seconds=3, transition_guard_seconds=1
-    )
-    assert result.frame.loc[1, "p1__温度"] == 1.0
-    assert bool(result.frame.loc[1, "p1__温度__interpolated"])
+    result = merge_parameter_fragments("1", [path], tmp_path)
+    assert pd.isna(result.frame.loc[1, "p1__温度"])
+    assert "p1__温度__interpolated" not in result.frame
     assert pd.isna(result.frame.loc[3, "p1__温度"])
     assert pd.isna(result.frame.loc[5, "p1__温度"])
 
@@ -80,10 +78,40 @@ def test_directory_outer_aligns_groups_and_reports_irregular_sampling(tmp_path: 
         ],
     )
     _write(tmp_path / "b参数2.xls", [("2026-07-15 00:00:02", "3", "OFF")])
-    result = preprocess_directory(tmp_path, short_gap_max_seconds=0)
+    result = load_sensor_data(tmp_path)
     assert result.frame["sensor_time"].tolist() == list(
         pd.date_range("2026-07-15", periods=4, freq="s")
     )
     assert {"p1__温度", "p2__温度"} <= set(result.frame.columns)
     assert result.sampling_summary["irregular_interval_count"].sum() >= 1
     assert not result.missing_intervals.empty
+
+
+def test_loader_marks_outer_join_rows_as_not_sampled(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "a参数1.xls",
+        [("2026-07-15 00:00:00", "1", "OFF")],
+    )
+    _write(
+        tmp_path / "b参数2.xls",
+        [("2026-07-15 00:00:01", "2", "OFF")],
+    )
+
+    result = load_sensor_data(tmp_path)
+
+    states = result.frame.set_index("sensor_time")["p1__温度__source_state"]
+    assert states.loc[pd.Timestamp("2026-07-15 00:00:00")] == "observed"
+    assert states.loc[pd.Timestamp("2026-07-15 00:00:01")] == "not_sampled"
+
+
+def test_conflicting_duplicate_values_are_stably_kept_and_warned(tmp_path: Path) -> None:
+    first = tmp_path / "b参数1.xls"
+    second = tmp_path / "a参数1.xls"
+    _write(first, [("2026-07-15 00:00:00", "2", "OFF")])
+    _write(second, [("2026-07-15 00:00:00", "20", "OFF")])
+
+    result = load_sensor_data(tmp_path)
+
+    assert result.frame.loc[0, "p1__温度"] == 2.0
+    assert result.frame.loc[0, "p1__duplicate_conflict"]
+    assert any("duplicate_conflict" in warning for warning in result.warnings)

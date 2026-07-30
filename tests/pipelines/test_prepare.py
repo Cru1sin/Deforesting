@@ -28,7 +28,8 @@ def test_prepared_schema_drops_internal_cleaning_artifacts() -> None:
             "signal": [1.0],
             "signal__raw": ["1"],
             "signal__missing": [False],
-            "signal__interpolated": [False],
+            "signal__invalid": [False],
+            "signal__source_state": ["observed"],
             "operating_mode": [3],
             "is_heating": [True],
         }
@@ -36,7 +37,15 @@ def test_prepared_schema_drops_internal_cleaning_artifacts() -> None:
     metadata = pd.DataFrame({"canonical_name": ["signal"]})
     result = build_prepared_sensor_table(frame, metadata)
     result = select_prepared_output_columns(result, registered_columns=["signal"])
-    assert list(result.columns) == ["timestamp", "signal", "operating_mode", "is_heating"]
+    assert list(result.columns) == [
+        "timestamp",
+        "signal",
+        "signal__missing",
+        "signal__invalid",
+        "signal__source_state",
+        "operating_mode",
+        "is_heating",
+    ]
     assert "baseline" not in " ".join(result.columns)
 
 
@@ -86,6 +95,12 @@ def test_publish_writes_iso_state_and_validated_outputs(tmp_path: Path) -> None:
             "cycle_id": ["cycle_001"],
             "cycle_status": ["valid"],
             "cycle_status_reason": [""],
+            "sensor_quality": ["complete"],
+            "sensor_quality_reason": [""],
+            "sensor_max_gap_seconds": [0.0],
+            "sensor_gap_intervals": [""],
+            "sensor_min_coverage": [1.0],
+            "sensor_low_coverage_channels": [""],
             "sensor_coverage_fraction": [1.0],
             "rgb_coverage_fraction": [0.0],
             "multimodal_coverage_fraction": [0.0],

@@ -46,3 +46,32 @@ def test_candidate_screening_returns_one_row_per_channel_without_weighted_score(
     assert list(evidence["canonical_name"]) == ["channel_a"]
     assert "candidate_score" not in evidence
     assert "trend_direction" in evidence
+
+
+def test_candidate_screening_does_not_globally_drop_valid_cycles_with_sensor_gaps() -> None:
+    times = pd.date_range("2026-07-15", periods=6, freq="min")
+    frame = pd.DataFrame(
+        {
+            "sensor_time": list(times) * 2,
+            "cycle_id": ["cycle_001"] * 6 + ["cycle_002"] * 6,
+            "cycle_quality": ["complete"] * 12,
+            "stage": ["frost_development"] * 12,
+            "cycle_phase": list(range(6)) * 2,
+            "cycle_gap_contaminated": [True] * 12,
+            "channel_a": list(range(6)) * 2,
+        }
+    )
+    cycles = pd.DataFrame(
+        {
+            "cycle_id": ["cycle_001", "cycle_002"],
+            "quality_flag": ["complete", "complete"],
+            "heating_start": [times[0], times[0]],
+        }
+    )
+    registry = pd.DataFrame(
+        [{"feature_id": "channel_a", "canonical_name": "channel_a", "analysis_enabled": True}]
+    )
+
+    evidence = screen_candidate_channels(frame, cycles, registry, {})
+
+    assert evidence.iloc[0]["valid_cycle_count"] == 2

@@ -23,7 +23,7 @@ class DatasetPaths:
 @dataclass(frozen=True)
 class PrepareOptions:
     timestamp_column: str
-    duplicate_policy: str
+    duplicate_conflict_policy: str
     heating_mode_value: int
     images_required: bool
     image_tolerance_seconds: float
@@ -42,17 +42,24 @@ class ProcessOptions:
     resample_interval_seconds: int
     windows_minutes: list[int]
     minimum_coverage: float
+    minimum_observed_coverage: float
+    minimum_available_coverage: float
+    maximum_imputed_fraction: float
+    maximum_raw_gap_seconds: float
+    missing_settings: dict[str, Any]
     baseline_settings: dict[str, Any]
 
 
 @dataclass(frozen=True)
 class AnalysisOptions:
     task: str
+    features: list[str]
     targets: list[str]
     methods: list[str]
     lags_minutes: list[int]
     minimum_cycles: int
     save_figures: bool
+    modalities: dict[str, Any]
 
 
 @dataclass(frozen=True)

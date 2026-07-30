@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,13 +24,20 @@ class ParameterMergeResult:
 
 
 @dataclass(frozen=True)
-class PreprocessResult:
-    frame: pd.DataFrame
+class SensorLoadResult:
+    data: pd.DataFrame
     conflicts: pd.DataFrame
     schema: pd.DataFrame
     quality_summary: pd.DataFrame
     missing_intervals: pd.DataFrame
     sampling_summary: pd.DataFrame
+    warnings: tuple[str, ...] = ()
+    metrics: Mapping[str, int | float] | None = None
+
+    @property
+    def frame(self) -> pd.DataFrame:
+        """Compatibility view for callers migrating from ``PreprocessResult``."""
+        return self.data
 
 
 def merge_parameter_fragments(
@@ -37,10 +45,9 @@ def merge_parameter_fragments(
     paths: list[Path],
     input_dir: Path,
     *,
-    short_gap_max_seconds: float = 0,
-    transition_guard_seconds: float = 30,
+    duplicate_conflict_policy: str = "warn_keep_stable",
 ) -> ParameterMergeResult:
-    """Merge one parameter group with auditable deterministic conflict resolution."""
+    """Merge one parameter group without reconstructing missing values."""
     if not paths:
         raise ValueError(f"parameter group {group} has no files")
     fragments: list[tuple[pd.Timestamp, str, pd.DataFrame]] = []
@@ -110,10 +117,16 @@ def merge_parameter_fragments(
         merged.groupby("sensor_time")["_signature"].transform("nunique").gt(1)
     )
     conflicts = (
-        merged.loc[merged["duplicate_count"].gt(1)]
+        merged.loc[merged["duplicate_count"].gt(1) & merged["duplicate_conflict"]]
         .drop(columns=["_fragment_order", "_signature"])
         .reset_index(drop=True)
     )
+    if duplicate_conflict_policy not in {"warn_keep_stable", "error"}:
+        raise ValueError(
+            "duplicate_conflict_policy must be 'warn_keep_stable' or 'error'"
+        )
+    if duplicate_conflict_policy == "error" and not conflicts.empty:
+        raise ValueError(f"conflicting duplicate timestamps in parameter group {group}")
     selected = (
         merged.drop_duplicates("sensor_time", keep="last")
         .sort_values("sensor_time")
@@ -128,22 +141,17 @@ def merge_parameter_fragments(
             "duplicate_conflict": f"p{group}__duplicate_conflict",
         }
     )
-    selected = _separate_and_clean(
-        selected,
-        value_columns,
-        short_gap_max_seconds=short_gap_max_seconds,
-        transition_guard_seconds=transition_guard_seconds,
-    )
+    selected = _separate_and_clean(selected, value_columns)
     schema = pd.DataFrame(schema_rows).drop_duplicates(["canonical_column", "source_file"])
     return ParameterMergeResult(group, selected, conflicts, schema, pd.DataFrame(sampling_rows))
 
 
-def preprocess_directory(
+def load_sensor_data(
     input_dir: Path,
     *,
-    short_gap_max_seconds: float = 0,
-    transition_guard_seconds: float = 30,
-) -> PreprocessResult:
+    duplicate_conflict_policy: str = "warn_keep_stable",
+) -> SensorLoadResult:
+    """Load observed sensor records and retain missing values without filling them."""
     groups: dict[str, list[Path]] = {}
     for path in sorted(input_dir.rglob("*")):
         if not path.is_file():
@@ -158,13 +166,13 @@ def preprocess_directory(
             group,
             paths,
             input_dir,
-            short_gap_max_seconds=short_gap_max_seconds,
-            transition_guard_seconds=transition_guard_seconds,
+            duplicate_conflict_policy=duplicate_conflict_policy,
         )
         for group, paths in sorted(groups.items(), key=lambda item: int(item[0]))
     }
     indexed = [result.frame.set_index("sensor_time") for result in results.values()]
     frame = pd.concat(indexed, axis=1, join="outer").sort_index().reset_index()
+    frame = _mark_not_sampled_states(frame)
     conflicts = pd.concat(
         [result.conflicts.assign(parameter_group=group) for group, result in results.items()],
         ignore_index=True,
@@ -175,11 +183,21 @@ def preprocess_directory(
     )
     quality = _quality_summary(frame)
     missing = _missing_intervals(frame)
-    return PreprocessResult(frame, conflicts, schema, quality, missing, sampling)
+    warnings = tuple(
+        f"duplicate_conflict:{group}:{len(result.conflicts)}"
+        for group, result in results.items()
+        if not result.conflicts.empty
+    )
+    metrics: dict[str, int | float] = {
+        "parameter_group_count": len(results),
+        "sensor_row_count": len(frame),
+        "conflicting_duplicate_count": int(len(conflicts)),
+    }
+    return SensorLoadResult(frame, conflicts, schema, quality, missing, sampling, warnings, metrics)
 
 
 def write_preprocessed(
-    result: PreprocessResult, processed_dir: Path, tables_dir: Path
+    result: SensorLoadResult, processed_dir: Path, tables_dir: Path
 ) -> FrameWriteResult:
     processed_dir.mkdir(parents=True, exist_ok=True)
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -194,18 +212,7 @@ def write_preprocessed(
 def _separate_and_clean(
     frame: pd.DataFrame,
     value_columns: list[str],
-    *,
-    short_gap_max_seconds: float,
-    transition_guard_seconds: float,
 ) -> pd.DataFrame:
-    state_column = next(
-        (
-            column
-            for column in value_columns
-            if column.lower().endswith("__deforst") or column.lower().endswith("__defrost")
-        ),
-        None,
-    )
     generated: dict[str, pd.Series] = {}
     for column in value_columns:
         raw = frame[column].fillna("").astype(str).str.strip()
@@ -213,79 +220,40 @@ def _separate_and_clean(
         nonempty = raw.ne("")
         numeric_ratio = float(numeric.notna().sum() / nonempty.sum()) if nonempty.any() else 0.0
         is_numeric = numeric_ratio >= 0.5 and numeric.notna().any()
+        invalid = nonempty & numeric.isna()
         if is_numeric:
-            working = pd.DataFrame(
-                {
-                    "sensor_time": frame["sensor_time"],
-                    column: numeric.astype(float),
-                    f"{column}__interpolated": False,
-                },
-                index=frame.index,
-            )
-            if state_column is not None and state_column != column:
-                working[state_column] = frame[state_column]
-            if short_gap_max_seconds > 0:
-                _interpolate_short_gaps(
-                    working,
-                    column,
-                    raw,
-                    state_column=state_column,
-                    max_seconds=short_gap_max_seconds,
-                    transition_guard_seconds=transition_guard_seconds,
-                )
-            generated[column] = working[column]
-            generated[f"{column}__interpolated"] = working[f"{column}__interpolated"]
-            generated[f"{column}__invalid"] = nonempty & numeric.isna()
+            generated[column] = numeric.astype(float)
         else:
             generated[column] = raw.replace("", pd.NA).astype("string")
-            generated[f"{column}__invalid"] = pd.Series(False, index=frame.index)
-            generated[f"{column}__interpolated"] = pd.Series(False, index=frame.index)
+        generated[f"{column}__invalid"] = invalid
         generated[f"{column}__raw"] = raw
         generated[f"{column}__missing"] = ~nonempty
+        state = pd.Series("observed", index=frame.index, dtype="string")
+        state.loc[~nonempty] = "missing"
+        state.loc[invalid] = "invalid"
+        generated[f"{column}__source_state"] = state
     base = frame.drop(columns=value_columns)
     return pd.concat([base, pd.DataFrame(generated, index=frame.index)], axis=1)
 
 
-def _interpolate_short_gaps(
-    frame: pd.DataFrame,
-    column: str,
-    raw: pd.Series,
-    *,
-    state_column: str | None,
-    max_seconds: float,
-    transition_guard_seconds: float,
-) -> None:
-    values = frame[column]
-    times = frame["sensor_time"]
-    missing_positions = np.flatnonzero(raw.eq("").to_numpy())
-    states = frame[state_column].astype("string") if state_column else None
-    for raw_position in missing_positions:
-        position = int(raw_position)
-        previous = position - 1
-        following = position + 1
-        if previous < 0 or following >= len(frame):
-            continue
-        if pd.isna(values.iloc[previous]) or pd.isna(values.iloc[following]):
-            continue
-        elapsed = (times.iloc[following] - times.iloc[previous]).total_seconds()
-        if elapsed > max_seconds:
-            continue
-        if states is not None and not (
-            states.iloc[previous] == states.iloc[position] == states.iloc[following]
-        ):
-            continue
-        if states is not None and transition_guard_seconds > 0:
-            nearby = times.between(
-                times.iloc[position] - pd.Timedelta(seconds=transition_guard_seconds),
-                times.iloc[position] + pd.Timedelta(seconds=transition_guard_seconds),
-            )
-            if states.loc[nearby].dropna().nunique() > 1:
-                continue
-        fraction = (times.iloc[position] - times.iloc[previous]).total_seconds() / elapsed
-        frame.loc[frame.index[position], column] = float(
-            values.iloc[previous] + fraction * (values.iloc[following] - values.iloc[previous])
+def _mark_not_sampled_states(frame: pd.DataFrame) -> pd.DataFrame:
+    result = frame.copy()
+    value_columns = [
+        column
+        for column in result.columns
+        if str(column).startswith("p")
+        and "__" in str(column)
+        and not str(column).endswith(
+            ("__raw", "__missing", "__invalid", "__source_state", "__source_file")
         )
-        frame.loc[frame.index[position], f"{column}__interpolated"] = True
+    ]
+    for column in value_columns:
+        state_column = f"{column}__source_state"
+        if state_column not in result:
+            continue
+        states = result[state_column].astype("string")
+        result[state_column] = states.fillna("not_sampled")
+    return result
 
 
 def _quality_summary(frame: pd.DataFrame) -> pd.DataFrame:
@@ -294,7 +262,9 @@ def _quality_summary(frame: pd.DataFrame) -> pd.DataFrame:
         column
         for column in frame.columns
         if column != "sensor_time"
-        and not column.endswith(("__raw", "__invalid", "__missing", "__interpolated"))
+        and not column.endswith(
+            ("__raw", "__invalid", "__missing", "__source_state", "__interpolated")
+        )
         and "source_" not in column
         and column not in {"duplicate_count", "duplicate_conflict"}
     ]
@@ -322,7 +292,7 @@ def _missing_intervals(frame: pd.DataFrame) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for column in frame.columns:
         if column == "sensor_time" or column.endswith(
-            ("__raw", "__invalid", "__missing", "__interpolated")
+            ("__raw", "__invalid", "__missing", "__source_state", "__interpolated")
         ):
             continue
         mask = frame[column].isna()

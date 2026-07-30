@@ -147,12 +147,16 @@ def _transition_count(values: pd.Series) -> int:
     return int(observed.ne(observed.shift()).sum() - 1)
 
 
-def engineer_features(
+def engineer_features(  # noqa: C901 - feature support rules are intentionally explicit
     frame: pd.DataFrame,
     sensor_specs: Mapping[str, Any] | Any,
     *,
     windows_minutes: list[int],
     minimum_coverage: float,
+    minimum_observed_coverage: float | None = None,
+    minimum_available_coverage: float | None = None,
+    maximum_imputed_fraction: float = 1.0,
+    maximum_raw_gap_seconds: float | None = None,
 ) -> FeatureResult:
     """Build a compact, cycle-isolated matrix from registry channels."""
     if not windows_minutes or any(int(value) <= 0 for value in windows_minutes):
@@ -160,6 +164,22 @@ def engineer_features(
     windows = list(dict.fromkeys(int(value) for value in windows_minutes))
     if not 0 < minimum_coverage <= 1:
         raise ValueError("minimum_coverage must be in (0, 1]")
+    minimum_observed_coverage = (
+        minimum_coverage
+        if minimum_observed_coverage is None
+        else minimum_observed_coverage
+    )
+    minimum_available_coverage = (
+        minimum_coverage
+        if minimum_available_coverage is None
+        else minimum_available_coverage
+    )
+    if not 0 < minimum_observed_coverage <= 1:
+        raise ValueError("minimum_observed_coverage must be in (0, 1]")
+    if not 0 < minimum_available_coverage <= 1:
+        raise ValueError("minimum_available_coverage must be in (0, 1]")
+    if not 0 <= maximum_imputed_fraction <= 1:
+        raise ValueError("maximum_imputed_fraction must be in [0, 1]")
     specs = _normalise_specs(sensor_specs)
     base = _feature_frame(frame, specs)
     base, specs, relationship_records = _add_physical_relationships(base, specs)
@@ -254,10 +274,22 @@ def engineer_features(
                 column,
                 minutes,
                 minimum_coverage,
+                minimum_observed_coverage=minimum_observed_coverage,
+                minimum_available_coverage=minimum_available_coverage,
+                maximum_imputed_fraction=maximum_imputed_fraction,
+                maximum_raw_gap_seconds=maximum_raw_gap_seconds,
                 include_action_count=str(spec.get("role")) == "control",
             )
             support_prefix = f"{column}__window_{minutes}m"
-            for support_name in ("coverage", "available"):
+            for support_name in (
+                "coverage",
+                "available",
+                "observed_coverage",
+                "available_coverage",
+                "imputed_fraction",
+                "maximum_raw_gap_s",
+                "valid",
+            ):
                 generated[f"{support_prefix}__{support_name}"] = support[support_name]
             for kind, values in window_features.items():
                 suffix = f"slope_{minutes}m_per_s" if kind == "slope" else f"{kind}_{minutes}m"
@@ -311,6 +343,7 @@ _BASELINE_SUFFIXES = (
     "baseline_available",
     "baseline_source_latest_time",
 )
+_AUDIT_SUFFIXES = ("observed", "imputed")
 _PASSTHROUGH_COLUMNS = {
     "cycle_gap_contaminated",
     "source_latest_time",
@@ -357,7 +390,7 @@ def _feature_frame(frame: pd.DataFrame, specs: dict[str, dict[str, Any]]) -> pd.
             column in names
             or separator
             and root in names
-            and suffix in _BASELINE_SUFFIXES
+            and suffix in (*_BASELINE_SUFFIXES, *_AUDIT_SUFFIXES)
             or column in _PASSTHROUGH_COLUMNS
         ):
             retained.append(column)
@@ -451,6 +484,10 @@ def _rolling_features(
     minutes: int,
     minimum_coverage: float,
     *,
+    minimum_observed_coverage: float,
+    minimum_available_coverage: float,
+    maximum_imputed_fraction: float,
+    maximum_raw_gap_seconds: float | None,
     include_action_count: bool = False,
 ) -> tuple[dict[str, pd.Series], dict[str, pd.Series]]:
     # Kept as a compatibility argument for older callers. The registry surface
@@ -463,8 +500,13 @@ def _rolling_features(
         "expected_count": pd.Series(0, index=frame.index, dtype=int),
         "elapsed_span_s": pd.Series(np.nan, index=frame.index, dtype=float),
         "coverage": pd.Series(0.0, index=frame.index, dtype=float),
+        "observed_coverage": pd.Series(0.0, index=frame.index, dtype=float),
+        "available_coverage": pd.Series(0.0, index=frame.index, dtype=float),
+        "imputed_fraction": pd.Series(0.0, index=frame.index, dtype=float),
+        "maximum_raw_gap_s": pd.Series(np.nan, index=frame.index, dtype=float),
         "maximum_gap_s": pd.Series(np.nan, index=frame.index, dtype=float),
         "available": pd.Series(False, index=frame.index, dtype=bool),
+        "valid": pd.Series(False, index=frame.index, dtype=bool),
         "reason": pd.Series("outside_complete_cycle", index=frame.index, dtype="string"),
     }
     window_seconds = minutes * 60.0
@@ -475,6 +517,12 @@ def _rolling_features(
         if "analysis_bin_available" in ordered:
             ordered_values = ordered_values.where(ordered["analysis_bin_available"].astype(bool))
         values = ordered_values.to_numpy(dtype=float)
+        observed_flags = ordered.get(
+            f"{column}__observed", ordered_values.notna()
+        ).astype(bool).to_numpy()
+        imputed_flags = ordered.get(
+            f"{column}__imputed", pd.Series(False, index=ordered.index)
+        ).astype(bool).to_numpy()
         nominal = _nominal_seconds(times)
         expected_count = max(2, int(np.floor(window_seconds / max(nominal, 1e-9))) + 1)
         min_periods = max(2, int(np.ceil(expected_count * minimum_coverage)))
@@ -501,6 +549,12 @@ def _rolling_features(
             window_seconds,
             nominal,
             minimum_coverage,
+            observed_flags,
+            imputed_flags,
+            minimum_observed_coverage,
+            minimum_available_coverage,
+            maximum_imputed_fraction,
+            maximum_raw_gap_seconds,
         )
         available = support_values["available"]
         for name, array in by_time.items():
@@ -519,6 +573,12 @@ def _window_support(
     window_seconds: float,
     nominal_seconds: float,
     minimum_coverage: float,
+    observed_flags: np.ndarray,
+    imputed_flags: np.ndarray,
+    minimum_observed_coverage: float,
+    minimum_available_coverage: float,
+    maximum_imputed_fraction: float,
+    maximum_raw_gap_seconds: float | None,
 ) -> dict[str, np.ndarray]:
     nanoseconds = times.view("int64")
     if len(times) != len(values):
@@ -529,8 +589,12 @@ def _window_support(
     expected = np.full(len(times), expected_value, dtype=int)
     span = np.full(len(times), np.nan)
     coverage = np.zeros(len(times), dtype=float)
+    observed_coverage = np.zeros(len(times), dtype=float)
+    available_coverage = np.zeros(len(times), dtype=float)
+    imputed_fraction = np.zeros(len(times), dtype=float)
     maximum_gap = np.full(len(times), np.nan)
     available = np.zeros(len(times), dtype=bool)
+    valid = np.zeros(len(times), dtype=bool)
     reason = np.full(len(times), "no_valid_observations", dtype=object)
     finite = np.isfinite(values)
     for position, start in enumerate(starts):
@@ -539,29 +603,51 @@ def _window_support(
         if not len(valid_positions):
             continue
         span[position] = float((nanoseconds[position] - nanoseconds[valid_positions[0]]) / 1e9)
-        observed_times = nanoseconds[valid_positions]
+        observed_positions = valid_positions[observed_flags[valid_positions]]
+        observed_times = nanoseconds[observed_positions]
         maximum_gap[position] = (
             float(np.diff(observed_times).max() / 1e9) if len(observed_times) > 1 else 0.0
         )
         count_coverage = min(1.0, observed[position] / expected_value)
+        observed_count_coverage = min(1.0, len(observed_positions) / expected_value)
+        imputed_fraction[position] = min(
+            1.0, int(imputed_flags[valid_positions].sum()) / expected_value
+        )
         span_coverage = min(1.0, span[position] / window_seconds)
         coverage[position] = min(count_coverage, span_coverage)
-        if maximum_gap[position] > 3 * max(nominal_seconds, 1e-9):
+        observed_coverage[position] = observed_count_coverage
+        available_coverage[position] = count_coverage
+        gap_limit = (
+            3 * max(nominal_seconds, 1e-9)
+            if maximum_raw_gap_seconds is None
+            else maximum_raw_gap_seconds
+        )
+        if maximum_gap[position] > gap_limit:
             reason[position] = "internal_gap"
-        elif count_coverage < minimum_coverage:
+        elif observed_count_coverage < minimum_observed_coverage:
+            reason[position] = "insufficient_observed_coverage"
+        elif count_coverage < minimum_available_coverage:
             reason[position] = "insufficient_count"
         elif span_coverage < minimum_coverage:
             reason[position] = "insufficient_elapsed_span"
+        elif imputed_fraction[position] > maximum_imputed_fraction:
+            reason[position] = "excessive_imputation"
         else:
             available[position] = True
+            valid[position] = True
             reason[position] = "available"
     return {
         "observed_count": observed,
         "expected_count": expected,
         "elapsed_span_s": span,
         "coverage": coverage,
+        "observed_coverage": observed_coverage,
+        "available_coverage": available_coverage,
+        "imputed_fraction": imputed_fraction,
+        "maximum_raw_gap_s": maximum_gap,
         "maximum_gap_s": maximum_gap,
         "available": available,
+        "valid": valid,
         "reason": reason,
     }
 

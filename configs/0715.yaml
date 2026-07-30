@@ -9,7 +9,9 @@ paths:
 
 prepare:
   timestamp_column: "sensor_time"
-  duplicate_policy: "keep_last"
+  duplicate_timestamps:
+    exact_duplicate: "drop"
+    conflicting_duplicate: "warn_keep_stable"
   heating_mode_value: 3
   images:
     required: false
@@ -45,9 +47,22 @@ prepare:
     manual_overrides: []
 
 process:
+  resample:
+    interval_seconds: 30
   missing:
-    continuous_max_gap_seconds: 60
-    control_max_gap_seconds: 30
+    group_columns: [cycle_id, cycle_stage]
+    continuous:
+      method: "time_linear"
+      maximum_bracketing_gap_seconds: 60
+      require_both_sides: true
+    control:
+      method: "forward_fill"
+      maximum_age_seconds: 30
+    protected:
+      method: "none"
+    audit:
+      keep_imputed_flag: true
+      keep_imputation_method: false
   baseline:
     recovery_exclusion_seconds: 180
     search_end_fraction: 0.35
@@ -72,12 +87,23 @@ process:
       water_in_temperature: 0.5
       water_out_temperature: 0.5
     relative_epsilon: 0.001
-  resample_interval_seconds: 30
-  windows_minutes: [5, 10, 30]
-  minimum_coverage: 0.7
+  features:
+    windows_minutes: [5, 10, 30]
+    minimum_observed_coverage: 0.8
+    minimum_available_coverage: 0.95
+    maximum_imputed_fraction: 0.15
+    maximum_raw_gap_seconds: 60
 
 analysis:
   task: "correlation"
+  features:
+    - "evaporating_temperature"
+    - "coil_temperature"
+    - "fin_temperature"
+    - "suction_temperature"
+    - "compressor_frequency"
+    - "water_delta_temperature"
+    - "pressure_ratio"
   targets:
     - "cop"
     - "heating_capacity"
@@ -88,3 +114,9 @@ analysis:
   lags_minutes: [0, 5, 10, 20]
   minimum_cycles: 3
   save_figures: false
+  modalities:
+    sensor:
+      required: true
+    rgb:
+      required: false
+      required_camera_roles: []

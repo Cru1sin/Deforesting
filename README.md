@@ -44,11 +44,11 @@ src/frost_analysis/
 └── core/            artifacts.py, validation.py
 ```
 
-`pipelines` 只编排阶段顺序；`data` 处理原始数据和实验结构；`processing` 做缺失、基准、重采样和特征；`analysis` 是可替换的科研任务；`core` 只负责保存和合同校验。当前不创建神经网络专用 `dataloader.py`。
+`pipelines` 只编排阶段顺序；`data` 处理原始数据和实验结构；`processing` 做缺失、基准、重采样和特征；`analysis` 是可替换的科研任务和任务级资格判断；`core` 只负责保存和合同校验。当前不创建神经网络专用 `dataloader.py`。
 
 ## 验证边界
 
-当前统计单位是循环和日期，不是每个原始采样点。阶段一保留源时间戳和真实缺口，`analysis_interval_seconds` 仅是目标分辨率提示，实际源间隔按循环记录，不人为填充规则网格。长缺口循环会被标记为污染，不作为完整证据。当前图像只完成文件清单、时间对齐和质量掩码，尚未用像素验证霜层。
+当前统计单位是循环和日期，不是每个原始采样点。Pipeline 1 保留源时间戳、NaN 和真实缺口，不做插值；Pipeline 2 先按循环/阶段重采样，再依据 Registry 和配置对允许的传感器局部缺口进行处理。长缺口只进入传感器质量审计，不会因此改写结构性的 `cycle_status`。RGB 缺失只影响声明需要对应相机角色的任务，不能阻断纯传感器任务。当前图像只完成文件清单、时间对齐和质量掩码，尚未用像素验证霜层。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider

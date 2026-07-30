@@ -13,6 +13,10 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
+from .qualification import evaluate_task_eligibility
+
+__all__ = ["evaluate_task_eligibility", "screen_candidate_channels"]
+
 
 def screen_candidate_channels(
     frame: pd.DataFrame,
@@ -28,10 +32,10 @@ def screen_candidate_channels(
         channels["data_role"] if "data_role" in channels else pd.Series("X", index=channels.index)
     )
     channels = channels.loc[roles.eq("X")].copy()
-    eligible = _eligible_rows(frame, cycles)
     rows: list[dict[str, object]] = []
     for item in channels.itertuples(index=False):
         name = str(getattr(item, "canonical_name", getattr(item, "feature_id", "")))
+        eligible = _eligible_rows(frame, cycles, required_variables=[name])
         signal_name = _signal_name(eligible, name)
         if not signal_name:
             rows.append(_unavailable_row(item, "insufficient_coverage"))
@@ -44,7 +48,7 @@ def screen_candidate_channels(
             minimum_cycles=int(config.get("minimum_valid_cycles", 2)),
         )
         lagged = _lagged_evidence(eligible, signal_name, config)
-        reset = _reset_evidence(frame, cycles, signal_name, config)
+        reset = _reset_evidence(frame, cycles, signal_name, config, eligible_frame=eligible)
         valid_cycles = int(cast(Any, trend["valid_cycle_count"]))
         status = _status(
             valid_cycles=valid_cycles,
@@ -106,7 +110,12 @@ def screen_candidate_channels(
     )
 
 
-def _eligible_rows(frame: pd.DataFrame, cycles: pd.DataFrame) -> pd.DataFrame:
+def _eligible_rows(
+    frame: pd.DataFrame,
+    cycles: pd.DataFrame,
+    *,
+    required_variables: list[str] | None = None,
+) -> pd.DataFrame:
     result = frame.copy()
     quality = (
         result["cycle_quality"]
@@ -118,8 +127,6 @@ def _eligible_rows(frame: pd.DataFrame, cycles: pd.DataFrame) -> pd.DataFrame:
     mask &= stage.isin(["stable_clean", "frost_development"])
     if "is_heating" in result:
         mask &= result["is_heating"].fillna(False).astype(bool)
-    if "cycle_gap_contaminated" in result:
-        mask &= ~result["cycle_gap_contaminated"].fillna(False).astype(bool)
     if "analysis_bin_available" in result:
         mask &= result["analysis_bin_available"].fillna(False).astype(bool)
     complete_ids = set(
@@ -134,7 +141,20 @@ def _eligible_rows(frame: pd.DataFrame, cycles: pd.DataFrame) -> pd.DataFrame:
     )
     if "cycle_id" in result:
         mask &= result["cycle_id"].astype(str).isin(complete_ids)
-    return result.loc[mask].sort_values(["cycle_id", "sensor_time"], kind="stable")
+    filtered = result.loc[mask].sort_values(["cycle_id", "sensor_time"], kind="stable")
+    for variable in required_variables or []:
+        candidates = [f"{variable}__baseline_offset", variable]
+        signal_column = next((column for column in candidates if column in filtered), "")
+        if not signal_column:
+            return filtered.iloc[0:0]
+        available_cycles = set(
+            filtered.loc[
+                pd.to_numeric(filtered[signal_column], errors="coerce").notna(),
+                "cycle_id",
+            ].astype(str)
+        )
+        filtered = filtered.loc[filtered["cycle_id"].astype(str).isin(available_cycles)]
+    return filtered
 
 
 def _signal_name(frame: pd.DataFrame, name: str) -> str:
@@ -302,7 +322,12 @@ def _future_rho(
 
 
 def _reset_evidence(
-    frame: pd.DataFrame, cycles: pd.DataFrame, signal_name: str, config: dict[str, Any]
+    frame: pd.DataFrame,
+    cycles: pd.DataFrame,
+    signal_name: str,
+    config: dict[str, Any],
+    *,
+    eligible_frame: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     quality = (
         cycles["quality_flag"] if "quality_flag" in cycles else pd.Series(False, index=cycles.index)
@@ -311,23 +336,24 @@ def _reset_evidence(
     window = pd.Timedelta(seconds=float(config.get("reset_window_seconds", 300)))
     effects: list[float] = []
     directions: list[bool] = []
-    direction = str(_trend_evidence(_eligible_rows(frame, cycles), signal_name)["trend_direction"])
+    source_frame = eligible_frame if eligible_frame is not None else _eligible_rows(frame, cycles)
+    direction = str(_trend_evidence(source_frame, signal_name)["trend_direction"])
     for index in range(len(eligible) - 1):
         current, following = eligible.iloc[index], eligible.iloc[index + 1]
         if pd.isna(following.get("clean_end")):
             continue
-        before = frame.loc[
-            frame["cycle_id"].eq(current["cycle_id"])
-            & frame["sensor_time"].between(
+        before = source_frame.loc[
+            source_frame["cycle_id"].eq(current["cycle_id"])
+            & source_frame["sensor_time"].between(
                 pd.Timestamp(current["defrost_start"]) - window,
                 pd.Timestamp(current["defrost_start"]),
                 inclusive="left",
             ),
             signal_name,
         ]
-        after = frame.loc[
-            frame["cycle_id"].eq(following["cycle_id"])
-            & frame["sensor_time"].between(
+        after = source_frame.loc[
+            source_frame["cycle_id"].eq(following["cycle_id"])
+            & source_frame["sensor_time"].between(
                 pd.Timestamp(following["clean_end"]),
                 pd.Timestamp(following["clean_end"]) + window,
                 inclusive="left",

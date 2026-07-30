@@ -5,9 +5,11 @@ import pandas as pd
 
 from frost_analysis.data.cycles import (
     append_issue,
+    assess_sensor_quality,
     infer_sampling_interval_seconds,
     normalize_cycle_status,
     segment_cycles,
+    validate_cycles,
 )
 
 
@@ -166,6 +168,23 @@ def test_cycle_status_normalizes_quality_to_three_states() -> None:
     assert normalize_cycle_status("partial") == "incomplete"
 
 
+def test_validation_keeps_structurally_valid_cycle_with_long_gap() -> None:
+    states = ["ON"] * 3 + ["OFF"] * 10 + ["ON"] * 3 + ["OFF"] * 2
+    frame = _frame(states)
+    frame.loc[8:, "timestamp"] += pd.Timedelta(seconds=20)
+    segmentation = segment_cycles(frame, "p1__Deforst", _config(max_heating_seconds=200))
+
+    result = validate_cycles(
+        segmentation,
+        {"expected_sampling_interval_seconds": 1.0, "gap_warning_factor": 3.0},
+    )
+
+    cycle = result.cycles.loc[result.cycles["quality_flag"].eq("complete")].iloc[0]
+    assert cycle["quality_flag"] == "complete"
+    assert result.frame.loc[result.frame["cycle_id"].eq(cycle["cycle_id"]), "cycle_phase"].notna().any()
+    assert any("long_gap" in warning for warning in result.warnings)
+
+
 def test_append_issue_does_not_turn_nan_into_literal_text() -> None:
     """Quality reasons must remain readable when the source cell is missing."""
     assert append_issue(np.nan, "long_gap") == "long_gap"
@@ -179,3 +198,51 @@ def test_sampling_interval_uses_configured_fallback_when_no_positive_delta_exist
         frame,
         expected_sampling_interval_seconds=2.0,
     ) == 2.0
+
+
+def test_sensor_quality_uses_required_channels_without_invalidating_cycle() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=4, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "cycle_id": "cycle_001",
+            "required_temperature": [1.0, np.nan, 3.0, 4.0],
+            "optional_temperature": [1.0, np.nan, 3.0, 4.0],
+        }
+    )
+    cycles = pd.DataFrame(
+        [
+            {
+                "cycle_id": "cycle_001",
+                "heating_start": timestamps[0],
+                "defrost_end": timestamps[-1],
+            }
+        ]
+    )
+
+    result = assess_sensor_quality(frame, cycles, required_channels=["required_temperature"])
+
+    row = result.iloc[0]
+    assert row["sensor_quality"] == "partial"
+    assert row["sensor_min_coverage"] < 1.0
+    assert row["sensor_low_coverage_channels"] == "required_temperature"
+    assert row["sensor_quality_reason"] == "required_channel_low_coverage"
+
+
+def test_sensor_quality_does_not_require_unconfigured_optional_channels() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=4, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "cycle_id": "cycle_001",
+            "required_temperature": [1.0, 2.0, 3.0, 4.0],
+            "optional_temperature": [1.0, np.nan, 3.0, 4.0],
+        }
+    )
+    cycles = pd.DataFrame(
+        [{"cycle_id": "cycle_001", "heating_start": timestamps[0], "defrost_end": timestamps[-1]}]
+    )
+
+    result = assess_sensor_quality(frame, cycles, required_channels=["required_temperature"])
+
+    assert result.iloc[0]["sensor_quality"] == "complete"
