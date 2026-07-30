@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
-from frost_analysis.config import Config
+from frost_analysis.config import Config, load_config
 from frost_analysis.cycles import label_cycles
 from frost_analysis.images import match_images
 from frost_analysis.prepare import prepare
@@ -81,6 +82,47 @@ def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> No
     assert summary["cycle_status"].eq("incomplete").any()
 
 
+def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=22, freq="s")
+    states: list[object] = [
+        True,
+        True,
+        False,
+        False,
+        False,
+        False,
+        None,
+        None,
+        None,
+        None,
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        True,
+        False,
+    ]
+    frame = pd.DataFrame({"timestamp": timestamps, "defrost_active": states})
+
+    _, summary = label_cycles(
+        frame,
+        "defrost_active",
+        {"maximum_state_gap_seconds": 5, "stable_heating_seconds": 1},
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    statuses = summary.set_index("cycle_id")["cycle_status"]
+    assert statuses["cycle_001"] == "incomplete"
+    assert statuses["cycle_002"] == "valid"
+
+
 def test_prepare_duplicate_only_masks_affected_channel(tmp_path: Path) -> None:
     raw = tmp_path / "data" / "0715"
     raw.mkdir(parents=True)
@@ -146,3 +188,62 @@ def test_match_images_does_not_reuse_one_image() -> None:
 
     assert matched["image_path"].dropna().is_unique
     assert matched["image_path"].notna().sum() == 2
+
+
+def test_prepare_enforces_configured_valid_range(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    (raw / "sample.xls").write_text(
+        "时间\tT4\n2026-07-15 00:00:00\t99\n",
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, raw)
+    channels = {
+        "ambient_temperature": {
+            "source_names": ["p1__T4"],
+            "unit": "degC",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "none",
+            "analysis_candidate": False,
+            "valid_range": [0, 10],
+        },
+        "defrost_active": {
+            "source_names": ["p1__Defrost"],
+            "unit": None,
+            "kind": "event",
+            "role": "event",
+            "resample": "last",
+            "missing": "none",
+            "analysis_candidate": False,
+            "allowed_values": {"ON": True, "OFF": False},
+        },
+    }
+
+    prepared, _, _ = prepare(config, channels)
+
+    assert pd.isna(prepared.loc[0, "ambient_temperature"])
+    assert bool(prepared.loc[0, "ambient_temperature__invalid"])
+
+
+def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+experiment_id: exp_test
+experiment_date: "2026-02-31"
+input_dir: data/0715
+channels_path: configs/channels.yaml
+sensor_globs: ["*.xls"]
+image_extensions: [".jpg"]
+camera_mapping_file: IPlocation.yaml
+cycles: {}
+process: {}
+analysis: {}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="ISO"):
+        load_config(path)

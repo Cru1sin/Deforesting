@@ -15,6 +15,8 @@ def validate_prepared(frame: pd.DataFrame, cycle_summary: pd.DataFrame) -> None:
     _unique(cycle_summary, ["experiment_id", "cycle_id"])
     if not frame["cycle_stage"].dropna().isin(_STAGES).all():
         raise ValueError("prepared cycle_stage contains an invalid value")
+    if "cycle_status" in frame and not frame["cycle_status"].dropna().isin(_STATUSES).all():
+        raise ValueError("prepared cycle_status contains an invalid value")
     _validate_progress(frame)
     forbidden = ("baseline", "rolling", "slope", "__imputed")
     if any(any(token in str(column) for token in forbidden) for column in frame.columns):

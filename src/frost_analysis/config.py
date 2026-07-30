@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +49,10 @@ def load_config(path: Path) -> Config:
     missing = sorted(required - set(loaded))
     if missing:
         raise ValueError(f"config missing keys: {missing}")
-    project_root = _find_project_root(config_path)
     experiment_date = str(loaded["experiment_date"])
     if not _is_iso_date(experiment_date):
         raise ValueError("experiment_date must use ISO YYYY-MM-DD format")
+    project_root = _find_project_root(config_path)
     return Config(
         project_root=project_root,
         experiment_id=str(loaded["experiment_id"]),
@@ -100,9 +101,7 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
 
 
 def _is_iso_date(value: str) -> bool:
-    return (
-        len(value) == 10
-        and value[4] == "-"
-        and value[7] == "-"
-        and value.replace("-", "").isdigit()
-    )
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False

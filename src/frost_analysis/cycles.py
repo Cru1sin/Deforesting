@@ -27,7 +27,7 @@ def label_cycles(
     labeled["timestamp"] = pd.to_datetime(labeled["timestamp"], errors="raise")
     labeled = labeled.sort_values("timestamp", kind="stable").reset_index(drop=True)
     raw_state = labeled[defrost_column].map(_normalize_state).astype("object")
-    filled_state, long_gap = _fill_short_state_gaps(
+    filled_state, long_gaps = _fill_short_state_gaps(
         labeled["timestamp"], raw_state, float(settings.get("maximum_state_gap_seconds", 5))
     )
     runs = _true_runs(labeled["timestamp"], filled_state)
@@ -50,9 +50,7 @@ def label_cycles(
         if stable_start >= defrost_start:
             status = "invalid"
             reason = "invalid_cycle_boundaries"
-        elif long_gap and _interval_contains(
-            labeled["timestamp"], heating_start, defrost_end, long_gap
-        ):
+        elif _interval_intersects(heating_start, defrost_end, long_gaps):
             status = "incomplete"
             reason = "defrost_state_gap"
         row = _cycle_row(
@@ -72,7 +70,7 @@ def label_cycles(
         )
 
     if not cycles:
-        reason = "defrost_state_gap" if long_gap else "insufficient_cycle_boundaries"
+        reason = "defrost_state_gap" if long_gaps else "insufficient_cycle_boundaries"
         cycles.append(
             _cycle_row(
                 experiment_id,
@@ -93,7 +91,7 @@ def label_cycles(
     labeled["cycle_status_reason"] = pd.Series(pd.NA, index=labeled.index, dtype="string")
     for cycle_id, heating_start, stable_start, defrost_start, defrost_end in complete_ranges:
         summary = next(row for row in cycles if row["cycle_id"] == cycle_id)
-        mask = labeled["timestamp"].between(heating_start, defrost_end)
+        mask = labeled["timestamp"].ge(heating_start) & labeled["timestamp"].lt(defrost_end)
         labeled.loc[mask, "cycle_id"] = cycle_id
         labeled.loc[mask, "cycle_status"] = str(summary["cycle_status"])
         labeled.loc[mask, "cycle_status_reason"] = str(summary["cycle_status_reason"])
@@ -124,9 +122,9 @@ def _normalize_state(value: object) -> bool | float:
 
 def _fill_short_state_gaps(
     timestamps: pd.Series, state: pd.Series, maximum_seconds: float
-) -> tuple[pd.Series, bool]:
+) -> tuple[pd.Series, tuple[tuple[pd.Timestamp, pd.Timestamp], ...]]:
     result = state.copy()
-    long_gap = False
+    long_gaps: list[tuple[pd.Timestamp, pd.Timestamp]] = []
     missing = result.isna().to_numpy()
     position = 0
     while position < len(result):
@@ -145,9 +143,9 @@ def _fill_short_state_gaps(
             if elapsed <= maximum_seconds and same_state:
                 result.iloc[position : end + 1] = result.iloc[previous]
             else:
-                long_gap = True
+                long_gaps.append((timestamps.iloc[previous], timestamps.iloc[following]))
         position = end + 1
-    return result, long_gap
+    return result, tuple(long_gaps)
 
 
 def _true_runs(
@@ -199,7 +197,7 @@ def _stage_for_times(
     stage = pd.Series("partial", index=times.index, dtype="string")
     stage.loc[times.lt(stable_start)] = "recovery"
     stage.loc[times.ge(stable_start) & times.lt(defrost_start)] = "frost_development"
-    stage.loc[times.ge(defrost_start) & times.le(defrost_end)] = "defrost"
+    stage.loc[times.ge(defrost_start) & times.lt(defrost_end)] = "defrost"
     return stage
 
 
@@ -252,13 +250,12 @@ def _add_cycle_coordinates(labeled: pd.DataFrame, cycles: list[dict[str, object]
         labeled.loc[mask, "cycle_progress"] = (elapsed / duration).clip(0, 1)
 
 
-def _interval_contains(
-    timestamps: pd.Series,
+def _interval_intersects(
     start: pd.Timestamp,
     end: pd.Timestamp,
-    gap: bool,
+    gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
 ) -> bool:
-    return bool(gap and timestamps.between(start, end).any())
+    return any(gap_start <= end and gap_end >= start for gap_start, gap_end in gaps)
 
 
 def _cycle_columns() -> list[str]:

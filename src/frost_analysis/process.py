@@ -82,7 +82,10 @@ def _resample(
     for group_values, group in frame.groupby(keys, sort=False, dropna=False):
         ordered = group.sort_values("timestamp", kind="stable")
         buckets = ordered["timestamp"].dt.floor(frequency)
-        for timestamp, bucket in ordered.groupby(buckets, sort=True):
+        start = buckets.min()
+        end = buckets.max()
+        for timestamp in pd.date_range(start, end, freq=frequency):
+            bucket = ordered.loc[buckets.eq(timestamp)]
             row: dict[str, object] = {
                 key: value for key, value in zip(keys, group_values, strict=True)
             }

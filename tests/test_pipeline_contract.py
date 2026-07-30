@@ -127,6 +127,7 @@ def test_analysis_emits_one_evidence_row_per_experiment_and_candidate() -> None:
     ]
     assert len(evidence) == 1
     assert evidence.loc[0, "trend_cycle_count"] == 3
+    assert evidence.loc[0, "future_cycle_count"] == 3
     assert evidence.loc[0, "decision"] == "trend_supported_candidate"
     assert "valid_cycle_count" not in evidence
     assert "rank" not in evidence
@@ -166,6 +167,32 @@ def test_future_matching_never_crosses_cycle_boundary() -> None:
     evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
 
     assert evidence.loc[0, "future_cycle_count"] == 0
+
+
+def test_analysis_excludes_incomplete_cycles_from_trend_evidence() -> None:
+    frame, cycles = _analysis_frame()
+    frame.loc[frame["cycle_id"].eq("cycle_003"), "cycle_status"] = "incomplete"
+
+    evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
+
+    assert evidence.loc[0, "trend_cycle_count"] == 2
+
+
+def test_structural_prepared_validation_checks_cycle_status() -> None:
+    prepared = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "timestamp": pd.to_datetime(["2026-07-15"]),
+            "cycle_id": ["cycle_001"],
+            "cycle_stage": ["frost_development"],
+            "cycle_status": ["not_a_status"],
+            "cycle_progress": [0.0],
+        }
+    )
+    summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_001"]})
+
+    with pytest.raises(ValueError, match="cycle_status"):
+        validate_prepared(prepared, summary)
 
 
 def test_structural_validators_reject_duplicate_or_forbidden_contracts() -> None:

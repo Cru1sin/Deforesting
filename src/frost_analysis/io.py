@@ -129,16 +129,21 @@ def write_run_outputs(
     )
 
 
+def ensure_output_outside_input(output_dir: Path, input_dir: Path) -> None:
+    """Reject any derived output path equal to or below the raw input path."""
+    input_resolved = input_dir.resolve()
+    output_resolved = output_dir.resolve()
+    if output_resolved == input_resolved or input_resolved in output_resolved.parents:
+        raise ValueError("output directory must not be inside the raw input directory")
+
+
 def _prepare_output_dir(
     output_dir: Path,
     input_dir: Path,
     known_files: set[str],
     overwrite: bool,
 ) -> None:
-    input_resolved = input_dir.resolve()
-    output_resolved = output_dir.resolve()
-    if output_resolved == input_resolved or input_resolved in output_resolved.parents:
-        raise ValueError("output directory must not be inside the raw input directory")
+    ensure_output_outside_input(output_dir, input_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     existing = {path.name for path in output_dir.iterdir() if path.name in known_files}
     if existing and not overwrite:

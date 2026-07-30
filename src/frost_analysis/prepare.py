@@ -219,6 +219,12 @@ def _parse_values(
         return values.astype("object"), invalid
     numeric = pd.to_numeric(raw_values.replace("", pd.NA), errors="coerce")
     invalid = nonempty & numeric.isna()
+    valid_range = settings.get("valid_range")
+    if isinstance(valid_range, list) and len(valid_range) == 2:
+        lower, upper = float(valid_range[0]), float(valid_range[1])
+        out_of_range = numeric.notna() & ~numeric.between(lower, upper)
+        invalid = invalid | out_of_range
+        numeric = numeric.mask(out_of_range)
     return numeric.astype(float), invalid
 
 

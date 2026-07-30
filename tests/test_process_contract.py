@@ -167,3 +167,37 @@ def test_process_does_not_forward_fill_images_or_cross_stage_values(tmp_path: Pa
     defrost = processed.loc[processed["cycle_stage"].eq("defrost")]
     assert defrost["image_path"].isna().all()
     assert processed.loc[processed["cycle_stage"].eq("defrost"), "temperature"].isna().all()
+
+
+def test_process_creates_regular_ten_second_grid_inside_partition(tmp_path: Path) -> None:
+    timestamps = pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:00:20"])
+    prepared = pd.DataFrame(
+        {
+            "experiment_id": "exp_test",
+            "experiment_date": "2026-07-15",
+            "timestamp": timestamps,
+            "cycle_id": "cycle_001",
+            "cycle_stage": "frost_development",
+            "cycle_status": "valid",
+            "cycle_status_reason": "",
+            "cycle_progress": [0.0, 1.0],
+            "temperature": [1.0, 3.0],
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "stable_heating_start": [timestamps[0]],
+            "defrost_start": [timestamps[1] + pd.Timedelta(seconds=10)],
+        }
+    )
+
+    processed, _ = process(prepared, summary, _config(tmp_path), _channels())
+
+    assert processed["timestamp"].tolist() == list(
+        pd.date_range(timestamps[0], timestamps[1], freq="10s")
+    )
+    middle = processed["timestamp"].eq(timestamps[0] + pd.Timedelta(seconds=10))
+    assert pd.isna(processed.loc[middle, "temperature"]).iloc[0]

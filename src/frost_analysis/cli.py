@@ -11,7 +11,7 @@ import pandas as pd
 from .analysis import analyze
 from .channels import load_channels
 from .config import load_config
-from .io import write_prepare_outputs
+from .io import ensure_output_outside_input, write_prepare_outputs
 from .pipeline import run_pipeline
 from .prepare import prepare
 from .process import process
@@ -50,6 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     cycle_summary = _read_cycle_summary(arguments.cycles)
     input_frame = pd.read_parquet(arguments.input)
+    ensure_output_outside_input(arguments.output, config.input_dir)
     if arguments.command == "process":
         processed, final_summary = process(input_frame, cycle_summary, config, channels)
         arguments.output.mkdir(parents=True, exist_ok=True)

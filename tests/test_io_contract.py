@@ -9,6 +9,7 @@ import pytest
 from frost_analysis.config import Config
 from frost_analysis.io import (
     discover_inputs,
+    ensure_output_outside_input,
     write_prepare_outputs,
     write_run_outputs,
 )
@@ -59,6 +60,14 @@ def test_output_inside_raw_input_is_rejected(tmp_path: Path) -> None:
             raw / "outputs",
             raw,
         )
+
+
+def test_standalone_stage_output_guard_rejects_raw_input(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="raw input directory"):
+        ensure_output_outside_input(raw / "stage", raw)
 
 
 def test_prepare_outputs_are_separate_from_formal_manifest(tmp_path: Path) -> None:

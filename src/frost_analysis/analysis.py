@@ -107,6 +107,8 @@ def _trend_effects(frame: pd.DataFrame, channel: str) -> list[float]:
         return []
     effects: list[float] = []
     development = frame.loc[frame["cycle_stage"].eq("frost_development")]
+    if "cycle_status" in development:
+        development = development.loc[development["cycle_status"].eq("valid")]
     for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
         x = pd.to_numeric(group["cycle_progress"], errors="coerce")
         y = pd.to_numeric(group[residual], errors="coerce")
@@ -168,11 +170,14 @@ def _reset_evidence(
 def _future_evidence(
     frame: pd.DataFrame, channel: str, target: str, horizon_minutes: int
 ) -> tuple[int, float]:
-    if channel not in frame or target not in frame:
+    residual = f"{channel}__baseline_residual"
+    if residual not in frame or target not in frame:
         return 0, np.nan
     effects: list[float] = []
     horizon = pd.Timedelta(minutes=horizon_minutes)
     development = frame.loc[frame["cycle_stage"].eq("frost_development")]
+    if "cycle_status" in development:
+        development = development.loc[development["cycle_status"].eq("valid")]
     for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
         target_by_time = pd.Series(
             pd.to_numeric(group[target], errors="coerce").to_numpy(),
@@ -181,7 +186,7 @@ def _future_evidence(
         current_values: list[float] = []
         future_values: list[float] = []
         for _, row in group.iterrows():
-            current = pd.to_numeric(pd.Series([row[channel]]), errors="coerce").iloc[0]
+            current = pd.to_numeric(pd.Series([row[residual]]), errors="coerce").iloc[0]
             future = target_by_time.get(pd.Timestamp(row["timestamp"]) + horizon, np.nan)
             if pd.notna(current) and pd.notna(future):
                 current_values.append(float(current))
@@ -207,9 +212,10 @@ def _context_association(
         return 0, np.nan
     associations: list[float] = []
     cycle_count = 0
-    for _, group in frame.loc[frame["cycle_stage"].eq("frost_development")].groupby(
-        ["experiment_id", "cycle_id"], sort=False
-    ):
+    development = frame.loc[frame["cycle_stage"].eq("frost_development")]
+    if "cycle_status" in development:
+        development = development.loc[development["cycle_status"].eq("valid")]
+    for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
         cycle_associations: list[float] = []
         for context in context_names:
             correlation = _spearman(group[residual], group[context])
