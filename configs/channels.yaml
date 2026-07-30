@@ -1,0 +1,72 @@
+channels:
+  ambient_temperature:
+    source_names: ["p1__T4(22.1)'2_31'"]
+    unit: degC
+    kind: continuous
+    role: context
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-30, 50]
+
+  water_in_temperature:
+    source_names: ["p1__Twin(26.1)'2_31'"]
+    unit: degC
+    kind: continuous
+    role: context
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-20, 80]
+
+  evaporating_temperature:
+    source_names: ["p1__Te'2_20"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: true
+    expected_frost_direction: decrease
+
+  heating_capacity:
+    source_names: ["p1__QComp10W'2_32"]
+    unit: kW
+    kind: continuous
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+
+  power_total:
+    source_names: ["p2__总功率"]
+    unit: kW
+    kind: continuous
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+
+  defrost_active:
+    source_names: ["p1__Deforst"]
+    unit: null
+    kind: event
+    role: event
+    resample: last
+    missing: none
+    analysis_candidate: false
+    allowed_values:
+      ON: true
+      OFF: false
+      "1": true
+      "0": false
+
+  cop:
+    unit: dimensionless
+    kind: derived
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+    formula: cop
+    dependencies: [heating_capacity, power_total]

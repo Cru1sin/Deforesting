@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,86 @@ from typing import Any
 import yaml
 
 from .schemas import AnalysisOptions, AppConfig, DatasetPaths, PrepareOptions, ProcessOptions
+
+
+@dataclass(frozen=True)
+class Config:
+    """Small configuration contract used by the new flat pipeline."""
+
+    project_root: Path
+    experiment_id: str
+    experiment_date: str
+    input_dir: Path
+    channels_path: Path
+    sensor_globs: tuple[str, ...]
+    image_extensions: tuple[str, ...]
+    camera_mapping_file: str
+    cycles: dict[str, Any]
+    process: dict[str, Any]
+    analysis: dict[str, Any]
+
+
+def load_config(path: Path) -> Config:
+    """Load the new flat configuration without changing the legacy loader."""
+    config_path = path.resolve()
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError("config must be a YAML mapping")
+    required = {
+        "experiment_id",
+        "experiment_date",
+        "input_dir",
+        "channels_path",
+        "sensor_globs",
+        "image_extensions",
+        "camera_mapping_file",
+        "cycles",
+        "process",
+        "analysis",
+    }
+    missing = sorted(required - set(loaded))
+    if missing:
+        raise ValueError(f"config missing keys: {missing}")
+    project_root = _find_project_root(config_path)
+    date = str(loaded["experiment_date"])
+    if len(date) != 10 or date[4] != "-" or date[7] != "-":
+        raise ValueError("experiment_date must use ISO YYYY-MM-DD format")
+    sensor_globs = _tuple_strings(loaded["sensor_globs"], "sensor_globs")
+    image_extensions = tuple(
+        value.lower() if value.startswith(".") else f".{value.lower()}"
+        for value in _tuple_strings(loaded["image_extensions"], "image_extensions")
+    )
+    return Config(
+        project_root=project_root,
+        experiment_id=str(loaded["experiment_id"]),
+        experiment_date=date,
+        input_dir=_resolve_config_path(project_root, loaded["input_dir"]),
+        channels_path=_resolve_config_path(project_root, loaded["channels_path"]),
+        sensor_globs=sensor_globs,
+        image_extensions=image_extensions,
+        camera_mapping_file=str(loaded["camera_mapping_file"]),
+        cycles=_mapping(loaded["cycles"], "cycles"),
+        process=_mapping(loaded["process"], "process"),
+        analysis=_mapping(loaded["analysis"], "analysis"),
+    )
+
+
+def _find_project_root(config_path: Path) -> Path:
+    for parent in (config_path.parent, *config_path.parents):
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    raise FileNotFoundError("could not find project root containing pyproject.toml")
+
+
+def _resolve_config_path(root: Path, value: Any) -> Path:
+    path = Path(str(value))
+    return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _tuple_strings(value: Any, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or any(not str(item).strip() for item in value):
+        raise ValueError(f"{name} must be a non-empty list of strings")
+    return tuple(str(item) for item in value)
 
 
 def load_camera_mapping(path: Path) -> tuple[dict[str, str], str]:

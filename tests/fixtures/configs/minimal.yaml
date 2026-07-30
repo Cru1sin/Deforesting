@@ -1,0 +1,27 @@
+experiment_id: exp_minimal
+experiment_date: "2026-07-15"
+input_dir: data/0715
+channels_path: configs/channels.yaml
+sensor_globs:
+  - "*.xls"
+  - "*.xlsx"
+image_extensions:
+  - ".jpg"
+  - ".png"
+camera_mapping_file: IPlocation.yaml
+
+cycles:
+  defrost_channel: defrost_active
+  maximum_state_gap_seconds: 5
+
+process:
+  resample_interval_seconds: 10
+
+analysis:
+  performance_target: heating_capacity__baseline_residual
+  future_horizon_minutes: 10
+  reset_pre_window_minutes: 5
+  minimum_valid_cycles: 3
+  minimum_absolute_trend_effect: 0.3
+  minimum_direction_consistency: 0.7
+  maximum_context_association: 0.8
