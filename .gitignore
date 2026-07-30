@@ -15,6 +15,7 @@
 !docs/**
 !scripts/
 !scripts/**
+docs/superpowers/
 
 # 日期级相机映射属于可复用配置；原始数据本身仍保持忽略。
 !data/
