@@ -24,6 +24,7 @@ cycles:
 
 process:
   resample_interval_seconds: 10
+  minimum_continuous_bucket_coverage: 0.8
   continuous_max_gap_seconds: 60
   control_max_gap_seconds: 30
   baseline:

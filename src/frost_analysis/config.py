@@ -113,6 +113,7 @@ class ProcessSettings:
     """Resampling, imputation, baseline, and dynamic-feature settings."""
 
     resample_interval_seconds: int = 10
+    minimum_continuous_bucket_coverage: float = 0.8
     continuous_max_gap_seconds: float = 60.0
     control_max_gap_seconds: float = 30.0
     baseline: BaselineSettings = field(default_factory=BaselineSettings)
@@ -127,6 +128,9 @@ class ProcessSettings:
         windows = tuple(int(value) for value in feature_values.get("windows_minutes", [5, 10, 30]))
         result = cls(
             resample_interval_seconds=int(values.get("resample_interval_seconds", 10)),
+            minimum_continuous_bucket_coverage=float(
+                values.get("minimum_continuous_bucket_coverage", 0.8)
+            ),
             continuous_max_gap_seconds=float(values.get("continuous_max_gap_seconds", 60)),
             control_max_gap_seconds=float(values.get("control_max_gap_seconds", 30)),
             baseline=BaselineSettings.from_mapping(baseline_values),
@@ -134,6 +138,9 @@ class ProcessSettings:
         )
         if result.resample_interval_seconds <= 0:
             raise ValueError("resample_interval_seconds must be positive")
+        _validate_fraction(
+            "minimum_continuous_bucket_coverage", result.minimum_continuous_bucket_coverage
+        )
         _validate_nonnegative("continuous_max_gap_seconds", result.continuous_max_gap_seconds)
         _validate_nonnegative("control_max_gap_seconds", result.control_max_gap_seconds)
         if not result.feature_windows_minutes or any(
@@ -211,6 +218,11 @@ class Config:
             object.__setattr__(self, "process", ProcessSettings.from_mapping(raw_process))
         if isinstance(raw_analysis, Mapping):
             object.__setattr__(self, "analysis", AnalysisSettings.from_mapping(raw_analysis))
+        if self.process.resample_interval_seconds % self.expected_sensor_interval_seconds != 0:
+            raise ValueError(
+                "resample_interval_seconds must be divisible by "
+                "expected_sensor_interval_seconds"
+            )
 
 
 def load_config(path: Path) -> Config:
@@ -248,6 +260,10 @@ def load_config(path: Path) -> Config:
     expected_interval = int(loaded["expected_sensor_interval_seconds"])
     image_tolerance = float(loaded["image_match_tolerance_seconds"])
     _validate_positive("expected_sensor_interval_seconds", expected_interval)
+    if process.resample_interval_seconds % expected_interval != 0:
+        raise ValueError(
+            "resample_interval_seconds must be divisible by expected_sensor_interval_seconds"
+        )
     _validate_nonnegative("image_match_tolerance_seconds", image_tolerance)
     if not str(loaded["timestamp_column"]).strip():
         raise ValueError("timestamp_column must not be empty")

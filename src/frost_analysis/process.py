@@ -23,13 +23,30 @@ def process(
     channels: Mapping[str, Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run the fixed Process order without modifying either input frame."""
-    _require_keys(prepared, ["experiment_id", "timestamp", "cycle_id", "cycle_stage"])
+    _require_keys(
+        prepared,
+        ["experiment_id", "timestamp", "cycle_id", "cycle_stage", "cycle_status"],
+    )
+    _validate_cycle_summary_input(prepared, initial_summary)
     source = prepared.copy()
     source = source.loc[source["cycle_stage"].ne("partial")].copy()
+    eligible_channels = _eligible_continuous_channels(prepared, channels)
     masked = _mask_duplicate_values(source, channels)
     interval_seconds = config.process.resample_interval_seconds
-    resampled, excluded_transition_buckets = _resample(
-        masked, initial_summary, channels, interval_seconds
+    (
+        resampled,
+        excluded_transition_buckets,
+        low_coverage_buckets,
+        eligible_channel_buckets,
+        processed_cycles,
+    ) = _resample(
+        masked,
+        initial_summary,
+        channels,
+        interval_seconds,
+        expected_points_per_bucket=interval_seconds // config.expected_sensor_interval_seconds,
+        minimum_coverage=config.process.minimum_continuous_bucket_coverage,
+        eligible_channels=eligible_channels,
     )
     coordinated = _recompute_cycle_coordinates(resampled, initial_summary)
     filled = _fill_missing(coordinated, channels, config)
@@ -52,6 +69,9 @@ def process(
         config,
         channels,
         excluded_transition_buckets,
+        low_coverage_buckets,
+        eligible_channel_buckets,
+        processed_cycles,
     )
     return featured, final_summary
 
@@ -88,55 +108,91 @@ def _resample(
     cycle_summary: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
     interval_seconds: int,
-) -> tuple[pd.DataFrame, dict[tuple[str, str], int]]:
+    *,
+    expected_points_per_bucket: int,
+    minimum_coverage: float,
+    eligible_channels: Mapping[str, tuple[str, ...]],
+) -> tuple[
+    pd.DataFrame,
+    dict[tuple[str, str], int],
+    dict[tuple[str, str], int],
+    dict[tuple[str, str], int],
+    set[tuple[str, str]],
+]:
     rows: list[dict[str, object]] = []
     excluded_transition_buckets: dict[tuple[str, str], int] = {}
+    low_coverage_buckets: dict[tuple[str, str], int] = {}
+    eligible_channel_buckets: dict[tuple[str, str], int] = {}
+    processed_cycles: set[tuple[str, str]] = set()
     frequency = f"{interval_seconds}s"
     image_roles = _image_roles(frame)
     summary_lookup = _summary_lookup(cycle_summary)
-    cycle_boundaries = _cycle_boundaries(cycle_summary)
     cycle_keys = ["experiment_id", "cycle_id"]
     for group_values, group in frame.groupby(cycle_keys, sort=False, dropna=False):
         ordered = group.sort_values("timestamp", kind="stable")
         buckets = ordered["timestamp"].dt.floor(frequency)
         grid = pd.date_range(buckets.min(), buckets.max(), freq=frequency)
         experiment_id, cycle_id = (str(value) for value in group_values)
-        intervals = _cycle_stage_intervals(
-            summary_lookup.get((experiment_id, cycle_id)), ordered
-        )
-        used_images: dict[str, set[str]] = {role: set() for role in image_roles}
+        summary = summary_lookup[(experiment_id, cycle_id)]
+        if not _has_complete_boundaries(summary):
+            continue
+        processed_cycles.add((experiment_id, cycle_id))
+        intervals = _cycle_stage_intervals(summary)
+        image_records = {role: _image_records(ordered, role) for role in image_roles}
+        cycle_key = (experiment_id, cycle_id)
         for timestamp in grid:
-            if _crosses_cycle_boundary(
-                timestamp, interval_seconds, cycle_boundaries.get(experiment_id, ())
-            ):
-                excluded_transition_buckets[(experiment_id, cycle_id)] = (
-                    excluded_transition_buckets.get((experiment_id, cycle_id), 0) + 1
-                )
-                continue
-            stage, overlap_tie = _winning_stage(timestamp, interval_seconds, intervals)
-            if overlap_tie:
-                excluded_transition_buckets[(experiment_id, cycle_id)] = (
-                    excluded_transition_buckets.get((experiment_id, cycle_id), 0) + 1
+            stage, transition = _stage_for_complete_bucket(timestamp, interval_seconds, intervals)
+            if transition:
+                excluded_transition_buckets[cycle_key] = (
+                    excluded_transition_buckets.get(cycle_key, 0) + 1
                 )
                 continue
             if stage is None:
                 continue
             bucket = ordered.loc[buckets.eq(timestamp) & ordered["cycle_stage"].eq(stage)]
             row = _identity_row(ordered, (experiment_id, cycle_id, stage), timestamp)
+            low_names, low_count, eligible_count = _coverage_for_bucket(
+                bucket,
+                eligible_channels.get(experiment_id, ()),
+                expected_points_per_bucket,
+                minimum_coverage,
+            )
+            eligible_channel_buckets[cycle_key] = (
+                eligible_channel_buckets.get(cycle_key, 0) + eligible_count
+            )
+            low_coverage_buckets[cycle_key] = (
+                low_coverage_buckets.get(cycle_key, 0) + low_count
+            )
             for name, settings in channels.items():
                 if str(settings.get("kind")) == "derived":
                     continue
-                row[name] = _aggregate_channel(bucket, name, settings)
+                row[name] = (
+                    np.nan
+                    if name in low_names
+                    else _aggregate_channel(bucket, name, settings)
+                )
             for role in image_roles:
-                _add_bucket_image(row, bucket, role, timestamp, used_images[role])
+                _add_bucket_image(row, image_records[role], role, timestamp, interval_seconds)
             rows.append(row)
     if not rows:
         empty = pd.DataFrame(columns=_processed_columns(channels, image_roles))
-        return empty, excluded_transition_buckets
+        return (
+            empty,
+            excluded_transition_buckets,
+            low_coverage_buckets,
+            eligible_channel_buckets,
+            processed_cycles,
+        )
     result = pd.DataFrame(rows).sort_values(
         ["experiment_id", "timestamp"], kind="stable"
     )
-    return result.reset_index(drop=True), excluded_transition_buckets
+    return (
+        result.reset_index(drop=True),
+        excluded_transition_buckets,
+        low_coverage_buckets,
+        eligible_channel_buckets,
+        processed_cycles,
+    )
 
 
 def _identity_row(
@@ -150,46 +206,15 @@ def _identity_row(
     return row
 
 
-def _summary_lookup(cycle_summary: pd.DataFrame) -> dict[tuple[str, str], pd.Series]:
-    lookup: dict[tuple[str, str], pd.Series] = {}
-    for _, row in cycle_summary.iterrows():
-        key = (str(row["experiment_id"]), str(row["cycle_id"]))
-        lookup[key] = row
-    return lookup
-
-
-def _cycle_boundaries(cycle_summary: pd.DataFrame) -> dict[str, tuple[pd.Timestamp, ...]]:
-    boundaries: dict[str, list[pd.Timestamp]] = {}
-    for _, row in cycle_summary.iterrows():
-        experiment_id = str(row["experiment_id"])
-        values = boundaries.setdefault(experiment_id, [])
-        for column in ("heating_start", "defrost_end"):
-            value = _as_timestamp(row.get(column))
-            if value is not None:
-                values.append(value)
-    return {experiment_id: tuple(values) for experiment_id, values in boundaries.items()}
-
-
-def _crosses_cycle_boundary(
-    timestamp: pd.Timestamp,
-    interval_seconds: int,
-    boundaries: tuple[pd.Timestamp, ...],
-) -> bool:
-    bucket_end = timestamp + pd.Timedelta(seconds=interval_seconds)
-    return any(timestamp < boundary < bucket_end for boundary in boundaries)
-
-
 def _cycle_stage_intervals(
-    summary: pd.Series | None, ordered: pd.DataFrame
-) -> dict[str, tuple[pd.Timestamp, pd.Timestamp | None]]:
-    if summary is None:
-        return _fallback_stage_intervals(ordered)
+    summary: pd.Series,
+) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
     heating = _as_timestamp(summary.get("heating_start"))
     stable = _as_timestamp(summary.get("stable_heating_start"))
     defrost = _as_timestamp(summary.get("defrost_start"))
     defrost_end = _as_timestamp(summary.get("defrost_end"))
-    if heating is None or stable is None or defrost is None:
-        return _fallback_stage_intervals(ordered)
+    if heating is None or stable is None or defrost is None or defrost_end is None:
+        raise ValueError("complete cycle is missing required stage boundaries")
     return {
         "recovery": (heating, stable),
         "frost_development": (stable, defrost),
@@ -197,36 +222,19 @@ def _cycle_stage_intervals(
     }
 
 
-def _fallback_stage_intervals(
-    ordered: pd.DataFrame,
-) -> dict[str, tuple[pd.Timestamp, pd.Timestamp | None]]:
-    stages = sorted(str(stage) for stage in ordered["cycle_stage"].dropna().unique())
-    if len(stages) != 1:
-        return {}
-    start = pd.Timestamp(ordered["timestamp"].min())
-    return {stages[0]: (start, None)}
-
-
-def _winning_stage(
+def _stage_for_complete_bucket(
     timestamp: pd.Timestamp,
     interval_seconds: int,
-    intervals: Mapping[str, tuple[pd.Timestamp, pd.Timestamp | None]],
+    intervals: Mapping[str, tuple[pd.Timestamp, pd.Timestamp]],
 ) -> tuple[str | None, bool]:
     bucket_end = timestamp + pd.Timedelta(seconds=interval_seconds)
-    overlaps: dict[str, float] = {}
-    for stage, (start, end) in intervals.items():
-        overlap_start = max(timestamp, start)
-        overlap_end = bucket_end if end is None else min(bucket_end, end)
-        seconds = (overlap_end - overlap_start).total_seconds()
-        if seconds > 0:
-            overlaps[stage] = seconds
-    if not overlaps:
-        return None, False
-    maximum = max(overlaps.values())
-    winners = [stage for stage, seconds in overlaps.items() if seconds == maximum]
-    if len(winners) > 1:
+    boundaries = {boundary for interval in intervals.values() for boundary in interval}
+    if any(timestamp < boundary < bucket_end for boundary in boundaries):
         return None, True
-    return winners[0], False
+    for stage, (start, end) in intervals.items():
+        if start <= timestamp < end:
+            return stage, False
+    return None, False
 
 
 def _as_timestamp(value: Any) -> pd.Timestamp | None:
@@ -253,6 +261,21 @@ def _aggregate_channel(
     return pd.to_numeric(values, errors="coerce").mean()
 
 
+def _coverage_for_bucket(
+    bucket: pd.DataFrame,
+    channel_names: tuple[str, ...],
+    expected_points: int,
+    minimum_coverage: float,
+) -> tuple[set[str], int, int]:
+    low_names = {
+        name
+        for name in channel_names
+        if (int(bucket[name].notna().sum()) if name in bucket else 0) / expected_points
+        < minimum_coverage
+    }
+    return low_names, len(low_names), len(channel_names)
+
+
 def _image_roles(frame: pd.DataFrame) -> list[str]:
     prefix = "image_"
     suffix = "_path"
@@ -266,54 +289,46 @@ def _image_roles(frame: pd.DataFrame) -> list[str]:
 
 def _add_bucket_image(
     row: dict[str, object],
-    bucket: pd.DataFrame,
+    records: list[tuple[str, pd.Timestamp]],
     role: str,
     timestamp: pd.Timestamp,
-    used: set[str],
+    interval_seconds: int,
 ) -> None:
     path_column = f"image_{role}_path"
     time_column = f"image_{role}_time"
     offset_column = f"image_{role}_offset_seconds"
-    if path_column not in bucket:
+    bucket_end = timestamp + pd.Timedelta(seconds=interval_seconds)
+    candidates = [
+        (path, image_time)
+        for path, image_time in records
+        if timestamp <= image_time < bucket_end
+    ]
+    if not candidates:
         row[path_column] = pd.NA
         row[time_column] = pd.NaT
         row[offset_column] = np.nan
         return
-    candidate_columns = ["timestamp", path_column]
-    if time_column in bucket:
-        candidate_columns.append(time_column)
-    candidates = bucket.loc[bucket[path_column].notna(), candidate_columns]
-    if candidates.empty:
-        row[path_column] = pd.NA
-        row[time_column] = pd.NaT
-        row[offset_column] = np.nan
-        return
-    candidate_rows: list[tuple[float, str, Any]] = []
-    for _, candidate in candidates.iterrows():
-        path = str(candidate[path_column])
-        if path in used:
-            continue
-        distance = abs((pd.Timestamp(candidate["timestamp"]) - timestamp).total_seconds())
-        image_time = (
-            pd.to_datetime(candidate[time_column], errors="coerce")
-            if time_column in bucket
-            else pd.NaT
-        )
-        candidate_rows.append((distance, path, image_time))
-    if not candidate_rows:
-        row[path_column] = pd.NA
-        row[time_column] = pd.NaT
-        row[offset_column] = np.nan
-        return
-    _, path, image_time = min(candidate_rows, key=lambda value: (value[0], value[1]))
-    used.add(path)
+    path, image_time = min(
+        candidates,
+        key=lambda value: (abs((value[1] - timestamp).total_seconds()), value[0]),
+    )
     row[path_column] = path
     row[time_column] = image_time
-    row[offset_column] = (
-        (pd.Timestamp(image_time) - timestamp).total_seconds()
-        if pd.notna(image_time)
-        else np.nan
-    )
+    row[offset_column] = (image_time - timestamp).total_seconds()
+
+
+def _image_records(frame: pd.DataFrame, role: str) -> list[tuple[str, pd.Timestamp]]:
+    path_column = f"image_{role}_path"
+    time_column = f"image_{role}_time"
+    if path_column not in frame or time_column not in frame:
+        return []
+    records = frame.loc[frame[path_column].notna(), [path_column, time_column]].copy()
+    records[time_column] = pd.to_datetime(records[time_column], errors="coerce")
+    records = records.dropna(subset=[time_column]).drop_duplicates()
+    return [
+        (str(path), pd.Timestamp(image_time))
+        for path, image_time in records.itertuples(index=False)
+    ]
 
 
 def _processed_columns(
@@ -357,6 +372,8 @@ def _recompute_cycle_coordinates(
         duration = (defrost - stable).total_seconds()
         if duration <= 0:
             continue
+        if (elapsed < 0).any():
+            raise ValueError("frost_development cycle_elapsed_seconds must be nonnegative")
         result.loc[development, "cycle_elapsed_seconds"] = elapsed
         result.loc[development, "cycle_progress"] = (elapsed / duration).clip(0, 1)
     return result
@@ -439,19 +456,18 @@ def _fill_continuous(
 
 def _fill_step(values: pd.Series, timestamps: pd.Series, maximum_gap_seconds: float) -> pd.Series:
     result = values.copy()
-    missing = result.isna().to_numpy()
-    position = 0
-    while position < len(result):
-        if not missing[position]:
-            position += 1
+    last_observed_time: pd.Timestamp | None = None
+    last_observed_value: object = np.nan
+    for position in range(len(result)):
+        value = result.iloc[position]
+        if pd.isna(value):
+            if last_observed_time is not None:
+                gap = (timestamps.iloc[position] - last_observed_time).total_seconds()
+                if gap <= maximum_gap_seconds:
+                    result.iloc[position] = last_observed_value
             continue
-        end = _missing_run_end(missing, position)
-        left = position - 1
-        if left >= 0:
-            gap = (timestamps.iloc[end] - timestamps.iloc[left]).total_seconds()
-            if gap <= maximum_gap_seconds:
-                result.iloc[position : end + 1] = result.iloc[left]
-        position = end + 1
+        last_observed_time = pd.Timestamp(timestamps.iloc[position])
+        last_observed_value = value
     return result
 
 
@@ -468,15 +484,25 @@ def _update_summary(
     config: Config,
     channels: Mapping[str, Mapping[str, Any]],
     excluded_transition_buckets: Mapping[tuple[str, str], int],
+    low_coverage_buckets: Mapping[tuple[str, str], int],
+    eligible_channel_buckets: Mapping[tuple[str, str], int],
+    processed_cycles: set[tuple[str, str]],
 ) -> pd.DataFrame:
     result = summary.copy()
+    summary_keys = [
+        (str(row["experiment_id"]), str(row["cycle_id"])) for _, row in result.iterrows()
+    ]
     result["excluded_transition_bucket_count"] = [
-        int(
-            excluded_transition_buckets.get(
-                (str(row["experiment_id"]), str(row["cycle_id"])), 0
-            )
-        )
-        for _, row in result.iterrows()
+        int(excluded_transition_buckets.get(key, 0)) if key in processed_cycles else np.nan
+        for key in summary_keys
+    ]
+    result["low_coverage_channel_bucket_count"] = [
+        int(low_coverage_buckets.get(key, 0)) if key in processed_cycles else np.nan
+        for key in summary_keys
+    ]
+    result["eligible_continuous_channel_bucket_count"] = [
+        int(eligible_channel_buckets.get(key, 0)) if key in processed_cycles else np.nan
+        for key in summary_keys
     ]
     keys = ["experiment_id", "cycle_id"]
     if processed.empty:
@@ -510,3 +536,53 @@ def _require_keys(frame: pd.DataFrame, keys: list[str]) -> None:
     missing = sorted(set(keys) - set(frame.columns))
     if missing:
         raise ValueError(f"process input missing columns: {missing}")
+
+
+def _eligible_continuous_channels(
+    frame: pd.DataFrame, channels: Mapping[str, Mapping[str, Any]]
+) -> dict[str, tuple[str, ...]]:
+    result: dict[str, tuple[str, ...]] = {}
+    for experiment_id, group in frame.groupby("experiment_id", sort=False, dropna=False):
+        names = [
+            name
+            for name, settings in channels.items()
+            if str(settings.get("kind")) == "continuous"
+            and f"{name}__missing" in group
+            and not _boolean_column(group, f"{name}__missing").all()
+        ]
+        result[str(experiment_id)] = tuple(names)
+    return result
+
+
+def _has_complete_boundaries(summary: pd.Series) -> bool:
+    return all(
+        _as_timestamp(summary.get(column)) is not None
+        for column in ("heating_start", "stable_heating_start", "defrost_start", "defrost_end")
+    )
+
+
+def _summary_lookup(cycle_summary: pd.DataFrame) -> dict[tuple[str, str], pd.Series]:
+    lookup: dict[tuple[str, str], pd.Series] = {}
+    for _, row in cycle_summary.iterrows():
+        key = (str(row["experiment_id"]), str(row["cycle_id"]))
+        if key in lookup:
+            raise ValueError(f"duplicate cycle summary for cycle {key[1]}")
+        lookup[key] = row
+    return lookup
+
+
+def _validate_cycle_summary_input(prepared: pd.DataFrame, summary: pd.DataFrame) -> None:
+    lookup = _summary_lookup(summary)
+    grouped = prepared.loc[prepared["cycle_stage"].ne("partial")].groupby(
+        ["experiment_id", "cycle_id"], sort=False, dropna=False
+    )
+    for group_values, group in grouped:
+        key = tuple(str(value) for value in group_values)
+        if key not in lookup:
+            raise ValueError(f"missing cycle summary for cycle {key[1]}")
+        cycle = lookup[key]
+        status = str(group["cycle_status"].iloc[0])
+        if status not in {"valid", "invalid", "incomplete"}:
+            raise ValueError(f"invalid cycle status for cycle {key[1]}")
+        if not _has_complete_boundaries(cycle) and status != "incomplete":
+            raise ValueError(f"cycle {key[1]} is missing required boundaries")
