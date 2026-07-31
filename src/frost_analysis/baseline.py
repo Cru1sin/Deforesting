@@ -1,12 +1,14 @@
-"""Strict no-frost baseline estimation with explicit failure reasons."""
+"""Cycle-local early stable baseline proxy selection."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+
+from .config import BaselineSettings
 
 BASELINE_FAILURE_REASONS = {
     "no_candidate_window",
@@ -15,50 +17,59 @@ BASELINE_FAILURE_REASONS = {
     "too_much_imputation",
     "unstable_anchor",
 }
+BASELINE_REFERENCE_TYPE = "cycle_local_early_stable_proxy"
 
 
 def add_baseline_residuals(
     frame: pd.DataFrame,
     cycle_summary: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
-    settings: Mapping[str, Any],
-) -> pd.DataFrame:
-    """Add accepted baseline and ``current - baseline`` residual columns."""
+    settings: BaselineSettings | Mapping[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add common-window baselines and return the enriched cycle summary."""
+    rules = _settings(settings)
     result = frame.copy()
-    stage = str(settings.get("stage", "recovery"))
-    minimum_coverage = float(settings.get("minimum_observed_coverage", 0.5))
-    maximum_imputed_fraction = float(settings.get("maximum_imputed_fraction", 0.2))
-    required_anchors = [str(value) for value in settings.get("required_anchor_channels", [])]
+    summary = cycle_summary.copy()
     eligible = _eligible_channels(channels)
     for name in eligible:
         result[f"{name}__baseline"] = np.nan
         result[f"{name}__baseline_residual"] = np.nan
-        result[f"{name}__baseline_status"] = pd.Series(
-            pd.NA, index=result.index, dtype="string"
-        )
-    for _, cycle in cycle_summary.iterrows():
-        experiment_id = cycle["experiment_id"]
-        cycle_id = cycle["cycle_id"]
-        cycle_mask = result["experiment_id"].eq(experiment_id) & result["cycle_id"].eq(cycle_id)
-        window_mask = cycle_mask & result["cycle_stage"].eq(stage)
+    summary = _initialise_summary(summary)
+    for index, cycle in summary.iterrows():
+        cycle_mask = result["experiment_id"].eq(cycle["experiment_id"]) & result[
+            "cycle_id"
+        ].eq(cycle["cycle_id"])
+        if cycle.get("cycle_status") != "valid":
+            summary.loc[index, "baseline_status"] = "not_applicable"
+            summary.loc[index, "baseline_failure_reason"] = "cycle_not_valid"
+            continue
+        window, reason = _find_common_window(result.loc[cycle_mask], cycle, rules)
+        if window is None:
+            summary.loc[index, "baseline_status"] = "unavailable"
+            summary.loc[index, "baseline_failure_reason"] = reason
+            continue
+        start, end, anchor_window = window
+        summary.loc[index, "baseline_status"] = "available"
+        summary.loc[index, "baseline_failure_reason"] = ""
+        summary.loc[index, "baseline_start"] = start
+        summary.loc[index, "baseline_end"] = end
+        unavailable: list[str] = []
         for name in eligible:
-            status, baseline = _estimate_one(
-                result.loc[window_mask],
-                name,
-                minimum_coverage=minimum_coverage,
-                maximum_imputed_fraction=maximum_imputed_fraction,
-                required_anchors=required_anchors,
-                frame=result,
-                window_mask=window_mask,
-                maximum_baseline_std=float(settings.get("maximum_baseline_std", float("inf"))),
-            )
-            result.loc[cycle_mask, f"{name}__baseline_status"] = status
+            baseline = _channel_baseline(anchor_window, name, rules)
             if baseline is None:
+                unavailable.append(name)
                 continue
             result.loc[cycle_mask, f"{name}__baseline"] = baseline
             values = pd.to_numeric(result.loc[cycle_mask, name], errors="coerce")
             result.loc[cycle_mask, f"{name}__baseline_residual"] = values - baseline
-    return result
+        summary.at[index, "baseline_unavailable_channels"] = cast(Any, unavailable)
+    return result, summary
+
+
+def _settings(settings: BaselineSettings | Mapping[str, Any]) -> BaselineSettings:
+    if isinstance(settings, BaselineSettings):
+        return settings
+    return BaselineSettings.from_mapping(settings)
 
 
 def _eligible_channels(channels: Mapping[str, Mapping[str, Any]]) -> list[str]:
@@ -73,38 +84,102 @@ def _eligible_channels(channels: Mapping[str, Mapping[str, Any]]) -> list[str]:
     ]
 
 
-def _estimate_one(
-    window: pd.DataFrame,
-    name: str,
-    *,
-    minimum_coverage: float,
-    maximum_imputed_fraction: float,
-    required_anchors: list[str],
-    frame: pd.DataFrame,
-    window_mask: pd.Series,
-    maximum_baseline_std: float,
-) -> tuple[str, float | None]:
-    if name not in window or window.empty:
-        return "no_candidate_window", None
-    for anchor in required_anchors:
-        if anchor not in frame:
-            return "missing_required_anchor", None
-        anchor_values = pd.to_numeric(frame.loc[window_mask, anchor], errors="coerce")
-        if not anchor_values.notna().any():
-            return "missing_required_anchor", None
+def _initialise_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    result = summary.copy()
+    defaults: dict[str, object] = {
+        "baseline_status": pd.NA,
+        "baseline_failure_reason": pd.NA,
+        "baseline_reference_type": BASELINE_REFERENCE_TYPE,
+        "baseline_start": pd.NaT,
+        "baseline_end": pd.NaT,
+        "baseline_unavailable_channels": None,
+    }
+    for column, value in defaults.items():
+        if column not in result:
+            if column == "baseline_unavailable_channels":
+                result[column] = pd.Series([None] * len(result), index=result.index, dtype=object)
+            else:
+                result[column] = cast(Any, value)
+    return result
+
+
+def _find_common_window(
+    cycle_frame: pd.DataFrame, cycle: pd.Series, settings: BaselineSettings
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp, pd.DataFrame], str] | tuple[None, str]:
+    stable = _timestamp_or_none(cycle.get("stable_heating_start"))
+    defrost = _timestamp_or_none(cycle.get("defrost_start"))
+    if stable is None or defrost is None:
+        return None, "no_candidate_window"
+    stage = cycle_frame.loc[cycle_frame["cycle_stage"].eq(settings.stage)].copy()
+    search_start = stable + pd.Timedelta(minutes=settings.search_start_minutes)
+    search_end = stable + pd.Timedelta(minutes=settings.search_end_minutes)
+    search_end = min(search_end, defrost)
+    window_length = pd.Timedelta(minutes=settings.window_minutes)
+    if search_end - search_start < window_length:
+        return None, "no_candidate_window"
+    last_failure = "no_candidate_window"
+    start = search_start
+    while start + window_length <= search_end:
+        end = start + window_length
+        window = stage.loc[stage["timestamp"].ge(start) & stage["timestamp"].lt(end)]
+        valid, failure = _anchors_are_stable(window, settings)
+        if valid:
+            return (start, end, window), ""
+        last_failure = failure
+        start += pd.Timedelta(minutes=settings.window_step_minutes)
+    return None, last_failure
+
+
+def _anchors_are_stable(
+    window: pd.DataFrame, settings: BaselineSettings
+) -> tuple[bool, str]:
+    if window.empty:
+        return False, "no_candidate_window"
+    for anchor in settings.required_anchor_channels:
+        if anchor not in window:
+            return False, "missing_required_anchor"
+        values = pd.to_numeric(window[anchor], errors="coerce")
+        imputed = _imputed_column(window, anchor)
+        if not values.notna().any():
+            return False, "missing_required_anchor"
+        if imputed.any():
+            return False, "too_much_imputation"
+        coverage = float(values.notna().mean())
+        if coverage < settings.minimum_observed_coverage:
+            return False, "insufficient_observed_coverage"
+        maximum_std = settings.anchor_maximum_std.get(anchor)
+        if maximum_std is not None and float(values.dropna().std(ddof=0)) > maximum_std:
+            return False, "unstable_anchor"
+    return True, ""
+
+
+def _channel_baseline(
+    window: pd.DataFrame, name: str, settings: BaselineSettings
+) -> float | None:
+    if name not in window:
+        return None
     values = pd.to_numeric(window[name], errors="coerce")
-    observed = values.notna()
-    if not observed.any():
-        return "no_candidate_window", None
+    observed = values.notna() & ~_imputed_column(window, name)
     coverage = float(observed.mean()) if len(values) else 0.0
-    if coverage < minimum_coverage:
-        return "insufficient_observed_coverage", None
-    imputed = window.get(f"{name}__imputed", pd.Series(False, index=window.index)).astype(bool)
-    if float(imputed.mean()) > maximum_imputed_fraction:
-        return "too_much_imputation", None
-    baseline = float(values.loc[observed].median())
+    if coverage < settings.minimum_observed_coverage:
+        return None
+    finite = values.loc[observed]
+    if finite.empty:
+        return None
+    baseline = float(finite.median())
     if not np.isfinite(baseline):
-        return "no_candidate_window", None
-    if float(values.loc[observed].std(ddof=0)) > maximum_baseline_std:
-        return "unstable_anchor", None
-    return "accepted", baseline
+        return None
+    return baseline
+
+
+def _imputed_column(frame: pd.DataFrame, name: str) -> pd.Series:
+    column = f"{name}__imputed"
+    if column not in frame:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    return frame[column].fillna(False).astype(bool)
+
+
+def _timestamp_or_none(value: Any) -> pd.Timestamp | None:
+    if value is None or pd.isna(value):
+        return None
+    return pd.Timestamp(value)

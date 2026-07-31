@@ -34,100 +34,14 @@ def label_cycles(
         labeled["timestamp"], filled_state, _setting(settings, "debounce_seconds", 20)
     )
     events = _defrost_runs(labeled["timestamp"], debounced)
-    cycles: list[dict[str, object]] = []
-    cycle_ranges: list[tuple[dict[str, object], pd.Timestamp, pd.Timestamp | None]] = []
-
-    for index in range(len(events) - 1):
-        previous = events[index]
-        following = events[index + 1]
-        heating_start = previous["end"]
-        defrost_start = following["start"]
-        defrost_end = following["end"]
-        cycle_id = f"cycle_{index + 1:03d}"
-        status = "valid"
-        reason = ""
-        if heating_start is None:
-            status, reason = "incomplete", "defrost_state_gap"
-        elif defrost_end is None:
-            status, reason = "incomplete", "data_ends_mid_cycle"
-        elif _interval_intersects(heating_start, defrost_end, long_gaps):
-            status, reason = "incomplete", "defrost_state_gap"
-        elif not _duration_in_range(
-            previous["duration"],
-            _setting(settings, "minimum_defrost_seconds", 60),
-            _setting(settings, "maximum_defrost_seconds", 1200),
-        ) or not _duration_in_range(
-            following["duration"],
-            _setting(settings, "minimum_defrost_seconds", 60),
-            _setting(settings, "maximum_defrost_seconds", 1200),
-        ):
-            status, reason = "invalid", "defrost_duration_out_of_range"
-        else:
-            heating_duration = (defrost_start - heating_start).total_seconds()
-            if not _duration_in_range(
-                heating_duration,
-                _setting(settings, "minimum_heating_seconds", 1800),
-                _setting(settings, "maximum_heating_seconds", 21600),
-            ):
-                status, reason = "invalid", "heating_duration_out_of_range"
-
-        stable_start = (
-            heating_start
-            + pd.Timedelta(seconds=_setting(settings, "stable_heating_seconds", 180))
-            if heating_start is not None
-            else None
-        )
-        if stable_start is not None and stable_start >= defrost_start:
-            status, reason = "invalid", "invalid_cycle_boundaries"
-        row = _cycle_row(
-            experiment_id,
-            experiment_date,
-            cycle_id,
-            status,
-            reason,
-            heating_start,
-            stable_start,
-            defrost_start,
-            defrost_end,
-        )
-        cycles.append(row)
-        if heating_start is not None:
-            cycle_ranges.append((row, heating_start, defrost_end))
-
-    if not cycles:
-        cycles.append(
-            _cycle_row(
-                experiment_id,
-                experiment_date,
-                "cycle_001",
-                "incomplete",
-                "defrost_state_gap" if long_gaps else "insufficient_cycle_boundaries",
-                None,
-                None,
-                None,
-                None,
-            )
-        )
-
-    labeled["cycle_id"] = pd.Series(pd.NA, index=labeled.index, dtype="string")
-    labeled["cycle_stage"] = pd.Series(pd.NA, index=labeled.index, dtype="string")
-    labeled["cycle_status"] = pd.Series(pd.NA, index=labeled.index, dtype="string")
-    labeled["cycle_status_reason"] = pd.Series(pd.NA, index=labeled.index, dtype="string")
-    for row, cycle_start, cycle_end in cycle_ranges:
-        cycle_id = str(row["cycle_id"])
-        if cycle_end is None:
-            mask = labeled["timestamp"].ge(cycle_start)
-        else:
-            mask = labeled["timestamp"].ge(cycle_start) & labeled["timestamp"].lt(cycle_end)
-        labeled.loc[mask, "cycle_id"] = cycle_id
-        labeled.loc[mask, "cycle_status"] = str(row["cycle_status"])
-        labeled.loc[mask, "cycle_status_reason"] = str(row["cycle_status_reason"])
-        labeled.loc[mask, "cycle_stage"] = _stage_for_times(
-            labeled.loc[mask, "timestamp"],
-            row["stable_heating_start"],
-            row["defrost_start"],
-            row["defrost_end"],
-        ).to_numpy()
+    cycles, cycle_ranges = _build_cycles(
+        events,
+        long_gaps,
+        settings,
+        experiment_id=experiment_id,
+        experiment_date=experiment_date,
+    )
+    labeled = _assign_cycle_ranges(labeled, cycle_ranges)
 
     _label_unassigned_rows(labeled, cycles, experiment_id, experiment_date)
     _add_cycle_coordinates(labeled, cycles)
@@ -137,7 +51,160 @@ def label_cycles(
     return labeled, pd.DataFrame(cycles, columns=_cycle_columns())
 
 
-def _normalize_state(value: object) -> bool | float:
+def _build_cycles(
+    events: list[dict[str, Any]],
+    long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
+    settings: Mapping[str, Any] | Any,
+    *,
+    experiment_id: str,
+    experiment_date: str,
+) -> tuple[
+    list[dict[str, object]],
+    list[tuple[dict[str, object], pd.Timestamp, pd.Timestamp | None]],
+]:
+    cycles: list[dict[str, object]] = []
+    ranges: list[tuple[dict[str, object], pd.Timestamp, pd.Timestamp | None]] = []
+    for index in range(len(events) - 1):
+        row = _make_cycle_record(
+            events[index],
+            events[index + 1],
+            long_gaps,
+            settings,
+            experiment_id,
+            experiment_date,
+            f"cycle_{index + 1:03d}",
+        )
+        cycles.append(row)
+        heating_start = row["heating_start"]
+        if isinstance(heating_start, pd.Timestamp):
+            defrost_end = row["defrost_end"]
+            if isinstance(defrost_end, pd.Timestamp) or defrost_end is None:
+                ranges.append((row, heating_start, defrost_end))
+    if not cycles:
+        reason = "defrost_state_gap" if long_gaps else "insufficient_cycle_boundaries"
+        cycles.append(
+            _cycle_row(
+                experiment_id,
+                experiment_date,
+                "cycle_001",
+                "incomplete",
+                reason,
+                None,
+                None,
+                None,
+                None,
+            )
+        )
+    return cycles, ranges
+
+
+def _make_cycle_record(
+    previous: dict[str, Any],
+    following: dict[str, Any],
+    long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
+    settings: Mapping[str, Any] | Any,
+    experiment_id: str,
+    experiment_date: str,
+    cycle_id: str,
+) -> dict[str, object]:
+    heating_start = previous["end"]
+    defrost_start = following["start"]
+    defrost_end = following["end"]
+    status, reason = _cycle_status(
+        previous,
+        following,
+        heating_start,
+        defrost_start,
+        defrost_end,
+        long_gaps,
+        settings,
+    )
+    stable_start = _stable_start(heating_start, settings)
+    if stable_start is not None and stable_start >= defrost_start:
+        status, reason = "invalid", "invalid_cycle_boundaries"
+    return _cycle_row(
+        experiment_id,
+        experiment_date,
+        cycle_id,
+        status,
+        reason,
+        heating_start,
+        stable_start,
+        defrost_start,
+        defrost_end,
+    )
+
+
+def _cycle_status(
+    previous: dict[str, pd.Timestamp | float | None],
+    following: dict[str, pd.Timestamp | float | None],
+    heating_start: Any,
+    defrost_start: Any,
+    defrost_end: Any,
+    long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
+    settings: Mapping[str, Any] | Any,
+) -> tuple[str, str]:
+    if heating_start is None:
+        return "incomplete", "defrost_state_gap"
+    if defrost_end is None:
+        return "incomplete", "data_ends_mid_cycle"
+    if _interval_intersects(heating_start, defrost_end, long_gaps):
+        return "incomplete", "defrost_state_gap"
+    if not _duration_in_range(
+        previous["duration"],
+        _setting(settings, "minimum_defrost_seconds", 60),
+        _setting(settings, "maximum_defrost_seconds", 1200),
+    ) or not _duration_in_range(
+        following["duration"],
+        _setting(settings, "minimum_defrost_seconds", 60),
+        _setting(settings, "maximum_defrost_seconds", 1200),
+    ):
+        return "invalid", "defrost_duration_out_of_range"
+    heating_duration = (defrost_start - heating_start).total_seconds()
+    if not _duration_in_range(
+        heating_duration,
+        _setting(settings, "minimum_heating_seconds", 1800),
+        _setting(settings, "maximum_heating_seconds", 21600),
+    ):
+        return "invalid", "heating_duration_out_of_range"
+    return "valid", ""
+
+
+def _stable_start(
+    heating_start: Any, settings: Mapping[str, Any] | Any
+) -> pd.Timestamp | None:
+    if not isinstance(heating_start, pd.Timestamp):
+        return None
+    return heating_start + pd.Timedelta(
+        seconds=_setting(settings, "stable_heating_seconds", 180)
+    )
+
+
+def _assign_cycle_ranges(
+    labeled: pd.DataFrame,
+    cycle_ranges: list[tuple[dict[str, object], pd.Timestamp, pd.Timestamp | None]],
+) -> pd.DataFrame:
+    result = labeled.copy()
+    for column in ("cycle_id", "cycle_stage", "cycle_status", "cycle_status_reason"):
+        result[column] = pd.Series(pd.NA, index=result.index, dtype="string")
+    for row, cycle_start, cycle_end in cycle_ranges:
+        if cycle_end is None:
+            mask = result["timestamp"].ge(cycle_start)
+        else:
+            mask = result["timestamp"].ge(cycle_start) & result["timestamp"].lt(cycle_end)
+        result.loc[mask, "cycle_id"] = str(row["cycle_id"])
+        result.loc[mask, "cycle_status"] = str(row["cycle_status"])
+        result.loc[mask, "cycle_status_reason"] = str(row["cycle_status_reason"])
+        result.loc[mask, "cycle_stage"] = _stage_for_times(
+            result.loc[mask, "timestamp"],
+            row["stable_heating_start"],
+            row["defrost_start"],
+            row["defrost_end"],
+        ).to_numpy()
+    return result
+
+
+def _normalize_state(value: Any) -> bool | float:
     if value is None or value is pd.NA or pd.isna(value):
         return np.nan
     if isinstance(value, (bool, np.bool_)):
@@ -208,10 +275,8 @@ def _debounce_state(timestamps: pd.Series, state: pd.Series, debounce_seconds: f
     return result
 
 
-def _defrost_runs(
-    timestamps: pd.Series, state: pd.Series
-) -> list[dict[str, pd.Timestamp | float | None]]:
-    events: list[dict[str, pd.Timestamp | float | None]] = []
+def _defrost_runs(timestamps: pd.Series, state: pd.Series) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
     position = 0
     while position < len(state):
         if state.iloc[position] is not True:
@@ -357,7 +422,7 @@ def _interval_intersects(
     return any(gap_start <= end and gap_end >= start for gap_start, gap_end in gaps)
 
 
-def _duration_in_range(value: object, minimum: float, maximum: float) -> bool:
+def _duration_in_range(value: Any, minimum: float, maximum: float) -> bool:
     return value is not None and minimum <= float(value) <= maximum
 
 

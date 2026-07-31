@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
-from collections.abc import Mapping
 
 import yaml
 
@@ -91,6 +91,8 @@ class BaselineSettings:
             required_anchor_channels=tuple(str(value) for value in anchors),
             anchor_maximum_std={str(key): float(value) for key, value in maximum_std.items()},
         )
+        if result.stage != "frost_development":
+            raise ValueError("baseline stage must be frost_development")
         if result.search_start_minutes < 0:
             raise ValueError("baseline search_start_minutes must be nonnegative")
         if result.search_end_minutes <= result.search_start_minutes:
@@ -134,7 +136,9 @@ class ProcessSettings:
             raise ValueError("resample_interval_seconds must be positive")
         _validate_nonnegative("continuous_max_gap_seconds", result.continuous_max_gap_seconds)
         _validate_nonnegative("control_max_gap_seconds", result.control_max_gap_seconds)
-        if not result.feature_windows_minutes or any(value <= 0 for value in result.feature_windows_minutes):
+        if not result.feature_windows_minutes or any(
+            value <= 0 for value in result.feature_windows_minutes
+        ):
             raise ValueError("feature windows must be positive")
         return result
 
@@ -192,18 +196,21 @@ class Config:
     timestamp_column: str
     expected_sensor_interval_seconds: int
     image_match_tolerance_seconds: float
-    cycles: CycleSettings | Mapping[str, Any]
-    process: ProcessSettings | Mapping[str, Any]
-    analysis: AnalysisSettings | Mapping[str, Any]
+    cycles: CycleSettings
+    process: ProcessSettings
+    analysis: AnalysisSettings
     config_path: Path | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.cycles, Mapping):
-            object.__setattr__(self, "cycles", CycleSettings.from_mapping(self.cycles))
-        if isinstance(self.process, Mapping):
-            object.__setattr__(self, "process", ProcessSettings.from_mapping(self.process))
-        if isinstance(self.analysis, Mapping):
-            object.__setattr__(self, "analysis", AnalysisSettings.from_mapping(self.analysis))
+        raw_cycles: Any = self.cycles
+        raw_process: Any = self.process
+        raw_analysis: Any = self.analysis
+        if isinstance(raw_cycles, Mapping):
+            object.__setattr__(self, "cycles", CycleSettings.from_mapping(raw_cycles))
+        if isinstance(raw_process, Mapping):
+            object.__setattr__(self, "process", ProcessSettings.from_mapping(raw_process))
+        if isinstance(raw_analysis, Mapping):
+            object.__setattr__(self, "analysis", AnalysisSettings.from_mapping(raw_analysis))
 
 
 def load_config(path: Path) -> Config:
@@ -238,6 +245,12 @@ def load_config(path: Path) -> Config:
     analysis = AnalysisSettings.from_mapping(_mapping(loaded["analysis"], "analysis"))
     if analysis.future_horizon_minutes * 60 % process.resample_interval_seconds != 0:
         raise ValueError("future_horizon_minutes must align with the resample interval")
+    expected_interval = int(loaded["expected_sensor_interval_seconds"])
+    image_tolerance = float(loaded["image_match_tolerance_seconds"])
+    _validate_positive("expected_sensor_interval_seconds", expected_interval)
+    _validate_nonnegative("image_match_tolerance_seconds", image_tolerance)
+    if not str(loaded["timestamp_column"]).strip():
+        raise ValueError("timestamp_column must not be empty")
     return Config(
         project_root=project_root,
         experiment_id=str(loaded["experiment_id"]),
@@ -248,8 +261,8 @@ def load_config(path: Path) -> Config:
         sensor_globs=_tuple_strings(loaded["sensor_globs"], "sensor_globs"),
         image_extensions=_image_extensions(loaded["image_extensions"]),
         timestamp_column=str(loaded["timestamp_column"]),
-        expected_sensor_interval_seconds=int(loaded["expected_sensor_interval_seconds"]),
-        image_match_tolerance_seconds=float(loaded["image_match_tolerance_seconds"]),
+        expected_sensor_interval_seconds=expected_interval,
+        image_match_tolerance_seconds=image_tolerance,
         cycles=CycleSettings.from_mapping(_mapping(loaded["cycles"], "cycles")),
         process=process,
         analysis=analysis,

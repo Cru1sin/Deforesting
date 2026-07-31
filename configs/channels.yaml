@@ -245,8 +245,8 @@ channels:
     missing: none
     analysis_candidate: false
     allowed_values:
-      ON: true
-      OFF: false
+      "ON": true
+      "OFF": false
       "1": true
       "0": false
       TRUE: true

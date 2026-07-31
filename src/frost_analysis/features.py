@@ -1,4 +1,4 @@
-"""Physical and strictly past-looking derived features."""
+"""Fixed physical formulas and strictly past-looking dynamic features."""
 
 from __future__ import annotations
 
@@ -7,6 +7,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+_FORMULAS = {
+    "cop",
+    "pressure_ratio",
+    "water_delta_temperature",
+    "superheat_calculated",
+}
 
 
 def calculate_derived_features(
@@ -19,27 +26,35 @@ def calculate_derived_features(
             continue
         formula = str(settings.get("formula", ""))
         dependencies = [str(value) for value in settings.get("dependencies", [])]
-        if formula != "cop" or len(dependencies) != 2:
+        if formula not in _FORMULAS:
             raise ValueError(f"unsupported derived formula for {name}: {formula}")
-        numerator, denominator = dependencies
-        imputed = _imputed_column(result, numerator) | _imputed_column(result, denominator)
-        if numerator not in result or denominator not in result:
-            result[name] = np.nan
-            result[f"{name}__imputed"] = imputed
-            continue
-        denominator_values = pd.to_numeric(result[denominator], errors="coerce")
-        numerator_values = pd.to_numeric(result[numerator], errors="coerce")
-        valid_denominator = denominator_values.gt(0)
-        result[name] = numerator_values.div(denominator_values).where(valid_denominator)
-        result[f"{name}__imputed"] = imputed
+        result[name] = _calculate_formula(result, formula, dependencies)
+        result[f"{name}__imputed"] = _dependency_imputed(result, dependencies)
     return result
 
 
-def _imputed_column(frame: pd.DataFrame, name: str) -> pd.Series:
-    column = f"{name}__imputed"
-    if column not in frame:
-        return pd.Series(False, index=frame.index, dtype=bool)
-    return frame[column].astype(bool)
+def _calculate_formula(frame: pd.DataFrame, formula: str, dependencies: list[str]) -> pd.Series:
+    if any(dependency not in frame for dependency in dependencies):
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    values = [pd.to_numeric(frame[dependency], errors="coerce") for dependency in dependencies]
+    if formula == "cop":
+        return values[0].div(values[1]).where(values[1].gt(0))
+    if formula == "pressure_ratio":
+        return values[0].div(values[1]).where(values[1].gt(0))
+    if formula == "water_delta_temperature":
+        return values[0] - values[1]
+    if formula == "superheat_calculated":
+        return values[0] - values[1]
+    raise ValueError(f"unsupported derived formula: {formula}")
+
+
+def _dependency_imputed(frame: pd.DataFrame, dependencies: list[str]) -> pd.Series:
+    result = pd.Series(False, index=frame.index, dtype=bool)
+    for dependency in dependencies:
+        column = f"{dependency}__imputed"
+        if column in frame:
+            result = result | frame[column].fillna(False).astype(bool)
+    return result
 
 
 def add_dynamic_features(
@@ -49,27 +64,32 @@ def add_dynamic_features(
     interval_seconds: int,
     windows_minutes: list[int],
 ) -> pd.DataFrame:
-    """Add rolling, slope, and lag columns using observations strictly in the past."""
+    """Add lag, delta, and full past-only rolling means within each partition."""
     result = frame.sort_values(
         ["experiment_id", "cycle_id", "cycle_stage", "timestamp"], kind="stable"
     ).reset_index(drop=True)
-    keys = ["experiment_id", "cycle_id", "cycle_stage"]
     for name, settings in channels.items():
         if not bool(settings.get("analysis_candidate", False)) or name not in result:
             continue
         for minutes in windows_minutes:
             steps = max(1, round(minutes * 60 / interval_seconds))
-            grouped = result.groupby(keys, sort=False)[name]
-            result[f"{name}__lag_{minutes}min"] = grouped.shift(steps)
-            result[f"{name}__slope_{minutes}min"] = result[name] - grouped.shift(steps)
-            shifted = grouped.shift(1)
-            result[f"{name}__rolling_mean_{minutes}min"] = (
-                shifted.groupby(
-                    [result[key] for key in keys], sort=False, group_keys=False
-                )
-                .rolling(steps, min_periods=1)
-                .mean()
-                .reset_index(level=list(range(len(keys))), drop=True)
-                .sort_index()
-            )
+            _add_window_features(result, name, minutes, steps)
     return result
+
+
+def _add_window_features(frame: pd.DataFrame, name: str, minutes: int, steps: int) -> None:
+    keys = ["experiment_id", "cycle_id", "cycle_stage"]
+    lag_column = f"{name}__lag_{minutes}min"
+    delta_column = f"{name}__delta_{minutes}min"
+    rolling_column = f"{name}__rolling_mean_{minutes}min"
+    frame[lag_column] = np.nan
+    frame[delta_column] = np.nan
+    frame[rolling_column] = np.nan
+    for _, group in frame.groupby(keys, sort=False, dropna=False):
+        indices = group.index
+        values = pd.to_numeric(group[name], errors="coerce")
+        lag = values.shift(steps)
+        rolling = values.shift(1).rolling(steps, min_periods=steps).mean()
+        frame.loc[indices, lag_column] = lag.to_numpy()
+        frame.loc[indices, delta_column] = (values - lag).to_numpy()
+        frame.loc[indices, rolling_column] = rolling.to_numpy()
