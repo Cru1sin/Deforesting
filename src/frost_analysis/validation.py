@@ -11,7 +11,6 @@ _DECISIONS = {
     "trend_supported_candidate",
     "partial_evidence",
     "insufficient_coverage",
-    "high_context_association",
 }
 _ANALYSIS_FIELDS = {
     "experiment_id",

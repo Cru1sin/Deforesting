@@ -31,8 +31,13 @@ _DECISIONS = {
     "trend_supported_candidate",
     "partial_evidence",
     "insufficient_coverage",
-    "high_context_association",
 }
+
+
+def imputed_column_for_value(column: str) -> str:
+    """Map a value or baseline residual column to its source quality column."""
+    base = column.removesuffix("__baseline_residual")
+    return f"{base}__imputed"
 
 
 def analyze(
@@ -46,6 +51,7 @@ def analyze(
     if not candidates:
         return pd.DataFrame(columns=EVIDENCE_COLUMNS)
     settings = _analysis_settings(config)
+    _require_analysis_quality_columns(processed, candidates, channels, settings)
     experiments = _experiments(processed, config)
     rows: list[dict[str, object]] = []
     for experiment_id, experiment_date in experiments:
@@ -65,7 +71,6 @@ def analyze(
                 len(trend),
                 trend_effect,
                 direction,
-                context_effect,
                 settings,
             )
             rows.append(
@@ -122,6 +127,7 @@ def _trend_effects(
     residual = f"{channel}__baseline_residual"
     if residual not in frame or "cycle_progress" not in frame:
         return []
+    quality = imputed_column_for_value(residual)
     eligible = _eligible_cycle_ids(cycles)
     development = frame.loc[
         frame["cycle_id"].isin(eligible)
@@ -129,8 +135,11 @@ def _trend_effects(
     ]
     effects: list[float] = []
     for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
+        observed = ~_quality_mask(group, quality)
         correlation = _spearman_with_minimum(
-            group["cycle_progress"], group[residual], settings.minimum_points_per_cycle
+            group.loc[observed, "cycle_progress"],
+            group.loc[observed, residual],
+            settings.minimum_points_per_cycle,
         )
         if correlation is None:
             continue
@@ -157,6 +166,8 @@ def _future_association(
     target = str(settings.performance_target)
     if residual not in frame or target not in frame:
         return 0, np.nan
+    candidate_quality = imputed_column_for_value(residual)
+    target_quality = imputed_column_for_value(target)
     eligible = _eligible_cycle_ids(cycles)
     development = frame.loc[
         frame["cycle_id"].isin(eligible) & frame["cycle_stage"].eq("frost_development")
@@ -168,9 +179,21 @@ def _future_association(
             pd.to_numeric(group[target], errors="coerce").to_numpy(),
             index=pd.DatetimeIndex(group["timestamp"]),
         )
-        future = (group["timestamp"] + horizon).map(target_by_time)
+        target_imputed_by_time = pd.Series(
+            _quality_mask(group, target_quality).to_numpy(),
+            index=pd.DatetimeIndex(group["timestamp"]),
+        )
+        future_timestamps = group["timestamp"] + horizon
+        future = future_timestamps.map(target_by_time)
+        future_imputed = future_timestamps.map(target_imputed_by_time).astype("boolean")
+        future_imputed = future_imputed.fillna(False)
+        observed = (
+            ~_quality_mask(group, candidate_quality)
+            & future.notna()
+            & ~future_imputed
+        )
         correlation = _spearman_with_minimum(
-            group[residual], future, settings.minimum_points_per_cycle
+            group.loc[observed, residual], future.loc[observed], settings.minimum_points_per_cycle
         )
         if correlation is not None:
             effects.append(correlation)
@@ -192,18 +215,32 @@ def _context_association(
     ]
     if residual not in frame or not context_names:
         return 0, np.nan
+    candidate_quality = imputed_column_for_value(residual)
     eligible = _eligible_cycle_ids(cycles)
     development = frame.loc[
         frame["cycle_id"].isin(eligible) & frame["cycle_stage"].eq("frost_development")
     ]
     cycle_maxima: list[float] = []
     for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
+        candidate_observed = ~_quality_mask(group, candidate_quality)
         associations = [
             abs(correlation)
             for context in context_names
             if (
                 correlation := _spearman_with_minimum(
-                    group[residual], group[context], settings.minimum_points_per_cycle
+                    group.loc[
+                        candidate_observed & ~_quality_mask(
+                            group, imputed_column_for_value(context)
+                        ),
+                        residual,
+                    ],
+                    group.loc[
+                        candidate_observed & ~_quality_mask(
+                            group, imputed_column_for_value(context)
+                        ),
+                        context,
+                    ],
+                    settings.minimum_points_per_cycle,
                 )
             )
             is not None
@@ -217,13 +254,10 @@ def _decision(
     trend_count: int,
     trend_effect: float,
     direction: float,
-    context_effect: float,
     settings: Any,
 ) -> tuple[str, str]:
     if trend_count < settings.minimum_valid_cycles:
         return "insufficient_coverage", "trend_cycles_below_minimum"
-    if np.isfinite(context_effect) and context_effect >= settings.maximum_context_association:
-        return "high_context_association", "context_association_above_threshold"
     if (
         np.isfinite(trend_effect)
         and trend_effect >= settings.minimum_trend_effect
@@ -258,3 +292,29 @@ def _spearman_with_minimum(
 
 def _median_or_nan(values: list[float]) -> float:
     return float(np.median(values)) if values else np.nan
+
+
+def _quality_mask(frame: pd.DataFrame, column: str) -> pd.Series:
+    return frame[column].astype("boolean").fillna(False).astype(bool)
+
+
+def _require_analysis_quality_columns(
+    frame: pd.DataFrame,
+    candidates: list[str],
+    channels: Mapping[str, Mapping[str, Any]],
+    settings: Any,
+) -> None:
+    required: set[str] = set()
+    for candidate in candidates:
+        residual = f"{candidate}__baseline_residual"
+        if residual in frame:
+            required.add(imputed_column_for_value(residual))
+    target = str(settings.performance_target)
+    if target in frame:
+        required.add(imputed_column_for_value(target))
+    for name, channel_settings in channels.items():
+        if channel_settings.get("role") == "context" and name in frame:
+            required.add(imputed_column_for_value(name))
+    missing = sorted(column for column in required if column not in frame)
+    if missing:
+        raise ValueError(f"analysis requires quality columns: {missing}")

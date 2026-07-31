@@ -28,5 +28,4 @@ analysis:
   minimum_valid_cycles: 3
   minimum_trend_effect: 0.3
   minimum_direction_consistency: 0.7
-  maximum_context_association: 0.8
   minimum_points_per_cycle: 6

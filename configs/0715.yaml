@@ -36,7 +36,6 @@ process:
     window_minutes: 5
     window_step_minutes: 1
     minimum_observed_coverage: 0.8
-    maximum_imputed_fraction: 0.0
     required_anchor_channels:
       - ambient_temperature
       - water_in_temperature
@@ -56,5 +55,4 @@ analysis:
   minimum_valid_cycles: 3
   minimum_trend_effect: 0.3
   minimum_direction_consistency: 0.7
-  maximum_context_association: 0.8
   minimum_points_per_cycle: 6

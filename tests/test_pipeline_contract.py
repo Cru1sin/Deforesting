@@ -18,7 +18,6 @@ def _config(root: Path, **analysis: object) -> Config:
         "minimum_valid_cycles": 2,
         "minimum_trend_effect": 0.3,
         "minimum_direction_consistency": 0.7,
-        "maximum_context_association": 0.8,
         "minimum_points_per_cycle": 4,
         **analysis,
     }
@@ -74,8 +73,11 @@ def _analysis_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
                     "cycle_status": "valid",
                     "cycle_progress": progress,
                     "signal__baseline_residual": -float(point),
+                    "signal__imputed": False,
                     "ambient_temperature": 0.0,
+                    "ambient_temperature__imputed": False,
                     "heating_capacity__baseline_residual": -float(point + 1),
+                    "heating_capacity__imputed": False,
                 }
             )
         rows.append(
@@ -159,8 +161,10 @@ def test_future_matching_never_crosses_cycle_or_stage_boundary() -> None:
             "cycle_stage": ["frost_development"] * 4,
             "cycle_status": ["valid"] * 4,
             "cycle_progress": [0.2] * 4,
-            "signal__baseline_residual": [1.0, 2.0, 3.0, 4.0],
-            "heating_capacity__baseline_residual": [np.nan, 3.0, 5.0, 7.0],
+                "signal__baseline_residual": [1.0, 2.0, 3.0, 4.0],
+                "signal__imputed": [False] * 4,
+                "heating_capacity__baseline_residual": [np.nan, 3.0, 5.0, 7.0],
+                "heating_capacity__imputed": [False] * 4,
         }
     )
     cycles = pd.DataFrame(
@@ -203,6 +207,55 @@ def test_context_uses_per_cycle_maximum_then_median() -> None:
 
     assert evidence.loc[0, "context_cycle_count"] == 2
     assert 0.4 < evidence.loc[0, "median_max_abs_context_spearman"] < 0.9
+
+
+def test_analysis_excludes_imputed_candidate_future_and_context_points() -> None:
+    frame, cycles = _analysis_frame()
+    frame.loc[
+        frame["cycle_id"].eq("cycle_002") & frame["cycle_progress"].notna(), "signal__imputed"
+    ] = True
+    cycle_2_frost = frame["cycle_id"].eq("cycle_002") & frame["cycle_progress"].notna()
+    frame.loc[cycle_2_frost, "heating_capacity__imputed"] = True
+    frame.loc[cycle_2_frost, "ambient_temperature__imputed"] = True
+    frame.loc[frame["cycle_id"].eq("cycle_001"), "ambient_temperature"] = frame.loc[
+        frame["cycle_id"].eq("cycle_001"), "cycle_progress"
+    ].fillna(0.0)
+
+    evidence = analyze(
+        frame,
+        cycles,
+        _config(Path("/tmp"), minimum_points_per_cycle=3),
+        _channels(),
+    )
+
+    assert evidence.loc[0, "trend_cycle_count"] == 1
+    assert evidence.loc[0, "future_cycle_count"] == 1
+    assert evidence.loc[0, "context_cycle_count"] == 1
+
+
+def test_analysis_requires_quality_columns_for_used_values() -> None:
+    frame, cycles = _analysis_frame()
+
+    with pytest.raises(ValueError, match="signal__imputed"):
+        analyze(frame.drop(columns=["signal__imputed"]), cycles, _config(Path("/tmp")), _channels())
+
+    with pytest.raises(ValueError, match="heating_capacity__imputed"):
+        analyze(
+            frame.drop(columns=["heating_capacity__imputed"]),
+            cycles,
+            _config(Path("/tmp")),
+            _channels(),
+        )
+
+
+def test_context_association_does_not_override_supported_trend() -> None:
+    frame, cycles = _analysis_frame()
+    frame["ambient_temperature"] = frame["cycle_progress"].fillna(0.0)
+
+    evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
+
+    assert evidence.loc[0, "median_max_abs_context_spearman"] == 1.0
+    assert evidence.loc[0, "decision"] == "trend_supported_candidate"
 
 
 def test_analysis_excludes_incomplete_cycles_from_trend_evidence() -> None:

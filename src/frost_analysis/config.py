@@ -64,7 +64,6 @@ class BaselineSettings:
     window_minutes: int = 5
     window_step_minutes: int = 1
     minimum_observed_coverage: float = 0.8
-    maximum_imputed_fraction: float = 0.0
     required_anchor_channels: tuple[str, ...] = (
         "ambient_temperature",
         "water_in_temperature",
@@ -91,7 +90,6 @@ class BaselineSettings:
             window_minutes=int(values.get("window_minutes", 5)),
             window_step_minutes=int(values.get("window_step_minutes", 1)),
             minimum_observed_coverage=float(values.get("minimum_observed_coverage", 0.8)),
-            maximum_imputed_fraction=float(values.get("maximum_imputed_fraction", 0.0)),
             required_anchor_channels=tuple(str(value) for value in anchors),
             anchor_maximum_std={str(key): float(value) for key, value in maximum_std.items()},
         )
@@ -106,7 +104,6 @@ class BaselineSettings:
         if result.window_minutes > result.search_end_minutes - result.search_start_minutes:
             raise ValueError("baseline window_minutes must fit within the search range")
         _validate_fraction("minimum_observed_coverage", result.minimum_observed_coverage)
-        _validate_fraction("maximum_imputed_fraction", result.maximum_imputed_fraction)
         if any(value < 0 for value in result.anchor_maximum_std.values()):
             raise ValueError("anchor_maximum_std values must be nonnegative")
         return result
@@ -163,7 +160,6 @@ class AnalysisSettings:
     minimum_valid_cycles: int = 3
     minimum_trend_effect: float = 0.3
     minimum_direction_consistency: float = 0.7
-    maximum_context_association: float = 0.8
     minimum_points_per_cycle: int = 6
 
     @classmethod
@@ -178,7 +174,6 @@ class AnalysisSettings:
             minimum_direction_consistency=float(
                 values.get("minimum_direction_consistency", 0.7)
             ),
-            maximum_context_association=float(values.get("maximum_context_association", 0.8)),
             minimum_points_per_cycle=int(values.get("minimum_points_per_cycle", 6)),
         )
         if result.future_horizon_minutes <= 0:
@@ -186,7 +181,6 @@ class AnalysisSettings:
         if result.minimum_valid_cycles <= 0 or result.minimum_points_per_cycle < 2:
             raise ValueError("analysis minimum counts are too small")
         _validate_fraction("minimum_direction_consistency", result.minimum_direction_consistency)
-        _validate_fraction("maximum_context_association", result.maximum_context_association)
         if result.minimum_trend_effect < 0 or result.minimum_trend_effect > 1:
             raise ValueError("minimum_trend_effect must be within [0, 1]")
         return result

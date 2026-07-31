@@ -46,11 +46,16 @@ Process 的重采样规则如下：
 每个 `experiment_id × cycle_id` 只建立一次公共 10 秒时间网格，不按
 `cycle_stage` 分别建网格。每个输出桶代表左闭右开区间 `[timestamp,
 timestamp + 10 秒)`。使用 `cycle_summary` 的 `heating_start`、
-`stable_heating_start`、`defrost_start` 和 `defrost_end` 计算精确阶段区间；
-桶与阶段区间的重叠时长最长者获得该桶。桶内只聚合获胜阶段的原始观测，不混合
-其他阶段。若两个阶段的重叠时长完全相同，该 transition bucket 被排除，不进入
-Processed，也不会被后续缺失处理补回。最终仍保证 `experiment_id + timestamp`
-唯一；`cycle_summary.excluded_transition_bucket_count` 记录每个循环排除的桶数。
+`stable_heating_start`、`defrost_start` 和 `defrost_end` 计算精确阶段区间。
+阶段或循环边界严格位于桶内部时，整个 transition bucket 被排除；边界恰好位于
+桶起点或终点时保留。桶内只聚合所属阶段的原始观测，不混合其他阶段，也不通过
+overlap winner 或 fallback 推断阶段。被排除的桶不会被后续缺失处理补回。最终仍
+保证 `experiment_id + timestamp` 唯一；`cycle_summary.excluded_transition_bucket_count`
+按循环内唯一 bucket timestamp 计数。Continuous 通道只在 Prepared 中
+`channel__missing` 不全为 True 时进入 coverage 分母；coverage 分子是桶内
+canonical 非空行数，低于配置阈值的值先置为 NaN，再执行 bounded fill。
+`low_coverage_channel_bucket_count` 和 `eligible_continuous_channel_bucket_count`
+均在插值前记录；未进入 Process 的 incomplete cycle 使用 NaN 诊断值。
 
 ## 3. 质量标记、循环和图片
 
@@ -66,7 +71,7 @@ Processed，也不会被后续缺失处理补回。最终仍保证 `experiment_i
 
 重复记录不选择、不平均；受影响 canonical 值置为 NaN，同一时间其他正常通道保留。Process 先屏蔽 duplicate/conflict，再重采样，不机械复制 Prepared 源质量标记。
 
-`cycle_status` 只有 `valid`、`incomplete`、`invalid`；`cycle_stage` 只有 `recovery`、`frost_development`、`defrost`、`partial`。长除霜状态缺口不推断；影响边界或阶段识别时使用 `cycle_status=incomplete` 和 `cycle_status_reason=defrost_state_gap`。持续时间超出日期配置时使用 `invalid`。partial 连续区间分别编号，且不进入 Process。
+`cycle_status` 只有 `valid`、`incomplete`、`invalid`；`cycle_stage` 只有 `recovery`、`frost_development`、`defrost`、`partial`。长除霜状态缺口不推断；影响边界或阶段识别时使用 `cycle_status=incomplete` 和 `cycle_status_reason=defrost_state_gap`。持续时间超出日期配置时使用 `invalid`，并分别记录 `preceding_defrost_duration_seconds` 和 `terminal_defrost_duration_seconds`；两侧除霜异常分别使用 `preceding_defrost_duration_out_of_range` 和 `terminal_defrost_duration_out_of_range`。Operating mode 只检查 `[heating_start, defrost_start)` 内的 observed、非 duplicate/conflict 值，不检查 terminal defrost。partial 连续区间分别编号，且不进入 Process；没有完整相邻除霜事件时不创建 phantom cycle。
 
 循环坐标只有在 `frost_development` 有值：
 
@@ -156,7 +161,7 @@ expected_frost_direction = decrease → aligned = -raw
 
 ### Context association
 
-每循环分别计算候选 residual 与各 context 通道的绝对 Spearman，取该循环最大值，再对循环最大值取中位数，输出 `median_max_abs_context_spearman`。它只是工况关联提示，不是因果混杂证明。
+每循环分别计算候选 residual 与各 context 通道的绝对 Spearman，取该循环最大值，再对循环最大值取中位数，输出 `median_max_abs_context_spearman`。它只是工况关联提示，不是因果混杂证明。Trend、future 和 context 证据均排除对应基础通道 `__imputed=true` 的点；residual 的质量列由去除 `__baseline_residual` 后的基础通道名确定，缺少必需质量列属于输入合同错误。
 
 ### Reset 和 decision
 
@@ -174,9 +179,6 @@ reset_evidence_reason = independent_reference_unavailable
 ```text
 trend_cycle_count < minimum_valid_cycles
 → insufficient_coverage
-
-median_max_abs_context_spearman >= maximum_context_association
-→ high_context_association
 
 trend_effect >= minimum_trend_effect
 且 direction_consistency >= minimum_direction_consistency
