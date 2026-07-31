@@ -16,7 +16,7 @@ def test_formal_config_uses_flat_contract_and_ten_second_resampling() -> None:
     assert config.experiment_id == "exp_20260715"
     assert config.input_dir == ROOT / "data" / "0715"
     assert config.process.resample_interval_seconds == 10
-    assert config.cycles.maximum_state_gap_seconds == 5
+    assert config.cycles.maximum_state_gap_seconds == 0
     assert config.timestamp_column == "时间"
     assert config.camera_mapping_path == ROOT / "configs" / "camera_mappings" / "0715.yaml"
 
@@ -162,3 +162,31 @@ analysis: {future_horizon_minutes: 10}
 
     with pytest.raises(ValueError, match="expected_sensor_interval_seconds"):
         load_config(path)
+
+
+def test_config_accepts_zero_maximum_state_gap(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    path.write_text(
+        """
+experiment_id: exp_test
+experiment_date: "2026-07-15"
+input_dir: data/0715
+channels_path: configs/channels.yaml
+camera_mapping_path: configs/camera_mappings/0715.yaml
+sensor_globs: ["*.xls"]
+image_extensions: [".jpg"]
+timestamp_column: 时间
+expected_sensor_interval_seconds: 1
+image_match_tolerance_seconds: 2
+cycles:
+  maximum_state_gap_seconds: 0
+process: {resample_interval_seconds: 10}
+analysis: {future_horizon_minutes: 10}
+""",
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.cycles.maximum_state_gap_seconds == 0

@@ -40,7 +40,7 @@ class CycleSettings:
             operating_mode_channel=str(values.get("operating_mode_channel", "")),
             required_operating_mode=str(values.get("required_operating_mode", "3")),
         )
-        _validate_positive("maximum_state_gap_seconds", result.maximum_state_gap_seconds)
+        _validate_nonnegative("maximum_state_gap_seconds", result.maximum_state_gap_seconds)
         _validate_positive("debounce_seconds", result.debounce_seconds)
         _validate_positive("minimum_defrost_seconds", result.minimum_defrost_seconds)
         _validate_positive("maximum_defrost_seconds", result.maximum_defrost_seconds)
