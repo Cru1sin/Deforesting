@@ -34,7 +34,7 @@ class InputFiles:
 
     sensor_files: tuple[Path, ...]
     image_files: tuple[Path, ...]
-    camera_mapping_file: Path
+    camera_mapping_path: Path
 
 
 def discover_inputs(config: Config) -> InputFiles:
@@ -57,11 +57,10 @@ def discover_inputs(config: Config) -> InputFiles:
         for path in camera_dir.iterdir()
         if path.is_file() and path.suffix.lower() in image_extensions
     }
-    camera_mapping = input_dir / config.camera_mapping_file
     return InputFiles(
         sensor_files=tuple(sorted(sensor_paths)),
         image_files=tuple(sorted(image_paths)),
-        camera_mapping_file=camera_mapping,
+        camera_mapping_path=config.camera_mapping_path,
     )
 
 
@@ -170,6 +169,15 @@ def _optional_sha256(path: Path) -> str | None:
 def optional_sha256(path: Path | None) -> str | None:
     """Return a file hash when a source file is available."""
     return None if path is None else _optional_sha256(path)
+
+
+def source_file_metadata(path: Path, root: Path) -> dict[str, Any]:
+    """Return stable metadata for one raw source file."""
+    return {
+        "relative_path": str(path.relative_to(root)),
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256(path),
+    }
 
 
 def git_commit(project_root: Path) -> str | None:

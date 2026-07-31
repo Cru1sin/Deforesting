@@ -15,8 +15,8 @@ import pandas as pd
 
 from .config import Config
 from .cycles import label_cycles
-from .images import match_images
-from .io import discover_inputs, git_commit, optional_sha256
+from .images import load_camera_roles, match_images
+from .io import discover_inputs, git_commit, optional_sha256, source_file_metadata
 
 
 def prepare(
@@ -26,22 +26,33 @@ def prepare(
     inputs = discover_inputs(config)
     if not inputs.sensor_files:
         raise ValueError(f"no sensor files found in {config.input_dir}")
-    channel_frames = _load_channel_frames(inputs.sensor_files, config.input_dir, channels)
+    camera_roles = load_camera_roles(inputs.camera_mapping_path)
+    channel_frames, invalid_timestamp_rows = _load_channel_frames(
+        inputs.sensor_files, config.input_dir, channels, config.timestamp_column
+    )
     timestamps = _all_timestamps(channel_frames)
     if timestamps.empty:
         raise ValueError("sensor files contain no valid timestamps")
     prepared = pd.DataFrame({"timestamp": timestamps})
     prepared.insert(0, "experiment_date", config.experiment_date)
     prepared.insert(0, "experiment_id", config.experiment_id)
+    unavailable_channels: list[str] = []
+    channel_columns: dict[str, pd.Series] = {}
     for name, settings in channels.items():
         if str(settings.get("kind")) == "derived":
             continue
+        if name not in channel_frames:
+            unavailable_channels.append(name)
         values = _combine_channel(channel_frames.get(name, []), settings, timestamps)
-        prepared[name] = values["value"].to_numpy()
+        channel_columns[name] = values["value"]
         for suffix in ("__missing", "__invalid", "__duplicate", "__conflict"):
-            prepared[f"{name}{suffix}"] = values[suffix].to_numpy()
+            channel_columns[f"{name}{suffix}"] = values[suffix]
 
-    defrost_channel = str(config.cycles.get("defrost_channel", "defrost_active"))
+    prepared = pd.concat(
+        [prepared, pd.DataFrame(channel_columns, index=prepared.index)], axis=1
+    )
+
+    defrost_channel = config.cycles.defrost_channel
     if defrost_channel not in prepared:
         prepared[defrost_channel] = pd.Series(pd.NA, index=prepared.index, dtype="boolean")
         prepared[f"{defrost_channel}__missing"] = True
@@ -58,33 +69,57 @@ def prepare(
     image_matches = match_images(
         prepared["timestamp"],
         [path.relative_to(config.input_dir) for path in inputs.image_files],
-        tolerance_seconds=float(config.cycles.get("image_tolerance_seconds", 2)),
+        camera_roles=camera_roles,
+        tolerance_seconds=config.image_match_tolerance_seconds,
     )
     for column in image_matches.columns:
         prepared[column] = image_matches[column].to_numpy()
     prepared = prepared.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
+    cycle_summary = _add_cycle_quality_summary(
+        prepared,
+        cycle_summary,
+        channels,
+        camera_roles,
+        config.expected_sensor_interval_seconds,
+    )
     prepare_summary = {
         "experiment_id": config.experiment_id,
         "experiment_date": config.experiment_date,
         "input_dir": str(config.input_dir),
+        "config_path": str(config.config_path) if config.config_path else None,
         "created_at": datetime.now(UTC).isoformat(),
-        "sensor_files": [str(path.relative_to(config.input_dir)) for path in inputs.sensor_files],
+        "sensor_files": [
+            source_file_metadata(path, config.input_dir) for path in inputs.sensor_files
+        ],
         "image_file_count": len(inputs.image_files),
         "sensor_file_count": len(inputs.sensor_files),
-        "prepared_rows": len(prepared),
+        "prepared_row_count": len(prepared),
         "cycle_count": len(cycle_summary),
         "config_sha256": optional_sha256(config.config_path),
+        "channels_path": str(config.channels_path),
         "channels_sha256": optional_sha256(config.channels_path),
+        "camera_mapping_path": str(inputs.camera_mapping_path),
+        "camera_mapping_sha256": optional_sha256(inputs.camera_mapping_path),
+        "discovered_camera_ids": sorted({path.parent.name for path in inputs.image_files}),
+        "mapped_camera_ids": sorted(camera_roles),
+        "missing_camera_ids": sorted(
+            set(camera_roles) - {path.parent.name for path in inputs.image_files}
+        ),
+        "unavailable_channels": unavailable_channels,
+        "invalid_timestamp_row_count": invalid_timestamp_rows,
         "git_commit": git_commit(config.project_root),
     }
     return prepared, cycle_summary, prepare_summary
 
 
 def _load_channel_frames(
-    paths: tuple[Path, ...], input_dir: Path, channels: Mapping[str, Mapping[str, Any]]
-) -> dict[str, list[pd.DataFrame]]:
+    paths: tuple[Path, ...],
+    input_dir: Path,
+    channels: Mapping[str, Mapping[str, Any]],
+    timestamp_column: str,
+) -> tuple[dict[str, list[pd.DataFrame]], int]:
     source_to_channels: dict[str, set[str]] = defaultdict(set)
     for name, settings in channels.items():
         if str(settings.get("kind")) == "derived":
@@ -93,8 +128,10 @@ def _load_channel_frames(
             source_to_channels[str(source)].add(name)
 
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
+    invalid_timestamp_rows = 0
     for path in paths:
-        table = _read_sensor_table(path)
+        table, invalid_count = _read_sensor_table(path, timestamp_column)
+        invalid_timestamp_rows += invalid_count
         if table.empty:
             continue
         group = _parameter_group(path)
@@ -102,22 +139,18 @@ def _load_channel_frames(
             if raw_column == "timestamp":
                 continue
             canonical = _canonical_name(group, str(raw_column))
-            channel_names = _matching_channels(
-                source_to_channels, canonical, str(raw_column)
-            )
+            channel_names = source_to_channels.get(canonical, set())
             for name in channel_names:
                 frames[name].append(
-                    pd.DataFrame(
-                        {"timestamp": table["timestamp"], "raw": table[raw_column]}
-                    )
+                    pd.DataFrame({"timestamp": table["timestamp"], "raw": table[raw_column]})
                 )
-    return frames
+    return frames, invalid_timestamp_rows
 
 
-def _read_sensor_table(path: Path) -> pd.DataFrame:
+def _read_sensor_table(path: Path, timestamp_column: str) -> tuple[pd.DataFrame, int]:
     sample = path.read_bytes()[:131_072]
     if sample.startswith((b"\xd0\xcf\x11\xe0", b"PK\x03\x04")):
-        raise ValueError(f"binary Excel workbook is not a supported text export: {path}")
+        raise ValueError(f"binary Excel workbook is not supported: {path}")
     encoding_errors = "strict"
     for encoding in ("utf-8-sig", "gb18030"):
         try:
@@ -140,29 +173,12 @@ def _read_sensor_table(path: Path) -> pd.DataFrame:
         encoding_errors=encoding_errors,
     )
     table.columns = [str(column).strip() for column in table.columns]
-    time_column = _time_column(table.columns)
-    if time_column is None:
-        raise ValueError(f"no timestamp column in {path}")
-    timestamps = pd.to_datetime(table.pop(time_column), errors="coerce")
+    if timestamp_column not in table.columns:
+        raise ValueError(f"timestamp column {timestamp_column!r} not found in {path}")
+    timestamps = pd.to_datetime(table.pop(timestamp_column), errors="coerce")
+    invalid_count = int(timestamps.isna().sum())
     table = pd.concat([timestamps.rename("timestamp"), table], axis=1)
-    return table.loc[table["timestamp"].notna()].reset_index(drop=True)
-
-
-def _matching_channels(
-    source_to_channels: Mapping[str, set[str]], canonical: str, raw_column: str
-) -> set[str]:
-    direct = set(source_to_channels.get(canonical, set()))
-    if direct:
-        return direct
-    direct = set(source_to_channels.get(raw_column, set()))
-    if direct:
-        return direct
-    return {
-        name
-        for source, names in source_to_channels.items()
-        if source.endswith(f"__{raw_column}")
-        for name in names
-    }
+    return table.loc[table["timestamp"].notna()].reset_index(drop=True), invalid_count
 
 
 def _combine_channel(
@@ -178,32 +194,40 @@ def _combine_channel(
         return empty
     records = pd.concat(frames, ignore_index=True).sort_values("timestamp", kind="stable")
     kind = str(settings.get("kind"))
-    rows: list[dict[str, object]] = []
-    for timestamp, group in records.groupby("timestamp", sort=True):
-        raw_values = group["raw"].astype("string").str.strip()
-        cleaned, invalid = _parse_values(raw_values, kind, settings)
-        valid_values = cleaned.loc[~invalid & cleaned.notna()]
-        unique_values = {str(value) for value in valid_values.tolist()}
-        duplicate = len(group) > 1
-        conflict = len(unique_values) > 1
-        value: object = np.nan
-        if len(group) == 1 and not bool(invalid.iloc[0]) and cleaned.iloc[0] is not pd.NA:
-            value = cleaned.iloc[0]
-        rows.append(
-            {
-                "timestamp": timestamp,
-                "value": value,
-                "__missing": bool(raw_values.iloc[0] == ""),
-                "__invalid": bool(invalid.any()),
-                "__duplicate": duplicate,
-                "__conflict": conflict,
-            }
-        )
-    result = pd.DataFrame(rows).set_index("timestamp")
-    result = result.reindex(pd.DatetimeIndex(timestamps))
-    result["__missing"] = result["__missing"].astype("boolean").fillna(True).astype(bool)
+    raw_values = records["raw"].astype("string").str.strip()
+    cleaned, invalid = _parse_values(raw_values, kind, settings)
+    work = pd.DataFrame(
+        {
+            "timestamp": records["timestamp"].to_numpy(),
+            "value": cleaned.to_numpy(),
+            "invalid": invalid.to_numpy(),
+            "nonempty": (raw_values.ne("") & raw_values.notna()).to_numpy(),
+        }
+    )
+    grouped = work.groupby("timestamp", sort=True)
+    counts = grouped.size()
+    invalid_any = grouped["invalid"].any()
+    nonempty_any = grouped["nonempty"].any()
+    first_value = grouped["value"].first()
+    valid_values = work.loc[~work["invalid"] & work["value"].notna(), ["timestamp", "value"]]
+    valid_values = valid_values.assign(value_key=valid_values["value"].astype("string"))
+    unique_counts = valid_values.groupby("timestamp")["value_key"].nunique()
+    index = pd.DatetimeIndex(timestamps)
+    result = pd.DataFrame(index=index)
+    counts_aligned = counts.reindex(index, fill_value=0)
+    invalid_aligned = invalid_any.reindex(index, fill_value=False)
+    nonempty_aligned = nonempty_any.reindex(index, fill_value=False)
+    unique_counts_aligned = unique_counts.reindex(index, fill_value=0)
+    result["value"] = first_value.reindex(index).where(
+        counts_aligned.eq(1) & ~invalid_aligned, np.nan
+    )
+    result["__missing"] = ~nonempty_aligned
+    result["__invalid"] = invalid_aligned
+    result["__duplicate"] = counts_aligned.gt(1)
+    result["__conflict"] = unique_counts_aligned.gt(1)
+    result["__missing"] = result["__missing"].astype(bool)
     for column in ("__invalid", "__duplicate", "__conflict"):
-        result[column] = result[column].astype("boolean").fillna(False).astype(bool)
+        result[column] = result[column].astype(bool)
     return result.reset_index(drop=True)
 
 
@@ -214,11 +238,18 @@ def _parse_values(
     if kind == "event":
         allowed = settings.get("allowed_values", {})
         mapping = {str(key).strip().upper(): bool(value) for key, value in allowed.items()}
-        values = raw_values.map(lambda value: mapping.get(str(value).upper(), np.nan))
+        values = raw_values.map(lambda value: mapping.get(str(value).strip().upper(), np.nan))
         invalid = nonempty & values.isna()
         return values.astype("object"), invalid
+    if kind == "categorical":
+        return raw_values.where(nonempty, pd.NA).astype("object"), pd.Series(
+            False, index=raw_values.index, dtype=bool
+        )
     numeric = pd.to_numeric(raw_values.replace("", pd.NA), errors="coerce")
     invalid = nonempty & numeric.isna()
+    scale = float(settings.get("scale", 1.0))
+    offset = float(settings.get("offset", 0.0))
+    numeric = numeric * scale + offset
     valid_range = settings.get("valid_range")
     if isinstance(valid_range, list) and len(valid_range) == 2:
         lower, upper = float(valid_range[0]), float(valid_range[1])
@@ -236,6 +267,87 @@ def _all_timestamps(channel_frames: Mapping[str, list[pd.DataFrame]]) -> pd.Seri
     return pd.Series(unique.to_numpy())
 
 
+def _add_cycle_quality_summary(
+    prepared: pd.DataFrame,
+    summary: pd.DataFrame,
+    channels: Mapping[str, Mapping[str, Any]],
+    camera_roles: Mapping[str, str],
+    expected_interval_seconds: int,
+) -> pd.DataFrame:
+    raw_channels = [
+        name for name, settings in channels.items() if str(settings.get("kind")) != "derived"
+    ]
+    role_path_columns = [f"image_{role}_path" for role in sorted(set(camera_roles.values()))]
+    role_time_columns = [f"image_{role}_time" for role in sorted(set(camera_roles.values()))]
+    result = summary.copy()
+    records: list[dict[str, object]] = []
+    for _, row in result.iterrows():
+        cycle_id = row["cycle_id"]
+        group = prepared.loc[prepared["cycle_id"].eq(cycle_id)]
+        raw_count = len(group)
+        expected = _expected_row_count(row, expected_interval_seconds)
+        observed_fraction = _observed_fraction(group, raw_channels)
+        maximum_gap = _maximum_gap(group["timestamp"])
+        duplicate_count = _quality_row_count(group, raw_channels, "__duplicate")
+        conflict_count = _quality_row_count(group, raw_channels, "__conflict")
+        image_values = group[role_path_columns].to_numpy().ravel()
+        image_count = int(pd.Series(image_values).dropna().nunique()) if image_values.size else 0
+        role_count = sum(int(group[column].notna().any()) for column in role_path_columns)
+        complete_fraction = role_count / len(role_path_columns) if role_path_columns else 0.0
+        image_gap = max(
+            (
+                _maximum_gap(group[column].dropna())
+                for column in role_time_columns
+                if column in group
+            ),
+            default=0.0,
+        )
+        records.append(
+            {
+                "raw_row_count": raw_count,
+                "expected_row_count": expected,
+                "sensor_observed_fraction": observed_fraction,
+                "maximum_sensor_gap_seconds": maximum_gap,
+                "duplicate_observation_count": duplicate_count,
+                "conflict_observation_count": conflict_count,
+                "rgb_image_count": image_count,
+                "rgb_role_count": role_count,
+                "rgb_complete_role_fraction": complete_fraction,
+                "maximum_rgb_gap_seconds": image_gap,
+            }
+        )
+    return pd.concat([result.reset_index(drop=True), pd.DataFrame(records)], axis=1)
+
+
+def _expected_row_count(row: pd.Series, interval_seconds: int) -> object:
+    start = row.get("heating_start")
+    end = row.get("defrost_end")
+    if not isinstance(start, pd.Timestamp) or not isinstance(end, pd.Timestamp):
+        return np.nan
+    return int(round((end - start).total_seconds() / interval_seconds)) + 1
+
+
+def _observed_fraction(group: pd.DataFrame, channels: list[str]) -> float:
+    available = [name for name in channels if name in group]
+    if group.empty or not available:
+        return 0.0
+    return float(group[available].notna().mean().mean())
+
+
+def _maximum_gap(timestamps: pd.Series) -> float:
+    parsed = pd.to_datetime(timestamps, errors="coerce").dropna().sort_values()
+    if len(parsed) < 2:
+        return 0.0
+    return float(parsed.diff().dt.total_seconds().dropna().max())
+
+
+def _quality_row_count(group: pd.DataFrame, channels: list[str], suffix: str) -> int:
+    columns = [f"{name}{suffix}" for name in channels if f"{name}{suffix}" in group]
+    if group.empty or not columns:
+        return 0
+    return int(group[columns].astype(bool).any(axis=1).sum())
+
+
 def _parameter_group(path: Path) -> str | None:
     match = re.search(r"参数(?P<group>\d+)", path.stem)
     return None if match is None else match.group("group")
@@ -243,14 +355,6 @@ def _parameter_group(path: Path) -> str | None:
 
 def _canonical_name(group: str | None, raw_column: str) -> str:
     return f"p{group}__{raw_column}" if group else raw_column
-
-
-def _time_column(columns: pd.Index[str]) -> str | None:
-    for position, column in enumerate(columns):
-        normalized = re.sub(r"[\s_-]+", "", str(column)).lower()
-        if normalized in {"时间", "time", "timestamp", "datetime"} or position == 0:
-            return str(column)
-    return None
 
 
 def _detect_delimiter(sample: str) -> str:

@@ -12,18 +12,27 @@ from frost_analysis.prepare import prepare
 
 
 def _config(root: Path, raw: Path) -> Config:
+    (root / "camera.yaml").write_text("camera_roles: {}\n", encoding="utf-8")
     return Config(
         project_root=root,
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=raw,
         channels_path=root / "channels.yaml",
+        camera_mapping_path=root / "camera.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
-        camera_mapping_file="IPlocation.yaml",
+        timestamp_column="时间",
+        expected_sensor_interval_seconds=1,
+        image_match_tolerance_seconds=2,
         cycles={
             "defrost_channel": "defrost_active",
             "maximum_state_gap_seconds": 5,
+            "debounce_seconds": 20,
+            "minimum_defrost_seconds": 1,
+            "maximum_defrost_seconds": 100,
+            "minimum_heating_seconds": 1,
+            "maximum_heating_seconds": 100,
             "stable_heating_seconds": 2,
         },
         process={"resample_interval_seconds": 10},
@@ -43,7 +52,15 @@ def test_label_cycles_defines_progress_only_during_frost_development() -> None:
     labeled, summary = label_cycles(
         frame,
         "defrost_active",
-        {"maximum_state_gap_seconds": 5, "stable_heating_seconds": 2},
+        {
+            "maximum_state_gap_seconds": 5,
+            "debounce_seconds": 0.5,
+            "minimum_defrost_seconds": 1,
+            "maximum_defrost_seconds": 100,
+            "minimum_heating_seconds": 1,
+            "maximum_heating_seconds": 100,
+            "stable_heating_seconds": 2,
+        },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
     )
@@ -72,7 +89,15 @@ def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> No
     labeled, summary = label_cycles(
         frame,
         "defrost_active",
-        {"maximum_state_gap_seconds": 5, "stable_heating_seconds": 1},
+        {
+            "maximum_state_gap_seconds": 5,
+            "debounce_seconds": 0.5,
+            "minimum_defrost_seconds": 1,
+            "maximum_defrost_seconds": 100,
+            "minimum_heating_seconds": 1,
+            "maximum_heating_seconds": 100,
+            "stable_heating_seconds": 1,
+        },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
     )
@@ -113,7 +138,15 @@ def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
     _, summary = label_cycles(
         frame,
         "defrost_active",
-        {"maximum_state_gap_seconds": 5, "stable_heating_seconds": 1},
+        {
+            "maximum_state_gap_seconds": 5,
+            "debounce_seconds": 0.5,
+            "minimum_defrost_seconds": 1,
+            "maximum_defrost_seconds": 100,
+            "minimum_heating_seconds": 1,
+            "maximum_heating_seconds": 100,
+            "stable_heating_seconds": 1,
+        },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
     )
@@ -126,14 +159,14 @@ def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
 def test_prepare_duplicate_only_masks_affected_channel(tmp_path: Path) -> None:
     raw = tmp_path / "data" / "0715"
     raw.mkdir(parents=True)
-    (raw / "sample.xls").write_text(
+    (raw / "sample参数1.xls").write_text(
         "时间\tT4\n"
         "2026-07-15 00:00:00\t10\n"
         "2026-07-15 00:00:00\t11\n"
         "2026-07-15 00:00:01\t12\n",
         encoding="utf-8",
     )
-    (raw / "events.xls").write_text(
+    (raw / "events参数1.xls").write_text(
         "时间\tDefrost\n"
         "2026-07-15 00:00:00\tON\n"
         "2026-07-15 00:00:01\tOFF\n",
@@ -184,16 +217,85 @@ def test_match_images_does_not_reuse_one_image() -> None:
         Path("192.168.1.1_1/20260715000001000.jpg"),
     ]
 
-    matched = match_images(timestamps, image_files, tolerance_seconds=2)
+    matched = match_images(
+        timestamps,
+        image_files,
+        camera_roles={"192.168.1.1_1": "front_center"},
+        tolerance_seconds=2,
+    )
 
-    assert matched["image_path"].dropna().is_unique
-    assert matched["image_path"].notna().sum() == 2
+    assert matched["image_front_center_path"].dropna().is_unique
+    assert matched["image_front_center_path"].notna().sum() == 2
+
+
+def test_match_images_keeps_same_time_images_for_separate_roles() -> None:
+    timestamps = pd.to_datetime(["2026-07-15 00:00:00"])
+    image_files = [
+        Path("192.168.1.1_1/20260715000000000.jpg"),
+        Path("192.168.1.2_1/20260715000000000.jpg"),
+    ]
+
+    matched = match_images(
+        timestamps,
+        image_files,
+        camera_roles={
+            "192.168.1.1_1": "front_center",
+            "192.168.1.2_1": "left_near",
+        },
+        tolerance_seconds=2,
+    )
+
+    assert pd.notna(matched.loc[0, "image_front_center_path"])
+    assert pd.notna(matched.loc[0, "image_left_near_path"])
+
+
+def test_partial_regions_receive_separate_cycle_ids() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=12, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [
+                None,
+                None,
+                True,
+                False,
+                False,
+                False,
+                True,
+                False,
+                False,
+                None,
+                None,
+                None,
+            ],
+        }
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        {
+            "maximum_state_gap_seconds": 1,
+            "debounce_seconds": 0.5,
+            "minimum_defrost_seconds": 1,
+            "maximum_defrost_seconds": 10,
+            "minimum_heating_seconds": 1,
+            "maximum_heating_seconds": 10,
+            "stable_heating_seconds": 0,
+        },
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    partial_ids = sorted(labeled.loc[labeled["cycle_stage"].eq("partial"), "cycle_id"].unique())
+    assert partial_ids == ["partial_001", "partial_002"]
+    assert summary["cycle_id"].isin(partial_ids).sum() == 2
 
 
 def test_prepare_enforces_configured_valid_range(tmp_path: Path) -> None:
     raw = tmp_path / "data" / "0715"
     raw.mkdir(parents=True)
-    (raw / "sample.xls").write_text(
+    (raw / "sample参数1.xls").write_text(
         "时间\tT4\n2026-07-15 00:00:00\t99\n",
         encoding="utf-8",
     )
@@ -237,7 +339,10 @@ input_dir: data/0715
 channels_path: configs/channels.yaml
 sensor_globs: ["*.xls"]
 image_extensions: [".jpg"]
-camera_mapping_file: IPlocation.yaml
+camera_mapping_path: configs/camera_mappings/0715.yaml
+timestamp_column: 时间
+expected_sensor_interval_seconds: 1
+image_match_tolerance_seconds: 2
 cycles: {}
 process: {}
 analysis: {}
