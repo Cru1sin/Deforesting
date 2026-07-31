@@ -60,7 +60,7 @@ python -m frost_analysis process \
 
 ## 科学边界
 
-Prepare 只解析原始 `.xls` 文本、应用显式单位换算、切分循环和独立匹配相机图片；不重采样、不填补、不计算 baseline 或动态特征。Process 在每个 `experiment_id × cycle_id` 内建立一次公共 10 秒网格，按精确阶段边界的重叠时长确定唯一阶段；然后仅在 `experiment_id × cycle_id × cycle_stage` 内执行 bounded 缺失处理、派生公式、共同 baseline 和 past-only 特征。等长 transition bucket 被排除，partial 行不进入 Process。Analyze 只使用 valid 且 baseline 可用的 `frost_development` 行。
+Prepare 只解析原始 `.xls` 文本、应用显式单位换算、切分循环和独立匹配相机图片；不重采样、不填补、不计算 baseline 或动态特征。Process 在每个 `experiment_id × cycle_id` 内按 summary 边界建立完整 10 秒网格；任何阶段或循环边界严格落在桶内部时排除该桶，不使用 overlap winner，也不从输入行 fallback 推断阶段；然后仅在 `experiment_id × cycle_id × cycle_stage` 内执行 bounded 缺失处理、派生公式、共同 baseline 和 past-only 特征，Step 缺失桶逐点按其距最后 observed 值的时间差执行 bounded forward fill。partial 行不进入 Process。Analyze 只使用 valid 且 baseline 可用的 `frost_development` 行。
 
 通道、阈值和每日期相机映射均在 `configs/` 中显式记录。baseline 是 `cycle_local_early_stable_proxy`，不是人工或图像证明的绝对无霜真值。Reset evidence 当前固定为 `not_evaluated`，不使用下一循环自身 baseline 自证恢复。
 

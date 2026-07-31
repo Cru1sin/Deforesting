@@ -36,6 +36,7 @@ def validate_prepared(frame: pd.DataFrame, cycle_summary: pd.DataFrame) -> None:
     _require(frame, ["experiment_id", "timestamp", "cycle_id", "cycle_stage", "cycle_progress"])
     _unique(frame, ["experiment_id", "timestamp"])
     _unique(cycle_summary, ["experiment_id", "cycle_id"])
+    _validate_cycle_references(frame, cycle_summary, require_exact=True)
     _validate_cycle_labels(frame, "prepared")
     _validate_progress(frame)
     _validate_elapsed(frame)
@@ -48,6 +49,7 @@ def validate_processed(frame: pd.DataFrame, cycle_summary: pd.DataFrame) -> None
     _require(frame, ["experiment_id", "timestamp", "cycle_id", "cycle_stage", "cycle_progress"])
     _unique(frame, ["experiment_id", "timestamp"])
     _unique(cycle_summary, ["experiment_id", "cycle_id"])
+    _validate_cycle_references(frame, cycle_summary, require_exact=False)
     _validate_cycle_labels(frame, "processed")
     if frame["cycle_stage"].eq("partial").any():
         raise ValueError("processed data must not contain partial rows")
@@ -107,6 +109,29 @@ def _validate_elapsed(frame: pd.DataFrame) -> None:
     elapsed = pd.to_numeric(frame["cycle_elapsed_seconds"], errors="coerce")
     if elapsed.loc[frame["cycle_stage"].ne("frost_development")].notna().any():
         raise ValueError("cycle_elapsed_seconds is only defined during frost_development")
+    frost_elapsed = elapsed.loc[frame["cycle_stage"].eq("frost_development")].dropna()
+    if (frost_elapsed < 0).any():
+        raise ValueError("cycle_elapsed_seconds must be nonnegative")
+
+
+def _validate_cycle_references(
+    frame: pd.DataFrame, cycle_summary: pd.DataFrame, *, require_exact: bool
+) -> None:
+    frame_keys = _cycle_key_set(frame)
+    summary_keys = _cycle_key_set(cycle_summary)
+    if require_exact and frame_keys != summary_keys:
+        raise ValueError("Prepared and cycle_summary cycle keys must match")
+    if not require_exact and not frame_keys <= summary_keys:
+        raise ValueError("Processed cycle keys must be present in cycle_summary")
+
+
+def _cycle_key_set(frame: pd.DataFrame) -> set[tuple[object, object]]:
+    columns = ["experiment_id", "cycle_id"]
+    if frame[columns].isna().any().any():
+        raise ValueError("cycle keys must not be null")
+    return set(
+        frame[columns].drop_duplicates().itertuples(index=False, name=None)
+    )
 
 
 def _validate_baseline_contract(frame: pd.DataFrame, summary: pd.DataFrame) -> None:

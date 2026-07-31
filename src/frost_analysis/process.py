@@ -66,8 +66,6 @@ def process(
     final_summary = _update_summary(
         baseline_summary,
         featured,
-        config,
-        channels,
         excluded_transition_buckets,
         low_coverage_buckets,
         eligible_channel_buckets,
@@ -130,12 +128,12 @@ def _resample(
     cycle_keys = ["experiment_id", "cycle_id"]
     for group_values, group in frame.groupby(cycle_keys, sort=False, dropna=False):
         ordered = group.sort_values("timestamp", kind="stable")
-        buckets = ordered["timestamp"].dt.floor(frequency)
-        grid = pd.date_range(buckets.min(), buckets.max(), freq=frequency)
         experiment_id, cycle_id = (str(value) for value in group_values)
         summary = summary_lookup[(experiment_id, cycle_id)]
         if not _has_complete_boundaries(summary):
             continue
+        grid = _cycle_grid(summary, frequency)
+        buckets = ordered["timestamp"].dt.floor(frequency)
         processed_cycles.add((experiment_id, cycle_id))
         intervals = _cycle_stage_intervals(summary)
         image_records = {role: _image_records(ordered, role) for role in image_roles}
@@ -481,14 +479,14 @@ def _missing_run_end(missing: np.ndarray, start: int) -> int:
 def _update_summary(
     summary: pd.DataFrame,
     processed: pd.DataFrame,
-    config: Config,
-    channels: Mapping[str, Mapping[str, Any]],
     excluded_transition_buckets: Mapping[tuple[str, str], int],
     low_coverage_buckets: Mapping[tuple[str, str], int],
     eligible_channel_buckets: Mapping[tuple[str, str], int],
     processed_cycles: set[tuple[str, str]],
 ) -> pd.DataFrame:
-    result = summary.copy()
+    result = summary.drop(
+        columns=["processed_available_fraction", "imputed_fraction"], errors="ignore"
+    ).copy()
     summary_keys = [
         (str(row["experiment_id"]), str(row["cycle_id"])) for _, row in result.iterrows()
     ]
@@ -507,25 +505,15 @@ def _update_summary(
     keys = ["experiment_id", "cycle_id"]
     if processed.empty:
         return result
-    raw_names = [name for name, settings in channels.items() if settings.get("kind") != "derived"]
     records: list[dict[str, object]] = []
     for group_values, group in processed.groupby(keys, sort=False, dropna=False):
-        available = group[raw_names].notna().mean().mean() if raw_names else np.nan
-        imputed_columns = [f"{name}__imputed" for name in channels if f"{name}__imputed" in group]
-        imputed_fraction = (
-            float(group[imputed_columns].to_numpy(dtype=bool).mean())
-            if imputed_columns
-            else 0.0
-        )
         gap = group["timestamp"].sort_values().diff().dt.total_seconds().max()
         records.append(
             {
                 "experiment_id": group_values[0],
                 "cycle_id": group_values[1],
                 "processed_row_count": len(group),
-                "processed_available_fraction": float(available),
-                "processed_maximum_gap_seconds": float(gap) if pd.notna(gap) else 0.0,
-                "imputed_fraction": imputed_fraction,
+                "processed_maximum_gap_seconds": float(gap) if pd.notna(gap) else np.nan,
             }
         )
     metrics = pd.DataFrame(records)
@@ -559,6 +547,15 @@ def _has_complete_boundaries(summary: pd.Series) -> bool:
         _as_timestamp(summary.get(column)) is not None
         for column in ("heating_start", "stable_heating_start", "defrost_start", "defrost_end")
     )
+
+
+def _cycle_grid(summary: pd.Series, frequency: str) -> pd.DatetimeIndex:
+    start = _as_timestamp(summary.get("heating_start"))
+    end = _as_timestamp(summary.get("defrost_end"))
+    if start is None or end is None:
+        return pd.DatetimeIndex([])
+    last = (end - pd.Timedelta(nanoseconds=1)).floor(frequency)
+    return pd.date_range(start.floor(frequency), last, freq=frequency)
 
 
 def _summary_lookup(cycle_summary: pd.DataFrame) -> dict[tuple[str, str], pd.Series]:

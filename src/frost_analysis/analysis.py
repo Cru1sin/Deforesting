@@ -48,10 +48,10 @@ def analyze(
 ) -> pd.DataFrame:
     """Compute one evidence row per experiment and configured candidate channel."""
     candidates = _candidate_names(channels)
-    if not candidates:
-        return pd.DataFrame(columns=EVIDENCE_COLUMNS)
     settings = _analysis_settings(config)
     _require_analysis_quality_columns(processed, candidates, channels, settings)
+    if not candidates:
+        return pd.DataFrame(columns=EVIDENCE_COLUMNS)
     experiments = _experiments(processed, config)
     rows: list[dict[str, object]] = []
     for experiment_id, experiment_date in experiments:
@@ -313,11 +313,13 @@ def _require_analysis_quality_columns(
         else:
             required.add(imputed_column_for_value(residual))
     target = str(settings.performance_target)
-    if target in frame:
+    if target not in frame:
+        missing_values.add(target)
+    else:
         required.add(imputed_column_for_value(target))
     for name, channel_settings in channels.items():
         if channel_settings.get("role") == "context" and name in frame:
             required.add(imputed_column_for_value(name))
     missing = sorted((*missing_values, *(column for column in required if column not in frame)))
     if missing:
-        raise ValueError(f"analysis requires quality columns: {missing}")
+        raise ValueError(f"analysis requires value and quality columns: {missing}")

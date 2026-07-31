@@ -236,6 +236,12 @@ def test_analysis_excludes_imputed_candidate_future_and_context_points() -> None
 def test_analysis_requires_quality_columns_for_used_values() -> None:
     frame, cycles = _analysis_frame()
 
+    bad_config = _config(Path("/tmp"), performance_target="missing_target__baseline_residual")
+    with pytest.raises(ValueError, match="missing_target__baseline_residual"):
+        analyze(frame, cycles, bad_config, _channels())
+    with pytest.raises(ValueError, match="missing_target__baseline_residual"):
+        analyze(frame, cycles, bad_config, {})
+
     with pytest.raises(ValueError, match="signal__baseline_residual"):
         analyze(
             frame.drop(columns=["signal__baseline_residual"]),
@@ -290,6 +296,49 @@ def test_structural_validators_reject_invalid_fields() -> None:
     summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_001"]})
     with pytest.raises(ValueError, match="cycle_status"):
         validate_prepared(prepared, summary)
+
+    valid_prepared = prepared.assign(cycle_status="valid")
+    extra_summary = pd.concat(
+        [summary, pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_002"]})],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="cycle keys"):
+        validate_prepared(valid_prepared, extra_summary)
+
+    missing_summary = valid_prepared.assign(cycle_id="cycle_002")
+    with pytest.raises(ValueError, match="cycle keys"):
+        validate_prepared(missing_summary, summary)
+
+    null_key = valid_prepared.assign(cycle_id=pd.NA)
+    with pytest.raises(ValueError, match="cycle keys"):
+        validate_prepared(null_key, summary)
+
+    processed = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "timestamp": pd.to_datetime(["2026-07-15"]),
+            "cycle_id": ["cycle_001"],
+            "cycle_stage": ["frost_development"],
+            "cycle_status": ["valid"],
+            "cycle_progress": [0.0],
+            "cycle_elapsed_seconds": [0.0],
+        }
+    )
+    processed_summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test", "exp_test"],
+            "cycle_id": ["cycle_001", "partial_001"],
+            "baseline_status": ["not_applicable", "not_applicable"],
+            "baseline_failure_reason": ["cycle_not_valid", "cycle_not_valid"],
+        }
+    )
+    validate_processed(processed, processed_summary)
+    with pytest.raises(ValueError, match="Processed cycle keys"):
+        validate_processed(processed.assign(cycle_id="cycle_002"), processed_summary)
+
+    negative_elapsed = valid_prepared.assign(cycle_elapsed_seconds=-1.0)
+    with pytest.raises(ValueError, match="nonnegative"):
+        validate_prepared(negative_elapsed, summary)
 
     evidence = pd.DataFrame(columns=[
         "experiment_id", "experiment_date", "channel", "trend_cycle_count",

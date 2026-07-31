@@ -345,7 +345,7 @@ def _observed_fraction(
 def _maximum_gap(timestamps: pd.Series) -> float:
     parsed = pd.to_datetime(timestamps, errors="coerce").dropna().sort_values()
     if len(parsed) < 2:
-        return 0.0
+        return np.nan
     return float(parsed.diff().dt.total_seconds().dropna().max())
 
 

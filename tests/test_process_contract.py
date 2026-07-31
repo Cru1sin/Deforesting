@@ -180,8 +180,9 @@ def test_process_excludes_partial_and_recomputes_coordinates(tmp_path: Path) -> 
     processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
 
     assert not processed["cycle_stage"].eq("partial").any()
-    assert processed["cycle_progress"].dropna().tolist() == [0.0, 1 / 6, 1 / 3]
-    assert final_summary.loc[0, "baseline_status"] == "available"
+    assert processed["cycle_progress"].dropna().tolist() == [index / 6 for index in range(6)]
+    assert final_summary.loc[0, "baseline_status"] == "unavailable"
+    assert final_summary.loc[0, "baseline_failure_reason"] == "insufficient_observed_coverage"
 
 
 def test_stage_boundary_buckets_are_excluded_only_when_boundary_is_inside_bucket(
@@ -376,11 +377,43 @@ def test_continuous_coverage_counts_before_fill_and_excludes_unavailable_channel
 
     processed, final_summary = process(frame, summary, _config(tmp_path), channels)
 
-    assert final_summary.loc[0, "eligible_continuous_channel_bucket_count"] == 6
-    assert final_summary.loc[0, "low_coverage_channel_bucket_count"] == 4
+    assert final_summary.loc[0, "eligible_continuous_channel_bucket_count"] == 72
+    assert final_summary.loc[0, "low_coverage_channel_bucket_count"] == 70
     low_bucket = processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:10"))
     assert processed.loc[low_bucket, "temperature__imputed"].all()
     assert processed.loc[low_bucket, "temperature"].notna().all()
+
+
+def test_complete_cycle_grid_uses_summary_boundaries_for_unobserved_edges(
+    tmp_path: Path,
+) -> None:
+    timestamps = pd.to_datetime(
+        ["2026-07-15 00:00:05", "2026-07-15 00:00:45"]
+    )
+    frame = _frame(timestamps, temperature=[1.0, 2.0])
+    frame["temperature__missing"] = False
+    frame.loc[0, "cycle_stage"] = "recovery"
+    frame.loc[1, "cycle_stage"] = "frost_development"
+    summary = _summary(
+        heating="2026-07-15 00:00:00",
+        stable="2026-07-15 00:10:00",
+        defrost="2026-07-15 00:50:00",
+    )
+    summary["defrost_end"] = pd.Timestamp("2026-07-15 00:01:00")
+    summary["processed_available_fraction"] = 1.0
+    summary["imputed_fraction"] = 0.0
+
+    processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
+
+    expected_timestamps = pd.date_range("2026-07-15 00:00:00", periods=6, freq="10s")
+    assert processed["timestamp"].tolist() == list(expected_timestamps)
+    first_bucket = processed["timestamp"].eq(expected_timestamps[0])
+    last_bucket = processed["timestamp"].eq(expected_timestamps[-1])
+    assert processed.loc[first_bucket, "temperature"].isna().all()
+    assert processed.loc[last_bucket, "temperature"].isna().all()
+    assert final_summary.loc[0, "eligible_continuous_channel_bucket_count"] == 6
+    assert "processed_available_fraction" not in final_summary
+    assert "imputed_fraction" not in final_summary
 
 
 def test_process_rejects_non_divisible_coverage_grid(tmp_path: Path) -> None:

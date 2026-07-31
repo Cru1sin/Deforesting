@@ -9,7 +9,7 @@ import pytest
 from frost_analysis.config import Config, load_config
 from frost_analysis.cycles import label_cycles
 from frost_analysis.images import match_images
-from frost_analysis.prepare import _expected_row_count, _observed_fraction, prepare
+from frost_analysis.prepare import _expected_row_count, _maximum_gap, _observed_fraction, prepare
 
 prepare_module = import_module("frost_analysis.prepare")
 
@@ -478,6 +478,7 @@ def test_summary_expected_row_count_uses_left_closed_interval() -> None:
 def test_image_gap_is_nan_when_fewer_than_two_images_exist() -> None:
     assert pd.isna(prepare_module._maximum_image_gap(pd.Series([pd.Timestamp("2026-07-15")])))
     assert pd.isna(prepare_module._maximum_image_gap(pd.Series(dtype="datetime64[ns]")))
+    assert pd.isna(_maximum_gap(pd.Series([pd.Timestamp("2026-07-15")])))
 
 
 def test_observed_fraction_uses_source_discovery_denominator() -> None:

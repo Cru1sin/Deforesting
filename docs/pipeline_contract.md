@@ -44,8 +44,9 @@ Process 的重采样规则如下：
 重采样产生的空桶不是 imputation；只有后续缺失策略真正重建的值才标记 `__imputed`。
 
 每个 `experiment_id × cycle_id` 只建立一次公共 10 秒时间网格，不按
-`cycle_stage` 分别建网格。每个输出桶代表左闭右开区间 `[timestamp,
-timestamp + 10 秒)`。使用 `cycle_summary` 的 `heating_start`、
+`cycle_stage` 分别建网格。网格覆盖 `heating_start` 到 `defrost_end` 的完整循环范围，
+包括没有任何原始观测的首尾桶。每个输出桶代表左闭右开区间 `[timestamp,
+ timestamp + 10 秒)`。使用 `cycle_summary` 的 `heating_start`、
 `stable_heating_start`、`defrost_start` 和 `defrost_end` 计算精确阶段区间。
 阶段或循环边界严格位于桶内部时，整个 transition bucket 被排除；边界恰好位于
 桶起点或终点时保留。桶内只聚合所属阶段的原始观测，不混合其他阶段，也不通过
@@ -95,7 +96,7 @@ image_<role>_offset_seconds
 
 ## 4. Bounded 缺失和共同 baseline
 
-重采样完成后，所有填补限制在 `experiment_id × cycle_id × cycle_stage` 内。连续量只有在完整 NaN run 两侧都有 observed 值、两侧实际时间间隔不超过 `continuous_max_gap_seconds` 时才整段线性插值；超长 run 整段保持 NaN。step 只在前值 observed 且整个缺失段距前值不超过 `control_max_gap_seconds` 时限时前值保持。event、categorical 和 protected 默认不填补。
+重采样完成后，所有填补限制在 `experiment_id × cycle_id × cycle_stage` 内。连续量只有在完整 NaN run 两侧都有 observed 值、两侧实际时间间隔不超过 `continuous_max_gap_seconds` 时才整段线性插值；超长 run 整段保持 NaN。step 对每个缺失桶分别计算其与最后 observed 值的时间差；在 `control_max_gap_seconds` 内的桶使用前值，超过阈值的桶保持 NaN。event、categorical 和 protected 默认不填补。
 
 派生通道的 `__imputed` 是全部依赖 `__imputed` 的布尔 OR。过去窗口特征只为候选通道生成：
 
