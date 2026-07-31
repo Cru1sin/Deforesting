@@ -86,7 +86,7 @@ def test_prepare_outputs_are_separate_from_formal_manifest(tmp_path: Path) -> No
     )
     summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_001"]})
 
-    write_prepare_outputs(prepared, summary, {"prepared_rows": 1}, prepared_dir, raw)
+    write_prepare_outputs(prepared, summary, {"prepared_row_count": 1}, prepared_dir, raw)
 
     assert (prepared_dir / "prepared_data.parquet").is_file()
     assert (prepared_dir / "cycle_summary.csv").is_file()

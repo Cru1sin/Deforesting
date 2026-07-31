@@ -61,6 +61,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     input_frame = pd.read_parquet(arguments.input)
     ensure_output_outside_input(arguments.output, config.input_dir)
     if arguments.command == "process":
+        validate_prepared(input_frame, cycle_summary)
         processed, final_summary = process(input_frame, cycle_summary, config, channels)
         validate_processed(processed, final_summary)
         write_process_outputs(
@@ -72,8 +73,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(arguments.output)
         return 0
-    evidence = analyze(input_frame, cycle_summary, config, channels)
     validate_processed(input_frame, cycle_summary)
+    evidence = analyze(input_frame, cycle_summary, config, channels)
     validate_analysis(evidence)
     write_analysis_outputs(
         evidence,

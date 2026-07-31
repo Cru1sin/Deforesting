@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from pathlib import Path
 
 import pandas as pd
@@ -8,7 +9,9 @@ import pytest
 from frost_analysis.config import Config, load_config
 from frost_analysis.cycles import label_cycles
 from frost_analysis.images import match_images
-from frost_analysis.prepare import prepare
+from frost_analysis.prepare import _expected_row_count, _observed_fraction, prepare
+
+prepare_module = import_module("frost_analysis.prepare")
 
 
 def _config(root: Path, raw: Path) -> Config:
@@ -459,6 +462,29 @@ def test_prepare_enforces_configured_valid_range(tmp_path: Path) -> None:
 
     assert pd.isna(prepared.loc[0, "ambient_temperature"])
     assert bool(prepared.loc[0, "ambient_temperature__invalid"])
+
+
+def test_summary_expected_row_count_uses_left_closed_interval() -> None:
+    row = pd.Series(
+        {
+            "heating_start": pd.Timestamp("2026-07-15 00:00:00"),
+            "defrost_end": pd.Timestamp("2026-07-15 00:00:10"),
+        }
+    )
+
+    assert _expected_row_count(row, 1) == 10
+
+
+def test_image_gap_is_nan_when_fewer_than_two_images_exist() -> None:
+    assert pd.isna(prepare_module._maximum_image_gap(pd.Series([pd.Timestamp("2026-07-15")])))
+    assert pd.isna(prepare_module._maximum_image_gap(pd.Series(dtype="datetime64[ns]")))
+
+
+def test_observed_fraction_uses_source_discovery_denominator() -> None:
+    group = pd.DataFrame({"valid": [1.0, 2.0], "invalid": [float("nan"), float("nan")]})
+
+    assert _observed_fraction(group, ["valid", "invalid"], {"valid", "invalid"}) == 0.5
+    assert _observed_fraction(group, ["valid", "invalid"], {"valid"}) == 1.0
 
 
 def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:

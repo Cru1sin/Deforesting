@@ -30,6 +30,7 @@ def prepare(
     channel_frames, invalid_timestamp_rows = _load_channel_frames(
         inputs.sensor_files, config.input_dir, channels, config.timestamp_column
     )
+    available_source_channels = set(channel_frames)
     timestamps = _all_timestamps(channel_frames)
     if timestamps.empty:
         raise ValueError("sensor files contain no valid timestamps")
@@ -83,6 +84,7 @@ def prepare(
         channels,
         camera_roles,
         config.expected_sensor_interval_seconds,
+        available_source_channels,
     )
     prepare_summary = {
         "experiment_id": config.experiment_id,
@@ -273,6 +275,7 @@ def _add_cycle_summary_metrics(
     channels: Mapping[str, Mapping[str, Any]],
     camera_roles: Mapping[str, str],
     expected_interval_seconds: int,
+    available_source_channels: set[str],
 ) -> pd.DataFrame:
     raw_channels = [
         name for name, settings in channels.items() if str(settings.get("kind")) != "derived"
@@ -286,7 +289,9 @@ def _add_cycle_summary_metrics(
         group = prepared.loc[prepared["cycle_id"].eq(cycle_id)]
         raw_count = len(group)
         expected = _expected_row_count(row, expected_interval_seconds)
-        observed_fraction = _observed_fraction(group, raw_channels)
+        observed_fraction = _observed_fraction(
+            group, raw_channels, available_source_channels
+        )
         maximum_gap = _maximum_gap(group["timestamp"])
         duplicate_count = _quality_row_count(group, raw_channels, "__duplicate")
         conflict_count = _quality_row_count(group, raw_channels, "__conflict")
@@ -294,25 +299,24 @@ def _add_cycle_summary_metrics(
         image_count = int(pd.Series(image_values).dropna().nunique()) if image_values.size else 0
         role_count = sum(int(group[column].notna().any()) for column in role_path_columns)
         complete_fraction = role_count / len(role_path_columns) if role_path_columns else 0.0
-        image_gap = max(
-            (
-                _maximum_gap(group[column].dropna())
-                for column in role_time_columns
-                if column in group
-            ),
-            default=0.0,
-        )
+        image_gaps = [
+            _maximum_image_gap(group[column].dropna())
+            for column in role_time_columns
+            if column in group
+        ]
+        image_gaps = [value for value in image_gaps if pd.notna(value)]
+        image_gap = max(image_gaps) if image_gaps else np.nan
         records.append(
             {
                 "raw_row_count": raw_count,
                 "expected_row_count": expected,
                 "sensor_observed_fraction": observed_fraction,
-                "maximum_sensor_gap_seconds": maximum_gap,
+                "maximum_timeline_gap_seconds": maximum_gap,
                 "duplicate_observation_count": duplicate_count,
                 "conflict_observation_count": conflict_count,
                 "rgb_image_count": image_count,
                 "rgb_role_count": role_count,
-                "rgb_complete_role_fraction": complete_fraction,
+                "rgb_role_presence_fraction": complete_fraction,
                 "maximum_rgb_gap_seconds": image_gap,
             }
         )
@@ -324,11 +328,15 @@ def _expected_row_count(row: pd.Series, interval_seconds: int) -> object:
     end = row.get("defrost_end")
     if not isinstance(start, pd.Timestamp) or not isinstance(end, pd.Timestamp):
         return np.nan
-    return int(round((end - start).total_seconds() / interval_seconds)) + 1
+    return int(np.ceil((end - start).total_seconds() / interval_seconds))
 
 
-def _observed_fraction(group: pd.DataFrame, channels: list[str]) -> float:
-    available = [name for name in channels if name in group]
+def _observed_fraction(
+    group: pd.DataFrame, channels: list[str], available_source_channels: set[str]
+) -> float:
+    available = [
+        name for name in channels if name in available_source_channels and name in group
+    ]
     if group.empty or not available:
         return 0.0
     return float(group[available].notna().mean().mean())
@@ -338,6 +346,13 @@ def _maximum_gap(timestamps: pd.Series) -> float:
     parsed = pd.to_datetime(timestamps, errors="coerce").dropna().sort_values()
     if len(parsed) < 2:
         return 0.0
+    return float(parsed.diff().dt.total_seconds().dropna().max())
+
+
+def _maximum_image_gap(timestamps: pd.Series) -> float:
+    parsed = pd.to_datetime(timestamps, errors="coerce").dropna().sort_values()
+    if len(parsed) < 2:
+        return np.nan
     return float(parsed.diff().dt.total_seconds().dropna().max())
 
 

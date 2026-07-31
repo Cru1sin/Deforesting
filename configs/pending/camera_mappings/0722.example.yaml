@@ -1,0 +1,3 @@
+# PENDING: camera roles have not been physically confirmed.
+# Do not use this configuration for Prepare or scientific analysis.
+camera_roles: {}

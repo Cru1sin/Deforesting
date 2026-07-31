@@ -80,7 +80,7 @@ def write_prepare_outputs(
     prepared.to_parquet(output_dir / "prepared_data.parquet", index=False)
     cycle_summary.to_csv(output_dir / "cycle_summary.csv", index=False)
     summary = dict(prepare_summary)
-    summary.setdefault("prepared_rows", len(prepared))
+    summary.setdefault("prepared_row_count", len(prepared))
     summary.setdefault("cycle_count", len(cycle_summary))
     (output_dir / "prepare_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, default=_json_default) + "\n",

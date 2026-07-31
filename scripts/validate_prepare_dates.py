@@ -13,15 +13,15 @@ from frost_analysis.validation import validate_prepared
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", action="append", type=Path, required=True)
+    parser.add_argument("config_paths", nargs="+", type=Path)
     arguments = parser.parse_args()
-    for config_path in arguments.config:
+    for config_path in arguments.config_paths:
         config = load_config(config_path)
         channels = load_channels(config.channels_path)
         prepared, summary, prepare_summary = prepare(config, channels)
         validate_prepared(prepared, summary)
         print(
-            f"{config.experiment_id}: rows={prepare_summary['prepared_rows']} "
+            f"{config.experiment_id}: rows={prepare_summary['prepared_row_count']} "
             f"cycles={prepare_summary['cycle_count']}",
             flush=True,
         )

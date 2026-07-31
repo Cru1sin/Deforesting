@@ -22,6 +22,30 @@ python -m frost_analysis run \
 
 完整运行成功后，目录中还会有 `manifest.json`。阶段命令 `prepare`、`process`、`analyze` 都要求显式输入；它们不自动寻找最新结果、不缓存、不恢复，也不生成阶段 manifest。
 
+## 模块地图
+
+需要修改的内容与主要文件：
+
+| 内容 | 文件 |
+| --- | --- |
+| 日期路径和阈值 | `configs/<date>.yaml` |
+| 原始字段、单位、角色 | `configs/channels.yaml` |
+| 相机物理角色 | `configs/camera_mappings/<date>.yaml` |
+| 原始数据整理 | `src/frost_analysis/prepare.py` |
+| 循环边界 | `src/frost_analysis/cycles.py` |
+| 重采样和缺失处理 | `src/frost_analysis/process.py` |
+| Baseline | `src/frost_analysis/baseline.py` |
+| 候选证据 | `src/frost_analysis/analysis.py` |
+| 阶段编排 | `src/frost_analysis/pipeline.py` |
+| 合同检查 | `src/frost_analysis/validation.py` |
+
+建议阅读顺序：
+
+```text
+README → docs/pipeline_contract.md → pipeline.py → config.py / channels.py
+→ prepare.py / cycles.py → process.py / baseline.py → analysis.py → validation.py
+```
+
 Prepared 快照可以独立复用：
 
 ```bash
