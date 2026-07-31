@@ -2,28 +2,42 @@ experiment_id: exp_20260717
 experiment_date: "2026-07-17"
 input_dir: data/0717
 channels_path: configs/channels.yaml
-sensor_globs: ["*.xls", "*.xlsx"]
+camera_mapping_path: configs/camera_mappings/0717.yaml
+sensor_globs: ["*.xls"]
 image_extensions: [".jpg", ".png"]
-camera_mapping_file: IPlocation.yaml
+timestamp_column: "时间"
+expected_sensor_interval_seconds: 1
+image_match_tolerance_seconds: 2
 cycles:
   defrost_channel: defrost_active
   maximum_state_gap_seconds: 5
+  debounce_seconds: 20
+  minimum_defrost_seconds: 60
+  maximum_defrost_seconds: 1200
+  minimum_heating_seconds: 1800
+  maximum_heating_seconds: 21600
   stable_heating_seconds: 180
 process:
   resample_interval_seconds: 10
   continuous_max_gap_seconds: 60
   control_max_gap_seconds: 30
   baseline:
-    stage: recovery
+    stage: frost_development
+    search_start_minutes: 0
+    search_end_minutes: 20
+    window_minutes: 5
+    window_step_minutes: 1
     minimum_observed_coverage: 0.8
-    maximum_imputed_fraction: 0.15
+    maximum_imputed_fraction: 0.0
+    required_anchor_channels: [ambient_temperature, water_in_temperature, water_out_temperature, compressor_frequency]
+    anchor_maximum_std: {ambient_temperature: 1.0, water_in_temperature: 1.0, water_out_temperature: 1.0, compressor_frequency: 5.0}
   features:
     windows_minutes: [5, 10, 30]
 analysis:
   performance_target: heating_capacity__baseline_residual
   future_horizon_minutes: 10
-  reset_pre_window_minutes: 5
   minimum_valid_cycles: 3
-  minimum_absolute_trend_effect: 0.3
+  minimum_trend_effect: 0.3
   minimum_direction_consistency: 0.7
   maximum_context_association: 0.8
+  minimum_points_per_cycle: 6

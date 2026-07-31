@@ -19,6 +19,49 @@ channels:
     analysis_candidate: false
     valid_range: [-20, 80]
 
+  water_out_temperature:
+    source_names: ["p1__Twout(27.1)'2_31'"]
+    unit: degC
+    kind: continuous
+    role: context
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-20, 80]
+
+  water_temperature_setpoint:
+    source_names: ["p1__Ts(37.1)'2_31"]
+    unit: degC
+    kind: continuous
+    role: control
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-20, 80]
+
+  water_flow:
+    source_names: ["p5__FlowQ"]
+    unit: m3/h
+    kind: continuous
+    role: context
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    scale: 0.01
+    offset: 0.0
+    valid_range: [0, 100]
+
+  evaporating_pressure:
+    source_names: ["p1__Pe(34.2)'2_12'"]
+    unit: MPa_abs
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: true
+    expected_frost_direction: decrease
+    valid_range: [0, 10]
+
   evaporating_temperature:
     source_names: ["p1__Te'2_20"]
     unit: degC
@@ -28,6 +71,139 @@ channels:
     missing: interpolate
     analysis_candidate: true
     expected_frost_direction: decrease
+    valid_range: [-50, 50]
+
+  coil_temperature:
+    source_names: ["p1__T3(21.1)'2_31'"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: true
+    expected_frost_direction: decrease
+    valid_range: [-50, 80]
+
+  fin_temperature:
+    source_names: ["p1__Tfin(25.1)'2_31"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: true
+    expected_frost_direction: decrease
+    valid_range: [-50, 80]
+
+  suction_temperature:
+    source_names: ["p1__Th(24.1)'2_31'"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-50, 100]
+
+  superheat:
+    source_names: ["p1__SH'2_20"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-20, 100]
+
+  condensing_pressure:
+    source_names: ["p1__Pc(31.2)'2_12'"]
+    unit: MPa_abs
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [0, 10]
+
+  condensing_temperature:
+    source_names: ["p1__Tc'2_20"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-50, 120]
+
+  discharge_temperature:
+    source_names: ["p1__Tp(23.1)'2_31'"]
+    unit: degC
+    kind: continuous
+    role: sensor
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [-50, 150]
+
+  compressor_frequency:
+    source_names: ["p1__运行频率'1_00"]
+    unit: Hz
+    kind: step
+    role: control
+    resample: last
+    missing: forward_fill
+    analysis_candidate: false
+    valid_range: [0, 200]
+
+  compressor_current:
+    source_names: ["p2__压缩机电流"]
+    unit: A
+    kind: continuous
+    role: control
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [0, 200]
+
+  compressor_speed:
+    source_names: ["p2__压缩机转速"]
+    unit: rpm
+    kind: step
+    role: control
+    resample: last
+    missing: forward_fill
+    analysis_candidate: false
+    valid_range: [0, 20000]
+
+  fan_speed:
+    source_names: ["p2__风机转速"]
+    unit: rpm
+    kind: step
+    role: control
+    resample: last
+    missing: forward_fill
+    analysis_candidate: false
+    valid_range: [0, 10000]
+
+  fan_current:
+    source_names: ["p2__风机电流"]
+    unit: A
+    kind: continuous
+    role: control
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+    valid_range: [0, 100]
+
+  exv_opening:
+    source_names: ["p1__EXV1'2_20"]
+    unit: steps
+    kind: step
+    role: control
+    resample: last
+    missing: forward_fill
+    analysis_candidate: false
+    valid_range: [0, 2000]
 
   heating_capacity:
     source_names: ["p1__QComp10W'2_32"]
@@ -37,6 +213,7 @@ channels:
     resample: mean
     missing: none
     analysis_candidate: false
+    valid_range: [0, 100]
 
   power_total:
     source_names: ["p2__总功率"]
@@ -44,6 +221,18 @@ channels:
     kind: continuous
     role: performance
     resample: mean
+    missing: none
+    analysis_candidate: false
+    scale: 0.001
+    offset: 0.0
+    valid_range: [0, 100]
+
+  operating_mode:
+    source_names: ["p1__模式(35.0)<1_00>"]
+    unit: code
+    kind: categorical
+    role: event
+    resample: last
     missing: none
     analysis_candidate: false
 
@@ -60,6 +249,8 @@ channels:
       OFF: false
       "1": true
       "0": false
+      TRUE: true
+      FALSE: false
 
   cop:
     unit: dimensionless
@@ -70,3 +261,33 @@ channels:
     analysis_candidate: false
     formula: cop
     dependencies: [heating_capacity, power_total]
+
+  pressure_ratio:
+    unit: dimensionless
+    kind: derived
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+    formula: pressure_ratio
+    dependencies: [condensing_pressure, evaporating_pressure]
+
+  water_delta_temperature:
+    unit: degC
+    kind: derived
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+    formula: water_delta_temperature
+    dependencies: [water_out_temperature, water_in_temperature]
+
+  superheat_calculated:
+    unit: degC
+    kind: derived
+    role: sensor
+    resample: mean
+    missing: none
+    analysis_candidate: false
+    formula: superheat_calculated
+    dependencies: [suction_temperature, evaporating_temperature]
