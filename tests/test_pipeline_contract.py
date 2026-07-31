@@ -305,6 +305,26 @@ def test_structural_validators_reject_invalid_fields() -> None:
     with pytest.raises(ValueError, match="cycle keys"):
         validate_prepared(valid_prepared, extra_summary)
 
+    incomplete_summary = pd.concat(
+        [
+            summary.assign(cycle_status="valid"),
+            pd.DataFrame(
+                {
+                    "experiment_id": ["exp_test"],
+                    "cycle_id": ["cycle_002"],
+                    "cycle_status": ["incomplete"],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    validate_prepared(valid_prepared, incomplete_summary)
+
+    invalid_summary = incomplete_summary.copy()
+    invalid_summary.loc[invalid_summary["cycle_id"].eq("cycle_002"), "cycle_status"] = "invalid"
+    with pytest.raises(ValueError, match="cycle keys"):
+        validate_prepared(valid_prepared, invalid_summary)
+
     missing_summary = valid_prepared.assign(cycle_id="cycle_002")
     with pytest.raises(ValueError, match="cycle keys"):
         validate_prepared(missing_summary, summary)

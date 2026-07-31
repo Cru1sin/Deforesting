@@ -119,8 +119,22 @@ def _validate_cycle_references(
 ) -> None:
     frame_keys = _cycle_key_set(frame)
     summary_keys = _cycle_key_set(cycle_summary)
-    if require_exact and frame_keys != summary_keys:
-        raise ValueError("Prepared and cycle_summary cycle keys must match")
+    if require_exact:
+        missing_from_summary = frame_keys - summary_keys
+        summary_only = summary_keys - frame_keys
+        if missing_from_summary:
+            raise ValueError("Prepared and cycle_summary cycle keys must match")
+        if summary_only:
+            if "cycle_status" not in cycle_summary:
+                raise ValueError("Prepared and cycle_summary cycle keys must match")
+            summary_only_rows = cycle_summary.loc[
+                cycle_summary.set_index(["experiment_id", "cycle_id"]).index.isin(
+                    summary_only
+                )
+            ]
+            if not summary_only_rows["cycle_status"].eq("incomplete").all():
+                raise ValueError("Prepared and cycle_summary cycle keys must match")
+        return
     if not require_exact and not frame_keys <= summary_keys:
         raise ValueError("Processed cycle keys must be present in cycle_summary")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from frost_analysis.io import (
 )
 from frost_analysis.prepare import prepare
 from frost_analysis.process import process
+from frost_analysis.report import generate_report
 from frost_analysis.validation import validate_analysis, validate_prepared, validate_processed
 
 
@@ -29,6 +31,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = subparsers.add_parser("run")
     _add_config_and_output(run)
     run.add_argument("--overwrite", action="store_true")
+    run.add_argument("--report", action="store_true")
     prepare_parser = subparsers.add_parser("prepare")
     _add_config_and_output(prepare_parser)
     prepare_parser.add_argument("--overwrite", action="store_true")
@@ -38,9 +41,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     analyze_parser = subparsers.add_parser("analyze")
     _add_config_input_cycles_output(analyze_parser)
     analyze_parser.add_argument("--overwrite", action="store_true")
+    report_parser = subparsers.add_parser("report")
+    _add_report_input_output(report_parser)
+    report_parser.add_argument("--overwrite", action="store_true")
     arguments = parser.parse_args(argv)
     if arguments.command == "run":
-        print(run_pipeline(arguments.config, arguments.output, arguments.overwrite))
+        run_dir = run_pipeline(arguments.config, arguments.output, arguments.overwrite)
+        if arguments.report:
+            try:
+                generate_report(run_dir, run_dir / "qa", overwrite=arguments.overwrite)
+            except Exception as error:
+                print(
+                    f"scientific run succeeded, QA report failed: {error}",
+                    file=sys.stderr,
+                )
+                return 1
+        print(run_dir)
+        return 0
+    if arguments.command == "report":
+        try:
+            print(generate_report(arguments.input, arguments.output, arguments.overwrite))
+        except Exception as error:
+            print(f"QA report failed: {error}", file=sys.stderr)
+            return 1
         return 0
     config = load_config(arguments.config)
     channels = load_channels(config.channels_path)
@@ -95,6 +118,11 @@ def _add_config_input_cycles_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--cycles", required=True, type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+
+
+def _add_report_input_output(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
 
 

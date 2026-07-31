@@ -1,6 +1,8 @@
 # Pipeline 数据合同
 
-本文档记录会改变科研含义的稳定约定。阅读顺序是 `config → prepare → process → analyze`。
+本文档记录会改变科研含义的稳定约定。阅读顺序是
+`config → prepare → process → analyze → report`；其中 Report 是只读 QA 模块，不是
+科学 Pipeline Stage。
 
 ## 1. 阶段边界和唯一键
 
@@ -9,6 +11,7 @@
 | Prepare | `data/<MMDD>` 原始目录 | Prepared、初始 `cycle_summary`、`prepare_summary.json` | 解析原始文本、单位换算、循环切分、图片匹配 |
 | Process | Prepared、初始 summary | Processed、最终 `cycle_summary` | 10 秒重采样、bounded 缺失、派生量、共同 baseline、动态特征 |
 | Analyze | Processed、最终 summary | `candidate_channel_evidence.csv` | 循环级趋势、未来关联和工况关联证据 |
+| Report | Prepared、Processed、最终 summary、Evidence | QA 图片和 `report_summary.json` | 只读可视化验收，不产生科学数据或证据 |
 
 原始目录只读。Prepared 和 Processed 的唯一键是 `experiment_id + timestamp`；循环摘要的唯一键是 `experiment_id + cycle_id`；候选证据的唯一键是 `experiment_id + channel`。
 
@@ -190,3 +193,59 @@ trend_effect >= minimum_trend_effect
 ```
 
 当前不使用绝对趋势、不使用 reset 或 future evidence，不生成 rank、weighted score 或综合 candidate score。
+
+## 6. 只读 QA Report 合同
+
+Report 只读取一次正式运行已经写出的：
+
+```text
+prepared_data.parquet
+processed_data.parquet
+cycle_summary.csv
+candidate_channel_evidence.csv
+```
+
+它先复用 `validate_prepared()`、`validate_processed()` 和 `validate_analysis()`，再检查
+绘图所需的额外字段。Report 允许读取、筛选、分组、遮罩、计数、排序、布局、渲染和
+SHA-256 hash；禁止重新执行 cycle segmentation、resampling、coverage thresholding、
+imputation、derived quantities、baseline/residual calculation、correlation、future/context
+evidence、direction consistency 或 decision thresholding。
+
+固定数据源如下：
+
+| 图中内容 | 正式来源 |
+| --- | --- |
+| 原始传感器、stage、defrost、图片时间 | Prepared |
+| COP、baseline 诊断曲线、residual | Processed |
+| cycle 边界、duration、baseline status/reason | Cycle Summary |
+| candidate 统计值、decision、reason | Evidence |
+| observed/non-observed 时间带 | Prepared + Cycle Summary |
+
+Prepared 的 observed-only 曲线同时遮罩 `<channel>__missing`、`__invalid`、`__duplicate`
+和 `__conflict`；Processed 的曲线只遮罩对应的 `<channel>__imputed`。Candidate residual
+的质量列必须由 `imputed_column_for_value()` 解析，不能在 Report 中猜测列名。Report
+不会读取 YAML，也不会显示未写入正式 summary 的 baseline 搜索区间。
+
+Coverage 只发现同时具有测量值列和四个 Prepared 质量列的通道，排除时间、cycle 元数据、
+图片和 source lineage 字段，保持 Prepared 正式列顺序。它可以绘制 observed 时间带、图片
+时间、缺失位置和已保存 Summary 诊断，但不得命名或产生新的 coverage rate、质量分数或
+通过结论。
+
+每个图片角色的正式列必须完整成组：
+
+```text
+image_<role>_path
+image_<role>_time
+image_<role>_offset_seconds
+```
+
+三列全无表示没有该角色；三列部分存在表示输出结构损坏，Report 直接失败。cycle 图的
+图片数量按当前 cycle 的唯一 path 统计。没有任何图片角色是合法降级状态，并记录
+`no_image_roles_exported`。
+
+Report 输出到同一父目录的临时目录，全部 PNG 成功后才写最后的
+`report_summary.json`，随后安全替换正式 QA 目录。失败时删除临时目录并保留旧目录。
+`manifest.json` 可以不存在；若存在但不是合法 JSON，Report 直接失败。JSON 记录
+`manifest_present`、允许的 provenance 字段、四个科研输入文件的 SHA-256、生成图文件清单和
+结构化 warnings。无 warning 时 status 为 `success`，有数据降级 warning 时为
+`success_with_warnings`。
