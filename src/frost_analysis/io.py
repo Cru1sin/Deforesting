@@ -19,6 +19,8 @@ _PREPARE_FILES = {
     "cycle_summary.csv",
     "prepare_summary.json",
 }
+_PROCESS_FILES = {"processed_data.parquet", "cycle_summary.csv"}
+_ANALYZE_FILES = {"candidate_channel_evidence.csv"}
 _RUN_FILES = {
     "prepared_data.parquet",
     "processed_data.parquet",
@@ -86,6 +88,41 @@ def write_prepare_outputs(
     )
 
 
+def write_process_outputs(
+    processed: pd.DataFrame,
+    cycle_summary: pd.DataFrame,
+    output_dir: Path,
+    input_dir: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Write standalone Process results without creating a manifest."""
+    _prepare_output_dir(output_dir, input_dir, _PROCESS_FILES, overwrite)
+    processed.to_parquet(output_dir / "processed_data.parquet", index=False)
+    cycle_summary.to_csv(output_dir / "cycle_summary.csv", index=False)
+
+
+def write_analysis_outputs(
+    evidence: pd.DataFrame,
+    output_dir: Path,
+    input_dir: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Write standalone Analysis results without creating a manifest."""
+    _prepare_output_dir(output_dir, input_dir, _ANALYZE_FILES, overwrite)
+    evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
+
+
+def remove_manifest_for_overwrite(
+    output_dir: Path, input_dir: Path, *, overwrite: bool
+) -> None:
+    """Remove only a prior formal manifest before an overwrite run starts."""
+    ensure_output_outside_input(output_dir, input_dir)
+    if overwrite:
+        (output_dir / "manifest.json").unlink(missing_ok=True)
+
+
 def write_run_outputs(
     prepared: pd.DataFrame,
     processed: pd.DataFrame,
@@ -113,6 +150,8 @@ def write_run_outputs(
         "config_path": str(config_path),
         "config_sha256": _optional_sha256(config_path),
         "channels_sha256": _optional_sha256(config.channels_path),
+        "camera_mapping_path": str(config.camera_mapping_path),
+        "camera_mapping_sha256": _optional_sha256(config.camera_mapping_path),
         "git_commit": _git_commit(config.project_root),
         "prepare_summary": prepare_summary,
         "outputs": {
@@ -120,6 +159,12 @@ def write_run_outputs(
             "processed_data": "processed_data.parquet",
             "cycle_summary": "cycle_summary.csv",
             "candidate_channel_evidence": "candidate_channel_evidence.csv",
+        },
+        "output_row_counts": {
+            "prepared_data": len(prepared),
+            "processed_data": len(processed),
+            "cycle_summary": len(cycle_summary),
+            "candidate_channel_evidence": len(evidence),
         },
     }
     (output_dir / "manifest.json").write_text(

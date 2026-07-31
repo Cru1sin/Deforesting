@@ -2,9 +2,11 @@
 
 __version__ = "0.1.0"
 
-from .analysis import analyze
-from .pipeline import run_pipeline
-from .prepare import prepare
-from .process import process
+from frost_analysis import pipeline as _pipeline
+from frost_analysis.analysis import analyze
+from frost_analysis.prepare import prepare
+from frost_analysis.process import process
+
+run_pipeline = _pipeline.run_pipeline
 
 __all__ = ["prepare", "process", "analyze", "run_pipeline"]

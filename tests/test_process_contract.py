@@ -111,9 +111,11 @@ def _channels() -> dict[str, dict[str, object]]:
 def _summary(
     *,
     status: str = "valid",
+    heating: str | None = None,
     stable: str = "2026-07-15 00:00:00",
     defrost: str = "2026-07-15 00:05:00",
 ) -> pd.DataFrame:
+    heating_start = pd.Timestamp(heating or stable)
     return pd.DataFrame(
         {
             "experiment_id": ["exp_test"],
@@ -121,7 +123,7 @@ def _summary(
             "cycle_id": ["cycle_001"],
             "cycle_status": [status],
             "cycle_status_reason": [""],
-            "heating_start": [pd.Timestamp(stable)],
+            "heating_start": [heating_start],
             "stable_heating_start": [pd.Timestamp(stable)],
             "defrost_start": [pd.Timestamp(defrost)],
             "defrost_end": [pd.Timestamp(defrost) + pd.Timedelta(minutes=1)],
@@ -176,20 +178,104 @@ def test_process_excludes_partial_and_recomputes_coordinates(tmp_path: Path) -> 
     assert final_summary.loc[0, "baseline_status"] == "available"
 
 
-def test_stage_boundary_bucket_is_emitted_once(tmp_path: Path) -> None:
+def test_stage_boundary_bucket_uses_overlap_winner_and_drops_ties(tmp_path: Path) -> None:
     timestamps = pd.to_datetime(
         [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:02",
+            "2026-07-15 00:00:03",
             "2026-07-15 00:00:09",
             "2026-07-15 00:00:11",
         ]
     )
-    frame = _frame(timestamps, temperature=[1.0, 2.0])
-    frame.loc[0, "cycle_stage"] = "recovery"
-    summary = _summary(defrost="2026-07-15 00:05:00")
+    frame = _frame(timestamps, temperature=[100.0, 100.0, 1.0, 9.0, 2.0])
+    frame.loc[:1, "cycle_stage"] = "recovery"
+    summary = _summary(
+        heating="2026-07-15 00:00:00",
+        stable="2026-07-15 00:00:03",
+        defrost="2026-07-15 00:01:00",
+    )
 
     processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
     assert not processed.duplicated(["experiment_id", "timestamp"]).any()
+    transition = processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:00"))
+    assert processed.loc[transition, "cycle_stage"].eq("frost_development").all()
+    assert processed.loc[transition, "temperature"].iloc[0] == 5.0
+
+    tie_timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:04",
+            "2026-07-15 00:00:05",
+            "2026-07-15 00:00:09",
+        ]
+    )
+    tie_frame = _frame(tie_timestamps, temperature=[100.0, 100.0, 1.0, 9.0])
+    tie_frame.loc[:1, "cycle_stage"] = "recovery"
+    tie_summary = _summary(
+        heating="2026-07-15 00:00:00",
+        stable="2026-07-15 00:00:05",
+        defrost="2026-07-15 00:01:00",
+    )
+
+    tie_processed, tie_final_summary = process(
+        tie_frame, tie_summary, _config(tmp_path), _channels()
+    )
+
+    assert tie_processed.empty
+    assert tie_final_summary.loc[0, "excluded_transition_bucket_count"] == 1
+
+
+def test_cycle_boundary_bucket_is_excluded_instead_of_duplicated(tmp_path: Path) -> None:
+    first_timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:29",
+            "2026-07-15 00:00:31",
+        ]
+    )
+    first = _frame(first_timestamps, temperature=[1.0, 2.0, 3.0])
+    first["cycle_id"] = "cycle_001"
+    first.loc[:1, "cycle_stage"] = "frost_development"
+    first.loc[2, "cycle_stage"] = "defrost"
+
+    second_timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:32",
+            "2026-07-15 00:00:34",
+            "2026-07-15 00:00:41",
+        ]
+    )
+    second = _frame(second_timestamps, temperature=[10.0, 11.0, 12.0])
+    second["cycle_id"] = "cycle_002"
+    second.loc[:1, "cycle_stage"] = "recovery"
+
+    first_summary = _summary(
+        heating="2026-07-15 00:00:00",
+        stable="2026-07-15 00:00:03",
+        defrost="2026-07-15 00:00:30",
+    )
+    first_summary["cycle_id"] = "cycle_001"
+    first_summary["defrost_end"] = pd.Timestamp("2026-07-15 00:00:32")
+    second_summary = _summary(
+        heating="2026-07-15 00:00:32",
+        stable="2026-07-15 00:00:35",
+        defrost="2026-07-15 00:01:00",
+    )
+    second_summary["cycle_id"] = "cycle_002"
+    summary = pd.concat([first_summary, second_summary], ignore_index=True)
+
+    processed, final_summary = process(
+        pd.concat([first, second], ignore_index=True),
+        summary,
+        _config(tmp_path),
+        _channels(),
+    )
+
+    assert not processed.duplicated(["experiment_id", "timestamp"]).any()
+    assert not processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:30")).any()
+    assert final_summary["excluded_transition_bucket_count"].sum() >= 1
 
 
 def test_long_continuous_gap_is_kept_entirely_nan(tmp_path: Path) -> None:

@@ -10,7 +10,10 @@ from frost_analysis.config import Config
 from frost_analysis.io import (
     discover_inputs,
     ensure_output_outside_input,
+    remove_manifest_for_overwrite,
+    write_analysis_outputs,
     write_prepare_outputs,
+    write_process_outputs,
     write_run_outputs,
 )
 
@@ -119,3 +122,35 @@ def test_formal_manifest_is_written_after_four_outputs(tmp_path: Path) -> None:
         "cycle_summary": "cycle_summary.csv",
         "candidate_channel_evidence": "candidate_channel_evidence.csv",
     }
+
+
+def test_standalone_writers_protect_known_files_and_keep_unknown_files(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    output = tmp_path / "outputs" / "stage"
+    output.mkdir(parents=True)
+    (output / "notes.txt").write_text("keep", encoding="utf-8")
+    processed = pd.DataFrame({"experiment_id": ["exp_test"]})
+    summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_001"]})
+    evidence = pd.DataFrame({"experiment_id": ["exp_test"], "channel": ["signal"]})
+
+    write_process_outputs(processed, summary, output, raw)
+    write_analysis_outputs(evidence, output, raw)
+
+    with pytest.raises(FileExistsError):
+        write_analysis_outputs(evidence, output, raw)
+    write_analysis_outputs(evidence, output, raw, overwrite=True)
+    assert (output / "notes.txt").read_text(encoding="utf-8") == "keep"
+    assert not (output / "manifest.json").exists()
+
+
+def test_overwrite_removes_old_manifest_before_pipeline_work(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    output = tmp_path / "outputs" / "run"
+    output.mkdir(parents=True)
+    (output / "manifest.json").write_text("old", encoding="utf-8")
+
+    remove_manifest_for_overwrite(output, raw, overwrite=True)
+
+    assert not (output / "manifest.json").exists()

@@ -1,4 +1,4 @@
-"""Cycle-level candidate evidence without fixed weights or global ranking."""
+"""Transparent candidate evidence for valid, baseline-backed cycles."""
 
 from __future__ import annotations
 
@@ -19,11 +19,20 @@ EVIDENCE_COLUMNS = [
     "trend_effect",
     "direction_consistency",
     "reset_effect",
-    "future_performance_effect",
-    "max_abs_context_spearman",
+    "reset_evidence_status",
+    "reset_evidence_reason",
+    "future_performance_association",
+    "median_max_abs_context_spearman",
     "decision",
     "reason",
 ]
+
+_DECISIONS = {
+    "trend_supported_candidate",
+    "partial_evidence",
+    "insufficient_coverage",
+    "high_context_association",
+}
 
 
 def analyze(
@@ -32,68 +41,49 @@ def analyze(
     config: Any,
     channels: Mapping[str, Mapping[str, Any]],
 ) -> pd.DataFrame:
-    """Compute one transparent evidence row per experiment and candidate channel."""
-    candidates = [
-        name
-        for name, settings in channels.items()
-        if bool(settings.get("analysis_candidate", False))
-    ]
+    """Compute one evidence row per experiment and configured candidate channel."""
+    candidates = _candidate_names(channels)
     if not candidates:
         return pd.DataFrame(columns=EVIDENCE_COLUMNS)
+    settings = _analysis_settings(config)
+    experiments = _experiments(processed, config)
     rows: list[dict[str, object]] = []
-    experiments = (
-        processed[["experiment_id", "experiment_date"]]
-        .drop_duplicates()
-        .to_dict("records")
-    )
-    if not experiments:
-        experiments = [
-            {"experiment_id": config.experiment_id, "experiment_date": config.experiment_date}
-        ]
-    for experiment in experiments:
-        experiment_id = str(experiment["experiment_id"])
-        experiment_date = str(experiment["experiment_date"])
+    for experiment_id, experiment_date in experiments:
         current = processed.loc[processed["experiment_id"].eq(experiment_id)].copy()
+        cycles = cycle_summary.loc[cycle_summary["experiment_id"].eq(experiment_id)].copy()
         for channel in candidates:
-            trend_effects = _trend_effects(current, channel)
-            context_count, context_effect = _context_association(current, channel, channels)
-            reset_count, reset_effect = _reset_evidence(
-                current,
-                cycle_summary.loc[cycle_summary["experiment_id"].eq(experiment_id)],
-                channel,
-                channels[channel],
-                int(config.analysis.get("reset_pre_window_minutes", 5)),
+            trend = _trend_effects(current, cycles, channel, channels[channel], settings)
+            context_count, context_effect = _context_association(
+                current, cycles, channel, channels, settings
             )
-            future_count, future_effect = _future_evidence(
-                current,
-                channel,
-                str(config.analysis.get("performance_target", "")),
-                int(config.analysis.get("future_horizon_minutes", 10)),
+            future_count, future_effect = _future_association(
+                current, cycles, channel, settings
             )
-            trend_count = len(trend_effects)
-            trend_effect = _median_or_nan(trend_effects)
-            direction = _direction_consistency(trend_effects, trend_effect)
+            trend_effect = _median_or_nan(trend)
+            direction = _direction_consistency(trend)
             decision, reason = _decision(
-                trend_count,
+                len(trend),
                 trend_effect,
                 direction,
                 context_effect,
-                config.analysis,
+                settings,
             )
             rows.append(
                 {
                     "experiment_id": experiment_id,
                     "experiment_date": experiment_date,
                     "channel": channel,
-                    "trend_cycle_count": trend_count,
-                    "reset_pair_count": reset_count,
+                    "trend_cycle_count": len(trend),
+                    "reset_pair_count": 0,
                     "future_cycle_count": future_count,
                     "context_cycle_count": context_count,
                     "trend_effect": trend_effect,
                     "direction_consistency": direction,
-                    "reset_effect": reset_effect,
-                    "future_performance_effect": future_effect,
-                    "max_abs_context_spearman": context_effect,
+                    "reset_effect": np.nan,
+                    "reset_evidence_status": "not_evaluated",
+                    "reset_evidence_reason": "independent_reference_unavailable",
+                    "future_performance_association": future_effect,
+                    "median_max_abs_context_spearman": context_effect,
                     "decision": decision,
                     "reason": reason,
                 }
@@ -101,97 +91,87 @@ def analyze(
     return pd.DataFrame(rows, columns=EVIDENCE_COLUMNS)
 
 
-def _trend_effects(frame: pd.DataFrame, channel: str) -> list[float]:
-    residual = f"{channel}__baseline_residual"
-    if residual not in frame or "cycle_progress" not in frame:
-        return []
-    effects: list[float] = []
-    development = frame.loc[frame["cycle_stage"].eq("frost_development")]
-    if "cycle_status" in development:
-        development = development.loc[development["cycle_status"].eq("valid")]
-    for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
-        x = pd.to_numeric(group["cycle_progress"], errors="coerce")
-        y = pd.to_numeric(group[residual], errors="coerce")
-        correlation = _spearman(x, y)
-        if correlation is not None:
-            effects.append(correlation)
-    return effects
+def _candidate_names(channels: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    return [
+        name
+        for name, settings in channels.items()
+        if bool(settings.get("analysis_candidate", False))
+    ]
 
 
-def _reset_evidence(
+def _experiments(processed: pd.DataFrame, config: Any) -> list[tuple[str, str]]:
+    if processed.empty:
+        return [(str(config.experiment_id), str(config.experiment_date))]
+    columns = ["experiment_id", "experiment_date"]
+    values = processed[columns].drop_duplicates().itertuples(index=False, name=None)
+    return [(str(experiment_id), str(experiment_date)) for experiment_id, experiment_date in values]
+
+
+def _analysis_settings(config: Any) -> Any:
+    settings = config.analysis
+    return settings
+
+
+def _trend_effects(
     frame: pd.DataFrame,
     cycles: pd.DataFrame,
     channel: str,
     channel_settings: Mapping[str, Any],
-    pre_window_minutes: int,
-) -> tuple[int, float]:
-    status = f"{channel}__baseline_status"
-    if cycles.empty or f"{channel}__baseline_residual" not in frame or status not in frame:
-        return 0, np.nan
-    ordered = cycles.copy()
-    ordered["heating_start"] = pd.to_datetime(ordered["heating_start"], errors="coerce")
-    ordered = ordered.sort_values("heating_start", kind="stable").reset_index(drop=True)
+    settings: Any,
+) -> list[float]:
+    residual = f"{channel}__baseline_residual"
+    if residual not in frame or "cycle_progress" not in frame:
+        return []
+    eligible = _eligible_cycle_ids(cycles)
+    development = frame.loc[
+        frame["cycle_id"].isin(eligible)
+        & frame["cycle_stage"].eq("frost_development")
+    ]
     effects: list[float] = []
-    residual = f"{channel}__baseline_residual"
-    for index in range(len(ordered) - 1):
-        current_cycle = ordered.iloc[index]
-        next_cycle = ordered.iloc[index + 1]
-        if pd.isna(current_cycle.get("defrost_start")):
+    for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
+        correlation = _spearman_with_minimum(
+            group["cycle_progress"], group[residual], settings.minimum_points_per_cycle
+        )
+        if correlation is None:
             continue
-        current_id = current_cycle["cycle_id"]
-        next_id = next_cycle["cycle_id"]
-        current_mask = frame["cycle_id"].eq(current_id)
-        next_mask = frame["cycle_id"].eq(next_id)
-        defrost_start = pd.Timestamp(current_cycle["defrost_start"])
-        pre = frame.loc[
-            current_mask
-            & frame["cycle_stage"].eq("frost_development")
-            & frame["timestamp"].between(
-                defrost_start - pd.Timedelta(minutes=pre_window_minutes),
-                defrost_start,
-                inclusive="left",
-            ),
-            residual,
-        ]
-        post = frame.loc[
-            next_mask
-            & frame["cycle_stage"].eq("recovery")
-            & frame[status].eq("accepted"),
-            residual,
-        ]
-        if pre.empty or post.empty or not pre.notna().any() or not post.notna().any():
-            continue
-        raw_effect = float(post.median() - pre.median())
-        direction = 1.0 if channel_settings.get("expected_frost_direction") == "decrease" else -1.0
-        effects.append(raw_effect * direction)
-    return len(effects), _median_or_nan(effects)
+        direction = str(channel_settings.get("expected_frost_direction", ""))
+        effects.append(correlation if direction == "increase" else -correlation)
+    return effects
 
 
-def _future_evidence(
-    frame: pd.DataFrame, channel: str, target: str, horizon_minutes: int
+def _eligible_cycle_ids(cycles: pd.DataFrame) -> set[object]:
+    if "baseline_status" not in cycles:
+        return set()
+    return set(
+        cycles.loc[
+            cycles["cycle_status"].eq("valid") & cycles["baseline_status"].eq("available"),
+            "cycle_id",
+        ]
+    )
+
+
+def _future_association(
+    frame: pd.DataFrame, cycles: pd.DataFrame, channel: str, settings: Any
 ) -> tuple[int, float]:
     residual = f"{channel}__baseline_residual"
+    target = str(settings.performance_target)
     if residual not in frame or target not in frame:
         return 0, np.nan
+    eligible = _eligible_cycle_ids(cycles)
+    development = frame.loc[
+        frame["cycle_id"].isin(eligible) & frame["cycle_stage"].eq("frost_development")
+    ]
+    horizon = pd.Timedelta(minutes=settings.future_horizon_minutes)
     effects: list[float] = []
-    horizon = pd.Timedelta(minutes=horizon_minutes)
-    development = frame.loc[frame["cycle_stage"].eq("frost_development")]
-    if "cycle_status" in development:
-        development = development.loc[development["cycle_status"].eq("valid")]
     for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
         target_by_time = pd.Series(
             pd.to_numeric(group[target], errors="coerce").to_numpy(),
             index=pd.DatetimeIndex(group["timestamp"]),
         )
-        current_values: list[float] = []
-        future_values: list[float] = []
-        for _, row in group.iterrows():
-            current = pd.to_numeric(pd.Series([row[residual]]), errors="coerce").iloc[0]
-            future = target_by_time.get(pd.Timestamp(row["timestamp"]) + horizon, np.nan)
-            if pd.notna(current) and pd.notna(future):
-                current_values.append(float(current))
-                future_values.append(float(future))
-        correlation = _spearman(pd.Series(current_values), pd.Series(future_values))
+        future = (group["timestamp"] + horizon).map(target_by_time)
+        correlation = _spearman_with_minimum(
+            group[residual], future, settings.minimum_points_per_cycle
+        )
         if correlation is not None:
             effects.append(correlation)
     return len(effects), _median_or_nan(effects)
@@ -199,32 +179,38 @@ def _future_evidence(
 
 def _context_association(
     frame: pd.DataFrame,
+    cycles: pd.DataFrame,
     channel: str,
     channels: Mapping[str, Mapping[str, Any]],
+    settings: Any,
 ) -> tuple[int, float]:
+    residual = f"{channel}__baseline_residual"
     context_names = [
         name
-        for name, settings in channels.items()
-        if settings.get("role") == "context" and name in frame
+        for name, channel_settings in channels.items()
+        if channel_settings.get("role") == "context" and name in frame
     ]
-    residual = f"{channel}__baseline_residual"
     if residual not in frame or not context_names:
         return 0, np.nan
-    associations: list[float] = []
-    cycle_count = 0
-    development = frame.loc[frame["cycle_stage"].eq("frost_development")]
-    if "cycle_status" in development:
-        development = development.loc[development["cycle_status"].eq("valid")]
+    eligible = _eligible_cycle_ids(cycles)
+    development = frame.loc[
+        frame["cycle_id"].isin(eligible) & frame["cycle_stage"].eq("frost_development")
+    ]
+    cycle_maxima: list[float] = []
     for _, group in development.groupby(["experiment_id", "cycle_id"], sort=False):
-        cycle_associations: list[float] = []
-        for context in context_names:
-            correlation = _spearman(group[residual], group[context])
-            if correlation is not None:
-                cycle_associations.append(abs(correlation))
-        if cycle_associations:
-            cycle_count += 1
-            associations.extend(cycle_associations)
-    return cycle_count, max(associations, default=np.nan)
+        associations = [
+            abs(correlation)
+            for context in context_names
+            if (
+                correlation := _spearman_with_minimum(
+                    group[residual], group[context], settings.minimum_points_per_cycle
+                )
+            )
+            is not None
+        ]
+        if associations:
+            cycle_maxima.append(max(associations))
+    return len(cycle_maxima), _median_or_nan(cycle_maxima)
 
 
 def _decision(
@@ -232,44 +218,41 @@ def _decision(
     trend_effect: float,
     direction: float,
     context_effect: float,
-    settings: Mapping[str, Any],
+    settings: Any,
 ) -> tuple[str, str]:
-    minimum_cycles = int(settings.get("minimum_valid_cycles", 3))
-    if trend_count < minimum_cycles:
+    if trend_count < settings.minimum_valid_cycles:
         return "insufficient_coverage", "trend_cycles_below_minimum"
-    maximum_context = float(settings.get("maximum_context_association", 0.8))
-    if np.isfinite(context_effect) and context_effect >= maximum_context:
+    if np.isfinite(context_effect) and context_effect >= settings.maximum_context_association:
         return "high_context_association", "context_association_above_threshold"
-    minimum_effect = float(settings.get("minimum_absolute_trend_effect", 0.3))
-    minimum_direction = float(settings.get("minimum_direction_consistency", 0.7))
     if (
         np.isfinite(trend_effect)
-        and abs(trend_effect) >= minimum_effect
+        and trend_effect >= settings.minimum_trend_effect
         and np.isfinite(direction)
-        and direction >= minimum_direction
+        and direction >= settings.minimum_direction_consistency
     ):
         return "trend_supported_candidate", "trend_evidence_meets_threshold"
     return "partial_evidence", "trend_evidence_partial"
 
 
-def _direction_consistency(effects: list[float], overall: float) -> float:
-    if not effects or not np.isfinite(overall) or overall == 0:
+def _direction_consistency(effects: list[float]) -> float:
+    if not effects:
         return np.nan
-    overall_sign = np.sign(overall)
-    return float(np.mean([np.sign(effect) == overall_sign for effect in effects]))
+    return float(np.mean([effect > 0 for effect in effects]))
 
 
-def _spearman(left: pd.Series, right: pd.Series) -> float | None:
+def _spearman_with_minimum(
+    left: pd.Series, right: pd.Series, minimum_points: int
+) -> float | None:
     x = pd.to_numeric(left, errors="coerce")
     y = pd.to_numeric(right, errors="coerce")
     valid = x.notna() & y.notna()
-    if int(valid.sum()) < 2:
+    if int(valid.sum()) < minimum_points:
         return None
-    left = x.loc[valid]
-    right = y.loc[valid]
-    if left.nunique(dropna=True) < 2 or right.nunique(dropna=True) < 2:
+    x = x.loc[valid]
+    y = y.loc[valid]
+    if x.nunique(dropna=True) < 2 or y.nunique(dropna=True) < 2:
         return None
-    value = left.corr(right, method="spearman")
+    value = x.corr(y, method="spearman")
     return None if pd.isna(value) else float(value)
 
 

@@ -1,20 +1,18 @@
 # Frost Sensor 科研分析 Pipeline
 
-这是面向论文实验数据的科研分析代码，不是通用数据平台。主流程只有三步：
+本项目把热泵除霜实验的文本传感器和 RGB 图片整理为可追溯的候选通道证据。主流程只有三阶段：
 
 ```text
-data/0715                 原始实验记录（只读）
-   ↓ prepare              整理字段、切分循环、匹配图片
-prepared_data.parquet
-   ↓ process              10 秒重采样、限定缺失处理、物理量和 baseline
-processed_data.parquet
-   ↓ analyze              循环级候选通道证据
+data/0715（只读）
+   ↓ prepare
+prepared_data.parquet + cycle_summary.csv
+   ↓ process
+processed_data.parquet + cycle_summary.csv
+   ↓ analyze
 candidate_channel_evidence.csv
 ```
 
-## 最短上手路径
-
-完整运行：
+## 最短运行路径
 
 ```bash
 python -m frost_analysis run \
@@ -22,64 +20,32 @@ python -m frost_analysis run \
   --output outputs/runs/0715_example
 ```
 
-如果只想先生成可复用的 Prepared 快照：
+完整运行成功后，目录中还会有 `manifest.json`。阶段命令 `prepare`、`process`、`analyze` 都要求显式输入；它们不自动寻找最新结果、不缓存、不恢复，也不生成阶段 manifest。
+
+Prepared 快照可以独立复用：
 
 ```bash
-python -m frost_analysis prepare \
+python -m frost_analysis process \
   --config configs/0715.yaml \
-  --output outputs/prepared/exp_20260715/prepare_01
+  --input outputs/prepared/exp_20260715/prepare_01/prepared_data.parquet \
+  --cycles outputs/prepared/exp_20260715/prepare_01/cycle_summary.csv \
+  --output outputs/runs/0715_process
 ```
 
-之后可通过 `process --input ... --cycles ...` 显式复用快照。Pipeline 不自动搜索或恢复旧结果。
+原始 `data/<MMDD>` 永远只读；所有派生结果写入 `outputs/prepared/` 或 `outputs/runs/`。默认拒绝覆盖，确认后使用 `--overwrite`。
 
-## 目录和阶段职责
+## 科学边界
 
-```text
-src/frost_analysis/
-├── config.py       扁平 YAML 配置
-├── channels.py     通道事实和最小合同
-├── io.py           输入发现、Parquet/CSV、manifest
-├── prepare.py      原始传感器整理和阶段编排
-├── cycles.py       循环边界、状态和坐标
-├── images.py       文件名时间戳匹配
-├── process.py      重采样、缺失处理和阶段编排
-├── baseline.py     严格无霜基准
-├── features.py     物理量和过去窗口特征
-├── analysis.py     候选通道证据
-├── validation.py   结构性不变量
-└── pipeline.py     run_pipeline() 单一完整入口
-```
+Prepare 只解析原始 `.xls` 文本、应用显式单位换算、切分循环和独立匹配相机图片；不重采样、不填补、不计算 baseline 或动态特征。Process 在每个 `experiment_id × cycle_id` 内建立一次公共 10 秒网格，按精确阶段边界的重叠时长确定唯一阶段；然后仅在 `experiment_id × cycle_id × cycle_stage` 内执行 bounded 缺失处理、派生公式、共同 baseline 和 past-only 特征。等长 transition bucket 被排除，partial 行不进入 Process。Analyze 只使用 valid 且 baseline 可用的 `frost_development` 行。
 
-`data/<MMDD>` 永远只读。派生输出只能写入 `outputs/prepared/` 或 `outputs/runs/`。正式运行的四个结果文件是 `prepared_data.parquet`、`processed_data.parquet`、`cycle_summary.csv` 和 `candidate_channel_evidence.csv`；四者成功写完后才生成 `manifest.json`。
+通道、阈值和每日期相机映射均在 `configs/` 中显式记录。baseline 是 `cycle_local_early_stable_proxy`，不是人工或图像证明的绝对无霜真值。Reset evidence 当前固定为 `not_evaluated`，不使用下一循环自身 baseline 自证恢复。
 
-## 关键科学边界
-
-Prepare 不插值、不重采样、不计算 baseline、rolling、slope 或 residual。Prepared 的时间键是 `experiment_id + timestamp`，循环摘要的键是 `experiment_id + cycle_id`。
-
-循环坐标只在 `frost_development` 阶段有值：
-
-```text
-cycle_elapsed_seconds = timestamp - stable_heating_start
-cycle_progress = (timestamp - stable_heating_start)
-                  / (defrost_start - stable_heating_start)
-```
-
-`cycle_progress` 被限制在 `[0, 1]`；其他阶段为 NaN。Process 重采样后重新计算它。
-
-源内重复不选择、不平均：受影响通道值置为 NaN，并保留 `__duplicate`、`__conflict` 事实；同一时间其他正常通道不被整行删除。除霜状态缺口超过 5 秒不推断，并将受影响循环设为 `cycle_status=incomplete`。缺失压缩机频率表示未知，不等于停机。
-
-Process 只在 `experiment_id × cycle_id × cycle_stage` 内处理缺失。连续量按配置线性插值，阶跃量只允许前值保持，事件量和 protected 量默认不填补。派生量的 `__imputed` 使用依赖量布尔 OR。baseline 失败保持 NaN，不 fallback。
-
-## 候选证据
-
-`candidate_channel_evidence.csv` 的统计单位是循环和实验日期，而不是原始采样点。每个候选通道一行，字段和公式见 [docs/pipeline_contract.md](docs/pipeline_contract.md)。当前 decision 只使用趋势证据、方向一致率和工况关联；复位证据和未来性能证据先作为展示字段，不参与综合评分。
-
-## 验证
+## 测试
 
 ```bash
 .venv/bin/python -m pytest -q -p no:cacheprovider
-.venv/bin/ruff check --no-cache src tests
+.venv/bin/python -m ruff check --no-cache src tests
 .venv/bin/python -m mypy --strict --cache-dir=/tmp/frost-analysis-mypy src
 ```
 
-所有显式日期可运行 Prepare smoke test；完整 Analysis 先选择至少三个代表日期。跨日期科学稳定性分析另行进行，不能把所有采样点直接拼接成一个相关系数。
+字段、公式、质量标记和 decision 规则见 [`docs/pipeline_contract.md`](docs/pipeline_contract.md)。

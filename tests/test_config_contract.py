@@ -136,3 +136,29 @@ analysis: {}
 
     with pytest.raises(ValueError, match="minimum_defrost_seconds"):
         load_config(path)
+
+
+def test_config_rejects_nonpositive_input_interval(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    path.write_text(
+        """
+experiment_id: exp_test
+experiment_date: "2026-07-15"
+input_dir: data/0715
+channels_path: configs/channels.yaml
+camera_mapping_path: configs/camera_mappings/0715.yaml
+sensor_globs: ["*.xls"]
+image_extensions: [".jpg"]
+timestamp_column: 时间
+expected_sensor_interval_seconds: 0
+image_match_tolerance_seconds: 2
+cycles: {}
+process: {resample_interval_seconds: 10}
+analysis: {future_horizon_minutes: 10}
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expected_sensor_interval_seconds"):
+        load_config(path)

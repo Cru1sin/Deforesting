@@ -11,27 +11,32 @@ from frost_analysis.config import Config
 from frost_analysis.validation import validate_analysis, validate_prepared, validate_processed
 
 
-def _config(root: Path) -> Config:
+def _config(root: Path, **analysis: object) -> Config:
+    values = {
+        "performance_target": "heating_capacity__baseline_residual",
+        "future_horizon_minutes": 10,
+        "minimum_valid_cycles": 2,
+        "minimum_trend_effect": 0.3,
+        "minimum_direction_consistency": 0.7,
+        "maximum_context_association": 0.8,
+        "minimum_points_per_cycle": 4,
+        **analysis,
+    }
     return Config(
         project_root=root,
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=root / "data",
         channels_path=root / "channels.yaml",
+        camera_mapping_path=root / "camera.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
-        camera_mapping_file="IPlocation.yaml",
+        timestamp_column="时间",
+        expected_sensor_interval_seconds=1,
+        image_match_tolerance_seconds=2,
         cycles={},
         process={"resample_interval_seconds": 10},
-        analysis={
-            "performance_target": "heating_capacity__baseline_residual",
-            "future_horizon_minutes": 10,
-            "reset_pre_window_minutes": 5,
-            "minimum_valid_cycles": 3,
-            "minimum_absolute_trend_effect": 0.3,
-            "minimum_direction_consistency": 0.7,
-            "maximum_context_association": 0.8,
-        },
+        analysis=values,
     )
 
 
@@ -54,7 +59,7 @@ def _channels() -> dict[str, dict[str, object]]:
 def _analysis_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
     rows: list[dict[str, object]] = []
     cycles: list[dict[str, object]] = []
-    for number in range(3):
+    for number in range(2):
         start = pd.Timestamp("2026-07-15") + pd.Timedelta(hours=number)
         cycle_id = f"cycle_{number + 1:03d}"
         for point, progress in enumerate((0.0, 1 / 3, 2 / 3, 1.0)):
@@ -71,7 +76,6 @@ def _analysis_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
                     "signal__baseline_residual": -float(point),
                     "ambient_temperature": 0.0,
                     "heating_capacity__baseline_residual": -float(point + 1),
-                    "signal__baseline_status": "accepted",
                 }
             )
         rows.append(
@@ -86,7 +90,6 @@ def _analysis_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
                 "signal__baseline_residual": 0.0,
                 "ambient_temperature": 0.0,
                 "heating_capacity__baseline_residual": 0.0,
-                "signal__baseline_status": "accepted",
             }
         )
         cycles.append(
@@ -95,6 +98,7 @@ def _analysis_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
                 "experiment_date": "2026-07-15",
                 "cycle_id": cycle_id,
                 "cycle_status": "valid",
+                "baseline_status": "available",
                 "heating_start": start,
                 "stable_heating_start": start + pd.Timedelta(minutes=10),
                 "defrost_start": start + pd.Timedelta(minutes=50),
@@ -104,7 +108,7 @@ def _analysis_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.DataFrame(rows), pd.DataFrame(cycles)
 
 
-def test_analysis_emits_one_evidence_row_per_experiment_and_candidate() -> None:
+def test_analysis_emits_explicit_evidence_and_disabled_reset_fields() -> None:
     frame, cycles = _analysis_frame()
 
     evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
@@ -120,31 +124,43 @@ def test_analysis_emits_one_evidence_row_per_experiment_and_candidate() -> None:
         "trend_effect",
         "direction_consistency",
         "reset_effect",
-        "future_performance_effect",
-        "max_abs_context_spearman",
+        "reset_evidence_status",
+        "reset_evidence_reason",
+        "future_performance_association",
+        "median_max_abs_context_spearman",
         "decision",
         "reason",
     ]
     assert len(evidence) == 1
-    assert evidence.loc[0, "trend_cycle_count"] == 3
-    assert evidence.loc[0, "future_cycle_count"] == 3
+    assert evidence.loc[0, "trend_cycle_count"] == 2
+    assert evidence.loc[0, "reset_pair_count"] == 0
+    assert pd.isna(evidence.loc[0, "reset_effect"])
+    assert evidence.loc[0, "reset_evidence_status"] == "not_evaluated"
+    assert evidence.loc[0, "reset_evidence_reason"] == "independent_reference_unavailable"
     assert evidence.loc[0, "decision"] == "trend_supported_candidate"
     assert "valid_cycle_count" not in evidence
     assert "rank" not in evidence
-    assert "weighted_score" not in evidence
 
 
-def test_future_matching_never_crosses_cycle_boundary() -> None:
+def test_future_matching_never_crosses_cycle_or_stage_boundary() -> None:
     frame = pd.DataFrame(
         {
-            "experiment_id": ["exp_test", "exp_test"],
-            "experiment_date": ["2026-07-15"] * 2,
-            "timestamp": pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:10:00"]),
-            "cycle_id": ["cycle_001", "cycle_002"],
-            "cycle_stage": ["frost_development"] * 2,
-            "cycle_progress": [0.2, 0.2],
-            "signal__baseline_residual": [1.0, 2.0],
-            "heating_capacity__baseline_residual": [np.nan, 3.0],
+            "experiment_id": ["exp_test"] * 4,
+            "experiment_date": ["2026-07-15"] * 4,
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-15 00:00:00",
+                    "2026-07-15 00:10:00",
+                    "2026-07-15 00:20:00",
+                    "2026-07-15 00:30:00",
+                ]
+            ),
+            "cycle_id": ["cycle_001", "cycle_002", "cycle_001", "cycle_002"],
+            "cycle_stage": ["frost_development"] * 4,
+            "cycle_status": ["valid"] * 4,
+            "cycle_progress": [0.2] * 4,
+            "signal__baseline_residual": [1.0, 2.0, 3.0, 4.0],
+            "heating_capacity__baseline_residual": [np.nan, 3.0, 5.0, 7.0],
         }
     )
     cycles = pd.DataFrame(
@@ -153,14 +169,7 @@ def test_future_matching_never_crosses_cycle_boundary() -> None:
             "experiment_date": ["2026-07-15"] * 2,
             "cycle_id": ["cycle_001", "cycle_002"],
             "cycle_status": ["valid", "valid"],
-            "heating_start": pd.to_datetime(
-                ["2026-07-15 00:00:00", "2026-07-15 00:10:00"]
-            ),
-            "stable_heating_start": pd.to_datetime(
-                ["2026-07-15 00:00:00", "2026-07-15 00:10:00"]
-            ),
-            "defrost_start": pd.to_datetime(["2026-07-15 00:05:00", "2026-07-15 00:15:00"]),
-            "defrost_end": pd.to_datetime(["2026-07-15 00:06:00", "2026-07-15 00:16:00"]),
+            "baseline_status": ["available", "available"],
         }
     )
 
@@ -169,16 +178,44 @@ def test_future_matching_never_crosses_cycle_boundary() -> None:
     assert evidence.loc[0, "future_cycle_count"] == 0
 
 
-def test_analysis_excludes_incomplete_cycles_from_trend_evidence() -> None:
+def test_decrease_candidate_with_wrong_raw_direction_is_not_supported() -> None:
     frame, cycles = _analysis_frame()
-    frame.loc[frame["cycle_id"].eq("cycle_003"), "cycle_status"] = "incomplete"
+    frame["signal__baseline_residual"] = frame["cycle_progress"]
 
     evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
 
-    assert evidence.loc[0, "trend_cycle_count"] == 2
+    assert evidence.loc[0, "trend_effect"] < 0
+    assert evidence.loc[0, "direction_consistency"] == 0
+    assert evidence.loc[0, "decision"] == "partial_evidence"
 
 
-def test_structural_prepared_validation_checks_cycle_status() -> None:
+def test_context_uses_per_cycle_maximum_then_median() -> None:
+    frame, cycles = _analysis_frame()
+    frame.loc[frame["cycle_id"].eq("cycle_001"), "ambient_temperature"] = [
+        0.0,
+        1.0,
+        0.0,
+        1.0,
+        0.5,
+    ]
+    frame.loc[frame["cycle_id"].eq("cycle_002"), "ambient_temperature"] = [0.0, 1.0, 0.0, 1.0, 0.5]
+    evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
+
+    assert evidence.loc[0, "context_cycle_count"] == 2
+    assert 0.4 < evidence.loc[0, "median_max_abs_context_spearman"] < 0.9
+
+
+def test_analysis_excludes_incomplete_cycles_from_trend_evidence() -> None:
+    frame, cycles = _analysis_frame()
+    frame.loc[frame["cycle_id"].eq("cycle_002"), "cycle_status"] = "incomplete"
+    cycles.loc[cycles["cycle_id"].eq("cycle_002"), "cycle_status"] = "incomplete"
+
+    evidence = analyze(frame, cycles, _config(Path("/tmp")), _channels())
+
+    assert evidence.loc[0, "trend_cycle_count"] == 1
+
+
+def test_structural_validators_reject_invalid_fields() -> None:
     prepared = pd.DataFrame(
         {
             "experiment_id": ["exp_test"],
@@ -190,51 +227,32 @@ def test_structural_prepared_validation_checks_cycle_status() -> None:
         }
     )
     summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_001"]})
-
     with pytest.raises(ValueError, match="cycle_status"):
         validate_prepared(prepared, summary)
 
+    evidence = pd.DataFrame(columns=[
+        "experiment_id", "experiment_date", "channel", "trend_cycle_count",
+        "reset_pair_count", "future_cycle_count", "context_cycle_count", "trend_effect",
+        "direction_consistency", "reset_effect", "reset_evidence_status",
+        "reset_evidence_reason", "future_performance_association",
+        "median_max_abs_context_spearman", "decision", "reason",
+    ])
+    validate_analysis(evidence)
+    with pytest.raises(ValueError, match="weighted score"):
+        validate_analysis(evidence.assign(weighted_score=1.0))
 
-def test_structural_validators_reject_duplicate_or_forbidden_contracts() -> None:
-    prepared = pd.DataFrame(
+
+def test_processed_validator_rejects_partial_rows() -> None:
+    processed = pd.DataFrame(
         {
             "experiment_id": ["exp_test"],
             "timestamp": pd.to_datetime(["2026-07-15"]),
-            "cycle_id": ["cycle_001"],
-            "cycle_stage": ["frost_development"],
-            "cycle_progress": [0.0],
+            "cycle_id": ["partial_001"],
+            "cycle_stage": ["partial"],
+            "cycle_status": ["incomplete"],
+            "cycle_progress": [np.nan],
         }
     )
-    summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["cycle_001"]})
-    validate_prepared(prepared, summary)
-
-    processed = prepared.assign(
-        cycle_status="valid",
-        channel__imputed=pd.Series([False], dtype=bool),
-        channel__baseline_status="accepted",
-        channel__baseline=1.0,
-    )
-    validate_processed(processed, summary)
-
-    evidence = pd.DataFrame(
-        {
-            "experiment_id": ["exp_test"],
-            "experiment_date": ["2026-07-15"],
-            "channel": ["signal"],
-            "trend_cycle_count": [3],
-            "reset_pair_count": [0],
-            "future_cycle_count": [0],
-            "context_cycle_count": [0],
-            "trend_effect": [-1.0],
-            "direction_consistency": [1.0],
-            "reset_effect": [np.nan],
-            "future_performance_effect": [np.nan],
-            "max_abs_context_spearman": [np.nan],
-            "decision": ["trend_supported_candidate"],
-            "reason": ["trend_evidence_meets_threshold"],
-        }
-    )
-    validate_analysis(evidence)
-
-    with pytest.raises(ValueError, match="weighted score"):
-        validate_analysis(evidence.assign(weighted_score=1.0))
+    summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["partial_001"]})
+    with pytest.raises(ValueError, match="partial"):
+        validate_processed(processed, summary)

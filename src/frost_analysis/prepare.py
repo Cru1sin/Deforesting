@@ -77,7 +77,7 @@ def prepare(
     prepared = prepared.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
-    cycle_summary = _add_cycle_quality_summary(
+    cycle_summary = _add_cycle_summary_metrics(
         prepared,
         cycle_summary,
         channels,
@@ -267,7 +267,7 @@ def _all_timestamps(channel_frames: Mapping[str, list[pd.DataFrame]]) -> pd.Seri
     return pd.Series(unique.to_numpy())
 
 
-def _add_cycle_quality_summary(
+def _add_cycle_summary_metrics(
     prepared: pd.DataFrame,
     summary: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
