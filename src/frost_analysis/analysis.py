@@ -304,10 +304,13 @@ def _require_analysis_quality_columns(
     channels: Mapping[str, Mapping[str, Any]],
     settings: Any,
 ) -> None:
+    missing_values: set[str] = set()
     required: set[str] = set()
     for candidate in candidates:
         residual = f"{candidate}__baseline_residual"
-        if residual in frame:
+        if residual not in frame:
+            missing_values.add(residual)
+        else:
             required.add(imputed_column_for_value(residual))
     target = str(settings.performance_target)
     if target in frame:
@@ -315,6 +318,6 @@ def _require_analysis_quality_columns(
     for name, channel_settings in channels.items():
         if channel_settings.get("role") == "context" and name in frame:
             required.add(imputed_column_for_value(name))
-    missing = sorted(column for column in required if column not in frame)
+    missing = sorted((*missing_values, *(column for column in required if column not in frame)))
     if missing:
         raise ValueError(f"analysis requires quality columns: {missing}")

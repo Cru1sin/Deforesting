@@ -236,6 +236,14 @@ def test_analysis_excludes_imputed_candidate_future_and_context_points() -> None
 def test_analysis_requires_quality_columns_for_used_values() -> None:
     frame, cycles = _analysis_frame()
 
+    with pytest.raises(ValueError, match="signal__baseline_residual"):
+        analyze(
+            frame.drop(columns=["signal__baseline_residual"]),
+            cycles,
+            _config(Path("/tmp")),
+            _channels(),
+        )
+
     with pytest.raises(ValueError, match="signal__imputed"):
         analyze(frame.drop(columns=["signal__imputed"]), cycles, _config(Path("/tmp")), _channels())
 
