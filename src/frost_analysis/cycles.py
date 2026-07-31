@@ -38,6 +38,7 @@ def label_cycles(
         events,
         long_gaps,
         settings,
+        labeled,
         experiment_id=experiment_id,
         experiment_date=experiment_date,
     )
@@ -55,6 +56,7 @@ def _build_cycles(
     events: list[dict[str, Any]],
     long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
     settings: Mapping[str, Any] | Any,
+    labeled: pd.DataFrame,
     *,
     experiment_id: str,
     experiment_date: str,
@@ -70,6 +72,7 @@ def _build_cycles(
             events[index + 1],
             long_gaps,
             settings,
+            labeled,
             experiment_id,
             experiment_date,
             f"cycle_{index + 1:03d}",
@@ -80,21 +83,6 @@ def _build_cycles(
             defrost_end = row["defrost_end"]
             if isinstance(defrost_end, pd.Timestamp) or defrost_end is None:
                 ranges.append((row, heating_start, defrost_end))
-    if not cycles:
-        reason = "defrost_state_gap" if long_gaps else "insufficient_cycle_boundaries"
-        cycles.append(
-            _cycle_row(
-                experiment_id,
-                experiment_date,
-                "cycle_001",
-                "incomplete",
-                reason,
-                None,
-                None,
-                None,
-                None,
-            )
-        )
     return cycles, ranges
 
 
@@ -103,6 +91,7 @@ def _make_cycle_record(
     following: dict[str, Any],
     long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
     settings: Mapping[str, Any] | Any,
+    labeled: pd.DataFrame,
     experiment_id: str,
     experiment_date: str,
     cycle_id: str,
@@ -120,8 +109,19 @@ def _make_cycle_record(
         settings,
     )
     stable_start = _stable_start(heating_start, settings)
-    if stable_start is not None and stable_start >= defrost_start:
+    if (
+        stable_start is not None
+        and isinstance(defrost_start, pd.Timestamp)
+        and stable_start >= defrost_start
+    ):
         status, reason = "invalid", "invalid_cycle_boundaries"
+    if status == "valid":
+        status, reason = _operating_mode_status(
+            labeled,
+            heating_start,
+            defrost_start,
+            settings,
+        )
     return _cycle_row(
         experiment_id,
         experiment_date,
@@ -132,6 +132,8 @@ def _make_cycle_record(
         stable_start,
         defrost_start,
         defrost_end,
+        previous["duration"],
+        following["duration"],
     )
 
 
@@ -144,22 +146,26 @@ def _cycle_status(
     long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
     settings: Mapping[str, Any] | Any,
 ) -> tuple[str, str]:
-    if heating_start is None:
+    if heating_start is None or defrost_start is None:
         return "incomplete", "defrost_state_gap"
     if defrost_end is None:
         return "incomplete", "data_ends_mid_cycle"
+    if defrost_start <= heating_start or defrost_end <= defrost_start:
+        return "invalid", "invalid_cycle_boundaries"
     if _interval_intersects(heating_start, defrost_end, long_gaps):
         return "incomplete", "defrost_state_gap"
     if not _duration_in_range(
         previous["duration"],
         _setting(settings, "minimum_defrost_seconds", 60),
         _setting(settings, "maximum_defrost_seconds", 1200),
-    ) or not _duration_in_range(
+    ):
+        return "invalid", "preceding_defrost_duration_out_of_range"
+    if not _duration_in_range(
         following["duration"],
         _setting(settings, "minimum_defrost_seconds", 60),
         _setting(settings, "maximum_defrost_seconds", 1200),
     ):
-        return "invalid", "defrost_duration_out_of_range"
+        return "invalid", "terminal_defrost_duration_out_of_range"
     heating_duration = (defrost_start - heating_start).total_seconds()
     if not _duration_in_range(
         heating_duration,
@@ -309,15 +315,12 @@ def _cycle_row(
     stable_start: pd.Timestamp | None,
     defrost_start: pd.Timestamp | None,
     defrost_end: pd.Timestamp | None,
+    preceding_defrost_duration: float | None = None,
+    terminal_defrost_duration: float | None = None,
 ) -> dict[str, object]:
     heating_duration = (
         (defrost_start - heating_start).total_seconds()
         if heating_start is not None and defrost_start is not None
-        else np.nan
-    )
-    defrost_duration = (
-        (defrost_end - defrost_start).total_seconds()
-        if defrost_start is not None and defrost_end is not None
         else np.nan
     )
     return {
@@ -331,8 +334,43 @@ def _cycle_row(
         "defrost_start": defrost_start,
         "defrost_end": defrost_end,
         "heating_duration_seconds": heating_duration,
-        "defrost_duration_seconds": defrost_duration,
+        "preceding_defrost_duration_seconds": preceding_defrost_duration,
+        "terminal_defrost_duration_seconds": terminal_defrost_duration,
     }
+
+
+def _operating_mode_status(
+    frame: pd.DataFrame,
+    heating_start: Any,
+    defrost_start: Any,
+    settings: Mapping[str, Any] | Any,
+) -> tuple[str, str]:
+    channel = _string_setting(settings, "operating_mode_channel", "")
+    if not channel:
+        return "valid", ""
+    required = _string_setting(settings, "required_operating_mode", "3")
+    if channel not in frame:
+        return "incomplete", "missing_operating_mode"
+    interval = frame.loc[
+        frame["timestamp"].ge(heating_start) & frame["timestamp"].lt(defrost_start)
+    ]
+    observed = interval.loc[interval[channel].notna(), channel]
+    for suffix in ("__duplicate", "__conflict"):
+        quality_column = f"{channel}{suffix}"
+        if quality_column in interval:
+            quality = interval.loc[observed.index, quality_column].fillna(False).astype(bool)
+            observed = observed.loc[~quality]
+    if observed.empty:
+        return "incomplete", "missing_operating_mode"
+    if not observed.eq(required).all():
+        return "invalid", "non_heating_mode_present"
+    return "valid", ""
+
+
+def _string_setting(settings: Mapping[str, Any] | Any, name: str, default: str) -> str:
+    if isinstance(settings, Mapping):
+        return str(settings.get(name, default))
+    return str(getattr(settings, name, default))
 
 
 def _stage_for_times(
@@ -444,5 +482,6 @@ def _cycle_columns() -> list[str]:
         "defrost_start",
         "defrost_end",
         "heating_duration_seconds",
-        "defrost_duration_seconds",
+        "preceding_defrost_duration_seconds",
+        "terminal_defrost_duration_seconds",
     ]

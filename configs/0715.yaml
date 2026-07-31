@@ -21,6 +21,8 @@ cycles:
   minimum_heating_seconds: 1800
   maximum_heating_seconds: 21600
   stable_heating_seconds: 180
+  operating_mode_channel: operating_mode
+  required_operating_mode: "3"
 
 process:
   resample_interval_seconds: 10

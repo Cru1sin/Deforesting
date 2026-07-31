@@ -32,10 +32,10 @@ channels:
   water_temperature_setpoint:
     source_names: ["p1__Ts(37.1)'2_31"]
     unit: degC
-    kind: continuous
+    kind: step
     role: control
-    resample: mean
-    missing: interpolate
+    resample: last
+    missing: forward_fill
     analysis_candidate: false
     valid_range: [-20, 80]
 

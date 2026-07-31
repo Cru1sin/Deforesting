@@ -73,6 +73,138 @@ def test_label_cycles_defines_progress_only_during_frost_development() -> None:
     assert labeled.loc[labeled["cycle_stage"] != "frost_development", "cycle_progress"].isna().all()
 
 
+def _cycle_frame_with_mode(
+    states: list[object], modes: list[object] | None = None
+) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-07-15", periods=len(states), freq="s"),
+            "defrost_active": states,
+        }
+    )
+    if modes is not None:
+        frame["operating_mode"] = modes
+    return frame
+
+
+def _short_cycle_settings() -> dict[str, object]:
+    return {
+        "maximum_state_gap_seconds": 5,
+        "debounce_seconds": 0.5,
+        "minimum_defrost_seconds": 2,
+        "maximum_defrost_seconds": 100,
+        "minimum_heating_seconds": 1,
+        "maximum_heating_seconds": 100,
+        "stable_heating_seconds": 2,
+        "operating_mode_channel": "operating_mode",
+        "required_operating_mode": "3",
+    }
+
+
+def test_cycle_summary_keeps_preceding_and_terminal_defrost_durations() -> None:
+    frame = _cycle_frame_with_mode(
+        [True, True, False, False, False, False, False, True, True, False, False],
+        ["3"] * 11,
+    )
+
+    _, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert cycle["preceding_defrost_duration_seconds"] == 2
+    assert cycle["terminal_defrost_duration_seconds"] == 2
+    assert "defrost_duration_seconds" not in summary
+
+
+@pytest.mark.parametrize(
+    ("states", "reason"),
+    [
+        (
+            [True, False, False, False, False, False, False, True, True, False, False],
+            "preceding_defrost_duration_out_of_range",
+        ),
+        (
+            [True, True, False, False, False, False, False, True, False, False, False],
+            "terminal_defrost_duration_out_of_range",
+        ),
+    ],
+)
+def test_cycle_summary_reports_each_defrost_duration_failure_reason(
+    states: list[object], reason: str
+) -> None:
+    _, summary = label_cycles(
+        _cycle_frame_with_mode(states, ["3"] * len(states)),
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert cycle["cycle_status"] == "invalid"
+    assert cycle["cycle_status_reason"] == reason
+
+
+@pytest.mark.parametrize(
+    ("modes", "status", "reason"),
+    [
+        (
+            ["3", "3", "3", "2", "3", "3", "3", "2", "2", "3", "3"],
+            "invalid",
+            "non_heating_mode_present",
+        ),
+        (
+            [None, None, None, None, None, None, None, "2", "2", "3", "3"],
+            "incomplete",
+            "missing_operating_mode",
+        ),
+        (
+            ["3", "3", "3", "3", "3", "3", "3", "2", "2", "3", "3"],
+            "valid",
+            "",
+        ),
+    ],
+)
+def test_operating_mode_only_checks_heating_interval(
+    modes: list[object], status: str, reason: str
+) -> None:
+    _, summary = label_cycles(
+        _cycle_frame_with_mode(
+            [True, True, False, False, False, False, False, True, True, False, False],
+            modes,
+        ),
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert cycle["cycle_status"] == status
+    assert cycle["cycle_status_reason"] == reason
+
+
+def test_single_defrost_event_creates_only_partial_cycles() -> None:
+    frame = _cycle_frame_with_mode([False, False, True, True, False, False])
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    assert not summary["cycle_id"].eq("cycle_001").any()
+    assert summary["cycle_id"].tolist() == ["partial_001"]
+    assert labeled["cycle_stage"].eq("partial").all()
+
+
 def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> None:
     timestamps = pd.to_datetime(
         [
@@ -103,8 +235,8 @@ def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> No
     )
 
     assert labeled["defrost_active"].isna().any()
-    assert "defrost_state_gap" in set(summary["cycle_status_reason"])
-    assert summary["cycle_status"].eq("incomplete").any()
+    assert not summary["cycle_id"].eq("cycle_001").any()
+    assert summary["cycle_status"].eq("incomplete").all()
 
 
 def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:

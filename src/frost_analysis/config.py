@@ -23,6 +23,8 @@ class CycleSettings:
     minimum_heating_seconds: float = 1800.0
     maximum_heating_seconds: float = 21600.0
     stable_heating_seconds: float = 180.0
+    operating_mode_channel: str = ""
+    required_operating_mode: str = "3"
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> CycleSettings:
@@ -35,6 +37,8 @@ class CycleSettings:
             minimum_heating_seconds=float(values.get("minimum_heating_seconds", 1800)),
             maximum_heating_seconds=float(values.get("maximum_heating_seconds", 21600)),
             stable_heating_seconds=float(values.get("stable_heating_seconds", 180)),
+            operating_mode_channel=str(values.get("operating_mode_channel", "")),
+            required_operating_mode=str(values.get("required_operating_mode", "3")),
         )
         _validate_positive("maximum_state_gap_seconds", result.maximum_state_gap_seconds)
         _validate_positive("debounce_seconds", result.debounce_seconds)
