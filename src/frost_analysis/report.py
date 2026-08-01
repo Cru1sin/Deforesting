@@ -25,7 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, Rectangle
 from matplotlib.ticker import MultipleLocator, NullLocator
 
 from .analysis import imputed_column_for_value
@@ -62,7 +62,7 @@ _PUBLICATION_PANEL_CHANNELS = (
 _PUBLICATION_AXIS_LABELS = (
     "Compressor frequency [Hz]",
     "Heating capacity [kW]",
-    "COP [-]",
+    "COP",
     "Water temperature [°C]",
     "Temperature [°C]",
 )
@@ -142,7 +142,7 @@ _DISPLAY_UNITS = {
 _AXIS_LABELS = {
     "compressor_frequency": "Compressor frequency [Hz]",
     "heating_capacity": "Heating capacity [kW]",
-    "cop": "COP [-]",
+    "cop": "COP",
 }
 _PLOT_DPI = 300
 _STARTUP_SHADE = "#D1D5DB"
@@ -151,9 +151,11 @@ _STATE_GAP_COLOR = "#9CA3AF"
 _DEFROST_OFF_COLOR = "#6B7280"
 _DEFROST_STATE_COLOR = "#C1121F"
 _COP_STABLE_SPAN_FRACTION = 0.35
-_COP_INSET_BBOX = (0.60, 0.50, 0.28, 0.32)
+_COP_INSET_BBOX = (0.68, 0.56, 0.22, 0.25)
 _PUBLICATION_HEIGHT_RATIOS = (0.18, 1.00, 1.00, 1.25, 1.00, 1.15)
 _PUBLICATION_X_GRID_ALPHA = 0.12
+_STAGE_BACKGROUND_ALPHA = 0.08
+_PUBLICATION_RIBBON_ALPHA = 0.78
 _RIBBON_STAGE_LABELS = {
     "recovery": "Recovery",
     "frost_development": "Frost development",
@@ -505,12 +507,12 @@ def _plot_one_cycle_publication(
     path: Path,
     warnings: list[dict[str, str]],
 ) -> None:
-    figure = plt.figure(figsize=(7.2, 10.8), dpi=_PLOT_DPI)
+    figure = plt.figure(figsize=(7.2, 12.0), dpi=_PLOT_DPI)
     grid = figure.add_gridspec(
         6,
         1,
         height_ratios=_PUBLICATION_HEIGHT_RATIOS,
-        hspace=0.50,
+        hspace=0.60,
     )
     ribbon_axis = figure.add_subplot(grid[0, 0])
     axes = [figure.add_subplot(grid[1, 0], sharex=ribbon_axis)]
@@ -535,9 +537,10 @@ def _plot_one_cycle_publication(
     )
 
     _add_startup_annotation(axes[2], cycle, origin)
-    _finish_cycle_axes(axes, None, publication=True, panel_label_x=-0.11)
+    _finish_cycle_axes(axes, None, publication=True, panel_label_x=-0.15)
+    ribbon_axis.grid(False)
     _add_cycle_title(figure, cycle, publication=True)
-    figure.subplots_adjust(left=0.21, right=0.985, bottom=0.06, top=0.94)
+    figure.subplots_adjust(left=0.24, right=0.985, bottom=0.055, top=0.955)
     _save_figure(figure, path)
 
 
@@ -566,7 +569,14 @@ def _plot_cycle_panels(
                 "show_legend": False,
                 "y_label": axis_label,
                 "linestyle": "--" if channel in dashed_channels else "-",
-                "zorder": 3 if channel == "compressor_frequency" else 2,
+                "linewidth": (
+                    1.45
+                    if channel == "compressor_frequency"
+                    else 0.95
+                    if channel == "compressor_frequency_setpoint"
+                    else 1.35
+                ),
+                "zorder": 4 if channel == "compressor_frequency" else 2,
             }
             if plotter is _plot_prepared_line:
                 line_kwargs["step"] = channel in dashed_channels
@@ -643,6 +653,7 @@ def _plot_prepared_line(
     y_label: str | None = None,
     linestyle: str = "-",
     step: bool = False,
+    linewidth: float = 1.35,
     zorder: int = 2,
 ) -> None:
     if channel not in frame:
@@ -674,7 +685,7 @@ def _plot_prepared_line(
         plot_kwargs = {
             "label": label if index == 0 else None,
             "color": line_color,
-            "linewidth": 1.35,
+            "linewidth": linewidth,
             "linestyle": linestyle,
             "zorder": zorder,
         }
@@ -702,6 +713,7 @@ def _plot_processed_line(
     show_legend: bool = True,
     y_label: str | None = None,
     linestyle: str = "-",
+    linewidth: float = 1.35,
     zorder: int = 2,
 ) -> None:
     if channel not in frame:
@@ -733,7 +745,7 @@ def _plot_processed_line(
             segment_values,
             label=label if index == 0 else None,
             color=line_color,
-            linewidth=1.35,
+            linewidth=linewidth,
             linestyle=linestyle,
             zorder=zorder,
         )
@@ -953,7 +965,7 @@ def _shade_cycle_stages(
                 left,
                 right,
                 color=_STAGE_COLORS[stage],
-                alpha=0.05,
+                alpha=_STAGE_BACKGROUND_ALPHA,
                 linewidth=0,
                 zorder=0,
             )
@@ -969,6 +981,7 @@ def _plot_publication_stage_ribbon(
     gap_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
     origin: pd.Timestamp,
 ) -> None:
+    axis.grid(False)
     axis.set_ylim(0.0, 1.0)
     axis.set_yticks([])
     axis.tick_params(axis="x", labelbottom=False, length=0)
@@ -982,7 +995,7 @@ def _plot_publication_stage_ribbon(
             left,
             right,
             color=_STAGE_COLORS[stage],
-            alpha=0.62,
+            alpha=_PUBLICATION_RIBBON_ALPHA,
             linewidth=0,
             zorder=0,
         )
@@ -1010,11 +1023,11 @@ def _plot_publication_stage_ribbon(
         else:
             axis.text(
                 (left + right) / 2.0,
-                0.54,
+                0.62,
                 _RIBBON_STAGE_LABELS[stage],
                 ha="center",
                 va="center",
-                fontsize=8.5,
+                fontsize=9.5,
                 fontweight="bold",
                 color="#263238",
                 clip_on=False,
@@ -1043,6 +1056,33 @@ def _plot_publication_stage_ribbon(
                 color="#4D4D4D",
                 clip_on=False,
             )
+    if gap_intervals:
+        axis.add_patch(
+            Rectangle(
+                (0.01, -0.30),
+                0.025,
+                0.16,
+                transform=axis.transAxes,
+                facecolor=_STATE_GAP_COLOR,
+                edgecolor=_STATE_GAP_COLOR,
+                hatch="//",
+                alpha=0.34,
+                linewidth=0.3,
+                clip_on=False,
+                zorder=3,
+            )
+        )
+        axis.text(
+            0.045,
+            -0.22,
+            "Defrost state unavailable",
+            transform=axis.transAxes,
+            ha="left",
+            va="center",
+            fontsize=7.5,
+            color="#4D4D4D",
+            clip_on=False,
+        )
     baseline_start = cycle.get("baseline_start")
     baseline_end = cycle.get("baseline_end")
     if pd.notna(baseline_start) and pd.notna(baseline_end):
@@ -1266,7 +1306,7 @@ def _add_startup_annotation(
         "Startup transient",
         xy=((left + right) / 2.0, 0.97),
         xycoords=("data", "axes fraction"),
-        xytext=(0.02, 1.03),
+        xytext=(0.14, 1.05),
         textcoords="axes fraction",
         ha="left",
         va="bottom",
@@ -1363,7 +1403,12 @@ def _finish_cycle_axes(
 
 def _add_cycle_title(figure: Any, cycle: pd.Series, publication: bool) -> None:
     cycle_id = str(cycle.get("cycle_id", "cycle")).replace("_", " ").title()
-    status = str(cycle.get("cycle_status", "unknown")).title()
+    raw_status = cycle.get("cycle_status", "unknown")
+    if raw_status is None or pd.isna(raw_status):
+        status = "Unknown"
+    else:
+        status = str(raw_status).strip()
+        status = "Unknown" if status.lower() in {"", "nan", "none"} else status.title()
     raw_reason = cycle.get("cycle_status_reason", "")
     if raw_reason is None or pd.isna(raw_reason):
         reason = ""
