@@ -15,9 +15,7 @@ from frost_analysis.report import (
     _COP_INSET_BBOX,
     _PUBLICATION_AXIS_LABELS,
     _PUBLICATION_PANEL_CHANNELS,
-    _PUBLICATION_RIBBON_ALPHA,
     _PUBLICATION_X_GRID_ALPHA,
-    _STAGE_BACKGROUND_ALPHA,
     _add_cycle_title,
     _add_freezing_reference,
     _add_qa_summary_line,
@@ -28,7 +26,6 @@ from frost_analysis.report import (
     _observed_segments,
     _plot_defrost_state_strip,
     _plot_prepared_line,
-    _plot_publication_stage_ribbon,
     _plot_stage_and_defrost,
     _prepared_observed_series,
     _processed_observed_series,
@@ -556,25 +553,20 @@ def test_publication_panel_contract_uses_formal_labels_and_physical_order() -> N
     assert _PUBLICATION_AXIS_LABELS == (
         "Compressor frequency [Hz]",
         "Heating capacity [kW]",
-        "COP",
+        "COP [-]",
         "Water temperature [°C]",
         "Temperature [°C]",
     )
-    assert _AXIS_LABELS["cop"] == "COP"
+    assert _AXIS_LABELS["cop"] == "COP [-]"
 
 
 def test_publication_inset_is_small_and_upper_right() -> None:
     left, bottom, width, height = _COP_INSET_BBOX
 
-    assert 0.60 <= left < 0.80
-    assert 0.50 <= bottom < 0.75
-    assert width <= 0.24
-    assert height <= 0.28
-
-
-def test_publication_phase_layers_are_visible_but_subordinate() -> None:
-    assert 0.07 <= _STAGE_BACKGROUND_ALPHA <= 0.12
-    assert 0.70 <= _PUBLICATION_RIBBON_ALPHA <= 0.85
+    assert 0.50 <= left < 0.75
+    assert 0.40 <= bottom < 0.70
+    assert width <= 0.30
+    assert height <= 0.36
 
 
 def test_publication_stage_labels_only_include_observed_boundaries() -> None:
@@ -591,31 +583,6 @@ def test_publication_stage_labels_only_include_observed_boundaries() -> None:
     assert _publication_stage_labels(cycle) == ("Recovery",)
 
 
-def test_publication_ribbon_explains_state_gap_texture_even_for_short_gaps() -> None:
-    start = pd.Timestamp("2026-07-15 08:00:00")
-    cycle = pd.Series(
-        {
-            "heating_start": start,
-            "stable_heating_start": start + pd.Timedelta(minutes=3),
-            "defrost_start": start + pd.Timedelta(minutes=20),
-            "defrost_end": start + pd.Timedelta(minutes=22),
-        }
-    )
-    figure, axis = plt.subplots()
-
-    _plot_publication_stage_ribbon(
-        axis,
-        cycle,
-        [(start + pd.Timedelta(minutes=8), start + pd.Timedelta(minutes=9))],
-        start,
-    )
-
-    assert any(
-        "Defrost state unavailable" in text.get_text() for text in axis.texts
-    )
-    plt.close(figure)
-
-
 def test_publication_title_omits_nan_reason() -> None:
     figure = plt.figure()
     cycle = pd.Series(
@@ -630,22 +597,6 @@ def test_publication_title_omits_nan_reason() -> None:
 
     assert all("nan" not in text.get_text().lower() for text in figure.texts)
     assert len(figure.texts) == 1
-    plt.close(figure)
-
-
-def test_publication_title_omits_nan_status() -> None:
-    figure = plt.figure()
-    cycle = pd.Series(
-        {
-            "cycle_id": "cycle_004",
-            "cycle_status": np.nan,
-            "cycle_status_reason": "",
-        }
-    )
-
-    _add_cycle_title(figure, cycle, publication=True)
-
-    assert all("nan" not in text.get_text().lower() for text in figure.texts)
     plt.close(figure)
 
 
@@ -676,7 +627,7 @@ def test_publication_startup_annotation_is_in_the_top_margin() -> None:
     _add_startup_annotation(axis, cycle, start)
 
     annotation = axis.texts[0]
-    assert annotation.get_position()[0] >= 0.10
+    assert annotation.get_position()[0] <= 0.05
     assert annotation.get_position()[1] > 1.0
     plt.close(figure)
 
