@@ -3,13 +3,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from PIL import Image
 
 from frost_analysis import cli
 from frost_analysis.report import (
+    _add_qa_summary_line,
+    _cop_inset_required,
     _cycle_image_counts,
+    _finish_cycle_axes,
+    _observed_segments,
+    _plot_defrost_state_strip,
+    _plot_prepared_line,
+    _plot_stage_and_defrost,
     _prepared_observed_series,
     _processed_observed_series,
     generate_report,
@@ -148,6 +157,7 @@ def test_generate_report_writes_four_figure_contract_and_metadata(tmp_path: Path
 
     assert result == output_dir
     assert (output_dir / "cycles" / "cycle_001_overview.png").is_file()
+    assert (output_dir / "publication" / "cycle_001_publication.png").is_file()
     assert (output_dir / "coverage.png").is_file()
     assert (output_dir / "baseline.png").is_file()
     assert (output_dir / "candidate.png").is_file()
@@ -156,6 +166,11 @@ def test_generate_report_writes_four_figure_contract_and_metadata(tmp_path: Path
     assert summary["manifest_present"] is True
     assert summary["input_files"]["prepared_data.parquet"]["sha256"]
     assert summary["provenance"]["config_provenance"]["schema_version"] == 2
+    assert "publication/cycle_001_publication.png" in summary["figures"]
+
+    with Image.open(output_dir / "publication" / "cycle_001_publication.png") as image:
+        assert image.info["dpi"][0] >= 299
+        assert image.info["dpi"][1] >= 299
 
 
 def test_report_masks_prepared_quality_flags_and_processed_imputation() -> None:
@@ -231,7 +246,7 @@ def test_report_warns_when_valid_cycle_has_no_processed_rows(tmp_path: Path) -> 
     )
 
 
-def test_report_does_not_repeat_empty_warnings_for_summary_only_incomplete_cycle(
+def test_report_skips_partial_and_summary_only_cycle_overviews(
     tmp_path: Path,
 ) -> None:
     run_dir = tmp_path / "run"
@@ -257,6 +272,23 @@ def test_report_does_not_repeat_empty_warnings_for_summary_only_incomplete_cycle
                     "baseline_end": [pd.NaT],
                 }
             ),
+            pd.DataFrame(
+                {
+                    "experiment_id": ["exp_test"],
+                    "experiment_date": ["2026-07-15"],
+                    "cycle_id": ["partial_001"],
+                    "cycle_status": ["incomplete"],
+                    "cycle_status_reason": ["outside_complete_cycle"],
+                    "heating_start": [pd.NaT],
+                    "stable_heating_start": [pd.NaT],
+                    "defrost_start": [pd.NaT],
+                    "defrost_end": [pd.NaT],
+                    "baseline_status": ["not_applicable"],
+                    "baseline_failure_reason": ["cycle_not_valid"],
+                    "baseline_start": [pd.NaT],
+                    "baseline_end": [pd.NaT],
+                }
+            ),
         ],
         ignore_index=True,
     )
@@ -269,9 +301,224 @@ def test_report_does_not_repeat_empty_warnings_for_summary_only_incomplete_cycle
     )
     assert not any(
         warning.get("cycle_id") == "cycle_002"
-        and warning["code"] in {"empty_visual_channel", "empty_camera_role"}
+        and warning["code"] == "empty_visual_channel"
         for warning in report_summary["warnings"]
     )
+    assert any(
+        warning.get("cycle_id") == "cycle_002"
+        and warning["code"] == "skipped_cycle_without_prepared_rows"
+        for warning in report_summary["warnings"]
+    )
+    assert not any(
+        warning.get("cycle_id") == "partial_001"
+        for warning in report_summary["warnings"]
+    )
+    assert "cycles/cycle_002_overview.png" not in report_summary["figures"]
+    assert "publication/cycle_002_publication.png" not in report_summary["figures"]
+    assert not (tmp_path / "qa" / "cycles" / "cycle_002_overview.png").exists()
+    assert not (tmp_path / "qa" / "publication" / "cycle_002_publication.png").exists()
+    assert not (tmp_path / "qa" / "publication" / "partial_001_publication.png").exists()
+
+
+@pytest.mark.parametrize("status", ["incomplete", "invalid"])
+def test_report_draws_formal_cycle_with_data_even_when_not_valid(
+    tmp_path: Path, status: str
+) -> None:
+    run_dir = tmp_path / "run"
+    _write_run(run_dir)
+    summary = pd.read_csv(run_dir / "cycle_summary.csv")
+    summary.loc[0, "cycle_status"] = status
+    summary.to_csv(run_dir / "cycle_summary.csv", index=False)
+
+    generate_report(run_dir, tmp_path / "qa")
+
+    report_summary = json.loads(
+        (tmp_path / "qa" / "report_summary.json").read_text(encoding="utf-8")
+    )
+    assert "cycles/cycle_001_overview.png" in report_summary["figures"]
+    assert "publication/cycle_001_publication.png" in report_summary["figures"]
+
+
+def test_observed_segments_break_on_nan() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 08:00:00",
+            "2026-07-15 08:00:10",
+            "2026-07-15 08:00:20",
+            "2026-07-15 08:00:30",
+        ]
+    )
+    segments = _observed_segments(timestamps, pd.Series([1.0, 2.0, np.nan, 4.0]))
+
+    assert len(segments) == 2
+    assert segments[0][1].tolist() == [1.0, 2.0]
+    assert segments[1][1].tolist() == [4.0]
+
+
+def test_observed_segments_break_on_timestamp_gap_and_keep_values_aligned() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 08:00:10",
+            "2026-07-15 08:00:00",
+            "2026-07-15 08:00:01",
+            "2026-07-15 08:00:02",
+            "2026-07-15 08:00:03",
+            "2026-07-15 08:00:11",
+        ]
+    )
+    segments = _observed_segments(timestamps, pd.Series([10.0, 0.0, 1.0, 2.0, 3.0, 11.0]))
+
+    assert len(segments) == 2
+    assert segments[0][1].tolist() == [0.0, 1.0, 2.0, 3.0]
+    assert segments[1][1].tolist() == [10.0, 11.0]
+
+
+def test_prepared_segments_keep_the_same_variable_color_after_a_gap() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 08:00:00",
+            "2026-07-15 08:00:10",
+            "2026-07-15 08:00:20",
+            "2026-07-15 08:00:30",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "compressor_frequency": [30.0, 31.0, np.nan, 33.0],
+            "compressor_frequency__missing": [False] * 4,
+            "compressor_frequency__invalid": [False] * 4,
+            "compressor_frequency__duplicate": [False] * 4,
+            "compressor_frequency__conflict": [False] * 4,
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _plot_prepared_line(
+        axis,
+        frame,
+        "compressor_frequency",
+        "Compressor frequency",
+        "cycle_001",
+        [],
+    )
+
+    assert len(axis.lines) == 2
+    assert {line.get_color() for line in axis.lines} == {"#0072B2"}
+    assert axis.lines[0].get_label() == "Compressor frequency"
+    assert axis.lines[1].get_label() == "_child1"
+    plt.close(figure)
+
+
+def test_defrost_step_plot_breaks_at_unknown_state() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 08:00:00",
+            "2026-07-15 08:00:10",
+            "2026-07-15 08:00:20",
+            "2026-07-15 08:00:30",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "cycle_stage": ["recovery", "defrost", "partial", "defrost"],
+            "defrost_active": [False, True, np.nan, True],
+            "defrost_active__missing": [False] * 4,
+            "defrost_active__invalid": [False] * 4,
+            "defrost_active__duplicate": [False] * 4,
+            "defrost_active__conflict": [False] * 4,
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _plot_stage_and_defrost(axis, frame, "cycle_001", [])
+
+    assert len(axis.lines) == 2
+    plt.close(figure)
+
+
+def test_defrost_state_strip_uses_neutral_off_and_red_on() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 08:00:00",
+            "2026-07-15 08:00:10",
+            "2026-07-15 08:00:20",
+            "2026-07-15 08:00:30",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [False, True, np.nan, True],
+            "defrost_active__missing": [False] * 4,
+            "defrost_active__invalid": [False] * 4,
+            "defrost_active__duplicate": [False] * 4,
+            "defrost_active__conflict": [False] * 4,
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _plot_defrost_state_strip(axis, frame, timestamps[0])
+
+    colors = {line.get_color() for line in axis.lines}
+    assert "#6B7280" in colors
+    assert "#C1121F" in colors
+    assert len(axis.lines) == 3
+    plt.close(figure)
+
+
+def test_cop_inset_rule_requires_startup_peak_and_narrow_stable_range() -> None:
+    timestamps = pd.date_range("2026-07-15 08:00:00", periods=4, freq="10s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "cop": [14.0, 2.2, 2.4, 2.6],
+            "cop__imputed": [False] * 4,
+        }
+    )
+    cycle = pd.Series(
+        {
+            "heating_start": timestamps[0],
+            "stable_heating_start": timestamps[1],
+        }
+    )
+
+    assert _cop_inset_required(frame, cycle) is True
+
+    cycle["stable_heating_start"] = pd.NaT
+    assert _cop_inset_required(frame, cycle) is False
+
+
+def test_qa_summary_line_uses_compact_minute_units() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    cycle = pd.Series(
+        {
+            "cycle_id": "cycle_001",
+            "cycle_duration_seconds": 4218.0,
+            "baseline_start": start + pd.Timedelta(minutes=5),
+            "baseline_end": start + pd.Timedelta(minutes=10),
+        }
+    )
+
+    line = _add_qa_summary_line(
+        cycle,
+        [(start + pd.Timedelta(minutes=20), start + pd.Timedelta(minutes=26))],
+        start,
+    )
+
+    assert "Duration: 70.3 min" in line
+    assert "Defrost-state gap: 6.0 min" in line
+    assert "Baseline: 5–10 min" in line
+
+
+def test_cycle_axes_label_time_from_heating_start() -> None:
+    figure, axis = plt.subplots()
+
+    _finish_cycle_axes([axis], None)
+
+    assert axis.get_xlabel() == "Time from heating start [min]"
+    plt.close(figure)
 
 
 def test_report_records_baseline_unavailable_even_without_processed_rows(tmp_path: Path) -> None:

@@ -25,6 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 from .analysis import imputed_column_for_value
 from .validation import validate_analysis, validate_prepared, validate_processed
@@ -77,6 +78,55 @@ _STAGE_COLORS = {
     "defrost": "#a1d99b",
     "partial": "#bdbdbd",
 }
+_STAGE_LABELS = {
+    "recovery": "Post-defrost recovery",
+    "frost_development": "Frost development",
+    "defrost": "Defrost",
+}
+_CHANNEL_COLORS = {
+    "compressor_frequency": "#0072B2",
+    "heating_capacity": "#D55E00",
+    "cop": "#009E73",
+    "ambient_temperature": "#374151",
+    "water_in_temperature": "#E69F00",
+    "water_out_temperature": "#CC79A7",
+    "evaporating_pressure": "#7B2CBF",
+    "evaporating_temperature": "#56B4E9",
+}
+_DISPLAY_LABELS = {
+    "compressor_frequency": "Compressor frequency",
+    "heating_capacity": "Heating capacity",
+    "cop": "COP",
+    "ambient_temperature": "Ambient temperature",
+    "water_in_temperature": "Water inlet temperature",
+    "water_out_temperature": "Water outlet temperature",
+    "evaporating_pressure": "Evaporating pressure, Pₑ",
+    "evaporating_temperature": "Evaporating temperature, Tₑ (measured)",
+}
+_DISPLAY_UNITS = {
+    "compressor_frequency": "Hz",
+    "heating_capacity": "kW",
+    "cop": "-",
+    "ambient_temperature": "°C",
+    "water_in_temperature": "°C",
+    "water_out_temperature": "°C",
+    "evaporating_pressure": "MPa abs",
+    "evaporating_temperature": "°C",
+}
+_AXIS_LABELS = {
+    "compressor_frequency": "Compressor frequency [Hz]",
+    "heating_capacity": "Heating capacity [kW]",
+    "cop": "COP [-]",
+    "evaporating_pressure": "Evaporating pressure [MPa abs]",
+    "evaporating_temperature": "Tₑ [°C]",
+}
+_PLOT_DPI = 300
+_STARTUP_SHADE = "#D1D5DB"
+_BASELINE_COLOR = "#6B7280"
+_STATE_GAP_COLOR = "#9CA3AF"
+_DEFROST_OFF_COLOR = "#6B7280"
+_DEFROST_STATE_COLOR = "#C1121F"
+_COP_STABLE_SPAN_FRACTION = 0.35
 
 
 def generate_report(input_dir: Path, output_dir: Path, overwrite: bool = False) -> Path:
@@ -101,7 +151,7 @@ def generate_report(input_dir: Path, output_dir: Path, overwrite: bool = False) 
     warnings: list[dict[str, str]] = []
     figures: list[str] = []
     try:
-        figures.extend(_plot_cycle_overviews(prepared, processed, summary, temporary_dir, warnings))
+        figures.extend(_plot_cycle_outputs(prepared, processed, summary, temporary_dir, warnings))
         figures.append(_plot_coverage(prepared, summary, temporary_dir, warnings))
         figures.append(_plot_baseline(processed, summary, temporary_dir, warnings))
         figures.append(_plot_candidates(processed, summary, evidence, temporary_dir, warnings))
@@ -268,7 +318,34 @@ def _validate_processed_quality_columns(
                 raise ValueError(f"processed value column lacks quality column: {quality}")
 
 
-def _plot_cycle_overviews(
+def _iter_plottable_cycles(
+    prepared: pd.DataFrame,
+    processed: pd.DataFrame,
+    summary: pd.DataFrame,
+    output_dir: Path,
+    warnings: list[dict[str, str]],
+) -> Any:
+    """Yield one shared set of data slices for all cycle figure variants."""
+    for _, cycle in summary.iterrows():
+        cycle_id = str(cycle["cycle_id"])
+        if not cycle_id.startswith("cycle_"):
+            continue
+        prepared_cycle = prepared.loc[_cycle_mask(prepared, cycle)]
+        if prepared_cycle.empty:
+            path = output_dir / "cycles" / f"{cycle_id}_overview.png"
+            _record_warning(
+                warnings,
+                "skipped_cycle_without_prepared_rows",
+                str(path.relative_to(output_dir)),
+                cycle_id,
+                message="Formal cycle has no Prepared rows; cycle figures were skipped.",
+            )
+            continue
+        processed_cycle = processed.loc[_cycle_mask(processed, cycle)]
+        yield cycle, prepared_cycle, processed_cycle
+
+
+def _plot_cycle_outputs(
     prepared: pd.DataFrame,
     processed: pd.DataFrame,
     summary: pd.DataFrame,
@@ -277,13 +354,45 @@ def _plot_cycle_overviews(
 ) -> list[str]:
     cycle_dir = output_dir / "cycles"
     cycle_dir.mkdir()
+    publication_dir = output_dir / "publication"
+    publication_dir.mkdir()
     figures: list[str] = []
-    for _, cycle in summary.iterrows():
+    for cycle, prepared_cycle, processed_cycle in _iter_plottable_cycles(
+        prepared, processed, summary, output_dir, warnings
+    ):
         cycle_id = str(cycle["cycle_id"])
-        prepared_cycle = prepared.loc[_cycle_mask(prepared, cycle)]
-        processed_cycle = processed.loc[_cycle_mask(processed, cycle)]
-        path = cycle_dir / f"{cycle_id}_overview.png"
-        _plot_one_cycle(prepared_cycle, processed_cycle, cycle, path, warnings)
+        overview_path = cycle_dir / f"{cycle_id}_overview.png"
+        _plot_one_cycle_qa(prepared_cycle, processed_cycle, cycle, overview_path, warnings)
+        figures.append(str(overview_path.relative_to(output_dir)))
+
+        publication_path = publication_dir / f"{cycle_id}_publication.png"
+        _plot_one_cycle_publication(
+            prepared_cycle,
+            processed_cycle,
+            cycle,
+            publication_path,
+            warnings,
+        )
+        figures.append(str(publication_path.relative_to(output_dir)))
+    return figures
+
+
+def _plot_cycle_overviews(
+    prepared: pd.DataFrame,
+    processed: pd.DataFrame,
+    summary: pd.DataFrame,
+    output_dir: Path,
+    warnings: list[dict[str, str]],
+) -> list[str]:
+    """Backward-compatible QA-only cycle rendering helper."""
+    cycle_dir = output_dir / "cycles"
+    cycle_dir.mkdir()
+    figures: list[str] = []
+    for cycle, prepared_cycle, processed_cycle in _iter_plottable_cycles(
+        prepared, processed, summary, output_dir, warnings
+    ):
+        path = cycle_dir / f"{cycle['cycle_id']}_overview.png"
+        _plot_one_cycle_qa(prepared_cycle, processed_cycle, cycle, path, warnings)
         figures.append(str(path.relative_to(output_dir)))
     return figures
 
@@ -295,77 +404,283 @@ def _plot_one_cycle(
     path: Path,
     warnings: list[dict[str, str]],
 ) -> None:
-    figure, axes = plt.subplots(7, 1, figsize=(15, 20), sharex=True)
+    """Backward-compatible alias for the QA layout."""
+    _plot_one_cycle_qa(prepared, processed, cycle, path, warnings)
+
+
+def _plot_one_cycle_qa(
+    prepared: pd.DataFrame,
+    processed: pd.DataFrame,
+    cycle: pd.Series,
+    path: Path,
+    warnings: list[dict[str, str]],
+) -> None:
+    figure = plt.figure(figsize=(14, 11.5), dpi=_PLOT_DPI)
+    grid = figure.add_gridspec(
+        6,
+        1,
+        height_ratios=(0.22, 1, 1.2, 1.15, 1, 1),
+        hspace=0.26,
+    )
+    state_axis = figure.add_subplot(grid[0, 0])
+    axes = [
+        figure.add_subplot(grid[index, 0], sharex=state_axis)
+        for index in range(1, 6)
+    ]
+
     cycle_id = str(cycle["cycle_id"])
+    origin = _cycle_time_origin(prepared, cycle)
+    all_axes = [state_axis, *axes]
+    gap_intervals = _defrost_state_gap_intervals(prepared)
+    _shade_cycle_stages(all_axes, cycle, origin)
+    _shade_defrost_state_gaps(all_axes, gap_intervals, origin)
+    _add_baseline_indicator(axes[0], cycle, origin)
+
     _plot_prepared_line(
         axes[0],
         prepared,
         "compressor_frequency",
-        "Compressor frequency",
+        _DISPLAY_LABELS["compressor_frequency"],
         cycle_id,
         warnings,
+        color=_CHANNEL_COLORS["compressor_frequency"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("compressor_frequency"),
     )
     _plot_prepared_line(
-        axes[1], prepared, "heating_capacity", "Heating capacity", cycle_id, warnings
+        axes[1],
+        prepared,
+        "heating_capacity",
+        _DISPLAY_LABELS["heating_capacity"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["heating_capacity"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("heating_capacity"),
     )
-    _plot_processed_line(axes[2], processed, "cop", "COP", cycle_id, warnings)
-    for channel, color in zip(
-        ("ambient_temperature", "water_in_temperature", "water_out_temperature"),
-        ("#3182bd", "#e6550d", "#31a354"),
-        strict=True,
+    _plot_processed_line(
+        axes[2],
+        processed,
+        "cop",
+        _DISPLAY_LABELS["cop"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["cop"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("cop"),
+    )
+    _configure_cop_axis(axes[2], processed, cycle, origin)
+    for channel in (
+        "ambient_temperature",
+        "water_in_temperature",
+        "water_out_temperature",
     ):
-        _plot_prepared_line(axes[3], prepared, channel, channel, cycle_id, warnings, color)
-    for channel, color in zip(
-        ("evaporating_pressure", "evaporating_temperature"),
-        ("#756bb1", "#636363"),
-        strict=True,
-    ):
-        _plot_prepared_line(axes[4], prepared, channel, channel, cycle_id, warnings, color)
-    _plot_stage_and_defrost(axes[5], prepared, cycle_id, warnings)
-    axes[6].axis("off")
-
-    boundaries = {
-        "heating_start": cycle.get("heating_start"),
-        "stable_heating_start": cycle.get("stable_heating_start"),
-        "defrost_start": cycle.get("defrost_start"),
-        "defrost_end": cycle.get("defrost_end"),
-    }
-    for axis in axes[:6]:
-        for _name, value in boundaries.items():
-            if pd.notna(value):
-                axis.axvline(pd.Timestamp(value), color="#333333", alpha=0.35, linewidth=0.8)
-        _shade_baseline(axis, cycle)
-    _format_cycle_metadata(figure, axes[6], prepared, processed, cycle)
-    figure_name = str(path.relative_to(path.parent.parent))
-    for role, count in _cycle_image_counts(prepared, cycle_id).items():
-        if count == 0 and not prepared.empty:
-            _record_warning(
-                warnings,
-                "empty_camera_role",
-                figure_name,
-                cycle_id,
-                role,
-                "Camera role exists but has no matched images in this cycle.",
-            )
-    if cycle.get("cycle_status") == "valid" and processed.empty:
-        _record_warning(
-            warnings,
-            "cycle_without_processed_rows",
-            figure_name,
+        _plot_prepared_line(
+            axes[3],
+            prepared,
+            channel,
+            _DISPLAY_LABELS[channel],
             cycle_id,
-            message="Valid cycle has no Processed rows.",
+            warnings,
+            color=_CHANNEL_COLORS[channel],
+            x_origin=origin,
+            show_legend=False,
+            y_label="Temperature [°C]",
         )
-    start = _format_timestamp(cycle.get("heating_start"))
-    end = _format_timestamp(cycle.get("defrost_end"))
-    duration = _cycle_duration(cycle)
-    figure.suptitle(
-        f"{cycle_id} | {cycle.get('cycle_status', 'N/A')}\n"
-        f"{start} → {end} | Duration: {duration}",
-        fontsize=14,
+    axes[3].legend(
+        loc="lower left",
+        bbox_to_anchor=(0.0, 1.02),
+        ncols=3,
+        fontsize=8,
+        frameon=False,
+        borderaxespad=0,
     )
-    figure.tight_layout(rect=(0, 0, 1, 0.95))
-    figure.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(figure)
+
+    pressure_axis = axes[4]
+    temperature_axis = pressure_axis.twinx()
+    _plot_prepared_line(
+        pressure_axis,
+        prepared,
+        "evaporating_pressure",
+        _DISPLAY_LABELS["evaporating_pressure"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["evaporating_pressure"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("evaporating_pressure"),
+    )
+    _plot_prepared_line(
+        temperature_axis,
+        prepared,
+        "evaporating_temperature",
+        _DISPLAY_LABELS["evaporating_temperature"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["evaporating_temperature"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("evaporating_temperature"),
+    )
+    temperature_axis.spines["right"].set_visible(True)
+    temperature_axis.tick_params(axis="y", labelsize=9)
+    pressure_axis.legend(
+        handles=[
+            Line2D(
+                [],
+                [],
+                color=_CHANNEL_COLORS["evaporating_pressure"],
+                label="Evaporating pressure, Pₑ",
+            ),
+            Line2D(
+                [],
+                [],
+                color=_CHANNEL_COLORS["evaporating_temperature"],
+                label="Evaporating temperature, Tₑ (measured)",
+            ),
+        ],
+        loc="lower left",
+        bbox_to_anchor=(0.0, 1.02),
+        fontsize=8,
+        frameon=False,
+        borderaxespad=0,
+    )
+
+    _plot_defrost_state_strip(state_axis, prepared, origin)
+    _add_startup_annotation(axes[2], cycle, origin)
+    figure.text(
+        0.08,
+        0.935,
+        _add_qa_summary_line(cycle, gap_intervals, origin),
+        ha="left",
+        va="top",
+        fontsize=9.5,
+        color="#4D4D4D",
+    )
+    _add_cycle_diagnostics(path, prepared, processed, cycle, warnings)
+    _finish_cycle_axes(axes, state_axis)
+    _add_cycle_title(figure, cycle, publication=False)
+    figure.legend(
+        handles=_cycle_legend_handles(gap_intervals, cycle),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.895),
+        ncols=5,
+        fontsize=8,
+        frameon=False,
+    )
+    figure.subplots_adjust(left=0.08, right=0.985, bottom=0.06, top=0.86)
+    _save_figure(figure, path)
+
+
+def _plot_one_cycle_publication(
+    prepared: pd.DataFrame,
+    processed: pd.DataFrame,
+    cycle: pd.Series,
+    path: Path,
+    warnings: list[dict[str, str]],
+) -> None:
+    figure = plt.figure(figsize=(7.2, 9.0), dpi=_PLOT_DPI)
+    grid = figure.add_gridspec(5, 1, hspace=0.30)
+    axes = [figure.add_subplot(grid[0, 0])]
+    axes.extend(figure.add_subplot(grid[index, 0], sharex=axes[0]) for index in range(1, 5))
+    cycle_id = str(cycle["cycle_id"])
+    origin = _cycle_time_origin(prepared, cycle)
+    gap_intervals = _defrost_state_gap_intervals(prepared)
+    _shade_cycle_stages(axes, cycle, origin)
+    _shade_defrost_state_gaps(axes, gap_intervals, origin)
+    _add_baseline_indicator(axes[0], cycle, origin)
+
+    _plot_prepared_line(
+        axes[0],
+        prepared,
+        "compressor_frequency",
+        _DISPLAY_LABELS["compressor_frequency"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["compressor_frequency"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("compressor_frequency"),
+    )
+    _plot_prepared_line(
+        axes[1],
+        prepared,
+        "heating_capacity",
+        _DISPLAY_LABELS["heating_capacity"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["heating_capacity"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("heating_capacity"),
+    )
+    _plot_processed_line(
+        axes[2],
+        processed,
+        "cop",
+        _DISPLAY_LABELS["cop"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["cop"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("cop"),
+    )
+    _configure_cop_axis(axes[2], processed, cycle, origin)
+    for channel in (
+        "ambient_temperature",
+        "water_in_temperature",
+        "water_out_temperature",
+    ):
+        _plot_prepared_line(
+            axes[3],
+            prepared,
+            channel,
+            _DISPLAY_LABELS[channel],
+            cycle_id,
+            warnings,
+            color=_CHANNEL_COLORS[channel],
+            x_origin=origin,
+            show_legend=False,
+            y_label="Temperature [°C]",
+        )
+    axes[3].legend(
+        loc="lower left",
+        bbox_to_anchor=(0.0, 1.02),
+        ncols=3,
+        fontsize=7.5,
+        frameon=False,
+        borderaxespad=0,
+    )
+    _plot_prepared_line(
+        axes[4],
+        prepared,
+        "evaporating_temperature",
+        _DISPLAY_LABELS["evaporating_temperature"],
+        cycle_id,
+        warnings,
+        color=_CHANNEL_COLORS["evaporating_temperature"],
+        x_origin=origin,
+        show_legend=False,
+        y_label=_channel_axis_label("evaporating_temperature"),
+    )
+
+    _add_startup_annotation(axes[2], cycle, origin)
+    _finish_cycle_axes(axes, None)
+    _add_cycle_title(figure, cycle, publication=True)
+    figure.legend(
+        handles=_cycle_legend_handles(gap_intervals, cycle),
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.925),
+        ncols=5,
+        fontsize=7.5,
+        frameon=False,
+    )
+    figure.subplots_adjust(left=0.14, right=0.98, bottom=0.06, top=0.89)
+    _save_figure(figure, path)
 
 
 def _plot_prepared_line(
@@ -376,6 +691,9 @@ def _plot_prepared_line(
     cycle_id: str,
     warnings: list[dict[str, str]],
     color: str | None = None,
+    x_origin: pd.Timestamp | None = None,
+    show_legend: bool = True,
+    y_label: str | None = None,
 ) -> None:
     if channel not in frame:
         _missing_panel(axis, label, "channel not present in Prepared", warnings, cycle_id, channel)
@@ -399,9 +717,19 @@ def _plot_prepared_line(
     if not values.notna().any():
         _empty_panel(axis, label, "no observed values", warnings, cycle_id, channel)
         return
-    axis.plot(frame["timestamp"], pd.to_numeric(values, errors="coerce"), label=label, color=color)
-    axis.set_ylabel(label)
-    axis.legend(loc="upper right", fontsize=8)
+    line_color = color or _CHANNEL_COLORS.get(channel, "#4D4D4D")
+    for index, (times, segment_values) in enumerate(_observed_segments(frame["timestamp"], values)):
+        plot_times = _elapsed_minutes(times, x_origin)
+        axis.plot(
+            plot_times,
+            segment_values,
+            label=label if index == 0 else None,
+            color=line_color,
+            linewidth=1.35,
+        )
+    axis.set_ylabel(y_label or label)
+    if show_legend:
+        axis.legend(loc="upper right", fontsize=8, frameon=False)
 
 
 def _plot_processed_line(
@@ -412,6 +740,9 @@ def _plot_processed_line(
     cycle_id: str,
     warnings: list[dict[str, str]],
     color: str | None = None,
+    x_origin: pd.Timestamp | None = None,
+    show_legend: bool = True,
+    y_label: str | None = None,
 ) -> None:
     if channel not in frame:
         _missing_panel(axis, label, "channel not present in Processed", warnings, cycle_id, channel)
@@ -434,9 +765,101 @@ def _plot_processed_line(
     if not values.notna().any():
         _empty_panel(axis, label, "no observed values", warnings, cycle_id, channel)
         return
-    axis.plot(frame["timestamp"], pd.to_numeric(values, errors="coerce"), label=label, color=color)
-    axis.set_ylabel(label)
-    axis.legend(loc="upper right", fontsize=8)
+    line_color = color or _CHANNEL_COLORS.get(channel, "#4D4D4D")
+    for index, (times, segment_values) in enumerate(_observed_segments(frame["timestamp"], values)):
+        plot_times = _elapsed_minutes(times, x_origin)
+        axis.plot(
+            plot_times,
+            segment_values,
+            label=label if index == 0 else None,
+            color=line_color,
+            linewidth=1.35,
+        )
+    axis.set_ylabel(y_label or label)
+    if show_legend:
+        axis.legend(loc="upper right", fontsize=8, frameon=False)
+
+
+def _cop_inset_required(frame: pd.DataFrame, cycle: pd.Series) -> bool:
+    """Return whether the startup COP peak would hide the stable trend."""
+    if "cop" not in frame or "cop__imputed" not in frame or frame.empty:
+        return False
+    start = cycle.get("heating_start")
+    stable = cycle.get("stable_heating_start")
+    if pd.isna(start) or pd.isna(stable) or pd.Timestamp(stable) <= pd.Timestamp(start):
+        return False
+    values = _processed_observed_series(frame, "cop")
+    times = pd.to_datetime(frame["timestamp"], errors="coerce")
+    observed = values.notna() & times.notna()
+    if not observed.any():
+        return False
+    observed_values = values.loc[observed]
+    observed_times = times.loc[observed]
+    peak_time = observed_times.loc[observed_values.idxmax()]
+    startup_peak = pd.Timestamp(start) <= peak_time < pd.Timestamp(stable)
+    stable_values = observed_values.loc[observed_times >= pd.Timestamp(stable)]
+    full_span = float(observed_values.max() - observed_values.min())
+    if stable_values.empty or full_span <= 0:
+        return False
+    stable_span = float(stable_values.quantile(0.95) - stable_values.quantile(0.05))
+    return startup_peak and stable_span / full_span < _COP_STABLE_SPAN_FRACTION
+
+
+def _configure_cop_axis(
+    axis: Any,
+    frame: pd.DataFrame,
+    cycle: pd.Series,
+    origin: pd.Timestamp,
+) -> None:
+    """Keep the stable COP trend readable and retain the full startup range in an inset."""
+    if not _cop_inset_required(frame, cycle):
+        return
+    values = _processed_observed_series(frame, "cop")
+    times = pd.to_datetime(frame["timestamp"], errors="coerce")
+    stable = cycle.get("stable_heating_start")
+    stable_values = values.loc[times.ge(pd.Timestamp(stable)) & values.notna()]
+    if stable_values.empty:
+        return
+    stable_min = float(stable_values.min())
+    stable_max = float(stable_values.max())
+    stable_span = max(stable_max - stable_min, 0.25)
+    padding = max(stable_span * 0.12, 0.12)
+    axis.set_ylim(max(0.0, stable_min - padding), stable_max + padding)
+    _add_cop_inset(axis, frame, cycle, origin)
+
+
+def _add_cop_inset(
+    axis: Any,
+    frame: pd.DataFrame,
+    cycle: pd.Series,
+    origin: pd.Timestamp,
+) -> None:
+    values = _processed_observed_series(frame, "cop")
+    segments = _observed_segments(frame["timestamp"], values)
+    if not segments:
+        return
+    inset = axis.inset_axes([0.64, 0.14, 0.33, 0.48], zorder=5)
+    for times, segment_values in segments:
+        inset.plot(
+            _elapsed_minutes(times, origin),
+            segment_values,
+            color=_CHANNEL_COLORS["cop"],
+            linewidth=0.9,
+        )
+    observed = values.dropna()
+    full_min = float(observed.min())
+    full_max = float(observed.max())
+    full_span = max(full_max - full_min, 0.25)
+    inset.set_ylim(max(0.0, full_min - full_span * 0.05), full_max + full_span * 0.05)
+    start = (pd.Timestamp(cycle["heating_start"]) - origin).total_seconds() / 60.0
+    stable = (pd.Timestamp(cycle["stable_heating_start"]) - origin).total_seconds() / 60.0
+    inset.set_xlim(start, stable)
+    inset.set_title("Startup transient\n(full scale)", fontsize=6.5, pad=2)
+    inset.tick_params(labelsize=5, width=0.45, length=2)
+    inset.grid(False)
+    inset.set_facecolor("white")
+    for spine in inset.spines.values():
+        spine.set_linewidth(0.55)
 
 
 def _plot_stage_and_defrost(
@@ -470,14 +893,15 @@ def _plot_stage_and_defrost(
     if "defrost_active" in frame:
         quality = _prepared_quality_available(frame, "defrost_active")
         if quality:
-            values = _prepared_observed_series(frame, "defrost_active").astype("boolean")
-            axis.step(
-                frame["timestamp"],
-                values.astype(float),
-                where="post",
-                color="#de2d26",
-                alpha=0.7,
-            )
+            values = _prepared_observed_series(frame, "defrost_active")
+            for times, segment_values in _observed_segments(frame["timestamp"], values):
+                axis.step(
+                    times,
+                    segment_values,
+                    where="post",
+                    color="#de2d26",
+                    alpha=0.7,
+                )
             axis.text(0.01, 0.02, "red: defrost_active", transform=axis.transAxes, fontsize=8)
         else:
             _missing_panel(
@@ -512,6 +936,370 @@ def _format_cycle_metadata(
         "images: " + (", ".join(counts) if counts else "none"),
     ]
     axis.text(0.01, 0.95, "\n".join(lines), va="top", transform=axis.transAxes, fontsize=10)
+
+
+def _channel_axis_label(channel: str) -> str:
+    if channel in _AXIS_LABELS:
+        return _AXIS_LABELS[channel]
+    label = _DISPLAY_LABELS.get(channel, channel)
+    unit = _DISPLAY_UNITS.get(channel)
+    return f"{label} [{unit}]" if unit else label
+
+
+def _cycle_time_origin(prepared: pd.DataFrame, cycle: pd.Series) -> pd.Timestamp:
+    heating_start = cycle.get("heating_start")
+    if pd.notna(heating_start):
+        return pd.Timestamp(heating_start)
+    timestamps = pd.to_datetime(
+        prepared.get("timestamp", pd.Series(dtype="datetime64[ns]")),
+        errors="coerce",
+    )
+    timestamps = timestamps.dropna()
+    if timestamps.empty:
+        return pd.Timestamp("1970-01-01")
+    return pd.Timestamp(timestamps.min())
+
+
+def _elapsed_minutes(timestamps: Any, origin: pd.Timestamp | None) -> pd.Series:
+    parsed = pd.to_datetime(pd.Series(timestamps), errors="coerce")
+    if origin is None:
+        return parsed
+    return (parsed - origin).dt.total_seconds().div(60.0)
+
+
+def _stage_intervals(cycle: pd.Series) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    boundaries = {
+        "recovery": (cycle.get("heating_start"), cycle.get("stable_heating_start")),
+        "frost_development": (cycle.get("stable_heating_start"), cycle.get("defrost_start")),
+        "defrost": (cycle.get("defrost_start"), cycle.get("defrost_end")),
+    }
+    intervals: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    for stage, (start, end) in boundaries.items():
+        if pd.notna(start) and pd.notna(end) and pd.Timestamp(start) < pd.Timestamp(end):
+            intervals.append((stage, pd.Timestamp(start), pd.Timestamp(end)))
+    return intervals
+
+
+def _shade_cycle_stages(
+    axes: list[Any], cycle: pd.Series, origin: pd.Timestamp
+) -> None:
+    for stage, start, end in _stage_intervals(cycle):
+        left = (start - origin).total_seconds() / 60.0
+        right = (end - origin).total_seconds() / 60.0
+        for axis in axes:
+            axis.axvspan(
+                left,
+                right,
+                color=_STAGE_COLORS[stage],
+                alpha=0.05,
+                linewidth=0,
+                zorder=0,
+            )
+
+
+def _defrost_state_gap_intervals(
+    frame: pd.DataFrame,
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if "defrost_active" not in frame or not _prepared_quality_available(frame, "defrost_active"):
+        return []
+    values = _prepared_observed_series(frame, "defrost_active")
+    work = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(frame["timestamp"], errors="coerce"),
+            "value": values,
+        }
+    )
+    work = work.loc[work["timestamp"].notna()].sort_values("timestamp", kind="stable")
+    if work.empty:
+        return []
+    timestamps = work["timestamp"].reset_index(drop=True)
+    observed = work["value"].reset_index(drop=True).notna()
+    diffs = timestamps.diff().dt.total_seconds()
+    positive = diffs.loc[diffs.gt(0)]
+    nominal = float(positive.median()) if not positive.empty else None
+    intervals: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for index, timestamp in enumerate(timestamps):
+        if not observed.iloc[index]:
+            end = (
+                timestamps.iloc[index + 1]
+                if index + 1 < len(timestamps)
+                else timestamp + pd.Timedelta(seconds=nominal or 0)
+            )
+            if end > timestamp:
+                intervals.append((timestamp, end))
+        if index > 0 and nominal is not None and diffs.iloc[index] > nominal * 1.5:
+            intervals.append((timestamps.iloc[index - 1], timestamp))
+    return _merge_intervals(intervals)
+
+
+def _merge_intervals(
+    intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals)
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        previous_start, previous_end = merged[-1]
+        if start <= previous_end:
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _shade_defrost_state_gaps(
+    axes: list[Any],
+    intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    origin: pd.Timestamp,
+) -> None:
+    for start, end in intervals:
+        left = (start - origin).total_seconds() / 60.0
+        right = (end - origin).total_seconds() / 60.0
+        for axis in axes:
+            axis.axvspan(
+                left,
+                right,
+                facecolor=_STATE_GAP_COLOR,
+                edgecolor=_STATE_GAP_COLOR,
+                hatch="//",
+                alpha=0.16,
+                linewidth=0.35,
+                zorder=1,
+            )
+
+
+def _add_baseline_indicator(
+    axis: Any, cycle: pd.Series, origin: pd.Timestamp
+) -> None:
+    start = cycle.get("baseline_start")
+    end = cycle.get("baseline_end")
+    if pd.notna(start) and pd.notna(end) and pd.Timestamp(start) < pd.Timestamp(end):
+        left = (pd.Timestamp(start) - origin).total_seconds() / 60.0
+        right = (pd.Timestamp(end) - origin).total_seconds() / 60.0
+        axis.axvspan(
+            left,
+            right,
+            ymin=0.90,
+            ymax=1.0,
+            color=_BASELINE_COLOR,
+            alpha=0.25,
+            linewidth=0,
+            zorder=3,
+        )
+
+
+def _add_qa_summary_line(
+    cycle: pd.Series,
+    gap_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    origin: pd.Timestamp,
+) -> str:
+    duration_seconds = _cycle_duration_seconds(cycle)
+    duration = "N/A" if duration_seconds is None else f"{duration_seconds / 60.0:.1f} min"
+    if gap_intervals:
+        gap_seconds = max((end - start).total_seconds() for start, end in gap_intervals)
+        gap = f"{gap_seconds / 60.0:.1f} min"
+    else:
+        gap = "none"
+    baseline_start = cycle.get("baseline_start")
+    baseline_end = cycle.get("baseline_end")
+    if pd.notna(baseline_start) and pd.notna(baseline_end):
+        left = (pd.Timestamp(baseline_start) - origin).total_seconds() / 60.0
+        right = (pd.Timestamp(baseline_end) - origin).total_seconds() / 60.0
+        baseline = f"{left:g}–{right:g} min"
+    else:
+        baseline = "unavailable"
+    text = f"Duration: {duration}   |   Defrost-state gap: {gap}   |   Baseline: {baseline}"
+    return text
+
+
+def _plot_defrost_state_strip(
+    axis: Any, frame: pd.DataFrame, origin: pd.Timestamp
+) -> None:
+    axis.set_title("Defrost state (observed)", loc="left", fontsize=9, pad=2)
+    axis.set_ylim(-0.1, 1.1)
+    axis.set_yticks([0, 1], ["OFF", "ON"])
+    axis.tick_params(axis="y", labelsize=8, length=3)
+    axis.tick_params(axis="x", labelbottom=False)
+    if "defrost_active" not in frame or not _prepared_quality_available(frame, "defrost_active"):
+        axis.text(
+            0.5,
+            0.5,
+            "Defrost state unavailable",
+            ha="center",
+            va="center",
+            transform=axis.transAxes,
+            fontsize=8,
+            color="#4D4D4D",
+        )
+        return
+    values = _prepared_observed_series(frame, "defrost_active")
+    for times, segment_values in _observed_segments(frame["timestamp"], values):
+        numeric_values = segment_values.astype(float).reset_index(drop=True)
+        plot_times = _elapsed_minutes(times, origin).reset_index(drop=True)
+        run_start = 0
+        for index in range(1, len(numeric_values) + 1):
+            state_changed = index == len(numeric_values) or (
+                numeric_values.iloc[index] != numeric_values.iloc[run_start]
+            )
+            if not state_changed:
+                continue
+            color = (
+                _DEFROST_STATE_COLOR
+                if bool(numeric_values.iloc[run_start])
+                else _DEFROST_OFF_COLOR
+            )
+            axis.step(
+                plot_times.iloc[run_start:index],
+                numeric_values.iloc[run_start:index],
+                where="post",
+                color=color,
+                linewidth=1.2,
+            )
+            run_start = index
+
+
+def _add_startup_annotation(
+    axis: Any, cycle: pd.Series, origin: pd.Timestamp
+) -> None:
+    start = cycle.get("heating_start")
+    stable = cycle.get("stable_heating_start")
+    if pd.isna(start) or pd.isna(stable) or pd.Timestamp(stable) <= pd.Timestamp(start):
+        return
+    left = (pd.Timestamp(start) - origin).total_seconds() / 60.0
+    right = (pd.Timestamp(stable) - origin).total_seconds() / 60.0
+    axis.annotate(
+        "Startup transient",
+        xy=((left + right) / 2.0, 0.97),
+        xycoords=("data", "axes fraction"),
+        ha="center",
+        va="top",
+        fontsize=8,
+        color="#4D4D4D",
+    )
+
+
+def _add_cycle_diagnostics(
+    path: Path,
+    prepared: pd.DataFrame,
+    processed: pd.DataFrame,
+    cycle: pd.Series,
+    warnings: list[dict[str, str]],
+) -> None:
+    figure_name = str(path.relative_to(path.parents[1]))
+    cycle_id = str(cycle["cycle_id"])
+    for role, count in _cycle_image_counts(prepared, cycle_id).items():
+        if count == 0 and not prepared.empty:
+            _record_warning(
+                warnings,
+                "empty_camera_role",
+                figure_name,
+                cycle_id,
+                role,
+                "Camera role exists but has no matched images in this cycle.",
+            )
+    if cycle.get("cycle_status") == "valid" and processed.empty:
+        _record_warning(
+            warnings,
+            "cycle_without_processed_rows",
+            figure_name,
+            cycle_id,
+            message="Valid cycle has no Processed rows.",
+        )
+
+
+def _finish_cycle_axes(axes: list[Any], state_axis: Any | None) -> None:
+    if state_axis is not None:
+        state_axis.set_xlabel("")
+        state_axis.tick_params(axis="x", labelbottom=False)
+    for index, axis in enumerate(axes):
+        axis.text(
+            -0.08,
+            1.04,
+            f"({chr(ord('a') + index)})",
+            transform=axis.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color="#272727",
+        )
+    for axis in axes[:-1]:
+        axis.tick_params(axis="x", labelbottom=False)
+    axes[-1].set_xlabel("Time from heating start [min]")
+    for axis in [*axes, *([state_axis] if state_axis is not None else [])]:
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.grid(axis="x", visible=False)
+        axis.grid(axis="y", color="#D9D9D9", linewidth=0.35, alpha=0.45)
+        axis.tick_params(labelsize=9, width=0.7, length=3)
+
+
+def _add_cycle_title(figure: Any, cycle: pd.Series, publication: bool) -> None:
+    cycle_id = str(cycle.get("cycle_id", "cycle")).replace("_", " ").title()
+    status = str(cycle.get("cycle_status", "unknown")).title()
+    reason = str(cycle.get("cycle_status_reason", "") or "").replace("_", " ").title()
+    figure.suptitle(
+        f"{cycle_id} — {status}",
+        x=0.04,
+        y=0.995,
+        ha="left",
+        va="top",
+        fontsize=14 if publication else 15,
+        fontweight="bold",
+    )
+    if reason:
+        figure.text(
+            0.04,
+            0.968,
+            reason,
+            ha="left",
+            va="top",
+            fontsize=9 if publication else 10,
+            color="#4D4D4D",
+        )
+
+
+def _cycle_legend_handles(
+    gap_intervals: list[tuple[pd.Timestamp, pd.Timestamp]], cycle: pd.Series
+) -> list[Any]:
+    handles = [
+        Patch(
+            facecolor=_STAGE_COLORS[stage],
+            edgecolor="none",
+            alpha=0.18,
+            label=_STAGE_LABELS[stage],
+        )
+        for stage in ("recovery", "frost_development", "defrost")
+    ]
+    if gap_intervals:
+        handles.append(
+            Patch(
+                facecolor=_STATE_GAP_COLOR,
+                edgecolor=_STATE_GAP_COLOR,
+                hatch="//",
+                alpha=0.22,
+                label="Defrost state unavailable",
+            )
+        )
+    if pd.notna(cycle.get("baseline_start")) and pd.notna(cycle.get("baseline_end")):
+        handles.append(
+            Patch(facecolor=_BASELINE_COLOR, edgecolor="none", alpha=0.22, label="Baseline window")
+        )
+    return handles
+
+
+def _save_figure(figure: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(
+        path,
+        dpi=_PLOT_DPI,
+        bbox_inches="tight",
+        pad_inches=0.12,
+        facecolor="white",
+        edgecolor="none",
+    )
+    plt.close(figure)
 
 
 def _plot_coverage(
@@ -576,8 +1364,7 @@ def _plot_coverage(
         )
     figure.tight_layout()
     path = output_dir / "coverage.png"
-    figure.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(figure)
+    _save_figure(figure, path)
     return str(path.relative_to(output_dir))
 
 
@@ -619,8 +1406,7 @@ def _plot_baseline(
     figure.suptitle("Baseline diagnostic channels and saved baseline windows")
     figure.tight_layout(rect=(0, 0, 1, 0.96))
     path = output_dir / "baseline.png"
-    figure.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(figure)
+    _save_figure(figure, path)
     return str(path.relative_to(output_dir))
 
 
@@ -668,7 +1454,14 @@ def _plot_baseline_panel(
             "baseline.png",
         )
         return
-    axis.plot(processed["timestamp"], pd.to_numeric(values, errors="coerce"), label=channel)
+    for index, (times, segment_values) in enumerate(
+        _observed_segments(processed["timestamp"], values)
+    ):
+        axis.plot(
+            times,
+            segment_values,
+            label=channel if index == 0 else None,
+        )
     axis.set_ylabel(channel)
     axis.legend(loc="upper right", fontsize=8)
 
@@ -769,8 +1562,7 @@ def _plot_candidates(
         )
     figure.tight_layout(rect=(0, 0, 1, 0.94 if cycle_color else 1))
     path = output_dir / "candidate.png"
-    figure.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(figure)
+    _save_figure(figure, path)
     return str(path.relative_to(output_dir))
 
 
@@ -826,6 +1618,49 @@ def _processed_observed_series(frame: pd.DataFrame, channel: str) -> pd.Series:
     values = frame[channel].copy()
     imputed = frame[f"{channel}__imputed"].fillna(False).astype(bool)
     return values.mask(imputed)
+
+
+def _observed_segments(
+    timestamps: Any,
+    values: Any,
+) -> list[tuple[pd.Series, pd.Series]]:
+    time = pd.Series(timestamps).reset_index(drop=True)
+    value = pd.Series(values).reset_index(drop=True)
+    if len(time) != len(value):
+        raise ValueError("timestamps and values must have the same length")
+
+    work = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(time, errors="coerce"),
+            "value": pd.to_numeric(value, errors="coerce"),
+        }
+    )
+    work = (
+        work.loc[work["timestamp"].notna()]
+        .sort_values("timestamp", kind="stable")
+        .reset_index(drop=True)
+    )
+    if work.empty:
+        return []
+
+    positive_diffs = work["timestamp"].diff().dt.total_seconds()
+    positive_diffs = positive_diffs.loc[positive_diffs.gt(0)]
+    nominal_interval = (
+        float(positive_diffs.median()) if not positive_diffs.empty else None
+    )
+    break_before = work["value"].isna()
+    if nominal_interval is not None:
+        break_before = break_before | work["timestamp"].diff().dt.total_seconds().gt(
+            nominal_interval * 1.5
+        )
+
+    segments: list[tuple[pd.Series, pd.Series]] = []
+    segment_ids = break_before.cumsum()
+    for _segment_id, segment in work.groupby(segment_ids, sort=False):
+        observed = segment.loc[segment["value"].notna()]
+        if not observed.empty:
+            segments.append((observed["timestamp"], observed["value"]))
+    return segments
 
 
 def _missing_panel(
@@ -915,22 +1750,15 @@ def _shade_baseline(axis: Any, cycle: pd.Series) -> None:
         axis.axvspan(cycle["baseline_start"], cycle["baseline_end"], color="#74c476", alpha=0.2)
 
 
-def _cycle_duration(cycle: pd.Series) -> str:
+def _cycle_duration_seconds(cycle: pd.Series) -> float | None:
     for column in ("cycle_duration_seconds", "duration_seconds", "cycle_duration"):
         if column in cycle and pd.notna(cycle[column]):
-            return _format_duration(float(cycle[column]))
+            return float(cycle[column])
     start = cycle.get("heating_start")
     end = cycle.get("defrost_end")
     if pd.notna(start) and pd.notna(end):
-        return _format_duration((pd.Timestamp(end) - pd.Timestamp(start)).total_seconds())
-    return "N/A"
-
-
-def _format_duration(seconds: float) -> str:
-    total = max(0, int(seconds))
-    hours, remainder = divmod(total, 3600)
-    minutes, secs = divmod(remainder, 60)
-    return f"{hours} h {minutes} min {secs} s"
+        return float((pd.Timestamp(end) - pd.Timestamp(start)).total_seconds())
+    return None
 
 
 def _format_timestamp(value: Any) -> str:
