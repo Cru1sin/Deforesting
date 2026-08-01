@@ -57,3 +57,25 @@ analysis:
   minimum_trend_effect: 0.3
   minimum_direction_consistency: 0.7
   minimum_points_per_cycle: 6
+  evidence:
+    min_segment_coverage: 0.80
+    min_segment_points: 12
+    min_pair_coverage: 0.80
+    min_valid_pairs: 30
+    min_valid_cycles: 3
+    horizons_minutes: [5, 10, 20]
+    targets:
+      - heating_capacity
+      - cop
+    primary_target: heating_capacity
+    primary_target_type: future_change
+    primary_horizon_minutes: 10
+    primary_feature_variant: residual_level
+    lead_target: heating_capacity
+    auto_reference_window_minutes: 5
+    auto_reference_min_observed_fraction: 0.80
+    auto_reference_max_gap_seconds: 60
+    onset_window_seconds: 60
+    onset_mad_multiplier: 3.0
+    onset_persistence_seconds: 60
+    similarity_threshold: 0.85

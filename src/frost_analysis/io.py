@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -21,6 +22,14 @@ _PREPARE_FILES = {
 }
 _PROCESS_FILES = {"processed_data.parquet", "cycle_summary.csv"}
 _ANALYZE_FILES = {"candidate_channel_evidence.csv"}
+_EVIDENCE_FILES = {
+    "cycle_eligibility.csv",
+    "feature_cycle_metrics.csv",
+    "future_association.csv",
+    "feature_profile.csv",
+    "feature_pair_similarity.csv",
+    "evidence_manifest.json",
+}
 _RUN_FILES = {
     "prepared_data.parquet",
     "processed_data.parquet",
@@ -112,9 +121,58 @@ def write_analysis_outputs(
     evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
 
 
-def remove_manifest_for_overwrite(
-    output_dir: Path, input_dir: Path, *, overwrite: bool
+def write_evidence_outputs(
+    bundle: Any,
+    output_dir: Path,
+    input_run_dirs: Path | Sequence[Path],
+    *,
+    settings: Any | None = None,
+    candidate_registry_path: Path | None = None,
+    project_root: Path | None = None,
+    legacy_evidence: pd.DataFrame | None = None,
+    overwrite: bool = False,
 ) -> None:
+    """Write the five batch evidence tables and their reproducibility manifest."""
+    run_dirs = [input_run_dirs] if isinstance(input_run_dirs, Path) else list(input_run_dirs)
+    if not run_dirs:
+        raise ValueError("evidence output requires at least one input run directory")
+    for run_dir in run_dirs:
+        ensure_output_outside_input(output_dir, run_dir)
+    known_files = set(_EVIDENCE_FILES)
+    if legacy_evidence is not None:
+        known_files.add("candidate_channel_evidence.csv")
+    _prepare_output_dir(output_dir, run_dirs[0], known_files, overwrite)
+    tables = {
+        "cycle_eligibility.csv": bundle.cycle_eligibility,
+        "feature_cycle_metrics.csv": bundle.feature_cycle_metrics,
+        "future_association.csv": bundle.future_association,
+        "feature_profile.csv": bundle.feature_profile,
+        "feature_pair_similarity.csv": bundle.feature_pair_similarity,
+    }
+    for filename, table in tables.items():
+        table.to_csv(output_dir / filename, index=False)
+    if legacy_evidence is not None:
+        legacy_evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
+    manifest = {
+        "analysis_version": "frost-cycle-evidence-v1",
+        "git_commit": _git_commit(project_root or Path.cwd()),
+        "created_at": datetime.now(UTC).isoformat(),
+        "input_run_dirs": [str(path.resolve()) for path in run_dirs],
+        "input_manifest_hashes": {
+            str(path.resolve()): optional_sha256(path / "manifest.json") for path in run_dirs
+        },
+        "analysis_settings": _serializable_settings(settings),
+        "candidate_registry_hash": optional_sha256(candidate_registry_path),
+        "output_files": {name: name for name in (*tables, "evidence_manifest.json")},
+        "output_row_counts": {name: len(table) for name, table in tables.items()},
+    }
+    (output_dir / "evidence_manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, default=_json_default) + "\n",
+        encoding="utf-8",
+    )
+
+
+def remove_manifest_for_overwrite(output_dir: Path, input_dir: Path, *, overwrite: bool) -> None:
     """Remove only a prior formal manifest before an overwrite run starts."""
     ensure_output_outside_input(output_dir, input_dir)
     if overwrite:
@@ -262,3 +320,7 @@ def _json_default(value: Any) -> str:
     if isinstance(value, (pd.Timestamp, datetime)):
         return value.isoformat()
     raise TypeError(f"cannot serialize {type(value).__name__}")
+
+
+def _serializable_settings(settings: Any) -> Any:
+    return asdict(cast(Any, settings)) if is_dataclass(settings) else settings
