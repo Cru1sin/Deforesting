@@ -32,6 +32,7 @@ def _config(root: Path, **analysis: object) -> Config:
         timestamp_column="时间",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
+        edf_pair_tolerance_seconds=1.0,
         cycles={},
         process={"resample_interval_seconds": 10},
         analysis=values,

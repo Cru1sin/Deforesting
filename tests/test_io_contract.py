@@ -31,6 +31,7 @@ def _config(root: Path, input_dir: Path) -> Config:
         timestamp_column="时间",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
+        edf_pair_tolerance_seconds=1.0,
         cycles={"defrost_channel": "defrost_active"},
         process={"resample_interval_seconds": 10},
         analysis={"future_horizon_minutes": 10},

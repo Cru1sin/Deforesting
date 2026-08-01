@@ -44,12 +44,14 @@ process
 
 | 阶段 | 输入 | 输出 | 主要职责 |
 | --- | --- | --- | --- |
-| Prepare | `data/<MMDD>` 原始目录 | Prepared、初始 `cycle_summary`、`prepare_summary.json` | 解析原始文本、单位换算、循环切分、图片匹配 |
+| Prepare | `data/<MMDD>` 原始目录 | Prepared、初始 `cycle_summary`、`prepare_summary.json` | 解析原始文本；按主数据时间范围对齐 EDF 双 SHT40 温湿度；单位换算、循环切分、图片匹配 |
 | Process | Prepared、初始 summary | Processed、最终 `cycle_summary` | 10 秒重采样、bounded 缺失、派生量、共同 baseline、动态特征 |
 | Analyze | Processed、最终 summary | `candidate_channel_evidence.csv` | 循环级趋势、未来关联和工况关联证据 |
 | Report | Prepared、Processed、最终 summary、Evidence | QA 图片和 `report_summary.json` | 只读可视化验收，不产生科学数据或证据 |
 
 原始目录只读。Prepared 和 Processed 的唯一键是 `experiment_id + timestamp`；循环摘要的唯一键是 `experiment_id + cycle_id`；候选证据的唯一键是 `experiment_id + channel`。
+
+EDF 双 SHT40 属于辅助环境输入。Prepare 先使用非 EDF 主数据形成权威原始时间轴，再将 EDF 双传感器融合结果按最近时间点对齐到该时间轴；对齐容差为主数据理论采样间隔的一半。EDF 不新增 Prepared 全局时间戳，无法对齐的环境观测保留为环境通道缺失。两只 SHT40 之间的配对容差是独立的 `input_format.edf.pair_tolerance_seconds` 配置，不与主时间轴对齐容差混用。
 
 ## 2. 通道和重采样
 

@@ -9,6 +9,24 @@ channels:
     analysis_candidate: false
     valid_range: [-30, 50]
 
+  environment_temperature:
+    source_names: ["environment_temperature"]
+    unit: degC
+    kind: continuous
+    role: context
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+
+  environment_relative_humidity:
+    source_names: ["environment_relative_humidity"]
+    unit: "%RH"
+    kind: continuous
+    role: context
+    resample: mean
+    missing: interpolate
+    analysis_candidate: false
+
   water_in_temperature:
     source_names: ["p1__Twin(26.1)'2_31'"]
     unit: degC

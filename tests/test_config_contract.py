@@ -29,6 +29,7 @@ def _write_v2_config(
             "sensor_globs": ["*.xls"],
             "image_extensions": [".jpg", ".png"],
             "timestamp_column": "时间",
+            "edf": {"pair_tolerance_seconds": 1.0},
         },
         "image_match_tolerance_seconds": 2,
         "cycles": {
@@ -148,6 +149,37 @@ def test_v2_config_loads_defaults_and_inline_camera_roles(tmp_path: Path) -> Non
     assert config.camera_roles == {"camera_01": "front"}
     assert config.process.baseline.stage == "frost_development"
     assert config.process.feature_windows_minutes == (5, 10, 30)
+    assert config.edf_pair_tolerance_seconds == 1.0
+
+
+def test_edf_pair_tolerance_override_is_flattened_and_resolved_nested(tmp_path: Path) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        overrides={"input_format": {"edf": {"pair_tolerance_seconds": 0.25}}},
+    )
+
+    config = load_config(path)
+    resolved = config_module.resolved_config_mapping(config)
+
+    assert config.edf_pair_tolerance_seconds == 0.25
+    assert resolved["input_format"]["edf"] == {"pair_tolerance_seconds": 0.25}
+
+
+@pytest.mark.parametrize("value", [0, -0.1, float("nan"), float("inf"), float("-inf")])
+def test_config_rejects_nonpositive_edf_pair_tolerance(tmp_path: Path, value: float) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        overrides={"input_format": {"edf": {"pair_tolerance_seconds": value}}},
+    )
+
+    with pytest.raises(ValueError, match="edf_pair_tolerance_seconds"):
+        load_config(path)
+
+
+def test_formal_config_discovers_edf_inputs() -> None:
+    config = load_config(ROOT / "configs" / "0720.yaml")
+
+    assert config.sensor_globs == ("*.xls", "*.edf")
 
 
 @pytest.mark.parametrize("schema_version", [None, 1, 3])

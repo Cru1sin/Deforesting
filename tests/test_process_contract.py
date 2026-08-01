@@ -28,6 +28,7 @@ def _config(
         timestamp_column="时间",
         expected_sensor_interval_seconds=expected_interval,
         image_match_tolerance_seconds=2,
+        edf_pair_tolerance_seconds=1.0,
         cycles={},
         process={
             "resample_interval_seconds": interval,
@@ -183,6 +184,43 @@ def test_process_excludes_partial_and_recomputes_coordinates(tmp_path: Path) -> 
     assert processed["cycle_progress"].dropna().tolist() == [index / 6 for index in range(6)]
     assert final_summary.loc[0, "baseline_status"] == "unavailable"
     assert final_summary.loc[0, "baseline_failure_reason"] == "insufficient_observed_coverage"
+
+
+def test_process_aggregates_environment_channels_and_keeps_rh_over_100(tmp_path: Path) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=6, freq="2s")
+    frame = _frame(timestamps, temperature=[10.0] * len(timestamps))
+    frame["environment_temperature"] = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
+    frame["environment_relative_humidity"] = [101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
+    channels = _channels()
+    channels.update(
+        {
+            "environment_temperature": {
+                "kind": "continuous",
+                "role": "context",
+                "resample": "mean",
+                "missing": "interpolate",
+                "analysis_candidate": False,
+            },
+            "environment_relative_humidity": {
+                "kind": "continuous",
+                "role": "context",
+                "resample": "mean",
+                "missing": "interpolate",
+                "analysis_candidate": False,
+            },
+        }
+    )
+
+    processed, _ = process(
+        frame,
+        _summary(defrost="2026-07-15 00:01:00"),
+        _config(tmp_path),
+        channels,
+    )
+
+    first_bucket = processed.loc[processed["timestamp"].eq(pd.Timestamp("2026-07-15"))].iloc[0]
+    assert first_bucket["environment_temperature"] == pytest.approx(12.0)
+    assert first_bucket["environment_relative_humidity"] == pytest.approx(103.0)
 
 
 def test_incomplete_cycle_with_observed_defrost_onset_keeps_observed_processed_grid(

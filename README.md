@@ -132,7 +132,7 @@ Report 只读取正式输出，允许为展示进行筛选、分组、遮罩、�
 
 ## 科学边界
 
-Prepare 只解析原始 `.xls` 文本、应用显式单位换算、切分循环和独立匹配相机图片；不重采样、不填补、不计算 baseline 或动态特征。Process 在每个 `experiment_id × cycle_id` 内按 summary 边界建立完整 10 秒网格；任何阶段或循环边界严格落在桶内部时排除该桶，不使用 overlap winner，也不从输入行 fallback 推断阶段；然后仅在 `experiment_id × cycle_id × cycle_stage` 内执行 bounded 缺失处理、派生公式、共同 baseline 和 past-only 特征，Step 缺失桶逐点按其距最后 observed 值的时间差执行 bounded forward fill。partial 行不进入 Process。Analyze 只使用 valid 且 baseline 可用的 `frost_development` 行。
+Prepare 解析原始 `.xls` 文本，并将 EDF 中双 SHT40 的温度/RH 原始信号按主数据时间范围对齐融合；随后应用显式单位换算、切分循环和独立匹配相机图片。不重采样、不填补、不计算 baseline 或动态特征。Process 在每个 `experiment_id × cycle_id` 内按 summary 边界建立完整 10 秒网格；任何阶段或循环边界严格落在桶内部时排除该桶，不使用 overlap winner，也不从输入行 fallback 推断阶段；然后仅在 `experiment_id × cycle_id × cycle_stage` 内执行 bounded 缺失处理、派生公式、共同 baseline 和 past-only 特征，Step 缺失桶逐点按其距最后 observed 值的时间差执行 bounded forward fill。partial 行不进入 Process。Analyze 只使用 valid 且 baseline 可用的 `frost_development` 行。
 
 共同通道方法和阈值在 `configs/defaults.yaml` 中显式记录；日期事实和每日期相机角色在各自的
 `configs/<date>.yaml` 中记录。baseline 是 `cycle_local_early_stable_proxy`，不是人工或图像证明的绝对无霜真值。Reset evidence 当前固定为 `not_evaluated`，不使用下一循环自身 baseline 自证恢复。

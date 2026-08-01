@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from datetime import date
@@ -223,6 +224,7 @@ class Config:
     timestamp_column: str
     expected_sensor_interval_seconds: int
     image_match_tolerance_seconds: float
+    edf_pair_tolerance_seconds: float
     cycles: CycleSettings
     process: ProcessSettings
     analysis: AnalysisSettings
@@ -245,6 +247,10 @@ class Config:
                 "resample_interval_seconds must be divisible by "
                 "expected_sensor_interval_seconds"
             )
+        _validate_positive(
+            "edf_pair_tolerance_seconds",
+            self.edf_pair_tolerance_seconds,
+        )
 
 
 def load_config(path: Path) -> Config:
@@ -300,9 +306,20 @@ def load_config(path: Path) -> Config:
     input_format = _mapping(resolved["input_format"], "input_format")
     _validate_keys(
         input_format,
-        {"sensor_globs", "image_extensions", "timestamp_column"},
+        {"sensor_globs", "image_extensions", "timestamp_column", "edf"},
         "input_format",
     )
+    if "edf" not in input_format:
+        raise ValueError("input_format missing keys: ['edf']")
+    edf_input = _mapping(input_format["edf"], "input_format.edf")
+    _validate_keys(
+        edf_input,
+        {"pair_tolerance_seconds"},
+        "input_format.edf",
+    )
+    if "pair_tolerance_seconds" not in edf_input:
+        raise ValueError("input_format.edf missing keys: ['pair_tolerance_seconds']")
+    edf_pair_tolerance = float(edf_input["pair_tolerance_seconds"])
     experiment_date = str(loaded["experiment_date"])
     if not _is_iso_date(experiment_date):
         raise ValueError("experiment_date must use ISO YYYY-MM-DD format")
@@ -319,6 +336,7 @@ def load_config(path: Path) -> Config:
             "resample_interval_seconds must be divisible by expected_sensor_interval_seconds"
         )
     _validate_nonnegative("image_match_tolerance_seconds", image_tolerance)
+    _validate_positive("edf_pair_tolerance_seconds", edf_pair_tolerance)
     if not str(input_format["timestamp_column"]).strip():
         raise ValueError("timestamp_column must not be empty")
     camera_roles = _camera_roles(loaded["camera_roles"])
@@ -333,6 +351,7 @@ def load_config(path: Path) -> Config:
         timestamp_column=str(input_format["timestamp_column"]),
         expected_sensor_interval_seconds=expected_interval,
         image_match_tolerance_seconds=image_tolerance,
+        edf_pair_tolerance_seconds=edf_pair_tolerance,
         cycles=CycleSettings.from_mapping(_mapping(resolved["cycles"], "cycles")),
         process=process,
         analysis=analysis,
@@ -354,6 +373,9 @@ def resolved_config_mapping(config: Config) -> dict[str, Any]:
             "sensor_globs": list(config.sensor_globs),
             "image_extensions": list(config.image_extensions),
             "timestamp_column": config.timestamp_column,
+            "edf": {
+                "pair_tolerance_seconds": config.edf_pair_tolerance_seconds,
+            },
         },
         "image_match_tolerance_seconds": config.image_match_tolerance_seconds,
         "cycles": asdict(config.cycles),
@@ -476,7 +498,7 @@ def _is_iso_date(value: str) -> bool:
 
 
 def _validate_positive(name: str, value: float) -> None:
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be positive")
 
 

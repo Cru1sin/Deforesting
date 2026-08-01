@@ -17,6 +17,7 @@ from .config import Config, resolved_config_sha256
 from .cycles import label_cycles
 from .images import match_images
 from .io import discover_inputs, git_commit, optional_sha256, source_file_metadata
+from .sensors import read_edf_environment
 
 
 def prepare(
@@ -27,8 +28,8 @@ def prepare(
     if not inputs.sensor_files:
         raise ValueError(f"no sensor files found in {config.input_dir}")
     camera_roles = config.camera_roles
-    channel_frames, invalid_timestamp_rows = _load_channel_frames(
-        inputs.sensor_files, config.input_dir, channels, config.timestamp_column
+    channel_frames, invalid_timestamp_rows, edf_summary = _load_prepare_channel_frames(
+        inputs.sensor_files, config, channels
     )
     available_source_channels = set(channel_frames)
     timestamps = _all_timestamps(channel_frames)
@@ -86,7 +87,7 @@ def prepare(
         config.expected_sensor_interval_seconds,
         available_source_channels,
     )
-    prepare_summary = {
+    prepare_summary: dict[str, Any] = {
         "experiment_id": config.experiment_id,
         "experiment_date": config.experiment_date,
         "input_dir": str(config.input_dir),
@@ -114,7 +115,70 @@ def prepare(
         "invalid_timestamp_row_count": invalid_timestamp_rows,
         "git_commit": git_commit(config.project_root),
     }
+    if edf_summary is not None:
+        prepare_summary["edf_summary"] = edf_summary
     return prepared, cycle_summary, prepare_summary
+
+
+def _load_prepare_channel_frames(
+    sensor_files: tuple[Path, ...],
+    config: Config,
+    channels: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, list[pd.DataFrame]], int, dict[str, object] | None]:
+    """Load main files first, then align optional EDF data to their time axis."""
+    edf_paths = tuple(path for path in sensor_files if path.suffix.lower() == ".edf")
+    main_paths = tuple(path for path in sensor_files if path.suffix.lower() != ".edf")
+    if not main_paths:
+        raise ValueError(f"no non-EDF sensor files found in {config.input_dir}")
+
+    channel_frames, invalid_timestamp_rows = _load_channel_frames(
+        main_paths, config.input_dir, channels, config.timestamp_column
+    )
+    main_timestamps = _all_timestamps(channel_frames)
+    if main_timestamps.empty:
+        raise ValueError("sensor files contain no valid timestamps")
+
+    if not edf_paths:
+        return channel_frames, invalid_timestamp_rows, None
+
+    environment, edf_summary = read_edf_environment(
+        edf_paths,
+        pd.Timestamp(main_timestamps.min()),
+        pd.Timestamp(main_timestamps.max()),
+        pd.to_timedelta(config.edf_pair_tolerance_seconds, unit="s"),
+    )
+    environment = _align_environment_to_main_timestamps(
+        environment,
+        main_timestamps,
+        pd.to_timedelta(config.expected_sensor_interval_seconds / 2, unit="s"),
+    )
+    for name in ("environment_temperature", "environment_relative_humidity"):
+        channel_frames[name] = [
+            environment[["timestamp", name]].rename(columns={name: "raw"})
+        ]
+    return channel_frames, invalid_timestamp_rows, edf_summary
+
+
+def _align_environment_to_main_timestamps(
+    environment: pd.DataFrame,
+    main_timestamps: pd.Series,
+    tolerance: pd.Timedelta,
+) -> pd.DataFrame:
+    """Map fused EDF observations onto the authoritative main time axis."""
+    if environment.empty:
+        return environment.copy()
+
+    main = pd.DataFrame({"timestamp": main_timestamps})
+    aligned = pd.merge_asof(
+        main.sort_values("timestamp"),
+        environment.sort_values("timestamp"),
+        on="timestamp",
+        direction="nearest",
+        tolerance=tolerance,
+    )
+    return aligned.dropna(
+        subset=["environment_temperature", "environment_relative_humidity"]
+    ).reset_index(drop=True)
 
 
 def _load_channel_frames(

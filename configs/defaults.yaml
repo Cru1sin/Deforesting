@@ -3,10 +3,13 @@ channels_path: channels.yaml
 input_format:
   sensor_globs:
     - "*.xls"
+    - "*.edf"
   image_extensions:
     - ".jpg"
     - ".png"
   timestamp_column: "时间"
+  edf:
+    pair_tolerance_seconds: 1.0
 
 image_match_tolerance_seconds: 2
 

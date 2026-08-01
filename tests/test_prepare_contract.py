@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 
@@ -19,23 +20,25 @@ from frost_analysis.cycles import (
 )
 from frost_analysis.images import match_images
 from frost_analysis.prepare import _expected_row_count, _maximum_gap, _observed_fraction, prepare
+from frost_analysis.sensors import read_edf_environment
 
 prepare_module = import_module("frost_analysis.prepare")
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _config(root: Path, raw: Path) -> Config:
+def _config(root: Path, raw: Path, *, sensor_globs: tuple[str, ...] = ("*.xls",)) -> Config:
     return Config(
         project_root=root,
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=raw,
         channels_path=root / "channels.yaml",
-        sensor_globs=("*.xls",),
+        sensor_globs=sensor_globs,
         image_extensions=(".jpg",),
         timestamp_column="时间",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
+        edf_pair_tolerance_seconds=1.0,
         cycles={
             "defrost_channel": "defrost_active",
             "maximum_state_gap_seconds": 5,
@@ -50,6 +53,234 @@ def _config(root: Path, raw: Path) -> Config:
         analysis={},
         camera_roles={},
     )
+
+
+def _write_edf(path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> Path:
+    header = (
+        "# EdfVersion=4.0\n"
+        "# Date=2026-07-20T09:00:00+08:00\n"
+        "Type=float64,Format=.3f,Unit=s\n"
+        "Epoch_UTC\tLocal_Date_Time\tT_SHT40_111\tRH_SHT40_111\t"
+        "T_SHT40_222\tRH_SHT40_222\n"
+    )
+    path.write_text(
+        header + "\n".join("\t".join(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_read_edf_environment_preserves_local_clock_pairs_once_and_clips(tmp_path: Path) -> None:
+    first = _write_edf(
+        tmp_path / "first.edf",
+        [
+            ("0", "2026-07-19T23:59:59+08:00", "20", "101", "", ""),
+            ("1", "2026-07-20T09:00:00+08:00", "20", "101", "", ""),
+            ("2", "2026-07-20T09:00:00.200000+08:00", "", "", "22", "103"),
+            ("3", "2026-07-20T09:00:01+08:00", "24", "102", "", ""),
+            ("4", "2026-07-20T09:00:01.200000+08:00", "", "", "26", "104"),
+        ],
+    )
+    second = _write_edf(
+        tmp_path / "second.edf",
+        [
+            ("5", "2026-07-20T09:00:01+08:00", "24", "102", "", ""),
+            ("6", "2026-07-20T09:00:01.200000+08:00", "", "", "26", "104"),
+            ("7", "2026-07-20T09:00:03+08:00", "30", "105", "", ""),
+            ("8", "2026-07-20T09:00:03.200000+08:00", "", "", "32", "107"),
+            ("9", "2026-07-20T09:00:04+08:00", "34", "108", "", ""),
+            ("10", "2026-07-20T09:00:06.500000+08:00", "", "", "36", "110"),
+            ("11", "2026-07-21T00:00:00+08:00", "40", "111", "", ""),
+            ("12", "2026-07-21T00:00:00.200000+08:00", "", "", "42", "113"),
+        ],
+    )
+
+    result, summary = read_edf_environment(
+        [first, second],
+        pd.Timestamp("2026-07-20 09:00:00"),
+        pd.Timestamp("2026-07-20 09:00:02"),
+        pd.Timedelta(seconds=1),
+    )
+
+    assert result["timestamp"].tolist() == [
+        pd.Timestamp("2026-07-20 09:00:00.100000"),
+        pd.Timestamp("2026-07-20 09:00:01.100000"),
+    ]
+    assert result["environment_temperature"].tolist() == [21.0, 25.0]
+    assert result["environment_relative_humidity"].tolist() == [102.0, 103.0]
+    assert result["timestamp"].dt.tz is None
+    assert summary["duplicate_rows_removed"] == 2
+    assert summary["paired_rows"] == 4
+    assert summary["unmatched_sensor_1_rows"] == 2
+    assert summary["unmatched_sensor_2_rows"] == 1
+    assert summary["pair_delta_median_ms"] == pytest.approx(200.0)
+    assert summary["pair_delta_max_ms"] == pytest.approx(200.0)
+    assert summary["rows_after_time_clip"] == 2
+
+
+def test_read_edf_environment_rejects_nat_pair_tolerance(tmp_path: Path) -> None:
+    path = _write_edf(
+        tmp_path / "environment.edf",
+        [("0", "2026-07-20T09:00:00+08:00", "20", "101", "22", "103")],
+    )
+
+    with pytest.raises(ValueError, match="pair_tolerance"):
+        read_edf_environment(
+            [path],
+            pd.Timestamp("2026-07-20 09:00:00"),
+            pd.Timestamp("2026-07-20 09:00:01"),
+            pd.NaT,
+        )
+
+
+def test_prepare_attaches_edf_channels_without_replacing_t4(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    (raw / "sample参数1.xls").write_text(
+        "时间\tT4\tDefrost\n"
+        "2026-07-15 09:00:00\t10\tOFF\n"
+        "2026-07-15 09:00:01\t11\tOFF\n"
+        "2026-07-15 09:00:02\t12\tOFF\n",
+        encoding="utf-8",
+    )
+    _write_edf(
+        raw / "environment.edf",
+        [
+            ("0", "2026-07-15T08:59:59+08:00", "1", "101", "", ""),
+            ("1", "2026-07-15T09:00:00+08:00", "20", "101", "", ""),
+            ("2", "2026-07-15T09:00:00.200000+08:00", "", "", "22", "103"),
+            ("3", "2026-07-15T09:00:01+08:00", "24", "102", "", ""),
+            ("4", "2026-07-15T09:00:01.200000+08:00", "", "", "26", "104"),
+            ("5", "2026-07-15T09:00:03+08:00", "30", "105", "", ""),
+            ("6", "2026-07-15T09:00:03.200000+08:00", "", "", "32", "107"),
+        ],
+    )
+    config = _config(tmp_path, raw, sensor_globs=("*.xls", "*.edf"))
+    channels = {
+        "ambient_temperature": {
+            "source_names": ["p1__T4"],
+            "unit": "degC",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "interpolate",
+            "analysis_candidate": False,
+        },
+        "defrost_active": {
+            "source_names": ["p1__Defrost"],
+            "unit": None,
+            "kind": "event",
+            "role": "event",
+            "resample": "last",
+            "missing": "none",
+            "analysis_candidate": False,
+            "allowed_values": {"ON": True, "OFF": False},
+        },
+        "environment_temperature": {
+            "source_names": ["environment_temperature"],
+            "unit": "degC",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "interpolate",
+            "analysis_candidate": False,
+        },
+        "environment_relative_humidity": {
+            "source_names": ["environment_relative_humidity"],
+            "unit": "%RH",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "interpolate",
+            "analysis_candidate": False,
+        },
+    }
+
+    prepared, _, prepare_summary = prepare(config, channels)
+    without_edf, _, _ = prepare(replace(config, sensor_globs=("*.xls",)), channels)
+
+    assert prepared["timestamp"].tolist() == pd.to_datetime(
+        [
+            "2026-07-15 09:00:00",
+            "2026-07-15 09:00:01",
+            "2026-07-15 09:00:02",
+        ]
+    ).tolist()
+    main_rows = prepared.loc[prepared["timestamp"].isin(pd.to_datetime(
+        ["2026-07-15 09:00:00", "2026-07-15 09:00:01", "2026-07-15 09:00:02"]
+    ))]
+    assert main_rows["ambient_temperature"].tolist() == [10.0, 11.0, 12.0]
+    environment = prepared.loc[prepared["environment_temperature"].notna()]
+    assert environment["environment_temperature"].tolist() == [21.0, 25.0]
+    assert environment["environment_relative_humidity"].tolist() == [102.0, 103.0]
+    assert environment["environment_relative_humidity__invalid"].eq(False).all()
+    assert prepare_summary["edf_summary"]["rows_after_time_clip"] == 2
+
+    old_columns = [
+        column
+        for column in without_edf.columns
+        if not column.startswith("environment_")
+    ]
+    pd.testing.assert_frame_equal(
+        prepared[old_columns].reset_index(drop=True),
+        without_edf[old_columns].reset_index(drop=True),
+    )
+
+
+def test_prepare_without_edf_keeps_new_channels_missing(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    (raw / "sample参数1.xls").write_text(
+        "时间\tT4\tDefrost\n2026-07-15 09:00:00\t10\tOFF\n",
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, raw, sensor_globs=("*.xls", "*.edf"))
+    channels = {
+        "ambient_temperature": {
+            "source_names": ["p1__T4"],
+            "unit": "degC",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "interpolate",
+            "analysis_candidate": False,
+        },
+        "defrost_active": {
+            "source_names": ["p1__Defrost"],
+            "unit": None,
+            "kind": "event",
+            "role": "event",
+            "resample": "last",
+            "missing": "none",
+            "analysis_candidate": False,
+            "allowed_values": {"ON": True, "OFF": False},
+        },
+        "environment_temperature": {
+            "source_names": ["environment_temperature"],
+            "unit": "degC",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "interpolate",
+            "analysis_candidate": False,
+        },
+        "environment_relative_humidity": {
+            "source_names": ["environment_relative_humidity"],
+            "unit": "%RH",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "interpolate",
+            "analysis_candidate": False,
+        },
+    }
+
+    prepared, _, prepare_summary = prepare(config, channels)
+
+    assert prepared["ambient_temperature"].tolist() == [10.0]
+    assert prepared["environment_temperature"].isna().all()
+    assert prepared["environment_relative_humidity"].isna().all()
+    assert "edf_summary" not in prepare_summary
 
 
 def test_label_cycles_defines_progress_only_during_frost_development() -> None:
@@ -703,6 +934,8 @@ input_format:
   sensor_globs: ["*.xls"]
   image_extensions: [".jpg"]
   timestamp_column: 时间
+  edf:
+    pair_tolerance_seconds: 1.0
 image_match_tolerance_seconds: 2
 cycles: {}
 process: {}
