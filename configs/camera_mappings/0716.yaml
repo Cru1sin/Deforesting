@@ -1,7 +1,0 @@
-camera_roles:
-  "192.168.1.1_1": unverified_camera_01
-  "192.168.1.2_1": unverified_camera_02
-  "192.168.1.11_1": unverified_camera_03
-  "192.168.1.12_1": unverified_camera_04
-  "192.168.1.13_1": unverified_camera_05
-  "192.168.1.14_1": unverified_camera_06

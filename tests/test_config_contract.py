@@ -3,14 +3,110 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
+import frost_analysis.config as config_module
 from frost_analysis.channels import load_channels
 from frost_analysis.config import load_config
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_formal_config_uses_flat_contract_and_ten_second_resampling() -> None:
+def _write_v2_config(
+    root: Path,
+    *,
+    schema_version: int | None = 2,
+    defaults: dict[str, object] | None = None,
+    overrides: dict[str, object] | None = None,
+    camera_roles: dict[str, str] | None = None,
+) -> Path:
+    configs = root / "configs"
+    configs.mkdir(parents=True)
+    (root / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+    defaults_mapping: dict[str, object] = {
+        "channels_path": "channels.yaml",
+        "input_format": {
+            "sensor_globs": ["*.xls"],
+            "image_extensions": [".jpg", ".png"],
+            "timestamp_column": "时间",
+        },
+        "image_match_tolerance_seconds": 2,
+        "cycles": {
+            "defrost_channel": "defrost_active",
+            "maximum_state_gap_seconds": 0,
+            "debounce_seconds": 20,
+            "minimum_defrost_seconds": 60,
+            "maximum_defrost_seconds": 1200,
+            "minimum_heating_seconds": 1800,
+            "maximum_heating_seconds": 21600,
+            "stable_heating_seconds": 180,
+            "operating_mode_channel": "operating_mode",
+            "required_operating_mode": "3",
+        },
+        "process": {
+            "resample_interval_seconds": 10,
+            "minimum_continuous_bucket_coverage": 0.8,
+            "continuous_max_gap_seconds": 60,
+            "control_max_gap_seconds": 30,
+            "baseline": {
+                "stage": "frost_development",
+                "search_start_minutes": 0,
+                "search_end_minutes": 20,
+                "window_minutes": 5,
+                "window_step_minutes": 1,
+                "minimum_observed_coverage": 0.8,
+                "required_anchor_channels": [
+                    "ambient_temperature",
+                    "water_in_temperature",
+                    "water_out_temperature",
+                    "compressor_frequency",
+                ],
+                "anchor_maximum_std": {
+                    "ambient_temperature": 1.0,
+                    "water_in_temperature": 1.0,
+                    "water_out_temperature": 1.0,
+                    "compressor_frequency": 5.0,
+                },
+            },
+            "features": {"windows_minutes": [5, 10, 30]},
+        },
+        "analysis": {
+            "performance_target": "heating_capacity__baseline_residual",
+            "future_horizon_minutes": 10,
+            "minimum_valid_cycles": 3,
+            "minimum_trend_effect": 0.3,
+            "minimum_direction_consistency": 0.7,
+            "minimum_points_per_cycle": 6,
+        },
+    }
+    if defaults:
+        defaults_mapping.update(defaults)
+    (configs / "defaults.yaml").write_text(
+        yaml.safe_dump(defaults_mapping, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    (configs / "channels.yaml").write_text("channels: {}\n", encoding="utf-8")
+    date_mapping: dict[str, object] = {
+        "defaults_path": "defaults.yaml",
+        "experiment_id": "exp_test",
+        "experiment_date": "2026-07-15",
+        "input_dir": "data/0715",
+        "expected_sensor_interval_seconds": 1,
+        "camera_roles": camera_roles or {},
+    }
+    if schema_version is not None:
+        date_mapping["schema_version"] = schema_version
+    if overrides is not None:
+        date_mapping["overrides"] = overrides
+    config_path = configs / "0715.yaml"
+    config_path.write_text(
+        yaml.safe_dump(date_mapping, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    return config_path
+
+
+def test_formal_config_uses_v2_contract_and_ten_second_resampling() -> None:
     config = load_config(ROOT / "configs" / "0715.yaml")
 
     assert config.experiment_id == "exp_20260715"
@@ -18,16 +114,106 @@ def test_formal_config_uses_flat_contract_and_ten_second_resampling() -> None:
     assert config.process.resample_interval_seconds == 10
     assert config.cycles.maximum_state_gap_seconds == 0
     assert config.timestamp_column == "时间"
-    assert config.camera_mapping_path == ROOT / "configs" / "camera_mappings" / "0715.yaml"
+    assert config.defaults_path == ROOT / "configs" / "defaults.yaml"
 
 
-def test_new_config_loads_relative_paths_and_10_second_process_settings() -> None:
-    config = load_config(ROOT / "tests" / "fixtures" / "configs" / "minimal.yaml")
+def test_v2_config_loads_defaults_and_inline_camera_roles(tmp_path: Path) -> None:
+    path = _write_v2_config(tmp_path, camera_roles={"camera_01": "front"})
 
-    assert config.experiment_id == "exp_minimal"
+    config = load_config(path)
+
+    assert config.defaults_path == tmp_path / "configs" / "defaults.yaml"
+    assert config.channels_path == tmp_path / "configs" / "channels.yaml"
+    assert config.camera_roles == {"camera_01": "front"}
+    assert config.process.baseline.stage == "frost_development"
+    assert config.process.feature_windows_minutes == (5, 10, 30)
+
+
+@pytest.mark.parametrize("schema_version", [None, 1, 3])
+def test_v2_loader_rejects_missing_or_unsupported_schema_version(
+    tmp_path: Path, schema_version: int | None
+) -> None:
+    path = _write_v2_config(tmp_path, schema_version=schema_version)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        load_config(path)
+
+
+def test_v2_loader_merges_existing_nested_overrides(tmp_path: Path) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        overrides={
+            "cycles": {"required_operating_mode": "4"},
+            "process": {"features": {"windows_minutes": [1, 5, 15]}},
+        },
+    )
+
+    config = load_config(path)
+
+    assert config.cycles.required_operating_mode == "4"
+    assert config.process.feature_windows_minutes == (1, 5, 15)
+    assert config.process.baseline.window_minutes == 5
+
+
+def test_v2_loader_rejects_unknown_override_path(tmp_path: Path) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        overrides={"cycles": {"unknown_parameter": 123}},
+    )
+
+    with pytest.raises(ValueError, match="unknown override"):
+        load_config(path)
+
+
+def test_v2_loader_rejects_unknown_dataclass_field(tmp_path: Path) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        defaults={"process": {"unknown_parameter": 123}},
+    )
+
+    with pytest.raises(ValueError, match="process"):
+        load_config(path)
+
+
+def test_v2_loader_preserves_zero_and_rejects_negative_state_gap(tmp_path: Path) -> None:
+    zero_path = _write_v2_config(tmp_path / "zero")
+    assert load_config(zero_path).cycles.maximum_state_gap_seconds == 0
+
+    negative_path = _write_v2_config(
+        tmp_path / "negative",
+        defaults={"cycles": {"maximum_state_gap_seconds": -1}},
+    )
+    with pytest.raises(ValueError, match="maximum_state_gap_seconds"):
+        load_config(negative_path)
+
+
+def test_v2_loader_accepts_sensor_only_camera_roles(tmp_path: Path) -> None:
+    path = _write_v2_config(tmp_path, camera_roles={})
+
+    assert load_config(path).camera_roles == {}
+
+
+def test_resolved_config_hash_is_stable_for_equivalent_mappings(tmp_path: Path) -> None:
+    first_path = _write_v2_config(tmp_path / "first", camera_roles={"a": "front", "b": "side"})
+    second_path = _write_v2_config(tmp_path / "second", camera_roles={"b": "side", "a": "front"})
+
+    first = load_config(first_path)
+    second = load_config(second_path)
+
+    hash_function = getattr(config_module, "resolved_config_sha256", None)
+    assert hash_function is not None
+    assert hash_function(first) == hash_function(second)
+
+
+def test_new_config_loads_relative_paths_and_10_second_process_settings(
+    tmp_path: Path,
+) -> None:
+    config = load_config(_write_v2_config(tmp_path))
+
+    assert config.experiment_id == "exp_test"
     assert config.experiment_date == "2026-07-15"
-    assert config.input_dir == ROOT / "data" / "0715"
-    assert config.channels_path == ROOT / "configs" / "channels.yaml"
+    assert config.input_dir == tmp_path / "data" / "0715"
+    assert config.channels_path == tmp_path / "configs" / "channels.yaml"
     assert config.sensor_globs == ("*.xls",)
     assert config.image_extensions == (".jpg", ".png")
     assert config.process.resample_interval_seconds == 10
@@ -108,30 +294,14 @@ channels:
 
 
 def test_config_rejects_invalid_window_relationships(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
-    path.write_text(
-        """
-experiment_id: exp_test
-experiment_date: "2026-07-15"
-input_dir: data/0715
-channels_path: configs/channels.yaml
-camera_mapping_path: configs/camera_mappings/0715.yaml
-sensor_globs: ["*.xls"]
-image_extensions: [".jpg"]
-timestamp_column: 时间
-expected_sensor_interval_seconds: 1
-image_match_tolerance_seconds: 2
-cycles:
-  maximum_state_gap_seconds: 5
-  debounce_seconds: 20
-  minimum_defrost_seconds: 120
-  maximum_defrost_seconds: 60
-process:
-  resample_interval_seconds: 10
-analysis: {}
-""",
-        encoding="utf-8",
+    path = _write_v2_config(
+        tmp_path,
+        defaults={
+            "cycles": {
+                "minimum_defrost_seconds": 120,
+                "maximum_defrost_seconds": 60,
+            }
+        },
     )
 
     with pytest.raises(ValueError, match="minimum_defrost_seconds"):
@@ -139,53 +309,17 @@ analysis: {}
 
 
 def test_config_rejects_nonpositive_input_interval(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
-    path.write_text(
-        """
-experiment_id: exp_test
-experiment_date: "2026-07-15"
-input_dir: data/0715
-channels_path: configs/channels.yaml
-camera_mapping_path: configs/camera_mappings/0715.yaml
-sensor_globs: ["*.xls"]
-image_extensions: [".jpg"]
-timestamp_column: 时间
-expected_sensor_interval_seconds: 0
-image_match_tolerance_seconds: 2
-cycles: {}
-process: {resample_interval_seconds: 10}
-analysis: {future_horizon_minutes: 10}
-""",
-        encoding="utf-8",
-    )
+    path = _write_v2_config(tmp_path)
+    date_config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    date_config["expected_sensor_interval_seconds"] = 0
+    path.write_text(yaml.safe_dump(date_config, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="expected_sensor_interval_seconds"):
         load_config(path)
 
 
 def test_config_accepts_zero_maximum_state_gap(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
-    path.write_text(
-        """
-experiment_id: exp_test
-experiment_date: "2026-07-15"
-input_dir: data/0715
-channels_path: configs/channels.yaml
-camera_mapping_path: configs/camera_mappings/0715.yaml
-sensor_globs: ["*.xls"]
-image_extensions: [".jpg"]
-timestamp_column: 时间
-expected_sensor_interval_seconds: 1
-image_match_tolerance_seconds: 2
-cycles:
-  maximum_state_gap_seconds: 0
-process: {resample_interval_seconds: 10}
-analysis: {future_horizon_minutes: 10}
-""",
-        encoding="utf-8",
-    )
+    path = _write_v2_config(tmp_path)
 
     config = load_config(path)
 

@@ -23,7 +23,6 @@ def _config(
         experiment_date="2026-07-15",
         input_dir=root / "data",
         channels_path=root / "channels.yaml",
-        camera_mapping_path=root / "camera.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
         timestamp_column="时间",
@@ -47,6 +46,7 @@ def _config(
             "features": {"windows_minutes": [1]},
         },
         analysis={},
+        camera_roles={},
     )
 
 

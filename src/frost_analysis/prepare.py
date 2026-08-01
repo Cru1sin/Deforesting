@@ -13,9 +13,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .config import Config
+from .config import Config, resolved_config_sha256
 from .cycles import label_cycles
-from .images import load_camera_roles, match_images
+from .images import match_images
 from .io import discover_inputs, git_commit, optional_sha256, source_file_metadata
 
 
@@ -26,7 +26,7 @@ def prepare(
     inputs = discover_inputs(config)
     if not inputs.sensor_files:
         raise ValueError(f"no sensor files found in {config.input_dir}")
-    camera_roles = load_camera_roles(inputs.camera_mapping_path)
+    camera_roles = config.camera_roles
     channel_frames, invalid_timestamp_rows = _load_channel_frames(
         inputs.sensor_files, config.input_dir, channels, config.timestamp_column
     )
@@ -100,10 +100,11 @@ def prepare(
         "prepared_row_count": len(prepared),
         "cycle_count": len(cycle_summary),
         "config_sha256": optional_sha256(config.config_path),
+        "defaults_path": str(config.defaults_path) if config.defaults_path else None,
+        "defaults_sha256": optional_sha256(config.defaults_path),
+        "resolved_config_sha256": resolved_config_sha256(config),
         "channels_path": str(config.channels_path),
         "channels_sha256": optional_sha256(config.channels_path),
-        "camera_mapping_path": str(inputs.camera_mapping_path),
-        "camera_mapping_sha256": optional_sha256(inputs.camera_mapping_path),
         "discovered_camera_ids": sorted({path.parent.name for path in inputs.image_files}),
         "mapped_camera_ids": sorted(camera_roles),
         "missing_camera_ids": sorted(

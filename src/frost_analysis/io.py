@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from .config import Config
+from .config import Config, resolved_config_mapping, resolved_config_sha256
 
 _PREPARE_FILES = {
     "prepared_data.parquet",
@@ -36,7 +36,6 @@ class InputFiles:
 
     sensor_files: tuple[Path, ...]
     image_files: tuple[Path, ...]
-    camera_mapping_path: Path
 
 
 def discover_inputs(config: Config) -> InputFiles:
@@ -62,7 +61,6 @@ def discover_inputs(config: Config) -> InputFiles:
     return InputFiles(
         sensor_files=tuple(sorted(sensor_paths)),
         image_files=tuple(sorted(image_paths)),
-        camera_mapping_path=config.camera_mapping_path,
     )
 
 
@@ -143,15 +141,24 @@ def write_run_outputs(
     cycle_summary.to_csv(output_dir / "cycle_summary.csv", index=False)
     evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
 
+    experiment_config = config.config_path or config_path.resolve()
+    if config.defaults_path is None:
+        raise ValueError("schema-v2 config must define defaults_path")
     manifest = {
         "experiment_id": config.experiment_id,
         "experiment_date": config.experiment_date,
         "created_at": datetime.now(UTC).isoformat(),
-        "config_path": str(config_path),
-        "config_sha256": _optional_sha256(config_path),
-        "channels_sha256": _optional_sha256(config.channels_path),
-        "camera_mapping_path": str(config.camera_mapping_path),
-        "camera_mapping_sha256": _optional_sha256(config.camera_mapping_path),
+        "config_provenance": {
+            "schema_version": 2,
+            "defaults_path": _relative_path(config.defaults_path, config.project_root),
+            "defaults_sha256": _optional_sha256(config.defaults_path),
+            "experiment_config_path": _relative_path(experiment_config, config.project_root),
+            "experiment_config_sha256": _optional_sha256(experiment_config),
+            "channels_path": _relative_path(config.channels_path, config.project_root),
+            "channels_sha256": _optional_sha256(config.channels_path),
+            "resolved_config_sha256": resolved_config_sha256(config),
+        },
+        "resolved_config": resolved_config_mapping(config),
         "git_commit": _git_commit(config.project_root),
         "prepare_summary": prepare_summary,
         "outputs": {
@@ -209,6 +216,13 @@ def _sha256(path: Path) -> str:
 
 def _optional_sha256(path: Path) -> str | None:
     return _sha256(path) if path.is_file() else None
+
+
+def _relative_path(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
 
 
 def optional_sha256(path: Path | None) -> str | None:

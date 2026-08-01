@@ -948,18 +948,13 @@ def _report_summary(
     input_files = {
         name: {"sha256": _sha256(input_dir / name)} for name in _REQUIRED_FILES
     }
-    provenance = {}
+    provenance: dict[str, Any] = {}
     if manifest is not None:
-        for key in (
-            "experiment_id",
-            "experiment_date",
-            "git_commit",
-            "config_sha256",
-            "channels_sha256",
-            "camera_mapping_sha256",
-        ):
+        for key in ("experiment_id", "experiment_date", "git_commit"):
             if key in manifest:
                 provenance[key] = manifest[key]
+        if "config_provenance" in manifest:
+            provenance["config_provenance"] = manifest["config_provenance"]
     return {
         "status": "success_with_warnings" if warnings else "success",
         "manifest_present": manifest is not None,

@@ -9,25 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import yaml
 
 _TIMESTAMP_RE = re.compile(r"(?<!\d)(\d{17})(?!\d)")
-
-
-def load_camera_roles(path: Path) -> dict[str, str]:
-    """Load exact camera-directory to stable-role mappings."""
-    if not path.is_file():
-        raise FileNotFoundError(f"camera mapping file does not exist: {path}")
-    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    roles = loaded.get("camera_roles") if isinstance(loaded, dict) else None
-    if not isinstance(roles, dict):
-        raise ValueError("camera mapping must contain a camera_roles mapping")
-    result = {str(camera): str(role) for camera, role in roles.items()}
-    if any(not camera or not role for camera, role in result.items()):
-        raise ValueError("camera mapping contains an empty camera ID or role")
-    if len(result.values()) != len(set(result.values())):
-        raise ValueError("two camera IDs cannot map to the same role")
-    return result
 
 
 def validate_camera_directories(

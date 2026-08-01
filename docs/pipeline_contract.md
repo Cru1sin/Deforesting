@@ -6,6 +6,42 @@
 
 ## 1. 阶段边界和唯一键
 
+### 配置 schema v2
+
+运行配置只支持 schema v2。共同方法配置集中在
+`configs/defaults.yaml`；每个实验日期使用一个事实文件
+`configs/<date>.yaml`，通过 `defaults_path: defaults.yaml` 引用共同配置。日期文件的
+相机角色直接内联在 `camera_roles` 中，不再通过外部 camera mapping 文件加载：
+
+```yaml
+schema_version: 2
+defaults_path: defaults.yaml
+experiment_id: frost_0715
+experiment_date: "2026-07-15"
+input_dir: data/0715
+expected_sensor_interval_seconds: 1
+camera_roles: {}
+overrides: {}
+```
+
+`defaults.yaml` 保存共同的 `input_format`、图像匹配容差、`cycles`、`process` 和
+`analysis` 设置。Process 的结构保持为：
+
+```text
+process
+├── baseline
+└── features
+```
+
+日期文件只保存实验身份、输入目录、当天的 `camera_roles` 和确有需要的
+`overrides`。Override 只能覆盖 defaults 中已经存在的配置项；共同方法参数不应复制到
+日期文件中。
+
+运行阶段将有效配置写入 `manifest.json` 的 `resolved_config`，并在
+`config_provenance` 中记录 schema 版本、defaults/日期/channels 文件的路径与内容 hash，
+以及 resolved config 的 hash。`resolved_config` 表示本次运行真正使用的配置，保留
+`process.baseline` 和 `process.features` 的嵌套结构，不包含机器绝对路径或来源文件 hash。
+
 | 阶段 | 输入 | 输出 | 主要职责 |
 | --- | --- | --- | --- |
 | Prepare | `data/<MMDD>` 原始目录 | Prepared、初始 `cycle_summary`、`prepare_summary.json` | 解析原始文本、单位换算、循环切分、图片匹配 |
@@ -87,7 +123,7 @@ cycle_progress = (timestamp - stable_heating_start)
 
 `cycle_progress` 限制到 `[0, 1]`，其他阶段为 NaN。Prepare 按原始时间戳计算一次；Process 重采样后按同一循环边界重新计算，Processed 值为最终权威值。缺失压缩机频率表示未知，不解释为停机。
 
-相机映射只来自配置指定的 `camera_mapping_path`。相机目录名必须精确匹配映射 key；未映射目录直接失败，映射存在但当天缺失的角色只记录。每个角色独立匹配且一张图片最多使用一次，输出：
+相机映射只来自日期配置中的 `camera_roles`。相机目录名必须精确匹配映射 key；未映射目录直接失败，映射存在但当天缺失的角色只记录。每个角色独立匹配且一张图片最多使用一次，输出：
 
 ```text
 image_<role>_path
@@ -196,7 +232,7 @@ trend_effect >= minimum_trend_effect
 
 ## 6. 只读 QA Report 合同
 
-Report 只读取一次正式运行已经写出的：
+Report 只读取运行目录中的 `manifest.json` 和一次正式运行已经写出的：
 
 ```text
 prepared_data.parquet
@@ -224,7 +260,9 @@ evidence、direction consistency 或 decision thresholding。
 Prepared 的 observed-only 曲线同时遮罩 `<channel>__missing`、`__invalid`、`__duplicate`
 和 `__conflict`；Processed 的曲线只遮罩对应的 `<channel>__imputed`。Candidate residual
 的质量列必须由 `imputed_column_for_value()` 解析，不能在 Report 中猜测列名。Report
-不会读取 YAML，也不会显示未写入正式 summary 的 baseline 搜索区间。
+不会重新读取 YAML，也不会显示未写入正式 summary 的 baseline 搜索区间。即使当前配置文件
+之后发生变化，旧运行的 Report 仍以该运行 manifest 中保存的 `resolved_config` 和
+provenance 为准。
 
 Coverage 只发现同时具有测量值列和四个 Prepared 质量列的通道，排除时间、cycle 元数据、
 图片和 source lineage 字段，保持 Prepared 正式列顺序。它可以绘制 observed 时间带、图片

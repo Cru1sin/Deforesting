@@ -128,7 +128,21 @@ def _write_run(run_dir: Path, *, manifest: str | None = None) -> None:
 def test_generate_report_writes_four_figure_contract_and_metadata(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     output_dir = tmp_path / "qa"
-    _write_run(run_dir, manifest=json.dumps({"experiment_id": "exp_test", "git_commit": "abc"}))
+    _write_run(
+        run_dir,
+        manifest=json.dumps(
+            {
+                "experiment_id": "exp_test",
+                "git_commit": "abc",
+                "config_provenance": {
+                    "schema_version": 2,
+                    "defaults_path": "configs/defaults.yaml",
+                    "resolved_config_sha256": "resolved",
+                },
+                "resolved_config": {"experiment_id": "exp_test"},
+            }
+        ),
+    )
 
     result = generate_report(run_dir, output_dir)
 
@@ -141,6 +155,7 @@ def test_generate_report_writes_four_figure_contract_and_metadata(tmp_path: Path
     assert summary["status"] == "success"
     assert summary["manifest_present"] is True
     assert summary["input_files"]["prepared_data.parquet"]["sha256"]
+    assert summary["provenance"]["config_provenance"]["schema_version"] == 2
 
 
 def test_report_masks_prepared_quality_flags_and_processed_imputation() -> None:

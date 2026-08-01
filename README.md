@@ -24,6 +24,33 @@ python -m frost_analysis run \
 
 完整运行成功后，目录中还会有 `manifest.json`。阶段命令 `prepare`、`process`、`analyze` 都要求显式输入；它们不自动寻找最新结果、不缓存、不恢复，也不生成阶段 manifest。
 
+### 配置结构
+
+共同方法参数集中在 `configs/defaults.yaml`；每个实验日期只有一个日期事实文件，例如
+`configs/0715.yaml`。日期文件使用 schema v2，并将相机物理角色直接写在
+`camera_roles` 中：
+
+```yaml
+schema_version: 2
+defaults_path: defaults.yaml
+experiment_id: frost_0715
+experiment_date: "2026-07-15"
+input_dir: data/0715
+expected_sensor_interval_seconds: 1
+camera_roles: {}
+overrides: {}
+```
+
+`defaults.yaml` 保存共同的 `input_format`、图像匹配容差、`cycles`、`process` 和
+`analysis` 方法设置。其中 Process 的设置保持嵌套结构：
+`process.baseline` 和 `process.features`。日期文件只保存实验身份、输入目录、当天的
+`camera_roles` 以及确有需要的 `overrides`；不再使用外部 camera mapping 文件。
+
+运行阶段会在 `manifest.json` 中保存最终的 `resolved_config` 和配置 provenance，包括
+defaults、日期配置、channels 文件的路径与 hash，以及 resolved config 的 hash。这样一次
+运行实际采用的有效配置可以随运行产物复现；Report 读取 manifest 和正式科研输出，不重新
+读取当前 YAML 配置。
+
 为一个已经完成的运行生成 QA 图片：
 
 ```bash
@@ -47,9 +74,10 @@ python -m frost_analysis run \
 
 | 内容 | 文件 |
 | --- | --- |
-| 日期路径和阈值 | `configs/<date>.yaml` |
+| 共同方法参数 | `configs/defaults.yaml` |
+| 日期事实、输入路径和必要 overrides | `configs/<date>.yaml` |
 | 原始字段、单位、角色 | `configs/channels.yaml` |
-| 相机物理角色 | `configs/camera_mappings/<date>.yaml` |
+| 相机物理角色 | `configs/<date>.yaml` 中的 `camera_roles` |
 | 原始数据整理 | `src/frost_analysis/prepare.py` |
 | 循环边界 | `src/frost_analysis/cycles.py` |
 | 重采样和缺失处理 | `src/frost_analysis/process.py` |
@@ -106,7 +134,8 @@ Report 只读取正式输出，允许为展示进行筛选、分组、遮罩、�
 
 Prepare 只解析原始 `.xls` 文本、应用显式单位换算、切分循环和独立匹配相机图片；不重采样、不填补、不计算 baseline 或动态特征。Process 在每个 `experiment_id × cycle_id` 内按 summary 边界建立完整 10 秒网格；任何阶段或循环边界严格落在桶内部时排除该桶，不使用 overlap winner，也不从输入行 fallback 推断阶段；然后仅在 `experiment_id × cycle_id × cycle_stage` 内执行 bounded 缺失处理、派生公式、共同 baseline 和 past-only 特征，Step 缺失桶逐点按其距最后 observed 值的时间差执行 bounded forward fill。partial 行不进入 Process。Analyze 只使用 valid 且 baseline 可用的 `frost_development` 行。
 
-通道、阈值和每日期相机映射均在 `configs/` 中显式记录。baseline 是 `cycle_local_early_stable_proxy`，不是人工或图像证明的绝对无霜真值。Reset evidence 当前固定为 `not_evaluated`，不使用下一循环自身 baseline 自证恢复。
+共同通道方法和阈值在 `configs/defaults.yaml` 中显式记录；日期事实和每日期相机角色在各自的
+`configs/<date>.yaml` 中记录。baseline 是 `cycle_local_early_stable_proxy`，不是人工或图像证明的绝对无霜真值。Reset evidence 当前固定为 `not_evaluated`，不使用下一循环自身 baseline 自证恢复。
 
 ## 测试
 

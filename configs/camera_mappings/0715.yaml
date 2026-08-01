@@ -1,7 +1,0 @@
-camera_roles:
-  "192.168.1.1_1": top_center
-  "192.168.1.2_1": left_near
-  "192.168.1.11_1": top_near
-  "192.168.1.12_1": right_extreme
-  "192.168.1.13_1": front_center
-  "192.168.1.14_1": left_oblique

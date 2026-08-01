@@ -1,58 +1,17 @@
+schema_version: 2
+defaults_path: defaults.yaml
+
 experiment_id: exp_20260716
 experiment_date: "2026-07-16"
 input_dir: data/0716
-channels_path: configs/channels.yaml
-camera_mapping_path: configs/camera_mappings/0716.yaml
-sensor_globs:
-  - "*.xls"
-image_extensions:
-  - ".jpg"
-  - ".png"
-timestamp_column: "时间"
 expected_sensor_interval_seconds: 1
-image_match_tolerance_seconds: 2
 
-cycles:
-  defrost_channel: defrost_active
-  maximum_state_gap_seconds: 0
-  debounce_seconds: 20
-  minimum_defrost_seconds: 60
-  maximum_defrost_seconds: 1200
-  minimum_heating_seconds: 1800
-  maximum_heating_seconds: 21600
-  stable_heating_seconds: 180
-  operating_mode_channel: operating_mode
-  required_operating_mode: "3"
+camera_roles:
+  "192.168.1.1_1": unverified_camera_01
+  "192.168.1.2_1": unverified_camera_02
+  "192.168.1.11_1": unverified_camera_03
+  "192.168.1.12_1": unverified_camera_04
+  "192.168.1.13_1": unverified_camera_05
+  "192.168.1.14_1": unverified_camera_06
 
-process:
-  resample_interval_seconds: 10
-  minimum_continuous_bucket_coverage: 0.8
-  continuous_max_gap_seconds: 60
-  control_max_gap_seconds: 30
-  baseline:
-    stage: frost_development
-    search_start_minutes: 0
-    search_end_minutes: 20
-    window_minutes: 5
-    window_step_minutes: 1
-    minimum_observed_coverage: 0.8
-    required_anchor_channels:
-      - ambient_temperature
-      - water_in_temperature
-      - water_out_temperature
-      - compressor_frequency
-    anchor_maximum_std:
-      ambient_temperature: 1.0
-      water_in_temperature: 1.0
-      water_out_temperature: 1.0
-      compressor_frequency: 5.0
-  features:
-    windows_minutes: [5, 10, 30]
-
-analysis:
-  performance_target: heating_capacity__baseline_residual
-  future_horizon_minutes: 10
-  minimum_valid_cycles: 3
-  minimum_trend_effect: 0.3
-  minimum_direction_consistency: 0.7
-  minimum_points_per_cycle: 6
+overrides: {}

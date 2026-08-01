@@ -19,13 +19,13 @@ from frost_analysis.io import (
 
 
 def _config(root: Path, input_dir: Path) -> Config:
+    (root / "defaults.yaml").write_text("defaults\n", encoding="utf-8")
     return Config(
         project_root=root,
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=input_dir,
         channels_path=root / "channels.yaml",
-        camera_mapping_path=root / "camera.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg", ".png"),
         timestamp_column="时间",
@@ -34,6 +34,8 @@ def _config(root: Path, input_dir: Path) -> Config:
         cycles={"defrost_channel": "defrost_active"},
         process={"resample_interval_seconds": 10},
         analysis={"future_horizon_minutes": 10},
+        defaults_path=root / "defaults.yaml",
+        camera_roles={},
     )
 
 
@@ -42,8 +44,6 @@ def test_discover_inputs_reads_root_sensors_and_one_level_images(tmp_path: Path)
     camera = raw / "192.168.1.1_1"
     camera.mkdir(parents=True)
     (raw / "参数1.xls").write_text("sensor", encoding="utf-8")
-    mapping = tmp_path / "camera.yaml"
-    mapping.write_text("camera_roles: {}\n", encoding="utf-8")
     (camera / "20260715080000000.jpg").write_bytes(b"image")
     (camera / "nested").mkdir()
     (camera / "nested" / "ignored.jpg").write_bytes(b"image")
@@ -52,7 +52,6 @@ def test_discover_inputs_reads_root_sensors_and_one_level_images(tmp_path: Path)
 
     assert result.sensor_files == (raw / "参数1.xls",)
     assert result.image_files == (camera / "20260715080000000.jpg",)
-    assert result.camera_mapping_path == mapping
 
 
 def test_output_inside_raw_input_is_rejected(tmp_path: Path) -> None:

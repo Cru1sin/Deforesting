@@ -15,14 +15,12 @@ prepare_module = import_module("frost_analysis.prepare")
 
 
 def _config(root: Path, raw: Path) -> Config:
-    (root / "camera.yaml").write_text("camera_roles: {}\n", encoding="utf-8")
     return Config(
         project_root=root,
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=raw,
         channels_path=root / "channels.yaml",
-        camera_mapping_path=root / "camera.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
         timestamp_column="时间",
@@ -40,6 +38,7 @@ def _config(root: Path, raw: Path) -> Config:
         },
         process={"resample_interval_seconds": 10},
         analysis={},
+        camera_roles={},
     )
 
 
@@ -492,15 +491,23 @@ def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text(
         """
+schema_version: 2
+defaults_path: defaults.yaml
 experiment_id: exp_test
 experiment_date: "2026-02-31"
 input_dir: data/0715
-channels_path: configs/channels.yaml
-sensor_globs: ["*.xls"]
-image_extensions: [".jpg"]
-camera_mapping_path: configs/camera_mappings/0715.yaml
-timestamp_column: 时间
 expected_sensor_interval_seconds: 1
+camera_roles: {}
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "defaults.yaml").write_text(
+        """
+channels_path: channels.yaml
+input_format:
+  sensor_globs: ["*.xls"]
+  image_extensions: [".jpg"]
+  timestamp_column: 时间
 image_match_tolerance_seconds: 2
 cycles: {}
 process: {}
@@ -508,6 +515,7 @@ analysis: {}
 """,
         encoding="utf-8",
     )
+    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="ISO"):
         load_config(path)

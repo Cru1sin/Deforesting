@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -28,17 +31,19 @@ class CycleSettings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> CycleSettings:
+        mapping = _mapping(values, "cycles")
+        _validate_dataclass_keys(mapping, cls, "cycles")
         result = cls(
-            defrost_channel=str(values.get("defrost_channel", cls.defrost_channel)),
-            maximum_state_gap_seconds=float(values.get("maximum_state_gap_seconds", 5)),
-            debounce_seconds=float(values.get("debounce_seconds", 20)),
-            minimum_defrost_seconds=float(values.get("minimum_defrost_seconds", 60)),
-            maximum_defrost_seconds=float(values.get("maximum_defrost_seconds", 1200)),
-            minimum_heating_seconds=float(values.get("minimum_heating_seconds", 1800)),
-            maximum_heating_seconds=float(values.get("maximum_heating_seconds", 21600)),
-            stable_heating_seconds=float(values.get("stable_heating_seconds", 180)),
-            operating_mode_channel=str(values.get("operating_mode_channel", "")),
-            required_operating_mode=str(values.get("required_operating_mode", "3")),
+            defrost_channel=str(mapping.get("defrost_channel", cls.defrost_channel)),
+            maximum_state_gap_seconds=float(mapping.get("maximum_state_gap_seconds", 5)),
+            debounce_seconds=float(mapping.get("debounce_seconds", 20)),
+            minimum_defrost_seconds=float(mapping.get("minimum_defrost_seconds", 60)),
+            maximum_defrost_seconds=float(mapping.get("maximum_defrost_seconds", 1200)),
+            minimum_heating_seconds=float(mapping.get("minimum_heating_seconds", 1800)),
+            maximum_heating_seconds=float(mapping.get("maximum_heating_seconds", 21600)),
+            stable_heating_seconds=float(mapping.get("stable_heating_seconds", 180)),
+            operating_mode_channel=str(mapping.get("operating_mode_channel", "")),
+            required_operating_mode=str(mapping.get("required_operating_mode", "3")),
         )
         _validate_nonnegative("maximum_state_gap_seconds", result.maximum_state_gap_seconds)
         _validate_positive("debounce_seconds", result.debounce_seconds)
@@ -81,15 +86,17 @@ class BaselineSettings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> BaselineSettings:
-        anchors = values.get("required_anchor_channels", cls().required_anchor_channels)
-        maximum_std = values.get("anchor_maximum_std", cls().anchor_maximum_std)
+        mapping = _mapping(values, "baseline")
+        _validate_dataclass_keys(mapping, cls, "baseline")
+        anchors = mapping.get("required_anchor_channels", cls().required_anchor_channels)
+        maximum_std = mapping.get("anchor_maximum_std", cls().anchor_maximum_std)
         result = cls(
-            stage=str(values.get("stage", "frost_development")),
-            search_start_minutes=int(values.get("search_start_minutes", 0)),
-            search_end_minutes=int(values.get("search_end_minutes", 20)),
-            window_minutes=int(values.get("window_minutes", 5)),
-            window_step_minutes=int(values.get("window_step_minutes", 1)),
-            minimum_observed_coverage=float(values.get("minimum_observed_coverage", 0.8)),
+            stage=str(mapping.get("stage", "frost_development")),
+            search_start_minutes=int(mapping.get("search_start_minutes", 0)),
+            search_end_minutes=int(mapping.get("search_end_minutes", 20)),
+            window_minutes=int(mapping.get("window_minutes", 5)),
+            window_step_minutes=int(mapping.get("window_step_minutes", 1)),
+            minimum_observed_coverage=float(mapping.get("minimum_observed_coverage", 0.8)),
             required_anchor_channels=tuple(str(value) for value in anchors),
             anchor_maximum_std={str(key): float(value) for key, value in maximum_std.items()},
         )
@@ -122,18 +129,32 @@ class ProcessSettings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> ProcessSettings:
-        baseline_values = values.get("baseline", {})
-        feature_values = values.get("features", {})
+        mapping = _mapping(values, "process")
+        _validate_keys(
+            mapping,
+            {
+                "resample_interval_seconds",
+                "minimum_continuous_bucket_coverage",
+                "continuous_max_gap_seconds",
+                "control_max_gap_seconds",
+                "baseline",
+                "features",
+            },
+            "process",
+        )
+        baseline_values = mapping.get("baseline", {})
+        feature_values = mapping.get("features", {})
         if not isinstance(baseline_values, Mapping) or not isinstance(feature_values, Mapping):
             raise ValueError("process.baseline and process.features must be mappings")
+        _validate_keys(feature_values, {"windows_minutes"}, "process.features")
         windows = tuple(int(value) for value in feature_values.get("windows_minutes", [5, 10, 30]))
         result = cls(
-            resample_interval_seconds=int(values.get("resample_interval_seconds", 10)),
+            resample_interval_seconds=int(mapping.get("resample_interval_seconds", 10)),
             minimum_continuous_bucket_coverage=float(
-                values.get("minimum_continuous_bucket_coverage", 0.8)
+                mapping.get("minimum_continuous_bucket_coverage", 0.8)
             ),
-            continuous_max_gap_seconds=float(values.get("continuous_max_gap_seconds", 60)),
-            control_max_gap_seconds=float(values.get("control_max_gap_seconds", 30)),
+            continuous_max_gap_seconds=float(mapping.get("continuous_max_gap_seconds", 60)),
+            control_max_gap_seconds=float(mapping.get("control_max_gap_seconds", 30)),
             baseline=BaselineSettings.from_mapping(baseline_values),
             feature_windows_minutes=windows,
         )
@@ -164,17 +185,19 @@ class AnalysisSettings:
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> AnalysisSettings:
+        mapping = _mapping(values, "analysis")
+        _validate_dataclass_keys(mapping, cls, "analysis")
         result = cls(
             performance_target=str(
-                values.get("performance_target", "heating_capacity__baseline_residual")
+                mapping.get("performance_target", "heating_capacity__baseline_residual")
             ),
-            future_horizon_minutes=int(values.get("future_horizon_minutes", 10)),
-            minimum_valid_cycles=int(values.get("minimum_valid_cycles", 3)),
-            minimum_trend_effect=float(values.get("minimum_trend_effect", 0.3)),
+            future_horizon_minutes=int(mapping.get("future_horizon_minutes", 10)),
+            minimum_valid_cycles=int(mapping.get("minimum_valid_cycles", 3)),
+            minimum_trend_effect=float(mapping.get("minimum_trend_effect", 0.3)),
             minimum_direction_consistency=float(
-                values.get("minimum_direction_consistency", 0.7)
+                mapping.get("minimum_direction_consistency", 0.7)
             ),
-            minimum_points_per_cycle=int(values.get("minimum_points_per_cycle", 6)),
+            minimum_points_per_cycle=int(mapping.get("minimum_points_per_cycle", 6)),
         )
         if result.future_horizon_minutes <= 0:
             raise ValueError("future_horizon_minutes must be positive")
@@ -195,7 +218,6 @@ class Config:
     experiment_date: str
     input_dir: Path
     channels_path: Path
-    camera_mapping_path: Path
     sensor_globs: tuple[str, ...]
     image_extensions: tuple[str, ...]
     timestamp_column: str
@@ -205,6 +227,8 @@ class Config:
     process: ProcessSettings
     analysis: AnalysisSettings
     config_path: Path | None = None
+    defaults_path: Path | None = None
+    camera_roles: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         raw_cycles: Any = self.cycles
@@ -224,64 +248,139 @@ class Config:
 
 
 def load_config(path: Path) -> Config:
-    """Load a flat YAML file and resolve every path relative to the repository."""
+    """Load one schema-v2 date file and resolve its shared defaults."""
     config_path = path.resolve()
-    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(loaded, dict):
-        raise ValueError("config must be a YAML mapping")
+    loaded = _load_yaml_mapping(config_path, "experiment config")
+    _validate_keys(
+        loaded,
+        {
+            "schema_version",
+            "defaults_path",
+            "experiment_id",
+            "experiment_date",
+            "input_dir",
+            "expected_sensor_interval_seconds",
+            "camera_roles",
+            "overrides",
+        },
+        "experiment config",
+    )
+    if loaded.get("schema_version") != 2:
+        raise ValueError("only config schema_version 2 is supported")
     required = {
+        "schema_version",
+        "defaults_path",
         "experiment_id",
         "experiment_date",
         "input_dir",
-        "channels_path",
-        "camera_mapping_path",
-        "sensor_globs",
-        "image_extensions",
-        "timestamp_column",
         "expected_sensor_interval_seconds",
-        "image_match_tolerance_seconds",
-        "cycles",
-        "process",
-        "analysis",
+        "camera_roles",
     }
     missing = sorted(required - set(loaded))
     if missing:
         raise ValueError(f"config missing keys: {missing}")
+    defaults_path = (config_path.parent / str(loaded["defaults_path"])).resolve()
+    defaults = _load_yaml_mapping(defaults_path, "defaults")
+    _validate_keys(
+        defaults,
+        {
+            "channels_path",
+            "input_format",
+            "image_match_tolerance_seconds",
+            "cycles",
+            "process",
+            "analysis",
+        },
+        "defaults",
+    )
+    overrides = loaded.get("overrides", {})
+    if not isinstance(overrides, Mapping):
+        raise ValueError("overrides must be a YAML mapping")
+    resolved = _merge_existing_keys(defaults, overrides)
+    input_format = _mapping(resolved["input_format"], "input_format")
+    _validate_keys(
+        input_format,
+        {"sensor_globs", "image_extensions", "timestamp_column"},
+        "input_format",
+    )
     experiment_date = str(loaded["experiment_date"])
     if not _is_iso_date(experiment_date):
         raise ValueError("experiment_date must use ISO YYYY-MM-DD format")
     project_root = _find_project_root(config_path)
-    process = ProcessSettings.from_mapping(_mapping(loaded["process"], "process"))
-    analysis = AnalysisSettings.from_mapping(_mapping(loaded["analysis"], "analysis"))
+    process = ProcessSettings.from_mapping(_mapping(resolved["process"], "process"))
+    analysis = AnalysisSettings.from_mapping(_mapping(resolved["analysis"], "analysis"))
     if analysis.future_horizon_minutes * 60 % process.resample_interval_seconds != 0:
         raise ValueError("future_horizon_minutes must align with the resample interval")
     expected_interval = int(loaded["expected_sensor_interval_seconds"])
-    image_tolerance = float(loaded["image_match_tolerance_seconds"])
+    image_tolerance = float(resolved["image_match_tolerance_seconds"])
     _validate_positive("expected_sensor_interval_seconds", expected_interval)
     if process.resample_interval_seconds % expected_interval != 0:
         raise ValueError(
             "resample_interval_seconds must be divisible by expected_sensor_interval_seconds"
         )
     _validate_nonnegative("image_match_tolerance_seconds", image_tolerance)
-    if not str(loaded["timestamp_column"]).strip():
+    if not str(input_format["timestamp_column"]).strip():
         raise ValueError("timestamp_column must not be empty")
+    camera_roles = _camera_roles(loaded["camera_roles"])
     return Config(
         project_root=project_root,
         experiment_id=str(loaded["experiment_id"]),
         experiment_date=experiment_date,
         input_dir=_resolve_path(project_root, loaded["input_dir"]),
-        channels_path=_resolve_path(project_root, loaded["channels_path"]),
-        camera_mapping_path=_resolve_path(project_root, loaded["camera_mapping_path"]),
-        sensor_globs=_tuple_strings(loaded["sensor_globs"], "sensor_globs"),
-        image_extensions=_image_extensions(loaded["image_extensions"]),
-        timestamp_column=str(loaded["timestamp_column"]),
+        channels_path=_resolve_path(defaults_path.parent, resolved["channels_path"]),
+        sensor_globs=_tuple_strings(input_format["sensor_globs"], "sensor_globs"),
+        image_extensions=_image_extensions(input_format["image_extensions"]),
+        timestamp_column=str(input_format["timestamp_column"]),
         expected_sensor_interval_seconds=expected_interval,
         image_match_tolerance_seconds=image_tolerance,
-        cycles=CycleSettings.from_mapping(_mapping(loaded["cycles"], "cycles")),
+        cycles=CycleSettings.from_mapping(_mapping(resolved["cycles"], "cycles")),
         process=process,
         analysis=analysis,
         config_path=config_path,
+        defaults_path=defaults_path,
+        camera_roles=camera_roles,
     )
+
+
+def resolved_config_mapping(config: Config) -> dict[str, Any]:
+    """Return the effective configuration without source-file provenance."""
+    return {
+        "experiment_id": config.experiment_id,
+        "experiment_date": config.experiment_date,
+        "input_dir": _relative_path(config.input_dir, config.project_root),
+        "expected_sensor_interval_seconds": config.expected_sensor_interval_seconds,
+        "camera_roles": dict(config.camera_roles),
+        "input_format": {
+            "sensor_globs": list(config.sensor_globs),
+            "image_extensions": list(config.image_extensions),
+            "timestamp_column": config.timestamp_column,
+        },
+        "image_match_tolerance_seconds": config.image_match_tolerance_seconds,
+        "cycles": asdict(config.cycles),
+        "process": {
+            "resample_interval_seconds": config.process.resample_interval_seconds,
+            "minimum_continuous_bucket_coverage": (
+                config.process.minimum_continuous_bucket_coverage
+            ),
+            "continuous_max_gap_seconds": config.process.continuous_max_gap_seconds,
+            "control_max_gap_seconds": config.process.control_max_gap_seconds,
+            "baseline": asdict(config.process.baseline),
+            "features": {"windows_minutes": list(config.process.feature_windows_minutes)},
+        },
+        "analysis": asdict(config.analysis),
+    }
+
+
+def resolved_config_sha256(config: Config) -> str:
+    """Hash the effective configuration with stable JSON serialization."""
+    payload = json.dumps(
+        resolved_config_mapping(config),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _find_project_root(config_path: Path) -> Path:
@@ -294,6 +393,60 @@ def _find_project_root(config_path: Path) -> Path:
 def _resolve_path(root: Path, value: Any) -> Path:
     path = Path(str(value))
     return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _load_yaml_mapping(path: Path, name: str) -> dict[str, Any]:
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, Mapping):
+        raise ValueError(f"{name} must be a YAML mapping")
+    return {str(key): value for key, value in loaded.items()}
+
+
+def _validate_keys(values: Mapping[str, Any], allowed: set[str], name: str) -> None:
+    unknown = sorted(set(values) - allowed)
+    if unknown:
+        raise ValueError(f"{name} contains unknown keys: {unknown}")
+
+
+def _validate_dataclass_keys(
+    values: Mapping[str, Any], cls: type[Any], name: str
+) -> None:
+    _validate_keys(values, {item.name for item in fields(cls)}, name)
+
+
+def _merge_existing_keys(
+    base: Mapping[str, Any], overrides: Mapping[str, Any], prefix: str = ""
+) -> dict[str, Any]:
+    result = copy.deepcopy(dict(base))
+    for key, value in overrides.items():
+        name = f"{prefix}.{key}" if prefix else str(key)
+        if key not in result:
+            raise ValueError(f"unknown override key: {name}")
+        existing = result[key]
+        if isinstance(existing, Mapping) and isinstance(value, Mapping):
+            result[key] = _merge_existing_keys(existing, value, name)
+        elif isinstance(existing, Mapping) != isinstance(value, Mapping):
+            raise ValueError(f"override mapping shape does not match: {name}")
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
+def _camera_roles(value: Any) -> dict[str, str]:
+    roles = _mapping(value, "camera_roles")
+    result = {str(camera): str(role) for camera, role in roles.items()}
+    if any(not camera.strip() or not role.strip() for camera, role in result.items()):
+        raise ValueError("camera_roles contains an empty camera ID or role")
+    if len(result.values()) != len(set(result.values())):
+        raise ValueError("two camera IDs cannot map to the same role")
+    return result
+
+
+def _relative_path(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
 
 
 def _tuple_strings(value: Any, name: str) -> tuple[str, ...]:
