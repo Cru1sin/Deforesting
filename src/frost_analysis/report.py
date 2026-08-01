@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.ticker import MultipleLocator, NullLocator
 
 from .analysis import imputed_column_for_value
 from .validation import validate_analysis, validate_prepared, validate_processed
@@ -51,6 +52,21 @@ _CYCLE_PANEL_CHANNELS = (
     ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
     ("evaporating_temperature", "coil_temperature", "ambient_temperature"),
 )
+_PUBLICATION_PANEL_CHANNELS = (
+    ("compressor_frequency", "compressor_frequency_setpoint"),
+    ("heating_capacity",),
+    ("cop",),
+    ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
+    ("ambient_temperature", "coil_temperature", "evaporating_temperature"),
+)
+_PUBLICATION_AXIS_LABELS = (
+    "Compressor frequency [Hz]",
+    "Heating capacity [kW]",
+    "COP [-]",
+    "Water temperature [°C]",
+    "Temperature [°C]",
+)
+_OVERVIEW_AXIS_LABELS = _PUBLICATION_AXIS_LABELS
 _FIXED_OVERVIEW_CHANNELS = tuple(
     channel for panel in _CYCLE_PANEL_CHANNELS for channel in panel
 )
@@ -107,6 +123,10 @@ _DISPLAY_LABELS = {
     "evaporating_temperature": "Evaporating temperature, Tₑ",
     "coil_temperature": "Coil temperature, T₃",
 }
+_PUBLICATION_DISPLAY_LABELS = {
+    **_DISPLAY_LABELS,
+    "evaporating_temperature": "Evaporating saturation temperature, Tₑ,sat",
+}
 _DISPLAY_UNITS = {
     "compressor_frequency": "Hz",
     "compressor_frequency_setpoint": "Hz",
@@ -131,6 +151,14 @@ _STATE_GAP_COLOR = "#9CA3AF"
 _DEFROST_OFF_COLOR = "#6B7280"
 _DEFROST_STATE_COLOR = "#C1121F"
 _COP_STABLE_SPAN_FRACTION = 0.35
+_COP_INSET_BBOX = (0.60, 0.50, 0.28, 0.32)
+_PUBLICATION_HEIGHT_RATIOS = (0.18, 1.00, 1.00, 1.25, 1.00, 1.15)
+_PUBLICATION_X_GRID_ALPHA = 0.12
+_RIBBON_STAGE_LABELS = {
+    "recovery": "Recovery",
+    "frost_development": "Frost development",
+    "defrost": "Defrost",
+}
 
 
 def generate_report(input_dir: Path, output_dir: Path, overwrite: bool = False) -> Path:
@@ -477,38 +505,39 @@ def _plot_one_cycle_publication(
     path: Path,
     warnings: list[dict[str, str]],
 ) -> None:
-    figure = plt.figure(figsize=(7.2, 10.5), dpi=_PLOT_DPI)
+    figure = plt.figure(figsize=(7.2, 10.8), dpi=_PLOT_DPI)
     grid = figure.add_gridspec(
-        5,
+        6,
         1,
-        height_ratios=(1.05, 1.05, 1.35, 1.05, 1.10),
-        hspace=0.42,
+        height_ratios=_PUBLICATION_HEIGHT_RATIOS,
+        hspace=0.50,
     )
-    axes = [figure.add_subplot(grid[0, 0])]
-    axes.extend(figure.add_subplot(grid[index, 0], sharex=axes[0]) for index in range(1, 5))
+    ribbon_axis = figure.add_subplot(grid[0, 0])
+    axes = [figure.add_subplot(grid[1, 0], sharex=ribbon_axis)]
+    axes.extend(figure.add_subplot(grid[index, 0], sharex=axes[0]) for index in range(2, 6))
     cycle_id = str(cycle["cycle_id"])
     origin = _cycle_time_origin(prepared, cycle)
     gap_intervals = _defrost_state_gap_intervals(prepared)
     _shade_cycle_stages(axes, cycle, origin)
     _shade_defrost_state_gaps(axes, gap_intervals, origin)
     _add_baseline_indicator(axes[0], cycle, origin)
+    _plot_publication_stage_ribbon(ribbon_axis, cycle, gap_intervals, origin)
 
-    _plot_cycle_panels(axes, prepared, processed, cycle, cycle_id, warnings, origin)
+    _plot_cycle_panels(
+        axes,
+        prepared,
+        processed,
+        cycle,
+        cycle_id,
+        warnings,
+        origin,
+        publication=True,
+    )
 
     _add_startup_annotation(axes[2], cycle, origin)
-    _finish_cycle_axes(axes, None)
+    _finish_cycle_axes(axes, None, publication=True, panel_label_x=-0.11)
     _add_cycle_title(figure, cycle, publication=True)
-    handles = _cycle_legend_handles(gap_intervals, cycle)
-    if handles:
-        figure.legend(
-            handles=handles,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.89),
-            ncols=min(5, len(handles)),
-            fontsize=8,
-            frameon=False,
-        )
-    figure.subplots_adjust(left=0.17, right=0.985, bottom=0.06, top=0.84)
+    figure.subplots_adjust(left=0.21, right=0.985, bottom=0.06, top=0.94)
     _save_figure(figure, path)
 
 
@@ -520,32 +549,35 @@ def _plot_cycle_panels(
     cycle_id: str,
     warnings: list[dict[str, str]],
     origin: pd.Timestamp,
+    publication: bool = False,
 ) -> None:
-    axis_labels = (
-        "Compressor frequency [Hz]",
-        "Heating capacity [kW]",
-        "COP [-]",
-        "Water temperature [°C]",
-        "Temperature [°C]",
-    )
+    panel_channels = _PUBLICATION_PANEL_CHANNELS if publication else _CYCLE_PANEL_CHANNELS
+    axis_labels = _PUBLICATION_AXIS_LABELS if publication else _OVERVIEW_AXIS_LABELS
+    display_labels = _PUBLICATION_DISPLAY_LABELS if publication else _DISPLAY_LABELS
     dashed_channels = {"compressor_frequency_setpoint", "water_temperature_setpoint"}
     for axis, channels, axis_label in zip(
-        axes, _CYCLE_PANEL_CHANNELS, axis_labels, strict=True
+        axes, panel_channels, axis_labels, strict=True
     ):
         for channel in channels:
             plotter = _plot_processed_line if channel == "cop" else _plot_prepared_line
+            line_kwargs = {
+                "color": _CHANNEL_COLORS[channel],
+                "x_origin": origin,
+                "show_legend": False,
+                "y_label": axis_label,
+                "linestyle": "--" if channel in dashed_channels else "-",
+                "zorder": 3 if channel == "compressor_frequency" else 2,
+            }
+            if plotter is _plot_prepared_line:
+                line_kwargs["step"] = channel in dashed_channels
             plotter(
                 axis,
                 processed if channel == "cop" else prepared,
                 channel,
-                _DISPLAY_LABELS[channel],
+                display_labels[channel],
                 cycle_id,
                 warnings,
-                color=_CHANNEL_COLORS[channel],
-                x_origin=origin,
-                show_legend=False,
-                y_label=axis_label,
-                linestyle="--" if channel in dashed_channels else "-",
+                **line_kwargs,
             )
         if len(channels) > 1:
             handles = [
@@ -554,8 +586,8 @@ def _plot_cycle_panels(
                     [],
                     color=_CHANNEL_COLORS[channel],
                     linestyle="--" if channel in dashed_channels else "-",
-                    linewidth=1.35,
-                    label=_DISPLAY_LABELS[channel],
+                    linewidth=1.35 if channel == channels[0] else 1.05,
+                    label=display_labels[channel],
                 )
                 for channel in channels
                 if _channel_has_observations(
@@ -570,14 +602,18 @@ def _plot_cycle_panels(
                     loc="lower left",
                     bbox_to_anchor=(0.0, 1.02),
                     ncols=len(handles),
-                    fontsize=8,
+                    fontsize=8.5 if publication else 8,
                     frameon=False,
                     borderaxespad=0,
                     handlelength=2.0,
                     columnspacing=1.2,
                 )
+        if publication and axis is axes[1]:
+            axis.margins(y=0.07)
         if axis is axes[2]:
             _configure_cop_axis(axis, processed, cycle, origin)
+        if publication and axis is axes[-1]:
+            _add_freezing_reference(axis)
 
 
 def _channel_has_observations(
@@ -606,6 +642,8 @@ def _plot_prepared_line(
     show_legend: bool = True,
     y_label: str | None = None,
     linestyle: str = "-",
+    step: bool = False,
+    zorder: int = 2,
 ) -> None:
     if channel not in frame:
         _missing_panel(axis, label, "channel not present in Prepared", warnings, cycle_id, channel)
@@ -632,13 +670,20 @@ def _plot_prepared_line(
     line_color = color or _CHANNEL_COLORS.get(channel, "#4D4D4D")
     for index, (times, segment_values) in enumerate(_observed_segments(frame["timestamp"], values)):
         plot_times = _elapsed_minutes(times, x_origin)
-        axis.plot(
+        plotter = axis.step if step else axis.plot
+        plot_kwargs = {
+            "label": label if index == 0 else None,
+            "color": line_color,
+            "linewidth": 1.35,
+            "linestyle": linestyle,
+            "zorder": zorder,
+        }
+        if step:
+            plot_kwargs["where"] = "post"
+        plotter(
             plot_times,
             segment_values,
-            label=label if index == 0 else None,
-            color=line_color,
-            linewidth=1.35,
-            linestyle=linestyle,
+            **plot_kwargs,
         )
     axis.set_ylabel(y_label or label)
     if show_legend:
@@ -657,6 +702,7 @@ def _plot_processed_line(
     show_legend: bool = True,
     y_label: str | None = None,
     linestyle: str = "-",
+    zorder: int = 2,
 ) -> None:
     if channel not in frame:
         _missing_panel(axis, label, "channel not present in Processed", warnings, cycle_id, channel)
@@ -689,6 +735,7 @@ def _plot_processed_line(
             color=line_color,
             linewidth=1.35,
             linestyle=linestyle,
+            zorder=zorder,
         )
     axis.set_ylabel(y_label or label)
     if show_legend:
@@ -753,7 +800,7 @@ def _add_cop_inset(
     segments = _observed_segments(frame["timestamp"], values)
     if not segments:
         return
-    inset = axis.inset_axes([0.64, 0.14, 0.33, 0.48], zorder=5)
+    inset = axis.inset_axes(_COP_INSET_BBOX, zorder=5)
     for times, segment_values in segments:
         inset.plot(
             _elapsed_minutes(times, origin),
@@ -769,7 +816,7 @@ def _add_cop_inset(
     start = (pd.Timestamp(cycle["heating_start"]) - origin).total_seconds() / 60.0
     stable = (pd.Timestamp(cycle["stable_heating_start"]) - origin).total_seconds() / 60.0
     inset.set_xlim(start, stable)
-    inset.set_title("Startup transient\n(full scale)", fontsize=6.5, pad=2)
+    inset.set_title("Full scale", fontsize=7.5, fontweight="bold", color="#263238", pad=2)
     inset.tick_params(labelsize=5, width=0.45, length=2)
     inset.grid(False)
     inset.set_facecolor("white")
@@ -910,6 +957,138 @@ def _shade_cycle_stages(
                 linewidth=0,
                 zorder=0,
             )
+
+
+def _publication_stage_labels(cycle: pd.Series) -> tuple[str, ...]:
+    return tuple(_RIBBON_STAGE_LABELS[stage] for stage, _, _ in _stage_intervals(cycle))
+
+
+def _plot_publication_stage_ribbon(
+    axis: Any,
+    cycle: pd.Series,
+    gap_intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
+    origin: pd.Timestamp,
+) -> None:
+    axis.set_ylim(0.0, 1.0)
+    axis.set_yticks([])
+    axis.tick_params(axis="x", labelbottom=False, length=0)
+    for spine in axis.spines.values():
+        spine.set_visible(False)
+    for stage, start, end in _stage_intervals(cycle):
+        left = (start - origin).total_seconds() / 60.0
+        right = (end - origin).total_seconds() / 60.0
+        width = right - left
+        axis.axvspan(
+            left,
+            right,
+            color=_STAGE_COLORS[stage],
+            alpha=0.62,
+            linewidth=0,
+            zorder=0,
+        )
+        if stage == "defrost" and width < 8.0:
+            axis.annotate(
+                "Defrost onset",
+                xy=(left, 0.86),
+                xycoords=("data", "axes fraction"),
+                xytext=(left, 1.55),
+                textcoords=("data", "axes fraction"),
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+                fontweight="bold",
+                color="#344054",
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": "#526777",
+                    "linewidth": 0.75,
+                    "shrinkA": 2,
+                    "shrinkB": 2,
+                },
+                clip_on=False,
+            )
+        else:
+            axis.text(
+                (left + right) / 2.0,
+                0.54,
+                _RIBBON_STAGE_LABELS[stage],
+                ha="center",
+                va="center",
+                fontsize=8.5,
+                fontweight="bold",
+                color="#263238",
+                clip_on=False,
+            )
+    for start, end in gap_intervals:
+        left = (start - origin).total_seconds() / 60.0
+        right = (end - origin).total_seconds() / 60.0
+        axis.axvspan(
+            left,
+            right,
+            facecolor=_STATE_GAP_COLOR,
+            edgecolor=_STATE_GAP_COLOR,
+            hatch="//",
+            alpha=0.34,
+            linewidth=0.3,
+            zorder=1,
+        )
+        if right - left >= 4.0:
+            axis.text(
+                (left + right) / 2.0,
+                0.18,
+                "State unavailable",
+                ha="center",
+                va="center",
+                fontsize=7.2,
+                color="#4D4D4D",
+                clip_on=False,
+            )
+    baseline_start = cycle.get("baseline_start")
+    baseline_end = cycle.get("baseline_end")
+    if pd.notna(baseline_start) and pd.notna(baseline_end):
+        left = (pd.Timestamp(baseline_start) - origin).total_seconds() / 60.0
+        right = (pd.Timestamp(baseline_end) - origin).total_seconds() / 60.0
+        axis.axvspan(
+            left,
+            right,
+            ymin=0.0,
+            ymax=0.16,
+            color=_BASELINE_COLOR,
+            alpha=0.55,
+            linewidth=0,
+            zorder=2,
+        )
+        axis.text(
+            (left + right) / 2.0,
+            0.08,
+            "Baseline",
+            ha="center",
+            va="center",
+            fontsize=7,
+            color="#263238",
+            clip_on=False,
+        )
+
+
+def _add_freezing_reference(axis: Any) -> None:
+    axis.axhline(
+        0.0,
+        color="#6B7280",
+        linestyle=(0, (3, 2)),
+        linewidth=0.75,
+        zorder=1,
+    )
+    axis.text(
+        0.55,
+        0.86,
+        "0°C freezing threshold",
+        transform=axis.transAxes,
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#4D4D4D",
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72, "pad": 1.0},
+    )
 
 
 def _defrost_state_gap_intervals(
@@ -1087,10 +1266,21 @@ def _add_startup_annotation(
         "Startup transient",
         xy=((left + right) / 2.0, 0.97),
         xycoords=("data", "axes fraction"),
-        ha="center",
-        va="top",
-        fontsize=8,
-        color="#4D4D4D",
+        xytext=(0.02, 1.03),
+        textcoords="axes fraction",
+        ha="left",
+        va="bottom",
+        fontsize=9.5,
+        fontweight="bold",
+        color="#263238",
+        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.86, "pad": 1.5},
+        arrowprops={
+            "arrowstyle": "->",
+            "color": "#526777",
+            "linewidth": 0.85,
+            "shrinkA": 3,
+            "shrinkB": 2,
+        },
     )
 
 
@@ -1123,13 +1313,19 @@ def _add_cycle_diagnostics(
         )
 
 
-def _finish_cycle_axes(axes: list[Any], state_axis: Any | None) -> None:
+def _finish_cycle_axes(
+    axes: list[Any],
+    state_axis: Any | None,
+    *,
+    publication: bool = False,
+    panel_label_x: float = -0.08,
+) -> None:
     if state_axis is not None:
         state_axis.set_xlabel("")
         state_axis.tick_params(axis="x", labelbottom=False)
     for index, axis in enumerate(axes):
         axis.text(
-            -0.08,
+            panel_label_x,
             1.04,
             f"({chr(ord('a') + index)})",
             transform=axis.transAxes,
@@ -1146,14 +1342,38 @@ def _finish_cycle_axes(axes: list[Any], state_axis: Any | None) -> None:
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)
         axis.grid(axis="x", visible=False)
-        axis.grid(axis="y", color="#D9D9D9", linewidth=0.35, alpha=0.45)
+        axis.grid(
+            axis="y",
+            color="#D9D9D9",
+            linewidth=0.35,
+            alpha=0.30 if publication else 0.45,
+        )
+        if publication:
+            axis.xaxis.set_major_locator(MultipleLocator(20))
+            axis.xaxis.set_minor_locator(NullLocator())
+            axis.grid(
+                axis="x",
+                which="major",
+                color="#D9D9D9",
+                linewidth=0.30,
+                alpha=_PUBLICATION_X_GRID_ALPHA,
+            )
         axis.tick_params(labelsize=9, width=0.7, length=3)
 
 
 def _add_cycle_title(figure: Any, cycle: pd.Series, publication: bool) -> None:
     cycle_id = str(cycle.get("cycle_id", "cycle")).replace("_", " ").title()
     status = str(cycle.get("cycle_status", "unknown")).title()
-    reason = str(cycle.get("cycle_status_reason", "") or "").replace("_", " ").title()
+    raw_reason = cycle.get("cycle_status_reason", "")
+    if raw_reason is None or pd.isna(raw_reason):
+        reason = ""
+    else:
+        reason = str(raw_reason).strip()
+        reason = (
+            ""
+            if reason.lower() in {"", "nan", "none"}
+            else reason.replace("_", " ").title()
+        )
     figure.suptitle(
         f"{cycle_id} — {status}",
         x=0.04,
@@ -1178,6 +1398,7 @@ def _add_cycle_title(figure: Any, cycle: pd.Series, publication: bool) -> None:
 def _cycle_legend_handles(
     gap_intervals: list[tuple[pd.Timestamp, pd.Timestamp]], cycle: pd.Series
 ) -> list[Any]:
+    present_stages = {stage for stage, _, _ in _stage_intervals(cycle)}
     handles = [
         Patch(
             facecolor=_STAGE_COLORS[stage],
@@ -1186,6 +1407,7 @@ def _cycle_legend_handles(
             label=_STAGE_LABELS[stage],
         )
         for stage in ("recovery", "frost_development", "defrost")
+        if stage in present_stages
     ]
     if gap_intervals:
         handles.append(

@@ -11,7 +11,15 @@ from PIL import Image
 
 from frost_analysis import cli
 from frost_analysis.report import (
+    _AXIS_LABELS,
+    _COP_INSET_BBOX,
+    _PUBLICATION_AXIS_LABELS,
+    _PUBLICATION_PANEL_CHANNELS,
+    _PUBLICATION_X_GRID_ALPHA,
+    _add_cycle_title,
+    _add_freezing_reference,
     _add_qa_summary_line,
+    _add_startup_annotation,
     _cop_inset_required,
     _cycle_image_counts,
     _finish_cycle_axes,
@@ -21,6 +29,7 @@ from frost_analysis.report import (
     _plot_stage_and_defrost,
     _prepared_observed_series,
     _processed_observed_series,
+    _publication_stage_labels,
     generate_report,
 )
 
@@ -533,6 +542,94 @@ def test_cycle_panel_contract_matches_final_five_panel_layout() -> None:
         ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
         ("evaporating_temperature", "coil_temperature", "ambient_temperature"),
     )
+
+
+def test_publication_panel_contract_uses_formal_labels_and_physical_order() -> None:
+    assert _PUBLICATION_PANEL_CHANNELS[-1] == (
+        "ambient_temperature",
+        "coil_temperature",
+        "evaporating_temperature",
+    )
+    assert _PUBLICATION_AXIS_LABELS == (
+        "Compressor frequency [Hz]",
+        "Heating capacity [kW]",
+        "COP [-]",
+        "Water temperature [°C]",
+        "Temperature [°C]",
+    )
+    assert _AXIS_LABELS["cop"] == "COP [-]"
+
+
+def test_publication_inset_is_small_and_upper_right() -> None:
+    left, bottom, width, height = _COP_INSET_BBOX
+
+    assert 0.50 <= left < 0.75
+    assert 0.40 <= bottom < 0.70
+    assert width <= 0.30
+    assert height <= 0.36
+
+
+def test_publication_stage_labels_only_include_observed_boundaries() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    cycle = pd.Series(
+        {
+            "heating_start": start,
+            "stable_heating_start": start + pd.Timedelta(minutes=3),
+            "defrost_start": pd.NaT,
+            "defrost_end": pd.NaT,
+        }
+    )
+
+    assert _publication_stage_labels(cycle) == ("Recovery",)
+
+
+def test_publication_title_omits_nan_reason() -> None:
+    figure = plt.figure()
+    cycle = pd.Series(
+        {
+            "cycle_id": "cycle_004",
+            "cycle_status": "valid",
+            "cycle_status_reason": np.nan,
+        }
+    )
+
+    _add_cycle_title(figure, cycle, publication=True)
+
+    assert all("nan" not in text.get_text().lower() for text in figure.texts)
+    assert len(figure.texts) == 1
+    plt.close(figure)
+
+
+def test_freezing_reference_adds_zero_degree_line_and_label() -> None:
+    figure, axis = plt.subplots()
+
+    _add_freezing_reference(axis)
+
+    assert any(float(line.get_ydata()[0]) == 0.0 for line in axis.lines)
+    reference_text = next(
+        text for text in axis.texts if "0°C freezing threshold" in text.get_text()
+    )
+    assert reference_text.get_position()[1] > 0.70
+    assert _PUBLICATION_X_GRID_ALPHA <= 0.15
+    plt.close(figure)
+
+
+def test_publication_startup_annotation_is_in_the_top_margin() -> None:
+    figure, axis = plt.subplots()
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    cycle = pd.Series(
+        {
+            "heating_start": start,
+            "stable_heating_start": start + pd.Timedelta(minutes=3),
+        }
+    )
+
+    _add_startup_annotation(axis, cycle, start)
+
+    annotation = axis.texts[0]
+    assert annotation.get_position()[0] <= 0.05
+    assert annotation.get_position()[1] > 1.0
+    plt.close(figure)
 
 
 def test_report_records_baseline_unavailable_even_without_processed_rows(tmp_path: Path) -> None:
