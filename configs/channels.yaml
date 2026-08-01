@@ -155,6 +155,16 @@ channels:
     analysis_candidate: false
     valid_range: [0, 200]
 
+  compressor_frequency_setpoint:
+    source_names: ["p1__设定频率<1_00>"]
+    unit: Hz
+    kind: step
+    role: control
+    resample: last
+    missing: forward_fill
+    analysis_candidate: false
+    valid_range: [0, 200]
+
   compressor_current:
     source_names: ["p2__压缩机电流"]
     unit: A

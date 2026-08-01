@@ -28,12 +28,12 @@ def label_cycles(
     labeled = labeled.sort_values("timestamp", kind="stable").reset_index(drop=True)
     raw_state = labeled[defrost_column].map(_normalize_state).astype("object")
     filled_state, long_gaps = _fill_short_state_gaps(
-        labeled["timestamp"], raw_state, _setting(settings, "maximum_state_gap_seconds", 5)
+        labeled["timestamp"], raw_state, _setting(settings, "maximum_state_gap_seconds", 0)
     )
     debounced = _debounce_state(
         labeled["timestamp"], filled_state, _setting(settings, "debounce_seconds", 20)
     )
-    events = _defrost_runs(labeled["timestamp"], debounced)
+    events = _defrost_runs(labeled["timestamp"], debounced, long_gaps)
     cycles, cycle_ranges = _build_cycles(
         events,
         long_gaps,
@@ -66,7 +66,11 @@ def _build_cycles(
 ]:
     cycles: list[dict[str, object]] = []
     ranges: list[tuple[dict[str, object], pd.Timestamp, pd.Timestamp | None]] = []
+    cycle_number = 1
     for index in range(len(events) - 1):
+        heating_start = events[index]["end"]
+        if not isinstance(heating_start, pd.Timestamp):
+            continue
         row = _make_cycle_record(
             events[index],
             events[index + 1],
@@ -75,14 +79,13 @@ def _build_cycles(
             labeled,
             experiment_id,
             experiment_date,
-            f"cycle_{index + 1:03d}",
+            f"cycle_{cycle_number:03d}",
         )
         cycles.append(row)
-        heating_start = row["heating_start"]
-        if isinstance(heating_start, pd.Timestamp):
-            defrost_end = row["defrost_end"]
-            if isinstance(defrost_end, pd.Timestamp) or defrost_end is None:
-                ranges.append((row, heating_start, defrost_end))
+        cycle_number += 1
+        defrost_end = row["defrost_end"]
+        if isinstance(defrost_end, pd.Timestamp) or defrost_end is None:
+            ranges.append((row, heating_start, defrost_end))
     return cycles, ranges
 
 
@@ -149,9 +152,11 @@ def _cycle_status(
     if heating_start is None or defrost_start is None:
         return "incomplete", "defrost_state_gap"
     if defrost_end is None:
-        return "incomplete", "data_ends_mid_cycle"
+        return "incomplete", "defrost_end_not_observed"
     if defrost_start <= heating_start or defrost_end <= defrost_start:
         return "invalid", "invalid_cycle_boundaries"
+    if following.get("boundary_uncertain"):
+        return "incomplete", "defrost_state_gap"
     if _interval_intersects(heating_start, defrost_end, long_gaps):
         return "incomplete", "defrost_state_gap"
     if not _duration_in_range(
@@ -244,7 +249,7 @@ def _fill_short_state_gaps(
             same_state = result.iloc[previous] == result.iloc[following]
             if elapsed <= maximum_seconds and same_state:
                 result.iloc[position : end + 1] = result.iloc[previous]
-            else:
+            elif elapsed > maximum_seconds:
                 long_gaps.append((timestamps.iloc[previous], timestamps.iloc[following]))
         position = end + 1
     return result, tuple(long_gaps)
@@ -281,27 +286,53 @@ def _debounce_state(timestamps: pd.Series, state: pd.Series, debounce_seconds: f
     return result
 
 
-def _defrost_runs(timestamps: pd.Series, state: pd.Series) -> list[dict[str, Any]]:
+def _defrost_runs(
+    timestamps: pd.Series,
+    state: pd.Series,
+    long_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...],
+) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    position = 0
-    while position < len(state):
-        if state.iloc[position] is not True:
-            position += 1
+    active_event: dict[str, Any] | None = None
+    last_known_state: bool | None = None
+    unknown_since_known = False
+    long_gap_ends = {gap_end for _gap_start, gap_end in long_gaps}
+
+    for position, value in enumerate(state):
+        if pd.isna(value):
+            unknown_since_known = True
             continue
-        start = position
-        while position + 1 < len(state) and state.iloc[position + 1] is True:
-            position += 1
-        next_index = position + 1
-        end = (
-            timestamps.iloc[next_index]
-            if next_index < len(state) and state.iloc[next_index] is False
-            else None
-        )
-        duration = (
-            (end - timestamps.iloc[start]).total_seconds() if end is not None else None
-        )
-        events.append({"start": timestamps.iloc[start], "end": end, "duration": duration})
-        position += 1
+
+        crossed_long_gap = unknown_since_known and timestamps.iloc[position] in long_gap_ends
+        if crossed_long_gap:
+            if active_event is not None:
+                active_event["boundary_uncertain"] = True
+                events.append(active_event)
+                active_event = None
+            last_known_state = None
+        unknown_since_known = False
+
+        if value is True:
+            if active_event is None and last_known_state is not True:
+                active_event = {
+                    "start": timestamps.iloc[position],
+                    "end": None,
+                    "duration": None,
+                }
+                if crossed_long_gap:
+                    active_event["boundary_uncertain"] = True
+        elif value is False and active_event is not None:
+            end = timestamps.iloc[position]
+            active_event["end"] = end
+            active_event["duration"] = (
+                end - active_event["start"]
+            ).total_seconds()
+            events.append(active_event)
+            active_event = None
+
+        last_known_state = bool(value)
+
+    if active_event is not None:
+        events.append(active_event)
     return events
 
 

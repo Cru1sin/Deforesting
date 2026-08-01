@@ -112,9 +112,30 @@ def test_formal_config_uses_v2_contract_and_ten_second_resampling() -> None:
     assert config.experiment_id == "exp_20260715"
     assert config.input_dir == ROOT / "data" / "0715"
     assert config.process.resample_interval_seconds == 10
-    assert config.cycles.maximum_state_gap_seconds == 0
+    assert config.cycles.maximum_state_gap_seconds == 5
     assert config.timestamp_column == "时间"
     assert config.defaults_path == ROOT / "configs" / "defaults.yaml"
+
+
+def test_all_formal_date_configs_allow_short_defrost_state_gaps() -> None:
+    for date in ("0714", "0715", "0716", "0717", "0720", "0721", "0722"):
+        config = load_config(ROOT / "configs" / f"{date}.yaml")
+        assert config.cycles.maximum_state_gap_seconds == 5
+
+
+def test_formal_channels_include_frequency_setpoint_control() -> None:
+    channels = load_channels(ROOT / "configs" / "channels.yaml")
+
+    assert channels["compressor_frequency_setpoint"] == {
+        "source_names": ["p1__设定频率<1_00>"],
+        "unit": "Hz",
+        "kind": "step",
+        "role": "control",
+        "resample": "last",
+        "missing": "forward_fill",
+        "analysis_candidate": False,
+        "valid_range": [0, 200],
+    }
 
 
 def test_v2_config_loads_defaults_and_inline_camera_roles(tmp_path: Path) -> None:
@@ -153,6 +174,19 @@ def test_v2_loader_merges_existing_nested_overrides(tmp_path: Path) -> None:
     assert config.cycles.required_operating_mode == "4"
     assert config.process.feature_windows_minutes == (1, 5, 15)
     assert config.process.baseline.window_minutes == 5
+
+
+def test_v2_loader_applies_state_gap_override_without_changing_defaults(tmp_path: Path) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        overrides={"cycles": {"maximum_state_gap_seconds": 5}},
+    )
+
+    config = load_config(path)
+    defaults = yaml.safe_load((tmp_path / "configs" / "defaults.yaml").read_text())
+
+    assert config.cycles.maximum_state_gap_seconds == 5
+    assert defaults["cycles"]["maximum_state_gap_seconds"] == 0
 
 
 def test_v2_loader_rejects_unknown_override_path(tmp_path: Path) -> None:

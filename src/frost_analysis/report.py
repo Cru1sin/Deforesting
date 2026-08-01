@@ -44,15 +44,15 @@ _SUMMARY_TIME_COLUMNS = (
     "baseline_start",
     "baseline_end",
 )
-_FIXED_OVERVIEW_CHANNELS = (
-    "compressor_frequency",
-    "heating_capacity",
-    "cop",
-    "ambient_temperature",
-    "water_in_temperature",
-    "water_out_temperature",
-    "evaporating_pressure",
-    "evaporating_temperature",
+_CYCLE_PANEL_CHANNELS = (
+    ("compressor_frequency", "compressor_frequency_setpoint"),
+    ("heating_capacity",),
+    ("cop",),
+    ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
+    ("evaporating_temperature", "coil_temperature", "ambient_temperature"),
+)
+_FIXED_OVERVIEW_CHANNELS = tuple(
+    channel for panel in _CYCLE_PANEL_CHANNELS for channel in panel
 )
 _BASELINE_DIAGNOSTIC_CHANNELS = (
     "ambient_temperature",
@@ -85,40 +85,44 @@ _STAGE_LABELS = {
 }
 _CHANNEL_COLORS = {
     "compressor_frequency": "#0072B2",
+    "compressor_frequency_setpoint": "#7A9CC6",
     "heating_capacity": "#D55E00",
     "cop": "#009E73",
     "ambient_temperature": "#374151",
     "water_in_temperature": "#E69F00",
     "water_out_temperature": "#CC79A7",
-    "evaporating_pressure": "#7B2CBF",
     "evaporating_temperature": "#56B4E9",
+    "coil_temperature": "#7B2CBF",
+    "water_temperature_setpoint": "#6B7280",
 }
 _DISPLAY_LABELS = {
     "compressor_frequency": "Compressor frequency",
+    "compressor_frequency_setpoint": "Setpoint frequency",
     "heating_capacity": "Heating capacity",
     "cop": "COP",
-    "ambient_temperature": "Ambient temperature",
+    "ambient_temperature": "Ambient temperature, T₄",
     "water_in_temperature": "Water inlet temperature",
     "water_out_temperature": "Water outlet temperature",
-    "evaporating_pressure": "Evaporating pressure, Pₑ",
-    "evaporating_temperature": "Evaporating temperature, Tₑ (measured)",
+    "water_temperature_setpoint": "Water temperature setpoint, Tₛ",
+    "evaporating_temperature": "Evaporating temperature, Tₑ",
+    "coil_temperature": "Coil temperature, T₃",
 }
 _DISPLAY_UNITS = {
     "compressor_frequency": "Hz",
+    "compressor_frequency_setpoint": "Hz",
     "heating_capacity": "kW",
     "cop": "-",
     "ambient_temperature": "°C",
     "water_in_temperature": "°C",
     "water_out_temperature": "°C",
-    "evaporating_pressure": "MPa abs",
+    "water_temperature_setpoint": "°C",
     "evaporating_temperature": "°C",
+    "coil_temperature": "°C",
 }
 _AXIS_LABELS = {
     "compressor_frequency": "Compressor frequency [Hz]",
     "heating_capacity": "Heating capacity [kW]",
     "cop": "COP [-]",
-    "evaporating_pressure": "Evaporating pressure [MPa abs]",
-    "evaporating_temperature": "Tₑ [°C]",
 }
 _PLOT_DPI = 300
 _STARTUP_SHADE = "#D1D5DB"
@@ -415,12 +419,12 @@ def _plot_one_cycle_qa(
     path: Path,
     warnings: list[dict[str, str]],
 ) -> None:
-    figure = plt.figure(figsize=(14, 11.5), dpi=_PLOT_DPI)
+    figure = plt.figure(figsize=(14, 15), dpi=_PLOT_DPI)
     grid = figure.add_gridspec(
         6,
         1,
-        height_ratios=(0.22, 1, 1.2, 1.15, 1, 1),
-        hspace=0.26,
+        height_ratios=(0.32, 1.05, 1.05, 1.35, 1.05, 1.10),
+        hspace=0.42,
     )
     state_axis = figure.add_subplot(grid[0, 0])
     axes = [
@@ -436,118 +440,7 @@ def _plot_one_cycle_qa(
     _shade_defrost_state_gaps(all_axes, gap_intervals, origin)
     _add_baseline_indicator(axes[0], cycle, origin)
 
-    _plot_prepared_line(
-        axes[0],
-        prepared,
-        "compressor_frequency",
-        _DISPLAY_LABELS["compressor_frequency"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["compressor_frequency"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("compressor_frequency"),
-    )
-    _plot_prepared_line(
-        axes[1],
-        prepared,
-        "heating_capacity",
-        _DISPLAY_LABELS["heating_capacity"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["heating_capacity"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("heating_capacity"),
-    )
-    _plot_processed_line(
-        axes[2],
-        processed,
-        "cop",
-        _DISPLAY_LABELS["cop"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["cop"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("cop"),
-    )
-    _configure_cop_axis(axes[2], processed, cycle, origin)
-    for channel in (
-        "ambient_temperature",
-        "water_in_temperature",
-        "water_out_temperature",
-    ):
-        _plot_prepared_line(
-            axes[3],
-            prepared,
-            channel,
-            _DISPLAY_LABELS[channel],
-            cycle_id,
-            warnings,
-            color=_CHANNEL_COLORS[channel],
-            x_origin=origin,
-            show_legend=False,
-            y_label="Temperature [°C]",
-        )
-    axes[3].legend(
-        loc="lower left",
-        bbox_to_anchor=(0.0, 1.02),
-        ncols=3,
-        fontsize=8,
-        frameon=False,
-        borderaxespad=0,
-    )
-
-    pressure_axis = axes[4]
-    temperature_axis = pressure_axis.twinx()
-    _plot_prepared_line(
-        pressure_axis,
-        prepared,
-        "evaporating_pressure",
-        _DISPLAY_LABELS["evaporating_pressure"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["evaporating_pressure"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("evaporating_pressure"),
-    )
-    _plot_prepared_line(
-        temperature_axis,
-        prepared,
-        "evaporating_temperature",
-        _DISPLAY_LABELS["evaporating_temperature"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["evaporating_temperature"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("evaporating_temperature"),
-    )
-    temperature_axis.spines["right"].set_visible(True)
-    temperature_axis.tick_params(axis="y", labelsize=9)
-    pressure_axis.legend(
-        handles=[
-            Line2D(
-                [],
-                [],
-                color=_CHANNEL_COLORS["evaporating_pressure"],
-                label="Evaporating pressure, Pₑ",
-            ),
-            Line2D(
-                [],
-                [],
-                color=_CHANNEL_COLORS["evaporating_temperature"],
-                label="Evaporating temperature, Tₑ (measured)",
-            ),
-        ],
-        loc="lower left",
-        bbox_to_anchor=(0.0, 1.02),
-        fontsize=8,
-        frameon=False,
-        borderaxespad=0,
-    )
+    _plot_cycle_panels(axes, prepared, processed, cycle, cycle_id, warnings, origin)
 
     _plot_defrost_state_strip(state_axis, prepared, origin)
     _add_startup_annotation(axes[2], cycle, origin)
@@ -563,15 +456,17 @@ def _plot_one_cycle_qa(
     _add_cycle_diagnostics(path, prepared, processed, cycle, warnings)
     _finish_cycle_axes(axes, state_axis)
     _add_cycle_title(figure, cycle, publication=False)
-    figure.legend(
-        handles=_cycle_legend_handles(gap_intervals, cycle),
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.895),
-        ncols=5,
-        fontsize=8,
-        frameon=False,
-    )
-    figure.subplots_adjust(left=0.08, right=0.985, bottom=0.06, top=0.86)
+    handles = _cycle_legend_handles(gap_intervals, cycle)
+    if handles:
+        figure.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.902),
+            ncols=min(5, len(handles)),
+            fontsize=9,
+            frameon=False,
+        )
+    figure.subplots_adjust(left=0.13, right=0.985, bottom=0.055, top=0.86)
     _save_figure(figure, path)
 
 
@@ -582,8 +477,13 @@ def _plot_one_cycle_publication(
     path: Path,
     warnings: list[dict[str, str]],
 ) -> None:
-    figure = plt.figure(figsize=(7.2, 9.0), dpi=_PLOT_DPI)
-    grid = figure.add_gridspec(5, 1, hspace=0.30)
+    figure = plt.figure(figsize=(7.2, 10.5), dpi=_PLOT_DPI)
+    grid = figure.add_gridspec(
+        5,
+        1,
+        height_ratios=(1.05, 1.05, 1.35, 1.05, 1.10),
+        hspace=0.42,
+    )
     axes = [figure.add_subplot(grid[0, 0])]
     axes.extend(figure.add_subplot(grid[index, 0], sharex=axes[0]) for index in range(1, 5))
     cycle_id = str(cycle["cycle_id"])
@@ -593,94 +493,105 @@ def _plot_one_cycle_publication(
     _shade_defrost_state_gaps(axes, gap_intervals, origin)
     _add_baseline_indicator(axes[0], cycle, origin)
 
-    _plot_prepared_line(
-        axes[0],
-        prepared,
-        "compressor_frequency",
-        _DISPLAY_LABELS["compressor_frequency"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["compressor_frequency"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("compressor_frequency"),
-    )
-    _plot_prepared_line(
-        axes[1],
-        prepared,
-        "heating_capacity",
-        _DISPLAY_LABELS["heating_capacity"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["heating_capacity"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("heating_capacity"),
-    )
-    _plot_processed_line(
-        axes[2],
-        processed,
-        "cop",
-        _DISPLAY_LABELS["cop"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["cop"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("cop"),
-    )
-    _configure_cop_axis(axes[2], processed, cycle, origin)
-    for channel in (
-        "ambient_temperature",
-        "water_in_temperature",
-        "water_out_temperature",
-    ):
-        _plot_prepared_line(
-            axes[3],
-            prepared,
-            channel,
-            _DISPLAY_LABELS[channel],
-            cycle_id,
-            warnings,
-            color=_CHANNEL_COLORS[channel],
-            x_origin=origin,
-            show_legend=False,
-            y_label="Temperature [°C]",
-        )
-    axes[3].legend(
-        loc="lower left",
-        bbox_to_anchor=(0.0, 1.02),
-        ncols=3,
-        fontsize=7.5,
-        frameon=False,
-        borderaxespad=0,
-    )
-    _plot_prepared_line(
-        axes[4],
-        prepared,
-        "evaporating_temperature",
-        _DISPLAY_LABELS["evaporating_temperature"],
-        cycle_id,
-        warnings,
-        color=_CHANNEL_COLORS["evaporating_temperature"],
-        x_origin=origin,
-        show_legend=False,
-        y_label=_channel_axis_label("evaporating_temperature"),
-    )
+    _plot_cycle_panels(axes, prepared, processed, cycle, cycle_id, warnings, origin)
 
     _add_startup_annotation(axes[2], cycle, origin)
     _finish_cycle_axes(axes, None)
     _add_cycle_title(figure, cycle, publication=True)
-    figure.legend(
-        handles=_cycle_legend_handles(gap_intervals, cycle),
-        loc="upper center",
-        bbox_to_anchor=(0.5, 0.925),
-        ncols=5,
-        fontsize=7.5,
-        frameon=False,
-    )
-    figure.subplots_adjust(left=0.14, right=0.98, bottom=0.06, top=0.89)
+    handles = _cycle_legend_handles(gap_intervals, cycle)
+    if handles:
+        figure.legend(
+            handles=handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.89),
+            ncols=min(5, len(handles)),
+            fontsize=8,
+            frameon=False,
+        )
+    figure.subplots_adjust(left=0.17, right=0.985, bottom=0.06, top=0.84)
     _save_figure(figure, path)
+
+
+def _plot_cycle_panels(
+    axes: list[Any],
+    prepared: pd.DataFrame,
+    processed: pd.DataFrame,
+    cycle: pd.Series,
+    cycle_id: str,
+    warnings: list[dict[str, str]],
+    origin: pd.Timestamp,
+) -> None:
+    axis_labels = (
+        "Compressor frequency [Hz]",
+        "Heating capacity [kW]",
+        "COP [-]",
+        "Water temperature [°C]",
+        "Temperature [°C]",
+    )
+    dashed_channels = {"compressor_frequency_setpoint", "water_temperature_setpoint"}
+    for axis, channels, axis_label in zip(
+        axes, _CYCLE_PANEL_CHANNELS, axis_labels, strict=True
+    ):
+        for channel in channels:
+            plotter = _plot_processed_line if channel == "cop" else _plot_prepared_line
+            plotter(
+                axis,
+                processed if channel == "cop" else prepared,
+                channel,
+                _DISPLAY_LABELS[channel],
+                cycle_id,
+                warnings,
+                color=_CHANNEL_COLORS[channel],
+                x_origin=origin,
+                show_legend=False,
+                y_label=axis_label,
+                linestyle="--" if channel in dashed_channels else "-",
+            )
+        if len(channels) > 1:
+            handles = [
+                Line2D(
+                    [],
+                    [],
+                    color=_CHANNEL_COLORS[channel],
+                    linestyle="--" if channel in dashed_channels else "-",
+                    linewidth=1.35,
+                    label=_DISPLAY_LABELS[channel],
+                )
+                for channel in channels
+                if _channel_has_observations(
+                    processed if channel == "cop" else prepared,
+                    channel,
+                    processed=channel == "cop",
+                )
+            ]
+            if handles:
+                axis.legend(
+                    handles=handles,
+                    loc="lower left",
+                    bbox_to_anchor=(0.0, 1.02),
+                    ncols=len(handles),
+                    fontsize=8,
+                    frameon=False,
+                    borderaxespad=0,
+                    handlelength=2.0,
+                    columnspacing=1.2,
+                )
+        if axis is axes[2]:
+            _configure_cop_axis(axis, processed, cycle, origin)
+
+
+def _channel_has_observations(
+    frame: pd.DataFrame, channel: str, *, processed: bool
+) -> bool:
+    if channel not in frame:
+        return False
+    if processed:
+        if f"{channel}__imputed" not in frame:
+            return False
+        return _processed_observed_series(frame, channel).notna().any()
+    if not _prepared_quality_available(frame, channel):
+        return False
+    return _prepared_observed_series(frame, channel).notna().any()
 
 
 def _plot_prepared_line(
@@ -694,6 +605,7 @@ def _plot_prepared_line(
     x_origin: pd.Timestamp | None = None,
     show_legend: bool = True,
     y_label: str | None = None,
+    linestyle: str = "-",
 ) -> None:
     if channel not in frame:
         _missing_panel(axis, label, "channel not present in Prepared", warnings, cycle_id, channel)
@@ -726,6 +638,7 @@ def _plot_prepared_line(
             label=label if index == 0 else None,
             color=line_color,
             linewidth=1.35,
+            linestyle=linestyle,
         )
     axis.set_ylabel(y_label or label)
     if show_legend:
@@ -743,6 +656,7 @@ def _plot_processed_line(
     x_origin: pd.Timestamp | None = None,
     show_legend: bool = True,
     y_label: str | None = None,
+    linestyle: str = "-",
 ) -> None:
     if channel not in frame:
         _missing_panel(axis, label, "channel not present in Processed", warnings, cycle_id, channel)
@@ -774,6 +688,7 @@ def _plot_processed_line(
             label=label if index == 0 else None,
             color=line_color,
             linewidth=1.35,
+            linestyle=linestyle,
         )
     axis.set_ylabel(y_label or label)
     if show_legend:

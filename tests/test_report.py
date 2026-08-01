@@ -28,7 +28,9 @@ _SOURCE_CHANNELS = [
     "ambient_temperature",
     "water_in_temperature",
     "water_out_temperature",
+    "water_temperature_setpoint",
     "compressor_frequency",
+    "compressor_frequency_setpoint",
     "heating_capacity",
     "evaporating_pressure",
     "evaporating_temperature",
@@ -519,6 +521,18 @@ def test_cycle_axes_label_time_from_heating_start() -> None:
 
     assert axis.get_xlabel() == "Time from heating start [min]"
     plt.close(figure)
+
+
+def test_cycle_panel_contract_matches_final_five_panel_layout() -> None:
+    from frost_analysis.report import _CYCLE_PANEL_CHANNELS
+
+    assert _CYCLE_PANEL_CHANNELS == (
+        ("compressor_frequency", "compressor_frequency_setpoint"),
+        ("heating_capacity",),
+        ("cop",),
+        ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
+        ("evaporating_temperature", "coil_temperature", "ambient_temperature"),
+    )
 
 
 def test_report_records_baseline_unavailable_even_without_processed_rows(tmp_path: Path) -> None:

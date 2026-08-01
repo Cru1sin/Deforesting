@@ -3,15 +3,25 @@ from __future__ import annotations
 from importlib import import_module
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
+from frost_analysis.channels import load_channels
 from frost_analysis.config import Config, load_config
-from frost_analysis.cycles import label_cycles
+from frost_analysis.cycles import (
+    _build_cycles,
+    _debounce_state,
+    _defrost_runs,
+    _fill_short_state_gaps,
+    _normalize_state,
+    label_cycles,
+)
 from frost_analysis.images import match_images
 from frost_analysis.prepare import _expected_row_count, _maximum_gap, _observed_fraction, prepare
 
 prepare_module = import_module("frost_analysis.prepare")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _config(root: Path, raw: Path) -> Config:
@@ -242,7 +252,7 @@ def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> No
 
 
 def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
-    timestamps = pd.date_range("2026-07-15", periods=22, freq="s")
+    timestamps = pd.date_range("2026-07-15", periods=23, freq="s")
     states: list[object] = [
         True,
         True,
@@ -250,6 +260,7 @@ def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
         False,
         False,
         False,
+        None,
         None,
         None,
         None,
@@ -288,6 +299,190 @@ def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
     statuses = summary.set_index("cycle_id")["cycle_status"]
     assert statuses["cycle_001"] == "incomplete"
     assert statuses["cycle_002"] == "valid"
+
+
+def test_nan_inside_defrost_run_does_not_split_event() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=6, freq="s")
+    state = pd.Series([True, True, np.nan, True, True, False], dtype="object")
+
+    events = _defrost_runs(timestamps.to_series(index=range(6)), state, ())
+
+    assert len(events) == 1
+    assert events[0]["start"] == timestamps[0]
+    assert events[0]["end"] == timestamps[5]
+
+
+def test_short_nan_between_on_and_off_ends_at_explicit_off() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=3, freq="s")
+    state = pd.Series([True, np.nan, False], dtype="object")
+
+    events = _defrost_runs(timestamps.to_series(index=range(3)), state, ())
+
+    assert len(events) == 1
+    assert events[0]["end"] == timestamps[2]
+
+
+def test_long_off_state_gap_keeps_cycle_but_marks_it_incomplete() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:01",
+            "2026-07-15 00:00:02",
+            "2026-07-15 00:00:03",
+            "2026-07-15 00:00:10",
+            "2026-07-15 00:00:11",
+            "2026-07-15 00:00:12",
+            "2026-07-15 00:00:13",
+            "2026-07-15 00:00:14",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [True, True, False, None, None, False, True, True, False],
+        }
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert labeled["defrost_active"].isna().any()
+    assert cycle["cycle_status"] == "incomplete"
+    assert cycle["cycle_status_reason"] == "defrost_state_gap"
+
+
+def test_long_on_state_gap_is_not_merged_into_a_complete_event() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=5, freq="s")
+    state = pd.Series([True, np.nan, np.nan, True, False], dtype="object")
+    long_gaps = ((timestamps[0], timestamps[3]),)
+
+    events = _defrost_runs(timestamps.to_series(index=range(5)), state, long_gaps)
+
+    assert len(events) == 2
+    assert events[0]["end"] is None
+    assert events[0]["boundary_uncertain"] is True
+    assert events[1]["start"] == timestamps[3]
+    assert events[1]["boundary_uncertain"] is True
+
+
+def test_cycle_pairs_without_heating_start_are_skipped_and_numbered_continuously() -> None:
+    timestamps = pd.date_range("2026-07-15", periods=24, freq="s")
+    events = [
+        {"start": timestamps[0], "end": None, "duration": None},
+        {"start": timestamps[10], "end": timestamps[12], "duration": 2.0},
+        {"start": timestamps[20], "end": timestamps[22], "duration": 2.0},
+    ]
+    labeled = pd.DataFrame({"timestamp": timestamps})
+
+    cycles, ranges = _build_cycles(
+        events,
+        (),
+        _short_cycle_settings(),
+        labeled,
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    assert [row["cycle_id"] for row in cycles] == ["cycle_001"]
+    assert len(ranges) == 1
+
+
+def test_data_starting_on_does_not_create_a_phantom_cycle() -> None:
+    frame = _cycle_frame_with_mode([True, True, False, False])
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    assert not summary["cycle_id"].str.startswith("cycle_").any()
+    assert labeled["cycle_id"].eq("partial_001").all()
+
+
+def test_data_ending_on_keeps_only_an_incomplete_cycle_with_data() -> None:
+    frame = _cycle_frame_with_mode(
+        [False, False, True, True, False, False, False, True, True]
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    formal = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert formal["cycle_status"] == "incomplete"
+    assert formal["cycle_status_reason"] == "defrost_end_not_observed"
+    assert labeled.loc[labeled["cycle_id"].eq("cycle_001")].shape[0] > 0
+    assert not summary["cycle_id"].eq("cycle_002").any()
+
+
+def test_short_state_gap_with_irregular_timestamps_does_not_split_defrost_event() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:01",
+            "2026-07-15 00:00:03",
+            "2026-07-15 00:00:04",
+            "2026-07-15 00:00:05",
+            "2026-07-15 00:00:06",
+        ]
+    )
+    state = pd.Series([False, True, None, True, True, False], dtype="object")
+
+    filled, long_gaps = _fill_short_state_gaps(timestamps.to_series(), state, 5)
+    events = _defrost_runs(timestamps.to_series(), filled, long_gaps)
+
+    assert len(events) == 1
+    assert events[0]["start"] == timestamps[1]
+    assert events[0]["end"] == timestamps[5]
+    assert not long_gaps
+
+
+@pytest.mark.skipif(
+    not (Path(__file__).resolve().parents[1] / "data" / "0715").is_dir(),
+    reason="0715 raw data is not available",
+)
+def test_0715_raw_data_has_four_defrost_events_and_three_formal_cycles() -> None:
+    config = load_config(ROOT / "configs" / "0715.yaml")
+    channels = load_channels(config.channels_path)
+    prepared, summary, _ = prepare(config, channels)
+
+    raw_state = prepared["defrost_active"].map(_normalize_state).astype("object")
+    filled_state, long_gaps = _fill_short_state_gaps(
+        prepared["timestamp"],
+        raw_state,
+        config.cycles.maximum_state_gap_seconds,
+    )
+    events = _defrost_runs(
+        prepared["timestamp"],
+        _debounce_state(
+            prepared["timestamp"],
+            filled_state,
+            config.cycles.debounce_seconds,
+        ),
+        long_gaps,
+    )
+    formal = summary.loc[summary["cycle_id"].astype(str).str.startswith("cycle_")]
+
+    assert len(events) == 4
+    assert formal["cycle_id"].tolist() == ["cycle_001", "cycle_002", "cycle_003"]
+    formal_counts = prepared.loc[
+        prepared["cycle_id"].astype(str).str.startswith("cycle_"), "cycle_id"
+    ].value_counts()
+    assert set(formal_counts.index) == set(formal["cycle_id"])
+    assert (formal_counts > 0).all()
 
 
 def test_prepare_duplicate_only_masks_affected_channel(tmp_path: Path) -> None:

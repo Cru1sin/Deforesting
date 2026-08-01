@@ -49,8 +49,12 @@ def process(
         eligible_channels=eligible_channels,
     )
     coordinated = _recompute_cycle_coordinates(resampled, initial_summary)
+    raw_cop = _calculate_unfilled_cop(coordinated, channels)
     filled = _fill_missing(coordinated, channels, config)
     derived = calculate_derived_features(filled, channels)
+    if raw_cop is not None:
+        derived["cop"] = raw_cop
+        derived["cop__imputed"] = False
     baselined, baseline_summary = add_baseline_residuals(
         derived, initial_summary, channels, config.process.baseline
     )
@@ -130,12 +134,15 @@ def _resample(
         ordered = group.sort_values("timestamp", kind="stable")
         experiment_id, cycle_id = (str(value) for value in group_values)
         summary = summary_lookup[(experiment_id, cycle_id)]
-        if not _has_complete_boundaries(summary):
+        observed_end = ordered["timestamp"].max()
+        if not _has_process_boundaries(summary, observed_end):
             continue
-        grid = _cycle_grid(summary, frequency)
+        grid = _cycle_grid(summary, frequency, observed_end=observed_end)
         buckets = ordered["timestamp"].dt.floor(frequency)
         processed_cycles.add((experiment_id, cycle_id))
-        intervals = _cycle_stage_intervals(summary)
+        intervals = _cycle_stage_intervals(
+            summary, observed_end=observed_end, frequency=frequency
+        )
         image_records = {role: _image_records(ordered, role) for role in image_roles}
         cycle_key = (experiment_id, cycle_id)
         for timestamp in grid:
@@ -206,11 +213,16 @@ def _identity_row(
 
 def _cycle_stage_intervals(
     summary: pd.Series,
+    *,
+    observed_end: pd.Timestamp | None = None,
+    frequency: str = "10s",
 ) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
     heating = _as_timestamp(summary.get("heating_start"))
     stable = _as_timestamp(summary.get("stable_heating_start"))
     defrost = _as_timestamp(summary.get("defrost_start"))
     defrost_end = _as_timestamp(summary.get("defrost_end"))
+    if defrost_end is None and observed_end is not None:
+        defrost_end = observed_end + pd.Timedelta(frequency)
     if heating is None or stable is None or defrost is None or defrost_end is None:
         raise ValueError("complete cycle is missing required stage boundaries")
     return {
@@ -549,12 +561,58 @@ def _has_complete_boundaries(summary: pd.Series) -> bool:
     )
 
 
-def _cycle_grid(summary: pd.Series, frequency: str) -> pd.DatetimeIndex:
+def _has_open_boundaries(summary: pd.Series) -> bool:
+    """Return whether an incomplete cycle has an observed defrost onset."""
+    if str(summary.get("cycle_status")) != "incomplete":
+        return False
+    return all(
+        _as_timestamp(summary.get(column)) is not None
+        for column in ("heating_start", "stable_heating_start", "defrost_start")
+    ) and _as_timestamp(summary.get("defrost_end")) is None
+
+
+def _observed_defrost_onset(summary: pd.Series, observed_end: pd.Timestamp) -> bool:
+    defrost = _as_timestamp(summary.get("defrost_start"))
+    return defrost is not None and observed_end >= defrost
+
+
+def _has_process_boundaries(summary: pd.Series, observed_end: pd.Timestamp) -> bool:
+    if _has_complete_boundaries(summary):
+        return True
+    return _has_open_boundaries(summary) and _observed_defrost_onset(summary, observed_end)
+
+
+def _calculate_unfilled_cop(
+    frame: pd.DataFrame, channels: Mapping[str, Mapping[str, Any]]
+) -> pd.Series | None:
+    settings = {
+        name: value
+        for name, value in channels.items()
+        if name == "cop" and str(value.get("kind")) == "derived"
+    }
+    if not settings:
+        return None
+    return calculate_derived_features(frame, settings)["cop"]
+
+
+def _cycle_grid(
+    summary: pd.Series,
+    frequency: str,
+    *,
+    observed_end: pd.Timestamp | None = None,
+) -> pd.DatetimeIndex:
     start = _as_timestamp(summary.get("heating_start"))
     end = _as_timestamp(summary.get("defrost_end"))
+    open_cycle = end is None
+    if open_cycle:
+        end = observed_end
     if start is None or end is None:
         return pd.DatetimeIndex([])
-    last = (end - pd.Timedelta(nanoseconds=1)).floor(frequency)
+    last = (
+        end.floor(frequency)
+        if open_cycle
+        else (end - pd.Timedelta(nanoseconds=1)).floor(frequency)
+    )
     return pd.date_range(start.floor(frequency), last, freq=frequency)
 
 

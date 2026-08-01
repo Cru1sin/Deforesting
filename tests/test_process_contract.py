@@ -185,6 +185,42 @@ def test_process_excludes_partial_and_recomputes_coordinates(tmp_path: Path) -> 
     assert final_summary.loc[0, "baseline_failure_reason"] == "insufficient_observed_coverage"
 
 
+def test_incomplete_cycle_with_observed_defrost_onset_keeps_observed_processed_grid(
+    tmp_path: Path,
+) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=30, freq="10s")
+    frame = _frame(timestamps, temperature=[10.0] * len(timestamps))
+    frame["cycle_status"] = "incomplete"
+    frame["cycle_status_reason"] = "defrost_end_not_observed"
+    frame.loc[:4, "cycle_stage"] = "recovery"
+    frame.loc[5:19, "cycle_stage"] = "frost_development"
+    frame.loc[20:, "cycle_stage"] = "defrost"
+    summary = _summary(status="incomplete", defrost="2026-07-15 00:03:20")
+    summary["cycle_status_reason"] = "defrost_end_not_observed"
+    summary["defrost_end"] = pd.NaT
+
+    processed, _ = process(frame, summary, _config(tmp_path), _channels())
+
+    assert not processed.empty
+    assert processed["cop"].notna().any()
+
+
+def test_cop_preserves_dependency_gaps_instead_of_using_filled_values(
+    tmp_path: Path,
+) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=6, freq="10s")
+    frame = _frame(timestamps, temperature=[10.0] * len(timestamps))
+    frame.loc[2, "heating_capacity"] = np.nan
+    summary = _summary(defrost="2026-07-15 00:05:00")
+
+    processed, _ = process(frame, summary, _config(tmp_path), _channels())
+
+    by_time = processed.set_index("timestamp")
+    assert by_time.loc[timestamps[1], "cop"] == 5.0
+    assert pd.isna(by_time.loc[timestamps[2], "cop"])
+    assert by_time.loc[timestamps[3], "cop"] == 5.0
+
+
 def test_stage_boundary_buckets_are_excluded_only_when_boundary_is_inside_bucket(
     tmp_path: Path,
 ) -> None:
@@ -454,7 +490,7 @@ def test_nonpartial_cycle_without_summary_is_a_process_contract_error(tmp_path: 
         process(frame, _summary().iloc[0:0], _config(tmp_path), _channels())
 
 
-def test_derived_imputation_is_boolean_or_of_dependencies(tmp_path: Path) -> None:
+def test_cop_does_not_mark_an_unfilled_dependency_as_imputed(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
     frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0])
     frame.loc[1, "heating_capacity"] = np.nan
@@ -462,9 +498,9 @@ def test_derived_imputation_is_boolean_or_of_dependencies(tmp_path: Path) -> Non
 
     processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
-    assert processed["cop"].notna().iloc[1]
+    assert processed["cop"].isna().iloc[1]
     assert processed["cop__imputed"].dtype == bool
-    assert bool(processed.loc[1, "cop__imputed"])
+    assert not processed["cop__imputed"].any()
 
 
 def test_invalid_cycle_has_no_baseline_and_does_not_change_status(tmp_path: Path) -> None:
