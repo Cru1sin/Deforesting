@@ -12,12 +12,21 @@ import yaml
 from frost_analysis.cli import main
 from frost_analysis.config import EvidencePolicy, load_evidence_settings
 from frost_analysis.config import is_iso_date as config_is_iso_date
-from frost_analysis.evidence import build_evidence_bundle, resolve_analysis_reference
+from frost_analysis.evidence import (
+    FEATURE_PAIR_SIMILARITY_COLUMNS,
+    FEATURE_PROFILE_COLUMNS,
+    build_evidence_bundle,
+    resolve_analysis_reference,
+)
 from frost_analysis.evidence_cycle import (
+    CycleChannelEvidence,
+    CycleSlice,
+    ResolvedReference,
     build_channel_evidence,
     build_cycle_slices,
     expected_grid,
 )
+from frost_analysis.evidence_summary import aggregate_feature_profiles, compute_pair_similarity
 from frost_analysis.io import is_iso_date as io_is_iso_date
 from frost_analysis.io import load_evidence_runs, optional_sha256, write_evidence_outputs
 
@@ -702,6 +711,184 @@ def test_build_cycle_slices_normalizes_mixed_cycle_key_types() -> None:
     assert len(cycles) == 1
     assert cycles[0].key == ("exp_test", "2026-07-15", "1")
     assert len(cycles[0].frost) == 2
+
+
+def test_in_stage_non_grid_timestamp_excludes_cycle() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"] * 3,
+            "experiment_date": ["2026-07-15"] * 3,
+            "cycle_id": ["cycle_001"] * 3,
+            "cycle_stage": ["frost_development"] * 3,
+            "cycle_status": ["valid"] * 3,
+            "timestamp": [
+                start,
+                start + pd.Timedelta(seconds=5),
+                start + pd.Timedelta(seconds=10),
+            ],
+            "signal": [1.0, 2.0, 3.0],
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "stable_heating_start": [start],
+            "defrost_start": [start + pd.Timedelta(minutes=1)],
+        }
+    )
+    channels = {"signal": {"analysis_candidate": True, "role": "sensor"}}
+    policy = EvidencePolicy(
+        min_segment_points=2,
+        min_valid_pairs=1,
+        min_valid_cycles=1,
+        horizons_minutes=(5,),
+        primary_horizon_minutes=5,
+        targets=("heating_capacity",),
+        primary_target="heating_capacity",
+        lead_target="heating_capacity",
+    )
+
+    cycles = build_cycle_slices(frame, summary, interval_seconds=10)
+    assert cycles[0].eligible is False
+    assert cycles[0].exclusion_reason == "frost_stage_grid_mismatch"
+
+    bundle = build_evidence_bundle(
+        frame,
+        summary,
+        policy,
+        channels,
+        grid_interval_seconds=10,
+    )
+
+    eligibility = bundle.cycle_eligibility.iloc[0]
+    metric = bundle.feature_cycle_metrics.iloc[0]
+    assert eligibility["eligibility_status"] == "excluded"
+    assert eligibility["exclusion_reason"] == "frost_stage_grid_mismatch"
+    assert metric["metric_status"] == "unavailable"
+
+
+def test_profile_trend_median_is_date_balanced() -> None:
+    metrics = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"] * 4,
+            "experiment_date": ["2026-07-16"] * 3 + ["2026-07-17"],
+            "cycle_id": ["cycle_001", "cycle_002", "cycle_003", "cycle_004"],
+            "feature": ["signal"] * 4,
+            "cycle_eligible": [True] * 4,
+            "reference_source": ["configured_baseline"] * 4,
+            "global_spearman": [1.0, 1.0, 1.0, -1.0],
+            "signed_sensitivity": [1.0] * 4,
+            "onset_elapsed_minutes": [1.0] * 4,
+        }
+    )
+    future = pd.DataFrame(
+        columns=[
+            "experiment_id",
+            "experiment_date",
+            "cycle_id",
+            "feature",
+            "feature_variant",
+            "target",
+            "target_type",
+            "horizon_minutes",
+            "effect",
+            "lead_time_minutes",
+        ]
+    )
+    policy = EvidencePolicy(min_valid_cycles=1)
+    channels = {"signal": {"role": "sensor", "expected_frost_direction": "increase"}}
+
+    profile = aggregate_feature_profiles(
+        metrics,
+        future,
+        ["signal"],
+        channels,
+        policy,
+        FEATURE_PROFILE_COLUMNS,
+    )
+
+    row = profile.iloc[0]
+    assert row["trend_valid_cycle_count"] == 4
+    assert row["trend_valid_date_count"] == 2
+    assert row["global_spearman_median"] == pytest.approx(0.0)
+
+
+def test_pair_coverage_audit_separates_evaluated_and_valid_cycles() -> None:
+    grid = pd.date_range("2026-07-16 00:00:00", periods=40, freq="10s")
+    reference = ResolvedReference(
+        residual=pd.Series(np.nan, index=grid),
+        source="unavailable",
+        center=np.nan,
+        scale=np.nan,
+        observed_fraction=0.0,
+        valid_from=grid[0],
+        exclusion_reason="test",
+    )
+
+    def cache(values: list[float | None]) -> CycleChannelEvidence:
+        slopes = pd.Series(values, index=grid, dtype=float)
+        return CycleChannelEvidence(
+            values=pd.Series(np.nan, index=grid),
+            imputed=pd.Series(False, index=grid),
+            target_valid=pd.Series(False, index=grid),
+            reference=reference,
+            analysis_residual=pd.Series(np.nan, index=grid),
+            onset_elapsed_minutes=np.nan,
+            onset_progress=np.nan,
+            past_slope_5min=slopes,
+        )
+
+    def cycle(cycle_id: str, experiment_date: str) -> CycleSlice:
+        return CycleSlice(
+            key=("exp_test", experiment_date, cycle_id),
+            frame=pd.DataFrame(),
+            frost=pd.DataFrame(),
+            grid=grid,
+            summary=pd.Series(dtype=object),
+            start=grid[0],
+            end=grid[-1] + pd.Timedelta(seconds=10),
+            grid_coverage=1.0,
+            cycle_status="valid",
+            cycle_status_reason=None,
+            eligible=True,
+            exclusion_reason=None,
+        )
+
+    full = [None] * 30 + list(np.arange(10, dtype=float))
+    partial = [None] * 30 + [1.0, 2.0, 3.0, 4.0] + [None] * 6
+    cycles = [cycle("cycle_001", "2026-07-16"), cycle("cycle_002", "2026-07-17")]
+    caches = {
+        (cycles[0].key, "signal_a"): cache(full),
+        (cycles[0].key, "signal_b"): cache(full),
+        (cycles[1].key, "signal_a"): cache(partial),
+        (cycles[1].key, "signal_b"): cache(partial),
+    }
+    policy = EvidencePolicy(
+        min_pair_coverage=0.8,
+        min_valid_pairs=3,
+        min_valid_cycles=1,
+    )
+    channels = {"signal_a": {}, "signal_b": {}}
+
+    pairs = compute_pair_similarity(
+        cycles,
+        ["signal_a", "signal_b"],
+        caches,
+        channels,
+        policy,
+        FEATURE_PAIR_SIMILARITY_COLUMNS,
+        interval_seconds=10,
+    )
+
+    row = pairs.iloc[0]
+    assert row["evaluated_cycle_count"] == 2
+    assert row["valid_cycle_count"] == 1
+    assert row["valid_date_count"] == 1
+    assert row["pair_coverage_median"] == pytest.approx(0.7)
 
 
 def test_cli_rejects_mixed_evidence_input_modes() -> None:
