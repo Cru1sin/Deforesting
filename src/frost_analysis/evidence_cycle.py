@@ -107,18 +107,23 @@ def build_cycle_slices(
             raise ValueError(f"duplicate cycle summary key: {key}")
         summary_lookup[key] = row
 
-    processed_keys = {
-        cast(tuple[str, str, str], tuple(str(value) for value in values))
-        for values in processed.groupby(list(CYCLE_KEYS), dropna=False).groups
-    }
-    keys = sorted(processed_keys | set(summary_lookup))
+    normalised_processed = processed.copy()
+    for name in CYCLE_KEYS:
+        normalised_processed[name] = normalised_processed[name].astype(str)
+    processed_groups: dict[tuple[str, str, str], pd.DataFrame] = {}
+    for values, group in normalised_processed.groupby(
+        list(CYCLE_KEYS), sort=False, dropna=False
+    ):
+        key = cast(tuple[str, str, str], tuple(str(value) for value in values))
+        processed_groups[key] = (
+            group.sort_values("timestamp", kind="stable").reset_index(drop=True)
+        )
+    empty_frame = processed.iloc[0:0].copy()
+    keys = sorted(set(processed_groups) | set(summary_lookup))
     slices: list[CycleSlice] = []
     for key in keys:
         summary = summary_lookup.get(key, pd.Series(dtype=object))
-        mask = np.ones(len(processed), dtype=bool)
-        for name, value in zip(CYCLE_KEYS, key, strict=True):
-            mask &= processed[name].astype(str).eq(value).to_numpy()
-        frame = processed.loc[mask].sort_values("timestamp", kind="stable").reset_index(drop=True)
+        frame = processed_groups.get(key, empty_frame).copy()
         frost = frame.loc[frame["cycle_stage"].eq(STAGE)].copy()
         if frost["timestamp"].duplicated().any():
             raise ValueError(f"duplicate processed timestamp in cycle {key}")
@@ -304,6 +309,7 @@ def feature_metric_record(
         "imputed_fraction": np.nan,
         "maximum_consecutive_gap_seconds": np.nan,
         "reference_source": evidence.reference.source,
+        "reference_exclusion_reason": evidence.reference.exclusion_reason or "",
         "reference_center": evidence.reference.center,
         "reference_scale": evidence.reference.scale,
         "reference_observed_fraction": evidence.reference.observed_fraction,
@@ -335,7 +341,7 @@ def feature_metric_record(
     progress = _progress(cycle.grid, cycle.start, cycle.end)
     for name in ("early", "middle", "late"):
         mask = _segment_mask(progress, name)
-        record[f"{name}_observed_fraction"] = _coverage(usable, mask)
+        record[f"{name}_observed_fraction"] = _coverage(real, mask)
         record[f"{name}_slope_per_min"] = _segment_slope(
             cycle.grid, values, progress, name, policy
         )

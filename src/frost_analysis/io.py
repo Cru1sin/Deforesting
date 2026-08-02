@@ -9,12 +9,16 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 
-from .config import Config, resolved_config_mapping, resolved_config_sha256
+from .config import Config, is_iso_date, resolved_config_mapping, resolved_config_sha256
 from .validation import validate_processed
+
+if TYPE_CHECKING:
+    from .config import EvidencePolicy, EvidenceSettings
+    from .evidence import EvidenceBundle
 
 _PREPARE_FILES = {
     "prepared_data.parquet",
@@ -119,7 +123,7 @@ def _load_evidence_run(
         raise ValueError(f"manifest must be a JSON object: {manifest_path}")
     experiment_id = str(manifest.get("experiment_id", ""))
     experiment_date = str(manifest.get("experiment_date", ""))
-    if not experiment_id or not _is_iso_date(experiment_date):
+    if not experiment_id or not is_iso_date(experiment_date):
         raise ValueError(f"manifest must contain experiment_id and ISO experiment_date: {run_dir}")
     provenance = manifest.get("config_provenance")
     resolved = manifest.get("resolved_config")
@@ -188,19 +192,6 @@ def _reject_duplicate_keys(frame: pd.DataFrame, keys: list[str]) -> None:
         raise ValueError(f"evidence input missing key columns: {missing}")
     if frame.duplicated(keys).any():
         raise ValueError(f"duplicate evidence key: {keys}")
-
-
-def is_iso_date(value: str) -> bool:
-    try:
-        from datetime import date
-
-        return date.fromisoformat(value).isoformat() == value
-    except ValueError:
-        return False
-
-
-def _is_iso_date(value: str) -> bool:
-    return is_iso_date(value)
 
 
 def discover_inputs(config: Config) -> InputFiles:
@@ -278,12 +269,12 @@ def write_analysis_outputs(
 
 
 def write_evidence_outputs(
-    bundle: Any,
+    bundle: EvidenceBundle,
     output_dir: Path,
     input_run_dirs: Path | Sequence[Path],
     *,
     load_result: EvidenceLoadResult | None = None,
-    settings: Any | None = None,
+    settings: EvidenceSettings | EvidencePolicy | None = None,
     candidate_registry_path: Path | None = None,
     project_root: Path | None = None,
     legacy_evidence: pd.DataFrame | None = None,

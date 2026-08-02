@@ -62,6 +62,7 @@ FEATURE_CYCLE_METRIC_COLUMNS = [
     "imputed_fraction",
     "maximum_consecutive_gap_seconds",
     "reference_source",
+    "reference_exclusion_reason",
     "reference_center",
     "reference_scale",
     "reference_observed_fraction",
@@ -170,12 +171,12 @@ def build_evidence_bundle(
     settings: EvidenceSettings | EvidencePolicy,
     channels: Mapping[str, Mapping[str, Any]],
     *,
-    grid_interval_seconds: int | None = None,
+    grid_interval_seconds: int,
 ) -> EvidenceBundle:
     """Build all evidence outputs from Processed data and cycle summaries."""
     policy = settings.policy if isinstance(settings, EvidenceSettings) else settings
-    interval = 10 if grid_interval_seconds is None else grid_interval_seconds
-    validate_evidence_timing(policy, interval)
+    validate_evidence_timing(policy, grid_interval_seconds)
+    interval = grid_interval_seconds
     frame = _normalise_identity(processed.copy(), cycle_summary)
     summary = _normalise_identity(cycle_summary.copy(), frame)
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="raise")
@@ -194,6 +195,7 @@ def build_evidence_bundle(
     future_rows: list[dict[str, object]] = []
     eligibility_rows: list[dict[str, object]] = []
     for cycle in cycles:
+        available_feature_count = 0
         for channel in [*candidates, *targets]:
             caches[(cycle.key, channel)] = build_channel_evidence(
                 cycle,
@@ -204,16 +206,16 @@ def build_evidence_bundle(
             )
         for feature in candidates:
             cache = caches[(cycle.key, feature)]
-            metric_rows.append(
-                feature_metric_record(
-                    cycle,
-                    feature,
-                    channels[feature],
-                    cache,
-                    policy,
-                    interval,
-                )
+            record = feature_metric_record(
+                cycle,
+                feature,
+                channels[feature],
+                cache,
+                policy,
+                interval,
             )
+            metric_rows.append(record)
+            available_feature_count += int(record["metric_status"] == "available")
             for target in targets:
                 future_rows.extend(
                     future_records(
@@ -226,7 +228,9 @@ def build_evidence_bundle(
                         interval,
                     )
                 )
-        eligibility_rows.append(_eligibility_record(cycle, candidates, caches))
+        eligibility_rows.append(
+            _eligibility_record(cycle, available_feature_count, len(candidates))
+        )
 
     metrics = pd.DataFrame(metric_rows, columns=FEATURE_CYCLE_METRIC_COLUMNS)
     future = pd.DataFrame(future_rows, columns=FUTURE_ASSOCIATION_COLUMNS)
@@ -253,8 +257,8 @@ def build_evidence_bundle(
 
 def _eligibility_record(
     cycle: CycleSlice,
-    candidates: list[str],
-    caches: Mapping[tuple[tuple[str, str, str], str], CycleChannelEvidence],
+    eligible_feature_count: int,
+    total_candidate_count: int,
 ) -> dict[str, object]:
     start = cycle.start
     end = cycle.end
@@ -272,15 +276,8 @@ def _eligibility_record(
             (end - start).total_seconds() / 60 if start is not None and end is not None else np.nan
         ),
         "frost_development_grid_coverage": cycle.grid_coverage,
-        "eligible_feature_count": int(
-            sum(
-                caches[(cycle.key, feature)].reference.source != "unavailable"
-                for feature in candidates
-            )
-            if cycle.eligible
-            else 0
-        ),
-        "total_candidate_count": len(candidates),
+        "eligible_feature_count": eligible_feature_count,
+        "total_candidate_count": total_candidate_count,
         "eligibility_status": cycle.eligibility_status,
         "exclusion_reason": cycle.exclusion_reason or "",
     }

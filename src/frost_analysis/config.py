@@ -508,7 +508,7 @@ def load_config(path: Path) -> Config:
         raise ValueError("input_format.edf missing keys: ['pair_tolerance_seconds']")
     edf_pair_tolerance = float(edf_input["pair_tolerance_seconds"])
     experiment_date = str(loaded["experiment_date"])
-    if not _is_iso_date(experiment_date):
+    if not is_iso_date(experiment_date):
         raise ValueError("experiment_date must use ISO YYYY-MM-DD format")
     project_root = _find_project_root(config_path)
     process = ProcessSettings.from_mapping(_mapping(resolved["process"], "process"))
@@ -686,7 +686,7 @@ def _mapping(value: Any, name: str) -> dict[str, Any]:
     return {str(key): item for key, item in value.items()}
 
 
-def _is_iso_date(value: str) -> bool:
+def is_iso_date(value: str) -> bool:
     try:
         return date.fromisoformat(value).isoformat() == value
     except ValueError:

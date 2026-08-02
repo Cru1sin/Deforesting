@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
-from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -213,10 +212,3 @@ def _read_yaml(path: Path) -> object:
     import yaml
 
     return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _is_iso_date(value: str) -> bool:
-    try:
-        return date.fromisoformat(value).isoformat() == value
-    except ValueError:
-        return False
