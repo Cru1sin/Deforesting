@@ -353,8 +353,20 @@ class EvidenceSettings:
     channels_path: Path
     policy: EvidencePolicy
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.policy, name)
+
+def validate_evidence_timing(policy: EvidencePolicy, grid_interval_seconds: int) -> None:
+    """Validate every Evidence duration against the run's actual grid."""
+    from .evidence_cycle import duration_buckets
+
+    durations = [
+        policy.auto_reference_window_minutes * 60,
+        5 * 60,
+        policy.onset_window_seconds,
+        policy.onset_persistence_seconds,
+        *(horizon * 60 for horizon in policy.horizons_minutes),
+    ]
+    for duration in durations:
+        duration_buckets(duration, grid_interval_seconds)
 
 
 def load_evidence_settings(path: Path, *, allow_date_config: bool) -> EvidenceSettings:
@@ -585,6 +597,15 @@ def _find_project_root(config_path: Path) -> Path:
         if (parent / "pyproject.toml").is_file():
             return parent
     raise FileNotFoundError("could not find project root containing pyproject.toml")
+
+
+def find_project_root(config_path: Path) -> Path | None:
+    """Return the nearest project root, or None when no repository root exists."""
+    resolved = config_path.resolve()
+    for parent in (resolved.parent, *resolved.parents):
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return None
 
 
 def _resolve_path(root: Path, value: Any) -> Path:

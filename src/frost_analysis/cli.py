@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
 from datetime import date
@@ -14,10 +13,12 @@ import pandas as pd
 from frost_analysis import run_pipeline
 from frost_analysis.analysis import analyze
 from frost_analysis.channels import load_channels
-from frost_analysis.config import load_config, load_evidence_settings
+from frost_analysis.config import find_project_root, load_config, load_evidence_settings
 from frost_analysis.evidence import build_evidence_bundle
 from frost_analysis.io import (
     ensure_output_outside_input,
+    load_evidence_runs,
+    optional_sha256,
     write_analysis_outputs,
     write_evidence_outputs,
     write_prepare_outputs,
@@ -68,12 +69,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"QA report failed: {error}", file=sys.stderr)
             return 1
         return 0
+    if arguments.command == "analyze":
+        has_run_dirs = bool(arguments.run_dirs)
+        has_legacy_inputs = arguments.input is not None or arguments.cycles is not None
+        if has_run_dirs and has_legacy_inputs:
+            parser.error("analyze cannot combine --run-dir with --input/--cycles")
+        if not has_run_dirs and not (arguments.input is not None and arguments.cycles is not None):
+            parser.error("analyze requires --input/--cycles or one or more --run-dir")
     if arguments.command == "analyze" and arguments.run_dirs:
         _run_evidence_analyze(arguments)
         print(arguments.output)
         return 0
-    if arguments.command == "analyze" and (arguments.input is None or arguments.cycles is None):
-        parser.error("analyze requires --input/--cycles or one or more --run-dir")
     config = load_config(arguments.config)
     channels = load_channels(config.channels_path)
     if arguments.command == "prepare":
@@ -166,75 +172,33 @@ def _run_evidence_analyze(arguments: argparse.Namespace) -> None:
         allow_date_config=len(run_dirs) == 1,
     )
     channels = load_channels(settings.channels_path)
-    processed, summary = _load_evidence_runs(run_dirs)
-    bundle = build_evidence_bundle(processed, summary, settings, channels)
+    registry_hash = optional_sha256(settings.channels_path)
+    if registry_hash is None:
+        raise FileNotFoundError(f"channels registry does not exist: {settings.channels_path}")
+    loaded = load_evidence_runs(run_dirs, registry_hash=registry_hash)
+    bundle = build_evidence_bundle(
+        loaded.processed,
+        loaded.cycle_summary,
+        settings,
+        channels,
+        grid_interval_seconds=loaded.grid_interval_seconds,
+    )
     legacy_evidence = None
     if len(run_dirs) == 1 and _is_date_config(arguments.config):
         legacy_config = load_config(arguments.config)
-        legacy_evidence = analyze(processed, summary, legacy_config, channels)
+        legacy_evidence = analyze(loaded.processed, loaded.cycle_summary, legacy_config, channels)
         validate_analysis(legacy_evidence)
     write_evidence_outputs(
         bundle,
         arguments.output,
         run_dirs,
         settings=settings,
+        load_result=loaded,
         candidate_registry_path=settings.channels_path,
-        project_root=_project_root(arguments.config),
+        project_root=find_project_root(arguments.config),
         legacy_evidence=legacy_evidence,
         overwrite=arguments.overwrite,
     )
-
-
-def _load_evidence_runs(run_dirs: list[Path]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if not run_dirs:
-        raise ValueError("at least one --run-dir is required")
-    processed_frames: list[pd.DataFrame] = []
-    summary_frames: list[pd.DataFrame] = []
-    for run_dir in run_dirs:
-        processed, summary = _load_one_evidence_run(run_dir)
-        processed_frames.append(processed)
-        summary_frames.append(summary)
-    return pd.concat(processed_frames, ignore_index=True), pd.concat(
-        summary_frames, ignore_index=True
-    )
-
-
-def _load_one_evidence_run(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    processed_path = run_dir / "processed_data.parquet"
-    summary_path = run_dir / "cycle_summary.csv"
-    if not processed_path.is_file() or not summary_path.is_file():
-        raise FileNotFoundError(
-            f"run directory must contain processed_data.parquet and cycle_summary.csv: {run_dir}"
-        )
-    manifest = _read_json_if_present(run_dir / "manifest.json")
-    if "experiment_id" not in manifest or "experiment_date" not in manifest:
-        raise ValueError(f"run manifest must contain experiment_id and experiment_date: {run_dir}")
-    processed = pd.read_parquet(processed_path)
-    summary = _read_cycle_summary(summary_path)
-    experiment_id = str(manifest["experiment_id"])
-    experiment_date = str(manifest["experiment_date"])
-    if not _is_iso_date(experiment_date):
-        raise ValueError(f"manifest experiment_date must be ISO YYYY-MM-DD: {run_dir}")
-    for candidate, name in ((processed, "processed"), (summary, "cycle summary")):
-        if "experiment_id" not in candidate:
-            candidate["experiment_id"] = experiment_id
-        if "experiment_date" not in candidate:
-            candidate["experiment_date"] = experiment_date
-        if candidate["experiment_id"].astype(str).ne(experiment_id).any():
-            raise ValueError(f"{name} experiment_id disagrees with manifest in {run_dir}")
-        if candidate["experiment_date"].astype(str).ne(experiment_date).any():
-            raise ValueError(f"{name} experiment_date disagrees with manifest in {run_dir}")
-    validate_processed(processed, summary)
-    return processed, summary
-
-
-def _read_json_if_present(path: Path) -> dict[str, object]:
-    if not path.is_file():
-        return {}
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError(f"manifest must be a JSON object: {path}")
-    return value
 
 
 def _is_date_config(path: Path) -> bool:
@@ -249,14 +213,6 @@ def _read_yaml(path: Path) -> object:
     import yaml
 
     return yaml.safe_load(path.read_text(encoding="utf-8"))
-
-
-def _project_root(path: Path) -> Path:
-    resolved = path.resolve()
-    for parent in (resolved.parent, *resolved.parents):
-        if (parent / "pyproject.toml").is_file():
-            return parent
-    return Path.cwd()
 
 
 def _is_iso_date(value: str) -> bool:
