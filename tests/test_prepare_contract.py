@@ -118,6 +118,32 @@ def test_read_edf_environment_preserves_local_clock_pairs_once_and_clips(tmp_pat
     assert summary["rows_after_time_clip"] == 2
 
 
+def test_read_edf_environment_chooses_nearest_pair_without_reuse(tmp_path: Path) -> None:
+    path = _write_edf(
+        tmp_path / "environment.edf",
+        [
+            ("0", "2026-07-20T09:00:00+08:00", "20", "101", "", ""),
+            ("1", "2026-07-20T09:00:00.900000+08:00", "", "", "22", "103"),
+            ("2", "2026-07-20T09:00:01+08:00", "24", "105", "", ""),
+        ],
+    )
+
+    result, summary = read_edf_environment(
+        [path],
+        pd.Timestamp("2026-07-20 09:00:00"),
+        pd.Timestamp("2026-07-20 09:00:02"),
+        pd.Timedelta(seconds=1),
+    )
+
+    assert result["timestamp"].tolist() == [
+        pd.Timestamp("2026-07-20 09:00:00.950000")
+    ]
+    assert result["environment_temperature"].tolist() == [23.0]
+    assert result["environment_relative_humidity"].tolist() == [104.0]
+    assert summary["unmatched_sensor_1_rows"] == 1
+    assert summary["unmatched_sensor_2_rows"] == 0
+
+
 def test_read_edf_environment_rejects_nat_pair_tolerance(tmp_path: Path) -> None:
     path = _write_edf(
         tmp_path / "environment.edf",
@@ -788,6 +814,26 @@ def test_match_images_does_not_reuse_one_image() -> None:
     assert matched["image_front_center_path"].notna().sum() == 2
 
 
+def test_match_images_assigns_image_to_closest_sensor_timestamp() -> None:
+    timestamps = pd.to_datetime(
+        ["2026-07-15 00:00:00", "2026-07-15 00:00:01"]
+    )
+    image_files = [Path("192.168.1.1_1/20260715000000900.jpg")]
+
+    matched = match_images(
+        timestamps,
+        image_files,
+        camera_roles={"192.168.1.1_1": "front_center"},
+        tolerance_seconds=2,
+    )
+
+    assert pd.isna(matched.loc[0, "image_front_center_path"])
+    assert matched.loc[1, "image_front_center_path"].endswith(
+        "20260715000000900.jpg"
+    )
+    assert matched.loc[1, "image_front_center_offset_seconds"] == pytest.approx(-0.1)
+
+
 def test_match_images_keeps_same_time_images_for_separate_roles() -> None:
     timestamps = pd.to_datetime(["2026-07-15 00:00:00"])
     image_files = [
@@ -807,6 +853,29 @@ def test_match_images_keeps_same_time_images_for_separate_roles() -> None:
 
     assert pd.notna(matched.loc[0, "image_front_center_path"])
     assert pd.notna(matched.loc[0, "image_left_near_path"])
+
+
+def test_environment_alignment_uses_each_observation_once_and_main_timestamp() -> None:
+    environment = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-07-15 00:00:00.500"]),
+            "environment_temperature": [20.0],
+            "environment_relative_humidity": [50.0],
+        }
+    )
+    main_timestamps = pd.Series(
+        pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:00:01"])
+    )
+
+    aligned = prepare_module._align_environment_to_main_timestamps(
+        environment,
+        main_timestamps,
+        pd.Timedelta(seconds=0.5),
+    )
+
+    assert aligned["timestamp"].tolist() == [pd.Timestamp("2026-07-15 00:00:00")]
+    assert aligned["environment_temperature"].tolist() == [20.0]
+    assert aligned["environment_relative_humidity"].tolist() == [50.0]
 
 
 def test_partial_regions_receive_separate_cycle_ids() -> None:

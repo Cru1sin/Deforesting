@@ -78,6 +78,7 @@ python -m frost_analysis run \
 | 日期事实、输入路径和必要 overrides | `configs/<date>.yaml` |
 | 原始字段、单位、角色 | `configs/channels.yaml` |
 | 相机物理角色 | `configs/<date>.yaml` 中的 `camera_roles` |
+| 一对一时间匹配 | `src/frost_analysis/alignment.py` |
 | 原始数据整理 | `src/frost_analysis/prepare.py` |
 | 循环边界 | `src/frost_analysis/cycles.py` |
 | 重采样和缺失处理 | `src/frost_analysis/process.py` |

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from .alignment import match_nearest_one_to_one
 
 _TIMESTAMP_RE = re.compile(r"(?<!\d)(\d{17})(?!\d)")
 
@@ -48,52 +49,24 @@ def match_images(
     columns: dict[str, list[Any]] = {}
     for role in roles:
         records = sorted(records_by_role[role], key=lambda item: (item[1], str(item[0])))
-        image_times = [record[1] for record in records]
-        used: set[Path] = set()
-        paths: list[object] = []
-        image_times_out: list[object] = []
-        offsets: list[object] = []
-        for timestamp in sensor_times:
-            selected = _select_image(timestamp, records, image_times, used, tolerance_seconds)
-            if selected is None:
-                paths.append(pd.NA)
-                image_times_out.append(pd.NaT)
-                offsets.append(float("nan"))
-                continue
-            path, image_time = selected
-            paths.append(str(path))
-            image_times_out.append(image_time)
-            offsets.append((image_time - timestamp).total_seconds())
+        paths: list[object] = [pd.NA] * len(sensor_times)
+        image_times_out: list[object] = [pd.NaT] * len(sensor_times)
+        offsets: list[object] = [float("nan")] * len(sensor_times)
+        pairs = match_nearest_one_to_one(
+            sensor_times,
+            pd.Series([record[1] for record in records]),
+            pd.to_timedelta(tolerance_seconds, unit="s"),
+        )
+        for sensor_position, image_position in pairs:
+            path, image_time = records[image_position]
+            sensor_time = sensor_times.iloc[sensor_position]
+            paths[sensor_position] = str(path)
+            image_times_out[sensor_position] = image_time
+            offsets[sensor_position] = (image_time - sensor_time).total_seconds()
         columns[f"image_{role}_path"] = paths
         columns[f"image_{role}_time"] = image_times_out
         columns[f"image_{role}_offset_seconds"] = offsets
     return pd.DataFrame(columns, index=sensor_times.index)
-
-
-def _select_image(
-    timestamp: pd.Timestamp,
-    records: list[tuple[Path, pd.Timestamp]],
-    image_times: list[pd.Timestamp],
-    used: set[Path],
-    tolerance_seconds: float,
-) -> tuple[Path, pd.Timestamp] | None:
-    if pd.isna(timestamp):
-        return None
-    lower = timestamp - pd.Timedelta(seconds=tolerance_seconds)
-    upper = timestamp + pd.Timedelta(seconds=tolerance_seconds)
-    left = bisect_left(image_times, lower)
-    right = bisect_right(image_times, upper)
-    candidates = [record for record in records[left:right] if record[0] not in used]
-    if not candidates:
-        return None
-    selected = min(
-        candidates,
-        key=lambda record: (abs((record[1] - timestamp).total_seconds()), str(record[0])),
-    )
-    used.add(selected[0])
-    return selected
-
-
 def _image_timestamp(path: Path) -> pd.Timestamp | None:
     match = _TIMESTAMP_RE.search(path.stem)
     if match is None:

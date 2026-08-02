@@ -133,6 +133,10 @@ image_<role>_time
 image_<role>_offset_seconds
 ```
 
+EDF 双传感器配对、EDF 融合观测到主时间轴的对齐，以及每个相机角色的图片匹配，
+均采用 tolerance 内的有序一对一匹配。任一侧记录不得复用；首先最大化配对数量，
+配对数量相同时最小化总绝对时间偏差，完全同分时按稳定输入顺序确定结果。
+
 图片不 forward fill；同一 10 秒桶内每个角色最多保留距离桶时间最近的一张。
 
 ## 4. Bounded 缺失和共同 baseline

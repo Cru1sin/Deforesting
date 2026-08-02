@@ -1,9 +1,0 @@
-# Date-local camera roles. Keep values stable because they become output columns.
-camera_roles:
-  "192.168.1.1": top_center
-  "192.168.1.2": left_near
-  "192.168.1.11": top_near
-  "192.168.1.12": right_extreme
-  "192.168.1.13": front_center
-  "192.168.1.14": left_oblique
-unknown_role: unknown

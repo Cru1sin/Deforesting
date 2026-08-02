@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .alignment import match_nearest_one_to_one
 from .config import Config, resolved_config_sha256
 from .cycles import label_cycles
 from .images import match_images
@@ -168,17 +169,23 @@ def _align_environment_to_main_timestamps(
     if environment.empty:
         return environment.copy()
 
-    main = pd.DataFrame({"timestamp": main_timestamps})
-    aligned = pd.merge_asof(
-        main.sort_values("timestamp"),
-        environment.sort_values("timestamp"),
-        on="timestamp",
-        direction="nearest",
-        tolerance=tolerance,
+    main = pd.Series(main_timestamps).reset_index(drop=True)
+    environment = environment.reset_index(drop=True)
+    pairs = match_nearest_one_to_one(
+        main,
+        environment["timestamp"],
+        tolerance,
     )
-    return aligned.dropna(
-        subset=["environment_temperature", "environment_relative_humidity"]
-    ).reset_index(drop=True)
+    if not pairs:
+        return environment.iloc[0:0].copy()
+
+    main_positions = [left for left, _ in pairs]
+    environment_positions = [right for _, right in pairs]
+    aligned = environment.iloc[environment_positions].reset_index(drop=True)
+    aligned["timestamp"] = pd.Series(
+        [main.iloc[position] for position in main_positions], dtype=main.dtype
+    )
+    return aligned[["timestamp", "environment_temperature", "environment_relative_humidity"]]
 
 
 def _load_channel_frames(

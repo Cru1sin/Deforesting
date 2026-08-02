@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .alignment import match_nearest_one_to_one
+
 _TEMPERATURE_PATTERN = re.compile(r"^T_SHT40_(?P<serial>.+)$")
 _HUMIDITY_PATTERN = re.compile(r"^RH_SHT40_(?P<serial>.+)$")
 _SIGNAL_COLUMNS = (
@@ -173,43 +175,33 @@ def _pair_sensor_records(
     tolerance: pd.Timedelta,
 ) -> tuple[pd.DataFrame, int, int, list[float]]:
     rows: list[dict[str, Any]] = []
-    unmatched_sensor_1 = 0
-    unmatched_sensor_2 = 0
     pair_deltas_ms: list[float] = []
-    left = 0
-    right = 0
-    while left < len(sensor_1) and right < len(sensor_2):
+    pairs = match_nearest_one_to_one(
+        sensor_1["timestamp"], sensor_2["timestamp"], tolerance
+    )
+    for left, right in pairs:
         left_time = pd.Timestamp(sensor_1.iloc[left]["timestamp"])
         right_time = pd.Timestamp(sensor_2.iloc[right]["timestamp"])
         delta_seconds = (left_time - right_time).total_seconds()
-        if abs(delta_seconds) <= tolerance.total_seconds():
-            rows.append(
-                {
-                    "timestamp": left_time + (right_time - left_time) / 2,
-                    "environment_temperature": (
-                        float(sensor_1.iloc[left]["temperature"])
-                        + float(sensor_2.iloc[right]["temperature"])
-                    )
-                    / 2,
-                    "environment_relative_humidity": (
-                        float(sensor_1.iloc[left]["humidity"])
-                        + float(sensor_2.iloc[right]["humidity"])
-                    )
-                    / 2,
-                }
-            )
-            pair_deltas_ms.append(abs(delta_seconds) * 1000)
-            left += 1
-            right += 1
-        elif left_time < right_time:
-            unmatched_sensor_1 += 1
-            left += 1
-        else:
-            unmatched_sensor_2 += 1
-            right += 1
+        rows.append(
+            {
+                "timestamp": left_time + (right_time - left_time) / 2,
+                "environment_temperature": (
+                    float(sensor_1.iloc[left]["temperature"])
+                    + float(sensor_2.iloc[right]["temperature"])
+                )
+                / 2,
+                "environment_relative_humidity": (
+                    float(sensor_1.iloc[left]["humidity"])
+                    + float(sensor_2.iloc[right]["humidity"])
+                )
+                / 2,
+            }
+        )
+        pair_deltas_ms.append(abs(delta_seconds) * 1000)
 
-    unmatched_sensor_1 += len(sensor_1) - left
-    unmatched_sensor_2 += len(sensor_2) - right
+    unmatched_sensor_1 = len(sensor_1) - len(pairs)
+    unmatched_sensor_2 = len(sensor_2) - len(pairs)
     paired = pd.DataFrame(rows, columns=["timestamp", *_ENVIRONMENT_COLUMNS])
     return paired, unmatched_sensor_1, unmatched_sensor_2, pair_deltas_ms
 
