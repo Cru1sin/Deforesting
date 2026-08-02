@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -8,13 +9,16 @@ import pandas as pd
 import pytest
 import yaml
 
+from frost_analysis.cli import main
 from frost_analysis.config import EvidencePolicy, load_evidence_settings
+from frost_analysis.config import is_iso_date as config_is_iso_date
 from frost_analysis.evidence import build_evidence_bundle, resolve_analysis_reference
 from frost_analysis.evidence_cycle import (
     build_channel_evidence,
     build_cycle_slices,
     expected_grid,
 )
+from frost_analysis.io import is_iso_date as io_is_iso_date
 from frost_analysis.io import load_evidence_runs, optional_sha256, write_evidence_outputs
 
 
@@ -193,7 +197,7 @@ def test_bundle_uses_channel_reference_and_keeps_future_change_raw(tmp_path: Pat
         },
     }
 
-    bundle = build_evidence_bundle(frame, summary, settings, channels)
+    bundle = build_evidence_bundle(frame, summary, settings, channels, grid_interval_seconds=10)
 
     metric = bundle.feature_cycle_metrics.iloc[0]
     assert metric["reference_source"] == "auto_cycle_initial_reference"
@@ -352,7 +356,7 @@ def test_future_change_does_not_require_target_reference() -> None:
         "heating_capacity": {"analysis_candidate": False, "role": "performance"},
     }
     policy = EvidencePolicy(min_valid_pairs=5, min_segment_points=5, min_valid_cycles=1)
-    bundle = build_evidence_bundle(frame, summary, policy, channels)
+    bundle = build_evidence_bundle(frame, summary, policy, channels, grid_interval_seconds=10)
     future = bundle.future_association
     change = future.loc[
         future["target_type"].eq("future_change") & future["horizon_minutes"].eq(5)
@@ -405,7 +409,7 @@ def test_evidence_writer_emits_five_tables_and_manifest(tmp_path: Path) -> None:
         "heating_capacity": {"analysis_candidate": False, "role": "performance"},
         "cop": {"analysis_candidate": False, "role": "performance"},
     }
-    bundle = build_evidence_bundle(frame, summary, settings, channels)
+    bundle = build_evidence_bundle(frame, summary, settings, channels, grid_interval_seconds=10)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     (run_dir / "manifest.json").write_text("{}\n", encoding="utf-8")
@@ -433,6 +437,12 @@ def test_expected_grid_contains_only_complete_stage_buckets() -> None:
 
     assert grid[0] == pd.Timestamp("2026-07-15 00:00:10")
     assert grid[-1] == pd.Timestamp("2026-07-15 00:04:50")
+
+
+def test_build_evidence_bundle_requires_grid_interval() -> None:
+    parameter = inspect.signature(build_evidence_bundle).parameters["grid_interval_seconds"]
+
+    assert parameter.default is inspect.Parameter.empty
 
 
 def test_bundle_rejects_nonpositive_grid_interval() -> None:
@@ -468,6 +478,248 @@ def test_bundle_rejects_nonpositive_grid_interval() -> None:
             EvidencePolicy(horizons_minutes=(5,), min_segment_points=2),
             channels,
             grid_interval_seconds=0,
+        )
+
+
+def test_segment_observed_fraction_excludes_process_imputation() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    timestamps = pd.date_range(start, periods=72, freq="10s")
+    imputed = np.zeros(len(timestamps), dtype=bool)
+    imputed[1] = True
+    frame = pd.DataFrame(
+        {
+            "experiment_id": "exp_test",
+            "experiment_date": "2026-07-15",
+            "cycle_id": "cycle_001",
+            "cycle_stage": "frost_development",
+            "cycle_status": "valid",
+            "timestamp": timestamps,
+            "signal": np.linspace(1.0, 2.0, len(timestamps)),
+            "signal__imputed": imputed,
+            "heating_capacity": np.linspace(5.0, 4.0, len(timestamps)),
+            "heating_capacity__imputed": False,
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "baseline_status": ["unavailable"],
+            "stable_heating_start": [start],
+            "defrost_start": [start + pd.Timedelta(minutes=12)],
+        }
+    )
+    channels = {
+        "signal": {"analysis_candidate": True, "role": "sensor"},
+        "heating_capacity": {"analysis_candidate": False, "role": "performance"},
+    }
+
+    bundle = build_evidence_bundle(
+        frame,
+        summary,
+        EvidencePolicy(min_segment_points=5, horizons_minutes=(5,)),
+        channels,
+        grid_interval_seconds=10,
+    )
+    metric = bundle.feature_cycle_metrics.iloc[0]
+
+    assert metric["early_observed_fraction"] == pytest.approx(17 / 18)
+    assert np.isfinite(metric["early_slope_per_min"])
+
+
+def test_past_slope_requires_no_remaining_nan_in_fixed_window() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    timestamps = pd.date_range(start, periods=150, freq="10s")
+    signal = np.linspace(1.0, 8.0, len(timestamps))
+    signal[100] = np.nan
+    frame = pd.DataFrame(
+        {
+            "experiment_id": "exp_test",
+            "experiment_date": "2026-07-15",
+            "cycle_id": "cycle_001",
+            "cycle_stage": ["frost_development"] * 144 + ["defrost"] * 6,
+            "cycle_status": "valid",
+            "timestamp": timestamps,
+            "signal": signal,
+            "signal__imputed": False,
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "stable_heating_start": [start],
+            "defrost_start": [start + pd.Timedelta(minutes=24)],
+        }
+    )
+    cycle = build_cycle_slices(frame, summary, 10)[0]
+    cache = build_channel_evidence(
+        cycle,
+        "signal",
+        EvidencePolicy(horizons_minutes=(5,)),
+        target=False,
+        interval_seconds=10,
+    )
+
+    assert cache.past_slope_5min is not None
+    assert pd.isna(cache.past_slope_5min.iloc[100])
+    assert pd.isna(cache.past_slope_5min.iloc[129])
+    assert np.isfinite(cache.past_slope_5min.iloc[130])
+
+
+def test_missing_grid_row_does_not_reduce_future_anchor_denominator() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    timestamps = pd.date_range(start, periods=72, freq="10s")
+    frame = pd.DataFrame(
+        {
+            "experiment_id": "exp_test",
+            "experiment_date": "2026-07-15",
+            "cycle_id": "cycle_001",
+            "cycle_stage": "frost_development",
+            "cycle_status": "valid",
+            "timestamp": timestamps,
+            "signal": np.linspace(1.0, 4.0, len(timestamps)),
+            "signal__imputed": False,
+            "heating_capacity": np.linspace(5.0, 4.0, len(timestamps)),
+            "heating_capacity__imputed": False,
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "baseline_status": ["unavailable"],
+            "stable_heating_start": [start],
+            "defrost_start": [start + pd.Timedelta(minutes=12)],
+        }
+    )
+    channels = {
+        "signal": {"analysis_candidate": True, "role": "sensor"},
+        "heating_capacity": {"analysis_candidate": False, "role": "performance"},
+    }
+    policy = EvidencePolicy(
+        min_segment_points=5,
+        min_valid_pairs=1,
+        min_pair_coverage=0.5,
+        horizons_minutes=(5,),
+    )
+    complete = build_evidence_bundle(frame, summary, policy, channels, grid_interval_seconds=10)
+    missing = build_evidence_bundle(
+        frame.drop(index=40), summary, policy, channels, grid_interval_seconds=10
+    )
+
+    selector = (
+        (complete.future_association["feature_variant"] == "residual_level")
+        & (complete.future_association["target"] == "heating_capacity")
+        & (complete.future_association["target_type"] == "future_change")
+        & (complete.future_association["horizon_minutes"] == 5)
+    )
+    complete_row = complete.future_association.loc[selector].iloc[0]
+    missing_row = missing.future_association.loc[selector].iloc[0]
+
+    assert missing_row["expected_anchor_count"] == complete_row["expected_anchor_count"]
+    assert missing_row["valid_pairs"] < complete_row["valid_pairs"]
+    assert missing_row["pair_coverage"] < complete_row["pair_coverage"]
+
+
+def test_summary_only_and_stage_boundary_mismatch_are_excluded() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"] * 3,
+            "experiment_date": ["2026-07-15"] * 3,
+            "cycle_id": ["bad_stage"] * 3,
+            "cycle_stage": ["frost_development"] * 3,
+            "cycle_status": ["valid"] * 3,
+            "timestamp": [
+                start - pd.Timedelta(seconds=10),
+                start,
+                start + pd.Timedelta(minutes=1, seconds=10),
+            ],
+            "signal": [1.0, 2.0, 3.0],
+            "signal__imputed": False,
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test", "exp_test"],
+            "experiment_date": ["2026-07-15", "2026-07-15"],
+            "cycle_id": ["bad_stage", "summary_only"],
+            "cycle_status": ["valid", "valid"],
+            "stable_heating_start": [start, start],
+            "defrost_start": [start + pd.Timedelta(minutes=1), start + pd.Timedelta(minutes=1)],
+        }
+    )
+    channels = {"signal": {"analysis_candidate": True, "role": "sensor"}}
+
+    bundle = build_evidence_bundle(
+        frame,
+        summary,
+        EvidencePolicy(min_segment_points=2, horizons_minutes=(5,)),
+        channels,
+        grid_interval_seconds=10,
+    )
+    eligibility = bundle.cycle_eligibility.set_index("cycle_id")
+    metrics = bundle.feature_cycle_metrics.set_index("cycle_id")
+
+    assert eligibility.loc["bad_stage", "exclusion_reason"] == "frost_stage_boundary_mismatch"
+    assert eligibility.loc["summary_only", "exclusion_reason"] == "processed_cycle_unavailable"
+    assert metrics.loc["bad_stage", "metric_status"] == "unavailable"
+    assert metrics.loc["summary_only", "metric_status"] == "unavailable"
+
+
+def test_build_cycle_slices_normalizes_mixed_cycle_key_types() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test", "exp_test"],
+            "experiment_date": ["2026-07-15", "2026-07-15"],
+            "cycle_id": [1, "1"],
+            "cycle_stage": ["frost_development", "frost_development"],
+            "timestamp": [start, start + pd.Timedelta(seconds=10)],
+            "signal": [1.0, 2.0],
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["1"],
+            "cycle_status": ["valid"],
+            "stable_heating_start": [start],
+            "defrost_start": [start + pd.Timedelta(minutes=1)],
+        }
+    )
+
+    cycles = build_cycle_slices(frame, summary, 10)
+
+    assert len(cycles) == 1
+    assert cycles[0].key == ("exp_test", "2026-07-15", "1")
+    assert len(cycles[0].frost) == 2
+
+
+def test_cli_rejects_mixed_evidence_input_modes() -> None:
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "analyze",
+                "--config",
+                "config.yaml",
+                "--input",
+                "processed.parquet",
+                "--cycles",
+                "cycles.csv",
+                "--run-dir",
+                "run",
+                "--output",
+                "output",
+            ]
         )
 
 
@@ -515,14 +767,16 @@ def test_trend_metrics_survive_unavailable_reference(tmp_path: Path) -> None:
         "heating_capacity": {"analysis_candidate": False, "role": "performance"},
     }
 
-    bundle = build_evidence_bundle(frame, summary, settings, channels)
+    bundle = build_evidence_bundle(frame, summary, settings, channels, grid_interval_seconds=10)
     metric = bundle.feature_cycle_metrics.iloc[0]
 
     assert metric["reference_source"] == "unavailable"
+    assert metric["reference_exclusion_reason"] == "reference_observed_coverage"
     assert np.isfinite(metric["global_spearman"])
     assert np.isfinite(metric["late_slope_per_min"])
     assert metric["metric_status"] == "available"
     assert metric["metric_exclusion_reason"] == ""
+    assert bundle.cycle_eligibility.iloc[0]["eligible_feature_count"] == 1
 
 
 def test_past_slope_future_variant_does_not_require_feature_reference() -> None:
@@ -567,7 +821,7 @@ def test_past_slope_future_variant_does_not_require_feature_reference() -> None:
         horizons_minutes=(5,),
     )
 
-    bundle = build_evidence_bundle(frame, summary, policy, channels)
+    bundle = build_evidence_bundle(frame, summary, policy, channels, grid_interval_seconds=10)
     row = bundle.future_association.loc[
         bundle.future_association["feature_variant"].eq("past_slope_5min")
         & bundle.future_association["target_type"].eq("future_change")
@@ -674,6 +928,12 @@ def test_cycle_status_allows_only_known_open_end_incomplete_reason() -> None:
     )
     assert gap_cache.reference.source == "unavailable"
     assert gap_cache.onset_elapsed_minutes != gap_cache.onset_elapsed_minutes
+
+
+def test_iso_date_validation_has_one_shared_implementation() -> None:
+    assert io_is_iso_date is config_is_iso_date
+    assert io_is_iso_date("2026-07-15")
+    assert not io_is_iso_date("2026-7-15")
 
 
 def test_load_evidence_runs_returns_contract_and_rejects_duplicate_path(tmp_path: Path) -> None:
