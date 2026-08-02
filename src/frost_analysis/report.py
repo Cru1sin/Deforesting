@@ -17,7 +17,7 @@ import shutil
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import matplotlib
 
@@ -559,26 +559,40 @@ def _plot_cycle_panels(
         axes, panel_channels, axis_labels, strict=True
     ):
         for channel in channels:
-            plotter = _plot_processed_line if channel == "cop" else _plot_prepared_line
-            line_kwargs = {
-                "color": _CHANNEL_COLORS[channel],
-                "x_origin": origin,
-                "show_legend": False,
-                "y_label": axis_label,
-                "linestyle": "--" if channel in dashed_channels else "-",
-                "zorder": 3 if channel == "compressor_frequency" else 2,
-            }
-            if plotter is _plot_prepared_line:
-                line_kwargs["step"] = channel in dashed_channels
-            plotter(
-                axis,
-                processed if channel == "cop" else prepared,
-                channel,
-                display_labels[channel],
-                cycle_id,
-                warnings,
-                **line_kwargs,
-            )
+            line_color = _CHANNEL_COLORS[channel]
+            line_style = "--" if channel in dashed_channels else "-"
+            line_zorder = 3 if channel == "compressor_frequency" else 2
+            if channel == "cop":
+                _plot_processed_line(
+                    axis,
+                    processed,
+                    channel,
+                    display_labels[channel],
+                    cycle_id,
+                    warnings,
+                    color=line_color,
+                    x_origin=origin,
+                    show_legend=False,
+                    y_label=axis_label,
+                    linestyle=line_style,
+                    zorder=line_zorder,
+                )
+            else:
+                _plot_prepared_line(
+                    axis,
+                    prepared,
+                    channel,
+                    display_labels[channel],
+                    cycle_id,
+                    warnings,
+                    color=line_color,
+                    x_origin=origin,
+                    show_legend=False,
+                    y_label=axis_label,
+                    linestyle=line_style,
+                    step=channel in dashed_channels,
+                    zorder=line_zorder,
+                )
         if len(channels) > 1:
             handles = [
                 Line2D(
@@ -624,10 +638,10 @@ def _channel_has_observations(
     if processed:
         if f"{channel}__imputed" not in frame:
             return False
-        return _processed_observed_series(frame, channel).notna().any()
+        return bool(_processed_observed_series(frame, channel).notna().any())
     if not _prepared_quality_available(frame, channel):
         return False
-    return _prepared_observed_series(frame, channel).notna().any()
+    return bool(_prepared_observed_series(frame, channel).notna().any())
 
 
 def _plot_prepared_line(
@@ -779,7 +793,10 @@ def _configure_cop_axis(
     values = _processed_observed_series(frame, "cop")
     times = pd.to_datetime(frame["timestamp"], errors="coerce")
     stable = cycle.get("stable_heating_start")
-    stable_values = values.loc[times.ge(pd.Timestamp(stable)) & values.notna()]
+    if stable is None or pd.isna(stable):
+        return
+    stable_timestamp = cast(pd.Timestamp, stable)
+    stable_values = values.loc[times.ge(stable_timestamp) & values.notna()]
     if stable_values.empty:
         return
     stable_min = float(stable_values.min())
