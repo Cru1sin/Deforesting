@@ -608,6 +608,7 @@ class AnalysisSettings:
 
     # 单个循环内计算 Spearman 相关所需的最少有限数据点数。
     minimum_points_per_cycle: int = 6
+    evidence: EvidencePolicy = field(default_factory=lambda: EvidencePolicy())
 
     @classmethod
     def from_mapping(
@@ -658,6 +659,7 @@ class AnalysisSettings:
                     cls.minimum_points_per_cycle,
                 )
             ),
+            evidence=EvidencePolicy.from_mapping(mapping.get("evidence", {})),
         )
 
         # future horizon 必须严格大于 0。
@@ -697,6 +699,191 @@ class AnalysisSettings:
 # =============================================================================
 # 5. Pipeline 最终配置对象
 # =============================================================================
+
+
+@dataclass(frozen=True)
+class EvidencePolicy:
+    """Date-independent rules for the cycle evidence analysis."""
+
+    min_segment_coverage: float = 0.8
+    min_segment_points: int = 12
+    min_pair_coverage: float = 0.8
+    min_valid_pairs: int = 30
+    min_valid_cycles: int = 3
+    horizons_minutes: tuple[int, ...] = (5, 10, 20)
+    targets: tuple[str, ...] = ("heating_capacity", "cop")
+    primary_target: str = "heating_capacity"
+    primary_target_type: str = "future_change"
+    primary_horizon_minutes: int = 10
+    primary_feature_variant: str = "residual_level"
+    lead_target: str = "heating_capacity"
+    auto_reference_window_minutes: int = 5
+    auto_reference_min_observed_fraction: float = 0.8
+    auto_reference_max_gap_seconds: float = 60.0
+    onset_window_seconds: int = 60
+    onset_mad_multiplier: float = 3.0
+    onset_persistence_seconds: int = 60
+    similarity_threshold: float = 0.85
+
+    @classmethod
+    def from_mapping(cls, values: Mapping[str, Any]) -> EvidencePolicy:
+        mapping = _mapping(values, "analysis.evidence")
+        _validate_dataclass_keys(mapping, cls, "analysis.evidence")
+        horizons = tuple(
+            int(value) for value in mapping.get("horizons_minutes", cls.horizons_minutes)
+        )
+        targets = tuple(str(value) for value in mapping.get("targets", cls.targets))
+        result = cls(
+            min_segment_coverage=float(
+                mapping.get("min_segment_coverage", cls.min_segment_coverage)
+            ),
+            min_segment_points=int(mapping.get("min_segment_points", cls.min_segment_points)),
+            min_pair_coverage=float(mapping.get("min_pair_coverage", cls.min_pair_coverage)),
+            min_valid_pairs=int(mapping.get("min_valid_pairs", cls.min_valid_pairs)),
+            min_valid_cycles=int(mapping.get("min_valid_cycles", cls.min_valid_cycles)),
+            horizons_minutes=horizons,
+            targets=targets,
+            primary_target=str(mapping.get("primary_target", cls.primary_target)),
+            primary_target_type=str(mapping.get("primary_target_type", cls.primary_target_type)),
+            primary_horizon_minutes=int(
+                mapping.get("primary_horizon_minutes", cls.primary_horizon_minutes)
+            ),
+            primary_feature_variant=str(
+                mapping.get("primary_feature_variant", cls.primary_feature_variant)
+            ),
+            lead_target=str(mapping.get("lead_target", cls.lead_target)),
+            auto_reference_window_minutes=int(
+                mapping.get(
+                    "auto_reference_window_minutes",
+                    cls.auto_reference_window_minutes,
+                )
+            ),
+            auto_reference_min_observed_fraction=float(
+                mapping.get(
+                    "auto_reference_min_observed_fraction",
+                    cls.auto_reference_min_observed_fraction,
+                )
+            ),
+            auto_reference_max_gap_seconds=float(
+                mapping.get(
+                    "auto_reference_max_gap_seconds",
+                    cls.auto_reference_max_gap_seconds,
+                )
+            ),
+            onset_window_seconds=int(mapping.get("onset_window_seconds", cls.onset_window_seconds)),
+            onset_mad_multiplier=float(
+                mapping.get("onset_mad_multiplier", cls.onset_mad_multiplier)
+            ),
+            onset_persistence_seconds=int(
+                mapping.get("onset_persistence_seconds", cls.onset_persistence_seconds)
+            ),
+            similarity_threshold=float(
+                mapping.get("similarity_threshold", cls.similarity_threshold)
+            ),
+        )
+        _validate_evidence_policy(result, horizons, targets)
+        return result
+
+
+def _validate_evidence_policy(
+    result: EvidencePolicy, horizons: tuple[int, ...], targets: tuple[str, ...]
+) -> None:
+    _validate_evidence_thresholds(result)
+    _validate_evidence_targets(result, horizons, targets)
+    _validate_evidence_windows(result)
+
+
+def _validate_evidence_thresholds(result: EvidencePolicy) -> None:
+    _validate_fraction("analysis.evidence.min_segment_coverage", result.min_segment_coverage)
+    _validate_fraction("analysis.evidence.min_pair_coverage", result.min_pair_coverage)
+    _validate_fraction(
+        "analysis.evidence.auto_reference_min_observed_fraction",
+        result.auto_reference_min_observed_fraction,
+    )
+    _validate_fraction("analysis.evidence.similarity_threshold", result.similarity_threshold)
+    if result.min_segment_points < 2 or result.min_valid_pairs < 1:
+        raise ValueError("analysis.evidence minimum counts are too small")
+    if result.min_valid_cycles < 1:
+        raise ValueError("analysis.evidence.min_valid_cycles must be positive")
+
+
+def _validate_evidence_targets(
+    result: EvidencePolicy, horizons: tuple[int, ...], targets: tuple[str, ...]
+) -> None:
+    if not horizons or any(value <= 0 for value in horizons):
+        raise ValueError("analysis.evidence horizons must be positive")
+    if len(set(horizons)) != len(horizons):
+        raise ValueError("analysis.evidence horizons must be unique")
+    if not targets or any(not value for value in targets):
+        raise ValueError("analysis.evidence targets must not be empty")
+    if result.primary_target not in targets:
+        raise ValueError("analysis.evidence.primary_target must be a configured target")
+    if result.lead_target not in targets:
+        raise ValueError("analysis.evidence.lead_target must be a configured target")
+    if result.primary_horizon_minutes not in horizons:
+        raise ValueError("analysis.evidence.primary_horizon_minutes must be configured")
+
+
+def _validate_evidence_windows(result: EvidencePolicy) -> None:
+    if result.auto_reference_window_minutes <= 0:
+        raise ValueError("analysis.evidence auto reference window must be positive")
+    if result.auto_reference_max_gap_seconds < 0:
+        raise ValueError("analysis.evidence auto reference gap must be nonnegative")
+    if result.onset_window_seconds <= 0 or result.onset_persistence_seconds <= 0:
+        raise ValueError("analysis.evidence onset windows must be positive")
+    if result.onset_mad_multiplier <= 0:
+        raise ValueError("analysis.evidence onset MAD multiplier must be positive")
+
+
+@dataclass(frozen=True)
+class EvidenceSettings:
+    """Evidence policy plus the candidate registry path used by Analyze."""
+
+    channels_path: Path
+    policy: EvidencePolicy
+
+
+def validate_evidence_timing(policy: EvidencePolicy, grid_interval_seconds: int) -> None:
+    """Validate every Evidence duration against the run's actual grid."""
+    from .evidence_cycle import duration_buckets
+
+    durations = [
+        policy.auto_reference_window_minutes * 60,
+        5 * 60,
+        policy.onset_window_seconds,
+        policy.onset_persistence_seconds,
+        *(horizon * 60 for horizon in policy.horizons_minutes),
+    ]
+    for duration in durations:
+        duration_buckets(duration, grid_interval_seconds)
+
+
+def load_evidence_settings(path: Path, *, allow_date_config: bool) -> EvidenceSettings:
+    """Load date-independent evidence settings or project them from one date config."""
+    config_path = path.resolve()
+    loaded = _load_yaml_mapping(config_path, "evidence config")
+    date_keys = {
+        "experiment_id",
+        "experiment_date",
+        "input_dir",
+        "camera_roles",
+        "overrides",
+    }
+    if not allow_date_config and date_keys.intersection(loaded):
+        raise ValueError("date-specific facts are not allowed in batch evidence config")
+    if "schema_version" in loaded:
+        if not allow_date_config:
+            raise ValueError("date-specific config is not allowed in batch evidence config")
+        config = load_config(config_path)
+        return EvidenceSettings(config.channels_path, config.analysis.evidence)
+
+    channels_value = loaded.get("channels_path")
+    analysis_value = _mapping(loaded.get("analysis", {}), "analysis")
+    policy = EvidencePolicy.from_mapping(analysis_value.get("evidence", {}))
+    if channels_value is None:
+        raise ValueError("evidence config requires channels_path")
+    channels_path = _resolve_path(config_path.parent, channels_value)
+    return EvidenceSettings(channels_path, policy)
 
 
 @dataclass(frozen=True)
@@ -962,7 +1149,6 @@ def load_config(path: Path) -> Config:
     if "pair_tolerance_seconds" not in edf_input:
         raise ValueError("input_format.edf missing keys: ['pair_tolerance_seconds']")
     edf_pair_tolerance = float(edf_input["pair_tolerance_seconds"])
-
     # 日期值统一转为字符串后，再严格检查 ISO 格式。
     experiment_date = str(
         loaded["experiment_date"]
@@ -1244,6 +1430,15 @@ def _find_project_root(config_path: Path) -> Path:
     )
 
 
+def find_project_root(config_path: Path) -> Path | None:
+    """Return the nearest project root, or None when no repository root exists."""
+    resolved = config_path.resolve()
+    for parent in (resolved.parent, *resolved.parents):
+        if (parent / "pyproject.toml").is_file():
+            return parent
+    return None
+
+
 def _resolve_path(root: Path, value: Any) -> Path:
     """将配置路径规范化为绝对路径。
 
@@ -1487,13 +1682,17 @@ def _mapping(
 
 def _is_iso_date(value: str) -> bool:
     """严格判断字符串是否为规范 ISO 日期 YYYY-MM-DD。"""
-
     try:
         # fromisoformat() 负责解析；
         # 再转回 isoformat()，拒绝非规范但可被宽松解析的表示。
         return date.fromisoformat(value).isoformat() == value
     except ValueError:
         return False
+
+
+def is_iso_date(value: str) -> bool:
+    """公开兼容入口，供 IO 和批量 evidence 配置校验复用。"""
+    return _is_iso_date(value)
 
 
 def _validate_positive(
