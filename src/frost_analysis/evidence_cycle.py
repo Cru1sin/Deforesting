@@ -131,6 +131,7 @@ def build_cycle_slices(
         start = _timestamp(summary.get("stable_heating_start"))
         end = _timestamp(summary.get("defrost_start"))
         grid = expected_grid(start, end, interval_seconds) if start and end else pd.DatetimeIndex([])
+        grid_available = not grid.empty
         actual = set(frost_times)
         grid_coverage = float(len(actual & set(grid)) / len(grid)) if len(grid) else 0.0
         status = _cycle_status(summary, frame)
@@ -144,10 +145,13 @@ def build_cycle_slices(
                 (frost_times < start).any() or (frost_times >= end).any()
             )
             grid_mismatch = bool(
-                not boundary_mismatch and not frost_times.isin(grid).all()
+                grid_available
+                and not boundary_mismatch
+                and not frost_times.isin(grid).all()
             )
         eligible = bool(
             boundary_complete
+            and grid_available
             and not frost.empty
             and not boundary_mismatch
             and not grid_mismatch
@@ -164,6 +168,7 @@ def build_cycle_slices(
                 status,
                 status_reason,
                 boundary_complete,
+                grid_available,
                 boundary_mismatch,
                 grid_mismatch,
             )
@@ -942,6 +947,7 @@ def _cycle_exclusion_reason(
     status: str,
     status_reason: str | None,
     boundary_complete: bool,
+    grid_available: bool,
     boundary_mismatch: bool,
     grid_mismatch: bool,
 ) -> str:
@@ -949,6 +955,8 @@ def _cycle_exclusion_reason(
         return "processed_cycle_unavailable"
     if boundary_mismatch:
         return "frost_stage_boundary_mismatch"
+    if boundary_complete and not grid_available:
+        return "no_complete_frost_grid_bucket"
     if grid_mismatch:
         return "frost_stage_grid_mismatch"
     if status == "invalid":

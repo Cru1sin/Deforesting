@@ -771,6 +771,76 @@ def test_in_stage_non_grid_timestamp_excludes_cycle() -> None:
     assert metric["metric_status"] == "unavailable"
 
 
+def test_empty_frost_grid_excludes_all_evidence_paths() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["cycle_001"],
+            "cycle_stage": ["frost_development"],
+            "cycle_status": ["valid"],
+            "timestamp": [start],
+            "signal_a": [1.0],
+            "signal_b": [2.0],
+            "heating_capacity": [3.0],
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "stable_heating_start": [start],
+            "defrost_start": [start + pd.Timedelta(seconds=5)],
+        }
+    )
+    channels = {
+        "signal_a": {"analysis_candidate": True, "role": "sensor"},
+        "signal_b": {"analysis_candidate": True, "role": "sensor"},
+    }
+    policy = EvidencePolicy(
+        min_segment_points=2,
+        min_valid_pairs=1,
+        min_valid_cycles=1,
+        horizons_minutes=(5,),
+        primary_horizon_minutes=5,
+        targets=("heating_capacity",),
+        primary_target="heating_capacity",
+        lead_target="heating_capacity",
+    )
+
+    cycles = build_cycle_slices(frame, summary, interval_seconds=10)
+    assert cycles[0].eligible is False
+    assert cycles[0].exclusion_reason == "no_complete_frost_grid_bucket"
+    assert cycles[0].grid_coverage == 0.0
+
+    bundle = build_evidence_bundle(
+        frame,
+        summary,
+        policy,
+        channels,
+        grid_interval_seconds=10,
+    )
+    eligibility = bundle.cycle_eligibility
+    metrics = bundle.feature_cycle_metrics
+    future = bundle.future_association
+    pair = bundle.feature_pair_similarity
+
+    assert eligibility["eligible_feature_count"].eq(0).all()
+    assert eligibility["exclusion_reason"].eq("no_complete_frost_grid_bucket").all()
+    assert metrics["metric_status"].eq("unavailable").all()
+    assert metrics["metric_exclusion_reason"].eq(
+        "no_complete_frost_grid_bucket"
+    ).all()
+    assert future["metric_status"].eq("unavailable").all()
+    assert future["exclusion_reason"].eq("no_complete_frost_grid_bucket").all()
+    assert pair["evaluated_cycle_count"].eq(0).all()
+    assert pair["valid_cycle_count"].eq(0).all()
+    assert pair["similarity_status"].eq("no_valid_evidence").all()
+
+
 def test_profile_trend_median_is_date_balanced() -> None:
     metrics = pd.DataFrame(
         {
