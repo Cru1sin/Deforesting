@@ -85,7 +85,7 @@ def expected_grid(
     end: pd.Timestamp,
     interval_seconds: int,
 ) -> pd.DatetimeIndex:
-    """Return buckets whose complete intervals lie inside ``[start, end)``."""
+    """Return Process fixed-bucket left labels fully contained in ``[start, end)``."""
     if interval_seconds <= 0 or end <= start:
         return pd.DatetimeIndex([])
     first = start.ceil(f"{interval_seconds}s")
@@ -127,26 +127,30 @@ def build_cycle_slices(
         frost = frame.loc[frame["cycle_stage"].eq(STAGE)].copy()
         if frost["timestamp"].duplicated().any():
             raise ValueError(f"duplicate processed timestamp in cycle {key}")
+        frost_times = pd.DatetimeIndex(pd.to_datetime(frost["timestamp"], errors="raise"))
         start = _timestamp(summary.get("stable_heating_start"))
         end = _timestamp(summary.get("defrost_start"))
         grid = expected_grid(start, end, interval_seconds) if start and end else pd.DatetimeIndex([])
-        actual = set(pd.to_datetime(frost["timestamp"], errors="raise"))
+        actual = set(frost_times)
         grid_coverage = float(len(actual & set(grid)) / len(grid)) if len(grid) else 0.0
         status = _cycle_status(summary, frame)
         status_reason = _cycle_status_reason(summary, frame)
         boundary_complete = start is not None and end is not None and start < end
-        boundary_mismatch = bool(
-            not frost.empty
-            and boundary_complete
-            and (
-                frost["timestamp"].lt(start).any()
-                or frost["timestamp"].ge(end).any()
+        boundary_mismatch = False
+        grid_mismatch = False
+        if len(frost_times) and boundary_complete:
+            assert start is not None and end is not None
+            boundary_mismatch = bool(
+                (frost_times < start).any() or (frost_times >= end).any()
             )
-        )
+            grid_mismatch = bool(
+                not boundary_mismatch and not frost_times.isin(grid).all()
+            )
         eligible = bool(
             boundary_complete
             and not frost.empty
             and not boundary_mismatch
+            and not grid_mismatch
             and (
                 status == "valid"
                 or (status == "incomplete" and status_reason == "defrost_end_not_observed")
@@ -155,13 +159,13 @@ def build_cycle_slices(
         exclusion: str | None = None
         if not eligible:
             exclusion = _cycle_exclusion_reason(
-                key,
                 frame,
                 frost,
                 status,
                 status_reason,
                 boundary_complete,
                 boundary_mismatch,
+                grid_mismatch,
             )
         slices.append(
             CycleSlice(
@@ -199,7 +203,11 @@ def resolve_analysis_reference(
     configured_baseline_end: pd.Timestamp | None = None,
     analysis_grid: pd.DatetimeIndex | None = None,
 ) -> ResolvedReference:
-    """Resolve a configured reference, otherwise the fixed initial grid window."""
+    """Resolve a configured or initial-grid reference.
+
+    ``cycle_start`` is retained for public API compatibility and is not used
+    by the current reference definition.
+    """
     output_on_analysis_grid = analysis_grid is not None
     grid = analysis_grid
     if grid is None:
@@ -398,7 +406,6 @@ def future_records(
                         feature_cache,
                         target_cache,
                         policy,
-                        interval_seconds,
                         horizon_buckets,
                     )
                 )
@@ -415,7 +422,6 @@ def _future_record(
     feature_cache: CycleChannelEvidence,
     target_cache: CycleChannelEvidence,
     policy: EvidencePolicy,
-    interval_seconds: int,
     horizon_buckets: int,
 ) -> dict[str, object]:
     feature_reference = feature_cache.reference
@@ -511,8 +517,6 @@ def _future_record(
         base["lead_time_minutes"], base["lead_time_status"] = _lead_time(
             feature_cache,
             target_cache,
-            cycle,
-            policy,
         )
     return base
 
@@ -520,8 +524,6 @@ def _future_record(
 def _lead_time(
     feature_cache: CycleChannelEvidence,
     target_cache: CycleChannelEvidence,
-    cycle: CycleSlice,
-    policy: EvidencePolicy,
 ) -> tuple[float, str]:
     feature_onset = feature_cache.onset_elapsed_minutes
     target_onset = target_cache.onset_elapsed_minutes
@@ -935,18 +937,20 @@ def _cycle_status_reason(summary: pd.Series, frame: pd.DataFrame) -> str | None:
 
 
 def _cycle_exclusion_reason(
-    key: tuple[str, str, str],
     frame: pd.DataFrame,
     frost: pd.DataFrame,
     status: str,
     status_reason: str | None,
     boundary_complete: bool,
     boundary_mismatch: bool,
+    grid_mismatch: bool,
 ) -> str:
     if frame.empty:
         return "processed_cycle_unavailable"
     if boundary_mismatch:
         return "frost_stage_boundary_mismatch"
+    if grid_mismatch:
+        return "frost_stage_grid_mismatch"
     if status == "invalid":
         return "cycle_invalid"
     if status == "incomplete" and status_reason != "defrost_end_not_observed":
