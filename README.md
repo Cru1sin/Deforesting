@@ -143,7 +143,7 @@ python -m frost_analysis run \
 | 科研 QA 图片 | `src/frost_analysis/report.py` |
 | 阶段编排 | `src/frost_analysis/pipeline.py` |
 | 合同检查 | `src/frost_analysis/validation.py` |
-| Cycle Dataset 发布 | `src/frost_analysis/dataset.py`、`dataset_images.py`、`dataset_validation.py` |
+| Cycle Dataset 发布与读取 | `src/frost_analysis/dataset.py`、`dataset_images.py`、`dataset_loader.py`、`dataset_manifest.py`、`dataset_validation.py` |
 
 建议阅读顺序：
 
@@ -188,28 +188,32 @@ outputs/qa/<date>/
 
 Report 只读取正式输出，允许为展示进行筛选、分组、遮罩、计数、排序、布局和 hash；不重新执行循环切分、重采样、coverage 阈值、插补、派生公式、baseline/residual、相关性、未来/context evidence、方向一致性或 decision。
 
-## Cycle Dataset 发布层
+## Cycle Dataset 自包含发布层
 
-正式 run 可以在不重跑科学 Pipeline 的情况下发布为跨日期的 cycle Dataset。Dataset 将每个
-有 Processed 行的 cycle 写成独立 Parquet，并从 Prepared 导出全部匹配图片；`cycle_index`
-和 `image_index` 记录来源、路径、数量和 SHA-256。无 Processed 行的 Summary cycle 仍保留
-在 `cycle_index`，但不发布 cycle 文件。
+正式 run 可以在不重跑科学 Pipeline 的情况下发布为自包含的 cycle Dataset。每个 Summary
+cycle 都保存 Parquet、CSV、publication PNG 和 RGB coverage PNG；Prepared 中的全部匹配图片
+进入 `images/<cycle>/<camera_role>/`，当前父目录名是 camera role 的权威来源。Manifest 使用
+单一可人工修改的 assessment，`DatasetLoader` 是所有 Dataset 下游的统一读取入口。
 
 ```bash
-python -m frost_analysis dataset build \
-  --run outputs/runs/0715 \
-  --run outputs/runs/0716 \
-  --output outputs/datasets/frost_cycles_v1
+python -m frost_analysis dataset add \
+  --run outputs/runs/0714 \
+  --dataset outputs/datasets/frost_cycles_v2
 
-python -m frost_analysis dataset append \
-  --run outputs/runs/0720 \
-  --dataset outputs/datasets/frost_cycles_v1
+python -m frost_analysis dataset add \
+  --run outputs/runs/0715 \
+  --dataset outputs/datasets/frost_cycles_v2
 
 python -m frost_analysis dataset validate \
-  --input outputs/datasets/frost_cycles_v1
+  --input outputs/datasets/frost_cycles_v2
+
+python -m frost_analysis analysis \
+  --dataset outputs/datasets/frost_cycles_v2 \
+  --status valid \
+  --output outputs/analysis/frost_cycles_v2
 ```
 
-Dataset 的目录、身份、图片导出、Append 和独立验证合同见
+Dataset 的目录、单一 assessment、图片角色、Loader、追加和独立验证合同见
 [`docs/dataset_contract.md`](docs/dataset_contract.md)。Dataset 层只组织正式产物，不重新
 执行循环切分、重采样、缺失处理、Baseline、特征工程或候选证据分析。
 

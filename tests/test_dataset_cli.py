@@ -65,3 +65,41 @@ def test_dataset_cli_dispatches_append_and_validate(
     assert cli.main(["dataset", "validate", "--input", str(dataset)]) == 0
     assert calls["validate"] == dataset
     assert capsys.readouterr().out.strip() == "dataset valid: 1 published cycles, 2 images"
+
+
+def test_dataset_cli_dispatches_v2_add_and_review(
+    monkeypatch: object, tmp_path: Path, capsys: object
+) -> None:
+    calls: dict[str, object] = {}
+    dataset = tmp_path / "frost_dataset"
+
+    def fake_add(run: Path, output: Path) -> Path:
+        calls["add"] = (run, output)
+        return output
+
+    def fake_review(output: Path, cycle: str, *, status: str, note: str | None) -> None:
+        calls["review"] = (output, cycle, status, note)
+
+    monkeypatch.setattr(cli, "add_dataset", fake_add)
+    monkeypatch.setattr(cli, "review_cycle", fake_review)
+    assert cli.main(
+        ["dataset", "add", "--run", "outputs/runs/0714", "--dataset", str(dataset)]
+    ) == 0
+    assert calls["add"] == (Path("outputs/runs/0714"), dataset)
+    assert capsys.readouterr().out.strip() == str(dataset)
+
+    assert cli.main(
+        [
+            "dataset",
+            "review-cycle",
+            "--dataset",
+            str(dataset),
+            "--cycle",
+            "frost_cycle_000001",
+            "--status",
+            "partial",
+            "--note",
+            "manual",
+        ]
+    ) == 0
+    assert calls["review"] == (dataset, "frost_cycle_000001", "partial", "manual")

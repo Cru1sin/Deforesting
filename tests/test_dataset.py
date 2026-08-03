@@ -127,6 +127,59 @@ def test_logical_schema_rejects_real_type_changes() -> None:
         logical_schema_compatible(left, right)
 
 
+@pytest.mark.parametrize(
+    ("expected", "actual", "message_parts"),
+    [
+        (
+            [
+                {"name": "signal", "logical_type": "double", "nullable": True},
+                {"name": "image_front_path", "logical_type": "string", "nullable": True},
+            ],
+            [
+                {"name": "signal", "logical_type": "double", "nullable": True},
+                {
+                    "name": "image_unverified_camera_01_path",
+                    "logical_type": "string",
+                    "nullable": True,
+                },
+            ],
+            (
+                "missing columns: ['image_front_path']",
+                "extra columns: ['image_unverified_camera_01_path']",
+            ),
+        ),
+        (
+            [
+                {"name": "first", "logical_type": "double", "nullable": True},
+                {"name": "second", "logical_type": "double", "nullable": True},
+            ],
+            [
+                {"name": "second", "logical_type": "double", "nullable": True},
+                {"name": "first", "logical_type": "double", "nullable": True},
+            ],
+            ("order changed: true",),
+        ),
+        (
+            [{"name": "signal", "logical_type": "double", "nullable": True}],
+            [{"name": "signal", "logical_type": "string", "nullable": True}],
+            ("type changes: ['signal: double -> string']",),
+        ),
+    ],
+)
+def test_logical_schema_reports_actionable_difference(
+    expected: list[dict[str, object]],
+    actual: list[dict[str, object]],
+    message_parts: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValueError) as error:
+        logical_schema_compatible(expected, actual)
+
+    message = str(error.value)
+    assert "Processed schema mismatch:" in message
+    for part in message_parts:
+        assert part in message
+
+
 def test_load_source_run_keeps_paths_and_hashes_only(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname='test'\n", encoding="utf-8")
     input_dir = tmp_path / "data" / "0715"

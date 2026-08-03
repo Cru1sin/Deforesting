@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .dataset_loader import DatasetLoader
 
 EVIDENCE_COLUMNS = [
     "experiment_id",
@@ -296,6 +300,85 @@ def _median_or_nan(values: list[float]) -> float:
 
 def _quality_mask(frame: pd.DataFrame, column: str) -> pd.Series:
     return frame[column].astype("boolean").fillna(False).astype(bool)
+
+
+def run_analysis(
+    loader: DatasetLoader,
+    *,
+    statuses: set[str] | None = None,
+    experiment_ids: set[str] | None = None,
+    cycle_names: set[str] | None = None,
+    output_dir: Path,
+) -> Path:
+    """Run Loader-driven, reproducible cycle summaries outside the Dataset.
+
+    The existing ``analyze`` function above remains the scientific Pipeline stage
+    that consumes a formal Processed snapshot.  This function is the downstream
+    Dataset entry point: it only reads cycle files and image metadata supplied by
+    DatasetLoader and writes regenerable summaries.
+    """
+    from .dataset_loader import DatasetLoader
+    from .io import ensure_output_outside_input
+
+    if not isinstance(loader, DatasetLoader):
+        raise TypeError("run_analysis requires DatasetLoader")
+    ensure_output_outside_input(output_dir, loader.dataset_root)
+    selected = loader.list_cycles(statuses=statuses, experiment_ids=experiment_ids)
+    if cycle_names is not None:
+        selected = selected.loc[selected["cycle_name"].isin(cycle_names)]
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    statistics: list[dict[str, object]] = []
+    image_statistics: list[dict[str, object]] = []
+    for cycle_name in selected["cycle_name"].astype(str):
+        record = loader.get_cycle_record(cycle_name)
+        frame = loader.load_cycle(cycle_name)
+        images = loader.load_cycle_images(cycle_name)
+        statistics.extend(_cycle_numeric_statistics(frame, record))
+        image_statistics.append(
+            {
+                "cycle_name": cycle_name,
+                "status": _assessment_status(record),
+                "image_count": len(images),
+                "camera_role_count": images["camera_role"].nunique()
+                if not images.empty
+                else 0,
+            }
+        )
+    pd.DataFrame(statistics).to_csv(output_dir / "cycle_statistics.csv", index=False)
+    pd.DataFrame(image_statistics).to_csv(
+        output_dir / "image_sensor_alignment.csv", index=False
+    )
+    return output_dir
+
+
+def _cycle_numeric_statistics(
+    frame: pd.DataFrame,
+    record: Mapping[str, object],
+) -> list[dict[str, object]]:
+    cycle_name = str(record["cycle_name"])
+    rows: list[dict[str, object]] = []
+    for column in frame.select_dtypes(include="number").columns:
+        values = pd.to_numeric(frame[column], errors="coerce").dropna()
+        rows.append(
+            {
+                "cycle_name": cycle_name,
+                "column": str(column),
+                "row_count": int(len(values)),
+                "mean": float(values.mean()) if not values.empty else np.nan,
+                "minimum": float(values.min()) if not values.empty else np.nan,
+                "maximum": float(values.max()) if not values.empty else np.nan,
+            }
+        )
+    return rows
+
+
+def _assessment_status(record: Mapping[str, object]) -> str | None:
+    assessment = record.get("assessment")
+    if isinstance(assessment, dict):
+        value = assessment.get("status")
+        return None if value is None else str(value)
+    return None
 
 
 def _require_analysis_quality_columns(

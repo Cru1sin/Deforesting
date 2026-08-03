@@ -11,10 +11,12 @@ from pathlib import Path
 import pandas as pd
 
 from frost_analysis import run_pipeline
-from frost_analysis.analysis import analyze
+from frost_analysis.analysis import analyze, run_analysis
 from frost_analysis.channels import load_channels
 from frost_analysis.config import find_project_root, load_config, load_evidence_settings
-from frost_analysis.dataset import append_dataset, build_dataset
+from frost_analysis.dataset import add_dataset, append_dataset, build_dataset
+from frost_analysis.dataset_loader import DatasetLoader
+from frost_analysis.dataset_manifest import refresh_manifest, review_cycle
 from frost_analysis.dataset_validation import validate_dataset
 from frost_analysis.evidence import build_evidence_bundle
 from frost_analysis.io import (
@@ -30,6 +32,10 @@ from frost_analysis.prepare import prepare
 from frost_analysis.process import process
 from frost_analysis.report import generate_report
 from frost_analysis.validation import validate_analysis, validate_prepared, validate_processed
+from frost_analysis.visualization import (
+    generate_cycle_publication,
+    generate_rgb_coverage,
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
@@ -47,6 +53,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     process_parser.add_argument("--overwrite", action="store_true")
     analyze_parser = subparsers.add_parser("analyze")
     _add_analyze_arguments(analyze_parser)
+    analysis_parser = subparsers.add_parser("analysis")
+    _add_dataset_analysis_arguments(analysis_parser)
     report_parser = subparsers.add_parser("report")
     _add_report_input_output(report_parser)
     report_parser.add_argument("--overwrite", action="store_true")
@@ -54,6 +62,21 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     arguments = parser.parse_args(argv)
     if arguments.command == "dataset":
         return _run_dataset_command(arguments)
+    if arguments.command == "analysis":
+        loader = DatasetLoader(arguments.dataset)
+        statuses = set(arguments.status) if arguments.status else None
+        experiments = set(arguments.experiment) if arguments.experiment else None
+        cycle_names = set(arguments.cycle) if arguments.cycle else None
+        print(
+            run_analysis(
+                loader,
+                statuses=statuses,
+                experiment_ids=experiments,
+                cycle_names=cycle_names,
+                output_dir=arguments.output,
+            )
+        )
+        return 0
     if arguments.command == "run":
         run_dir = run_pipeline(arguments.config, arguments.output, arguments.overwrite)
         if arguments.report:
@@ -150,6 +173,18 @@ def _add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--overwrite", action="store_true")
 
 
+def _add_dataset_analysis_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--dataset", required=True, type=Path)
+    parser.add_argument(
+        "--status",
+        action="append",
+        choices=["valid", "partial", "incomplete", "invalid"],
+    )
+    parser.add_argument("--experiment", action="append", default=[])
+    parser.add_argument("--cycle", action="append", default=[])
+    parser.add_argument("--output", required=True, type=Path)
+
+
 def _add_report_input_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
@@ -170,8 +205,57 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     validate_parser = dataset_commands.add_parser("validate")
     validate_parser.add_argument("--input", required=True, type=Path)
 
+    add_parser = dataset_commands.add_parser("add")
+    add_parser.add_argument("--run", required=True, type=Path)
+    add_parser.add_argument("--dataset", required=True, type=Path)
 
-def _run_dataset_command(arguments: argparse.Namespace) -> int:
+    refresh_parser = dataset_commands.add_parser("refresh-manifest")
+    refresh_parser.add_argument("--dataset", required=True, type=Path)
+
+    review_parser = dataset_commands.add_parser("review-cycle")
+    review_parser.add_argument("--dataset", required=True, type=Path)
+    review_parser.add_argument("--cycle", required=True)
+    review_parser.add_argument(
+        "--status",
+        required=True,
+        choices=["valid", "partial", "incomplete", "invalid"],
+    )
+    review_parser.add_argument("--note")
+
+    render_parser = dataset_commands.add_parser("render")
+    render_parser.add_argument("--dataset", required=True, type=Path)
+    render_parser.add_argument("--cycle", required=True)
+    render_parser.add_argument("--publication", action="store_true")
+    render_parser.add_argument("--coverage", action="store_true")
+
+
+def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
+    if arguments.dataset_command == "add":
+        print(add_dataset(arguments.run, arguments.dataset))
+        return 0
+    if arguments.dataset_command == "refresh-manifest":
+        print(refresh_manifest(arguments.dataset))
+        return 0
+    if arguments.dataset_command == "review-cycle":
+        review_cycle(
+            arguments.dataset,
+            arguments.cycle,
+            status=arguments.status,
+            note=arguments.note,
+        )
+        print(arguments.dataset)
+        return 0
+    if arguments.dataset_command == "render":
+        loader = DatasetLoader(arguments.dataset)
+        if not arguments.publication and not arguments.coverage:
+            arguments.publication = True
+            arguments.coverage = True
+        if arguments.publication:
+            generate_cycle_publication(loader, arguments.cycle)
+        if arguments.coverage:
+            generate_rgb_coverage(loader, arguments.cycle)
+        print(arguments.dataset)
+        return 0
     if arguments.dataset_command == "build":
         print(build_dataset(arguments.run, arguments.output))
         return 0
@@ -182,6 +266,14 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:
     manifest = json.loads(
         (arguments.input / "dataset_manifest.json").read_text(encoding="utf-8")
     )
+    if manifest.get("dataset_schema_version") == 2:
+        cycle_index = pd.read_parquet(arguments.input / "cycle_index.parquet")
+        image_metadata = pd.read_parquet(arguments.input / "image_metadata.parquet")
+        print(
+            "dataset valid: "
+            f"{len(cycle_index)} cycles, {len(image_metadata)} images"
+        )
+        return 0
     print(
         "dataset valid: "
         f"{manifest['published_cycle_count']} published cycles, "
