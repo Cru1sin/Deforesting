@@ -373,7 +373,7 @@ def test_structural_validators_reject_invalid_fields() -> None:
         validate_analysis(evidence.assign(weighted_score=1.0))
 
 
-def test_processed_validator_rejects_partial_rows() -> None:
+def test_processed_validator_accepts_partial_fallback_rows() -> None:
     processed = pd.DataFrame(
         {
             "experiment_id": ["exp_test"],
@@ -382,8 +382,18 @@ def test_processed_validator_rejects_partial_rows() -> None:
             "cycle_stage": ["partial"],
             "cycle_status": ["incomplete"],
             "cycle_progress": [np.nan],
+            "cycle_elapsed_seconds": [np.nan],
+            "temperature": [1.0],
+            "temperature__imputed": pd.Series([False], dtype=bool),
         }
     )
-    summary = pd.DataFrame({"experiment_id": ["exp_test"], "cycle_id": ["partial_001"]})
-    with pytest.raises(ValueError, match="partial"):
-        validate_processed(processed, summary)
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "cycle_id": ["partial_001"],
+            "baseline_status": ["not_applicable"],
+            "baseline_failure_reason": ["cycle_not_valid"],
+        }
+    )
+
+    validate_processed(processed, summary)

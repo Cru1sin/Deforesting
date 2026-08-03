@@ -51,8 +51,6 @@ def validate_processed(frame: pd.DataFrame, cycle_summary: pd.DataFrame) -> None
     _unique(cycle_summary, ["experiment_id", "cycle_id"])
     _validate_cycle_references(frame, cycle_summary, require_exact=False)
     _validate_cycle_labels(frame, "processed")
-    if frame["cycle_stage"].eq("partial").any():
-        raise ValueError("processed data must not contain partial rows")
     _validate_progress(frame)
     _validate_elapsed(frame)
     for column in frame.columns:

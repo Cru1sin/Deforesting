@@ -29,10 +29,12 @@ def process(
         ["experiment_id", "timestamp", "cycle_id", "cycle_stage", "cycle_status"],
     )
     _validate_cycle_summary_input(prepared, initial_summary)
-    source = prepared.copy()
-    source = source.loc[source["cycle_stage"].ne("partial")].copy()
+    scientific_source, fallback_source = _partition_process_inputs(prepared, initial_summary)
+    scientific_source = scientific_source.loc[
+        scientific_source["cycle_stage"].ne("partial")
+    ].copy()
     eligible_channels = _eligible_continuous_channels(prepared, channels)
-    masked = _mask_duplicate_values(source, channels)
+    masked = _mask_duplicate_values(scientific_source, channels)
     interval_seconds = config.process.resample_interval_seconds
     (
         resampled,
@@ -65,6 +67,18 @@ def process(
         interval_seconds=interval_seconds,
         windows_minutes=list(config.process.feature_windows_minutes),
     )
+    fallback = _resample_fallback(
+        _mask_duplicate_values(fallback_source, channels),
+        channels,
+        interval_seconds,
+    ).reindex(columns=featured.columns)
+    for column in fallback.columns:
+        if str(column).endswith("__imputed"):
+            fallback[column] = False
+    if featured.empty:
+        featured = fallback.copy()
+    elif not fallback.empty:
+        featured = pd.concat([featured, fallback], ignore_index=True)
     featured = featured.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
@@ -77,6 +91,27 @@ def process(
         processed_cycles,
     )
     return featured, final_summary
+
+
+def _partition_process_inputs(
+    prepared: pd.DataFrame, cycle_summary: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    summary_lookup = _summary_lookup(cycle_summary)
+    scientific_indices: list[object] = []
+    fallback_indices: list[object] = []
+    for group_values, group in prepared.groupby(
+        ["experiment_id", "cycle_id"], sort=False, dropna=False
+    ):
+        key = tuple(str(value) for value in group_values)
+        summary = summary_lookup[key]
+        target = (
+            scientific_indices
+            if str(group["cycle_status"].iloc[0]) == "valid"
+            and _has_complete_boundaries(summary)
+            else fallback_indices
+        )
+        target.extend(group.index.tolist())
+    return prepared.loc[scientific_indices].copy(), prepared.loc[fallback_indices].copy()
 
 
 def _mask_duplicate_values(
@@ -199,6 +234,42 @@ def _resample(
         eligible_channel_buckets,
         processed_cycles,
     )
+
+
+def _resample_fallback(
+    frame: pd.DataFrame,
+    channels: Mapping[str, Mapping[str, Any]],
+    interval_seconds: int,
+) -> pd.DataFrame:
+    roles = image_roles(frame)
+    if frame.empty:
+        return pd.DataFrame(columns=_processed_columns(channels, list(roles)))
+    source = frame.copy()
+    frequency = f"{interval_seconds}s"
+    source["_process_bucket"] = source["timestamp"].dt.floor(frequency)
+    rows: list[dict[str, object]] = []
+    keys = ["experiment_id", "cycle_id", "_process_bucket"]
+    for group_values, bucket in source.groupby(keys, sort=False, dropna=False):
+        ordered = bucket.sort_values("timestamp", kind="stable")
+        experiment_id, cycle_id = (str(value) for value in group_values[:2])
+        timestamp = pd.Timestamp(group_values[2])
+        stage = str(ordered["cycle_stage"].iloc[-1])
+        row = _identity_row(ordered, (experiment_id, cycle_id, stage), timestamp)
+        for name, settings in channels.items():
+            if str(settings.get("kind")) != "derived":
+                row[name] = _aggregate_channel(ordered, name, settings)
+        for role in roles:
+            _add_bucket_image(
+                row,
+                _image_records(ordered, role),
+                role,
+                timestamp,
+                interval_seconds,
+            )
+        rows.append(row)
+    return pd.DataFrame(rows).sort_values(
+        ["experiment_id", "timestamp"], kind="stable"
+    ).reset_index(drop=True)
 
 
 def _identity_row(
@@ -613,16 +684,17 @@ def _summary_lookup(cycle_summary: pd.DataFrame) -> dict[tuple[str, str], pd.Ser
 
 def _validate_cycle_summary_input(prepared: pd.DataFrame, summary: pd.DataFrame) -> None:
     lookup = _summary_lookup(summary)
-    grouped = prepared.loc[prepared["cycle_stage"].ne("partial")].groupby(
-        ["experiment_id", "cycle_id"], sort=False, dropna=False
-    )
+    grouped = prepared.groupby(["experiment_id", "cycle_id"], sort=False, dropna=False)
+    prepared_keys: set[tuple[str, str]] = set()
     for group_values, group in grouped:
         key = tuple(str(value) for value in group_values)
+        prepared_keys.add(key)
         if key not in lookup:
             raise ValueError(f"missing cycle summary for cycle {key[1]}")
-        cycle = lookup[key]
         status = str(group["cycle_status"].iloc[0])
         if status not in {"valid", "invalid", "incomplete"}:
             raise ValueError(f"invalid cycle status for cycle {key[1]}")
-        if not _has_complete_boundaries(cycle) and status != "incomplete":
-            raise ValueError(f"cycle {key[1]} is missing required boundaries")
+    summary_only = set(lookup) - prepared_keys
+    if summary_only:
+        cycle_id = sorted(summary_only)[0][1]
+        raise ValueError(f"cycle summary {cycle_id} is without Prepared rows")

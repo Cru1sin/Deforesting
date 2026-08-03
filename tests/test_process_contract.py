@@ -240,7 +240,26 @@ def test_incomplete_cycle_with_observed_defrost_onset_keeps_observed_processed_g
     processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
     assert not processed.empty
-    assert processed["cop"].notna().any()
+    assert processed["temperature"].notna().any()
+    assert processed["cop"].isna().all()
+
+
+def test_partial_cycle_uses_observed_fallback(tmp_path: Path) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
+    frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0], stage="partial")
+    frame["cycle_id"] = "partial_001"
+    frame["cycle_status"] = "incomplete"
+    summary = _summary(status="incomplete")
+    summary["cycle_id"] = "partial_001"
+    summary[["heating_start", "stable_heating_start", "defrost_start", "defrost_end"]] = pd.NaT
+
+    processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
+
+    assert processed["timestamp"].tolist() == timestamps.tolist()
+    assert processed["cycle_stage"].eq("partial").all()
+    assert processed["cycle_status"].eq("incomplete").all()
+    assert processed["temperature"].tolist() == [1.0, 2.0, 3.0]
+    assert final_summary.loc[0, "processed_row_count"] == 3
 
 
 def test_cop_preserves_dependency_gaps_instead_of_using_filled_values(
@@ -495,30 +514,66 @@ def test_process_rejects_non_divisible_coverage_grid(tmp_path: Path) -> None:
         _config(tmp_path, expected_interval=3)
 
 
-def test_incomplete_cycle_without_boundaries_is_excluded_with_nan_diagnostics(
+def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
     tmp_path: Path,
 ) -> None:
-    timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
-    frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0])
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:01",
+            "2026-07-15 00:00:10",
+            "2026-07-15 00:00:11",
+        ]
+    )
+    frame = _frame(timestamps, temperature=[1.0, 3.0, 5.0, 7.0])
     frame["cycle_status"] = "incomplete"
+    for suffix in ("__missing", "__invalid", "__duplicate", "__conflict"):
+        frame[f"temperature{suffix}"] = False
     summary = _summary(status="incomplete", defrost="2026-07-15 00:05:00")
     summary["defrost_end"] = pd.NaT
 
-    processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
+    processed, final_summary = process(
+        frame,
+        summary,
+        _config(tmp_path, expected_interval=10),
+        _channels(),
+    )
 
-    assert processed.empty
-    assert pd.isna(final_summary.loc[0, "excluded_transition_bucket_count"])
-    assert pd.isna(final_summary.loc[0, "low_coverage_channel_bucket_count"])
-    assert pd.isna(final_summary.loc[0, "eligible_continuous_channel_bucket_count"])
+    expected_timestamps = list(pd.date_range(timestamps[0], periods=2, freq="10s"))
+    assert processed["timestamp"].tolist() == expected_timestamps
+    assert processed["temperature"].tolist() == [2.0, 6.0]
+    assert processed["cycle_stage"].eq("frost_development").all()
+    assert processed["cycle_status"].eq("incomplete").all()
+    assert processed["cycle_progress"].isna().all()
+    assert processed["cycle_elapsed_seconds"].isna().all()
+    assert processed["cop"].isna().all()
+    assert processed["temperature__baseline"].isna().all()
+    assert processed["temperature__baseline_residual"].isna().all()
+    assert processed["temperature__lag_1min"].isna().all()
+    assert processed["temperature__delta_1min"].isna().all()
+    assert processed["temperature__rolling_mean_1min"].isna().all()
+    imputed_columns = [column for column in processed if column.endswith("__imputed")]
+    assert imputed_columns
+    assert not processed[imputed_columns].any(axis=None)
+    assert not any(
+        column.endswith(("__missing", "__invalid", "__duplicate", "__conflict"))
+        for column in processed
+    )
+    assert final_summary.loc[0, "processed_row_count"] == 2
 
 
-def test_valid_cycle_without_boundaries_is_a_process_contract_error(tmp_path: Path) -> None:
+def test_valid_cycle_without_boundaries_uses_observed_fallback(tmp_path: Path) -> None:
     frame = _frame(pd.date_range("2026-07-15", periods=2, freq="10s"), temperature=[1.0, 2.0])
     summary = _summary()
     summary["defrost_end"] = pd.NaT
 
-    with pytest.raises(ValueError, match="missing required boundaries"):
-        process(frame, summary, _config(tmp_path), _channels())
+    processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
+
+    assert processed["timestamp"].tolist() == frame["timestamp"].tolist()
+    assert processed["temperature"].tolist() == frame["temperature"].tolist()
+    assert processed["cop"].isna().all()
+    assert processed["cycle_progress"].isna().all()
+    assert final_summary.loc[0, "processed_row_count"] == 2
 
 
 def test_nonpartial_cycle_without_summary_is_a_process_contract_error(tmp_path: Path) -> None:
@@ -526,6 +581,16 @@ def test_nonpartial_cycle_without_summary_is_a_process_contract_error(tmp_path: 
 
     with pytest.raises(ValueError, match="missing cycle summary"):
         process(frame, _summary().iloc[0:0], _config(tmp_path), _channels())
+
+
+def test_summary_cycle_without_prepared_rows_is_a_process_contract_error(tmp_path: Path) -> None:
+    frame = _frame(pd.date_range("2026-07-15", periods=2, freq="10s"), temperature=[1.0, 2.0])
+    summary_only = _summary(status="incomplete")
+    summary_only["cycle_id"] = "cycle_002"
+    summary = pd.concat([_summary(), summary_only], ignore_index=True)
+
+    with pytest.raises(ValueError, match="without Prepared rows"):
+        process(frame, summary, _config(tmp_path), _channels())
 
 
 def test_cop_does_not_mark_an_unfilled_dependency_as_imputed(tmp_path: Path) -> None:
@@ -544,12 +609,16 @@ def test_cop_does_not_mark_an_unfilled_dependency_as_imputed(tmp_path: Path) -> 
 def test_invalid_cycle_has_no_baseline_and_does_not_change_status(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
     frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0])
+    frame["cycle_status"] = "invalid"
     summary = _summary(status="invalid", defrost="2026-07-15 00:05:00")
 
     processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
 
     assert final_summary.loc[0, "cycle_status"] == "invalid"
     assert final_summary.loc[0, "baseline_status"] == "not_applicable"
+    assert processed["temperature"].tolist() == [1.0, 2.0, 3.0]
+    assert processed["cop"].isna().all()
+    assert processed["cycle_progress"].isna().all()
     assert processed["temperature__baseline"].isna().all()
     assert processed["temperature__baseline_residual"].isna().all()
 
