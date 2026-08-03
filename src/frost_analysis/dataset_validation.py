@@ -594,6 +594,20 @@ def _validate_v2_structure(  # noqa: C901
             raise ValueError(f"manifest file SHA mismatch: {name}")
     cycle_index = pd.read_parquet(dataset_dir / "cycle_index.parquet")
     image_metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    expected_manifest_counts = {
+        "summary_cycle_count": len(cycle_index),
+        "image_count": len(image_metadata),
+    }
+    for name, expected in expected_manifest_counts.items():
+        if manifest.get(name) != expected:
+            raise ValueError(f"manifest count disagrees: {name}")
+    for name, expected in (
+        ("cycle_index", len(cycle_index)),
+        ("image_metadata", len(image_metadata)),
+    ):
+        entry = manifest.get(name)
+        if not isinstance(entry, dict) or entry.get("row_count") != expected:
+            raise ValueError(f"manifest row count disagrees: {name}")
     _require_columns(cycle_index, _V2_CYCLE_COLUMNS, "cycle_index")
     _require_columns(image_metadata, _V2_IMAGE_COLUMNS, "image_metadata")
     if cycle_index.duplicated(["cycle_name"]).any() or cycle_index.duplicated(["cycle_uid"]).any():
@@ -677,6 +691,17 @@ def _validate_v2_new_assets(  # noqa: C901
         expected = image_metadata.loc[image_metadata["cycle_name"].eq(cycle_name)]
         if set(scanned["image_id"].astype(str)) != set(expected["image_id"].astype(str)):
             raise ValueError(f"new image metadata does not match files: {cycle_name}")
+        expected_by_id = {
+            str(row["image_id"]): row for row in expected.to_dict(orient="records")
+        }
+        for row in scanned.to_dict(orient="records"):
+            image_id = str(row["image_id"])
+            path = Path(str(row["path"]))
+            metadata = expected_by_id[image_id]
+            if sha256_file(path) != str(metadata["sha256"]):
+                raise ValueError(f"image SHA mismatch: {path}")
+            if path.stat().st_size != int(metadata["file_size_bytes"]):
+                raise ValueError(f"image size mismatch: {path}")
 
 
 def _validate_v2_cycle_schema(path: Path, source_schema: list[object]) -> None:

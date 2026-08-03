@@ -9,7 +9,6 @@ import pandas as pd
 import pytest
 import yaml
 
-from frost_analysis.cli import main
 from frost_analysis.config import EvidencePolicy, load_evidence_settings
 from frost_analysis.config import is_iso_date as config_is_iso_date
 from frost_analysis.evidence import (
@@ -959,25 +958,6 @@ def test_pair_coverage_audit_separates_evaluated_and_valid_cycles() -> None:
     assert row["valid_cycle_count"] == 1
     assert row["valid_date_count"] == 1
     assert row["pair_coverage_median"] == pytest.approx(0.7)
-
-
-def test_cli_rejects_mixed_evidence_input_modes() -> None:
-    with pytest.raises(SystemExit):
-        main(
-            [
-                "analyze",
-                "--config",
-                "config.yaml",
-                "--input",
-                "processed.parquet",
-                "--cycles",
-                "cycles.csv",
-                "--run-dir",
-                "run",
-                "--output",
-                "output",
-            ]
-        )
 
 
 def test_trend_metrics_survive_unavailable_reference(tmp_path: Path) -> None:

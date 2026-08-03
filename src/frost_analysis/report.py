@@ -504,17 +504,24 @@ def _plot_one_cycle_publication(
     cycle: pd.Series,
     path: Path,
     warnings: list[dict[str, str]],
+    *,
+    processed_only: bool = False,
+    include_humidity: bool = False,
 ) -> None:
-    figure = plt.figure(figsize=(7.2, 10.8), dpi=_PLOT_DPI)
+    humidity_channels = _humidity_columns(processed) if include_humidity else []
+    height_ratios = _PUBLICATION_HEIGHT_RATIOS + ((0.9,) if humidity_channels else ())
+    figure = plt.figure(figsize=(7.2, 10.8 + 1.25 * len(humidity_channels)), dpi=_PLOT_DPI)
     grid = figure.add_gridspec(
-        6,
+        len(height_ratios),
         1,
-        height_ratios=_PUBLICATION_HEIGHT_RATIOS,
+        height_ratios=height_ratios,
         hspace=0.50,
     )
     ribbon_axis = figure.add_subplot(grid[0, 0])
     axes = [figure.add_subplot(grid[1, 0], sharex=ribbon_axis)]
     axes.extend(figure.add_subplot(grid[index, 0], sharex=axes[0]) for index in range(2, 6))
+    if humidity_channels:
+        axes.append(figure.add_subplot(grid[6, 0], sharex=axes[0]))
     cycle_id = str(cycle["cycle_id"])
     origin = _cycle_time_origin(prepared, cycle)
     gap_intervals = _defrost_state_gap_intervals(prepared)
@@ -524,7 +531,7 @@ def _plot_one_cycle_publication(
     _plot_publication_stage_ribbon(ribbon_axis, cycle, gap_intervals, origin)
 
     _plot_cycle_panels(
-        axes,
+        axes[:5],
         prepared,
         processed,
         cycle,
@@ -532,7 +539,17 @@ def _plot_one_cycle_publication(
         warnings,
         origin,
         publication=True,
+        processed_only=processed_only,
     )
+    if humidity_channels:
+        _plot_humidity_panel(
+            axes[-1],
+            processed,
+            humidity_channels,
+            cycle_id,
+            warnings,
+            origin,
+        )
 
     _add_startup_annotation(axes[2], cycle, origin)
     _finish_cycle_axes(axes, None, publication=True, panel_label_x=-0.11)
@@ -550,6 +567,7 @@ def _plot_cycle_panels(
     warnings: list[dict[str, str]],
     origin: pd.Timestamp,
     publication: bool = False,
+    processed_only: bool = False,
 ) -> None:
     panel_channels = _PUBLICATION_PANEL_CHANNELS if publication else _CYCLE_PANEL_CHANNELS
     axis_labels = _PUBLICATION_AXIS_LABELS if publication else _OVERVIEW_AXIS_LABELS
@@ -562,7 +580,7 @@ def _plot_cycle_panels(
             line_color = _CHANNEL_COLORS[channel]
             line_style = "--" if channel in dashed_channels else "-"
             line_zorder = 3 if channel == "compressor_frequency" else 2
-            if channel == "cop":
+            if channel == "cop" or processed_only:
                 _plot_processed_line(
                     axis,
                     processed,
@@ -702,6 +720,39 @@ def _plot_prepared_line(
     axis.set_ylabel(y_label or label)
     if show_legend:
         axis.legend(loc="upper right", fontsize=8, frameon=False)
+
+
+def _humidity_columns(frame: pd.DataFrame) -> list[str]:
+    return [
+        str(column)
+        for column in frame.columns
+        if "humidity" in str(column).lower() and not str(column).endswith("__imputed")
+    ]
+
+
+def _plot_humidity_panel(
+    axis: Any,
+    frame: pd.DataFrame,
+    columns: list[str],
+    cycle_id: str,
+    warnings: list[dict[str, str]],
+    origin: pd.Timestamp,
+) -> None:
+    for column in columns:
+        _plot_processed_line(
+            axis,
+            frame,
+            column,
+            column,
+            cycle_id,
+            warnings,
+            color="#CC79A7",
+            x_origin=origin,
+            show_legend=False,
+            y_label="Relative humidity [%]",
+        )
+    if len(columns) > 1:
+        axis.legend(frameon=False, fontsize=8, loc="upper left", ncol=3)
 
 
 def _plot_processed_line(

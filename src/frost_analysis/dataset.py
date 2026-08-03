@@ -1319,6 +1319,12 @@ def _v2_cycle_record(
         "experiment_id": str(row["experiment_id"]),
         "experiment_date": str(row["experiment_date"])[:10],
         "source_cycle_id": str(row["cycle_id"]),
+        "heating_start": _summary_time(row.get("heating_start")),
+        "stable_heating_start": _summary_time(row.get("stable_heating_start")),
+        "defrost_start": _summary_time(row.get("defrost_start")),
+        "defrost_end": _summary_time(row.get("defrost_end")),
+        "baseline_start": _summary_time(row.get("baseline_start")),
+        "baseline_end": _summary_time(row.get("baseline_end")),
         "start_time": start_time,
         "end_time": end_time,
         "duration_seconds": duration,
@@ -1426,6 +1432,13 @@ def _maximum_gap(times: pd.Series) -> float:
         return 0.0
     gaps = times.sort_values().diff().dropna().dt.total_seconds()
     return float(gaps.max()) if not gaps.empty else 0.0
+
+
+def _summary_time(value: object) -> str | None:
+    if value is None:
+        return None
+    timestamp = pd.Timestamp(cast(Any, value))
+    return None if pd.isna(timestamp) else timestamp.isoformat()
 
 
 def _write_v2_asset_readme(staging_dataset: Path, dataset_id: str) -> None:

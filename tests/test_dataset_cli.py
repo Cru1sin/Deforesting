@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from frost_analysis import cli
 
 
@@ -103,3 +105,12 @@ def test_dataset_cli_dispatches_v2_add_and_review(
         ]
     ) == 0
     assert calls["review"] == (dataset, "frost_cycle_000001", "partial", "manual")
+
+
+def test_cli_help_does_not_expose_legacy_analyze_entry(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["--help"])
+
+    assert "analyze" not in capsys.readouterr().out

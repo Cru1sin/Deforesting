@@ -125,6 +125,57 @@ def test_rendered_assets_keep_dataset_manifest_hashes_valid(tmp_path: Path) -> N
     validate_dataset(dataset)
 
 
+def test_dataset_publication_uses_existing_report_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _write_run(tmp_path, "frost_0714", "2026-07-14")
+    dataset = tmp_path / "outputs" / "datasets" / "frost_dataset"
+    add_dataset(run, dataset)
+
+    from frost_analysis import report
+    from frost_analysis.visualization import generate_cycle_publication
+
+    calls: list[tuple[object, ...]] = []
+    original_renderer = report._plot_one_cycle_publication
+
+    def record_renderer(*args: object, **kwargs: object) -> None:
+        calls.append(args)
+        original_renderer(*args, **kwargs)
+
+    monkeypatch.setattr(report, "_plot_one_cycle_publication", record_renderer)
+    loader = DatasetLoader(dataset)
+    cycle_name = str(loader.cycle_index.loc[0, "cycle_name"])
+    generate_cycle_publication(loader, cycle_name)
+
+    assert len(calls) == 1
+
+
+def test_dataset_publication_adds_humidity_panel(tmp_path: Path) -> None:
+    from frost_analysis.visualization import render_cycle_publication
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s"),
+            "environment_relative_humidity": [80.0, 81.0],
+            "environment_relative_humidity__imputed": [False, False],
+        }
+    )
+    output = tmp_path / "publication.png"
+    render_cycle_publication(
+        frame,
+        {
+            "cycle_name": "frost_cycle_000001",
+            "cycle_id": "cycle_1",
+            "cycle_status": "valid",
+            "start_time": "2026-07-14T10:00:00",
+            "end_time": "2026-07-14T10:00:10",
+        },
+        output,
+    )
+
+    assert output.is_file()
+
+
 def test_add_appends_cycles_and_same_source_is_a_noop(tmp_path: Path) -> None:
     first = _write_run(tmp_path, "frost_0714", "2026-07-14")
     second = _write_run(tmp_path, "frost_0715", "2026-07-15")
@@ -250,6 +301,43 @@ def test_v2_add_rolls_back_after_asset_or_metadata_failure(
     validate_dataset(dataset)
 
 
+def test_v2_append_rejects_new_image_corruption_after_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _write_run(tmp_path, "frost_0714", "2026-07-14")
+    second = _write_run(tmp_path, "frost_0715", "2026-07-15")
+    dataset = tmp_path / "outputs" / "datasets" / "frost_dataset"
+    add_dataset(first, dataset)
+
+    import frost_analysis.dataset_io as dataset_io
+
+    original_commit = dataset_io.commit_v2_append_files
+
+    def corrupt_after_commit(
+        staging_dataset: Path,
+        dataset_dir: Path,
+        relative_paths: list[str],
+        *,
+        moved_files: list[Path] | None = None,
+    ) -> list[Path]:
+        moved = original_commit(
+            staging_dataset,
+            dataset_dir,
+            relative_paths,
+            moved_files=moved_files,
+        )
+        image = next((dataset_dir / "images" / "frost_cycle_000002").rglob("*.jpg"))
+        image.write_bytes(b"tampered")
+        return moved
+
+    monkeypatch.setattr(dataset_io, "commit_v2_append_files", corrupt_after_commit)
+    with pytest.raises(ValueError, match="image SHA mismatch"):
+        add_dataset(second, dataset)
+
+    assert not (dataset / "cycles" / "frost_cycle_000002.parquet").exists()
+    validate_dataset(dataset)
+
+
 def test_v2_validator_finds_asset_hash_and_orphan_errors(tmp_path: Path) -> None:
     run = _write_run(tmp_path, "frost_0714", "2026-07-14")
     dataset = tmp_path / "outputs" / "datasets" / "frost_dataset"
@@ -263,4 +351,18 @@ def test_v2_validator_finds_asset_hash_and_orphan_errors(tmp_path: Path) -> None
     image_root = dataset / "images" / "frost_cycle_000001" / "unassigned_01"
     (image_root / "orphan.jpg").write_bytes(b"orphan")
     with pytest.raises(ValueError, match="orphan image"):
+        validate_dataset(dataset)
+
+
+def test_v2_validator_rejects_stale_manifest_counts(tmp_path: Path) -> None:
+    run = _write_run(tmp_path, "frost_0714", "2026-07-14")
+    dataset = tmp_path / "outputs" / "datasets" / "frost_dataset"
+    add_dataset(run, dataset)
+
+    manifest_path = dataset / "dataset_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["image_count"] = int(manifest["image_count"]) + 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest count disagrees: image_count"):
         validate_dataset(dataset)
