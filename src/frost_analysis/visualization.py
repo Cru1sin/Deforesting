@@ -54,18 +54,30 @@ def generate_cycle_publication(loader: DatasetLoader, cycle_name: str) -> Path:
 
 def generate_rgb_coverage(loader: DatasetLoader, cycle_name: str) -> Path:
     """Load one cycle and its current role folders through DatasetLoader."""
-    from .dataset_coverage import render_rgb_coverage
     from .dataset_loader import DatasetLoader
     from .dataset_manifest import refresh_cycle_asset_hashes
 
     if not isinstance(loader, DatasetLoader):
         raise TypeError("generate_rgb_coverage requires DatasetLoader")
     path = loader.rgb_coverage_path(cycle_name)
-    render_rgb_coverage(
-        loader.load_cycle(cycle_name),
-        loader.load_cycle_images(cycle_name),
-        loader.get_cycle_record(cycle_name),
-        path,
-    )
+    if loader.schema_version == 3:
+        from .dataset_coverage_v3 import render_rgb_coverage
+
+        render_rgb_coverage(
+            loader.load_cycle(cycle_name),
+            loader.load_cycle_images(cycle_name),
+            loader.get_cycle_record(cycle_name),
+            path,
+            registry=loader.registry,
+        )
+    else:
+        from .dataset_coverage import render_rgb_coverage as render_legacy_rgb_coverage
+
+        render_legacy_rgb_coverage(
+            loader.load_cycle(cycle_name),
+            loader.load_cycle_images(cycle_name),
+            loader.get_cycle_record(cycle_name),
+            path,
+        )
     refresh_cycle_asset_hashes(loader.dataset_root, cycle_name)
     return path

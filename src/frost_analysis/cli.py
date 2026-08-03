@@ -17,6 +17,9 @@ from frost_analysis.config import load_config
 from frost_analysis.dataset import add_dataset, append_dataset, build_dataset
 from frost_analysis.dataset_loader import DatasetLoader
 from frost_analysis.dataset_manifest import refresh_manifest, review_cycle
+from frost_analysis.dataset_manifest_v3 import refresh_manifest as refresh_manifest_v3
+from frost_analysis.dataset_v3 import add_dataset as add_dataset_v3
+from frost_analysis.dataset_v3 import resolve_project_root
 from frost_analysis.dataset_validation import validate_dataset
 from frost_analysis.io import (
     ensure_output_outside_input,
@@ -56,7 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     if arguments.command == "dataset":
         return _run_dataset_command(arguments)
     if arguments.command == "analysis":
-        loader = DatasetLoader(arguments.dataset)
+        dataset_path = arguments.dataset or resolve_project_root() / "dataset"
+        loader = DatasetLoader(dataset_path)
         statuses = set(arguments.status) if arguments.status else None
         experiments = set(arguments.experiment) if arguments.experiment else None
         cycle_names = set(arguments.cycle) if arguments.cycle else None
@@ -137,7 +141,7 @@ def _add_config_input_cycles_output(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_dataset_analysis_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--dataset", required=True, type=Path)
+    parser.add_argument("--dataset", type=Path)
     parser.add_argument(
         "--status",
         action="append",
@@ -166,18 +170,24 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     append_parser.add_argument("--dataset", required=True, type=Path)
 
     validate_parser = dataset_commands.add_parser("validate")
-    validate_parser.add_argument("--input", required=True, type=Path)
+    validate_parser.add_argument("--input", type=Path)
+    validate_parser.add_argument("--dataset", type=Path)
+    validate_parser.add_argument("--require-assigned", action="store_true")
 
     add_parser = dataset_commands.add_parser("add")
-    add_parser.add_argument("--run", required=True, type=Path)
-    add_parser.add_argument("--dataset", required=True, type=Path)
+    add_parser.add_argument("input_dir", nargs="?", type=Path)
+    add_parser.add_argument("--run", type=Path)
+    add_parser.add_argument("--dataset", type=Path)
 
     refresh_parser = dataset_commands.add_parser("refresh-manifest")
-    refresh_parser.add_argument("--dataset", required=True, type=Path)
+    refresh_parser.add_argument("--dataset", type=Path)
+    refresh_parser = dataset_commands.add_parser("refresh")
+    refresh_parser.add_argument("--dataset", type=Path)
 
     review_parser = dataset_commands.add_parser("review-cycle")
-    review_parser.add_argument("--dataset", required=True, type=Path)
-    review_parser.add_argument("--cycle", required=True)
+    review_parser.add_argument("--dataset", type=Path)
+    review_parser.add_argument("cycle", nargs="?")
+    review_parser.add_argument("--cycle", dest="cycle_option")
     review_parser.add_argument(
         "--status",
         required=True,
@@ -186,38 +196,79 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     review_parser.add_argument("--note")
 
     render_parser = dataset_commands.add_parser("render")
-    render_parser.add_argument("--dataset", required=True, type=Path)
-    render_parser.add_argument("--cycle", required=True)
+    render_parser.add_argument("--dataset", type=Path)
+    render_parser.add_argument("cycle", nargs="?", type=str)
+    render_parser.add_argument("--cycle", dest="cycle_option")
     render_parser.add_argument("--publication", action="store_true")
     render_parser.add_argument("--coverage", action="store_true")
 
 
 def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
     if arguments.dataset_command == "add":
+        if arguments.input_dir is not None:
+            print(add_dataset_v3(arguments.input_dir, arguments.dataset))
+            return 0
+        if arguments.run is None or arguments.dataset is None:
+            raise ValueError("dataset add requires INPUT_DIR or --run with --dataset")
         print(add_dataset(arguments.run, arguments.dataset))
         return 0
-    if arguments.dataset_command == "refresh-manifest":
-        print(refresh_manifest(arguments.dataset))
+    if arguments.dataset_command in {"refresh-manifest", "refresh"}:
+        dataset = arguments.dataset or (resolve_project_root() / "dataset")
+        manifest_path = dataset / "dataset_manifest.json"
+        manifest = (
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest_path.is_file()
+            else {}
+        )
+        if manifest.get("dataset_schema_version") == 3:
+            print(refresh_manifest_v3(dataset))
+        else:
+            print(refresh_manifest(dataset))
         return 0
     if arguments.dataset_command == "review-cycle":
+        dataset = arguments.dataset or (resolve_project_root() / "dataset")
+        cycle = arguments.cycle_option or arguments.cycle
+        if cycle is None:
+            raise ValueError("dataset review-cycle requires a cycle name")
+        manifest_path = dataset / "dataset_manifest.json"
+        manifest = (
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+            if manifest_path.is_file()
+            else {}
+        )
+        if manifest.get("dataset_schema_version") == 3:
+            from frost_analysis.dataset_manifest_v3 import review_cycle as review_cycle_v3
+
+            review_cycle_v3(
+                dataset,
+                cycle,
+                status=arguments.status,
+                note=arguments.note,
+            )
+            print(dataset)
+            return 0
         review_cycle(
-            arguments.dataset,
-            arguments.cycle,
+            dataset,
+            cycle,
             status=arguments.status,
             note=arguments.note,
         )
-        print(arguments.dataset)
+        print(dataset)
         return 0
     if arguments.dataset_command == "render":
-        loader = DatasetLoader(arguments.dataset)
+        dataset = arguments.dataset or (resolve_project_root() / "dataset")
+        cycle = arguments.cycle_option or arguments.cycle
+        if cycle is None:
+            raise ValueError("dataset render requires a cycle name")
+        loader = DatasetLoader(dataset)
         if not arguments.publication and not arguments.coverage:
             arguments.publication = True
             arguments.coverage = True
         if arguments.publication:
-            generate_cycle_publication(loader, arguments.cycle)
+            generate_cycle_publication(loader, cycle)
         if arguments.coverage:
-            generate_rgb_coverage(loader, arguments.cycle)
-        print(arguments.dataset)
+            generate_rgb_coverage(loader, cycle)
+        print(dataset)
         return 0
     if arguments.dataset_command == "build":
         print(build_dataset(arguments.run, arguments.output))
@@ -225,24 +276,51 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
     if arguments.dataset_command == "append":
         print(append_dataset(arguments.run, arguments.dataset))
         return 0
-    validate_dataset(arguments.input)
+    dataset = arguments.input or arguments.dataset or (resolve_project_root() / "dataset")
+    validate_dataset(dataset)
+    if arguments.require_assigned:
+        _require_assigned_roles(dataset)
     manifest = json.loads(
-        (arguments.input / "dataset_manifest.json").read_text(encoding="utf-8")
+        (dataset / "dataset_manifest.json").read_text(encoding="utf-8")
     )
     if manifest.get("dataset_schema_version") == 2:
-        cycle_index = pd.read_parquet(arguments.input / "cycle_index.parquet")
-        image_metadata = pd.read_parquet(arguments.input / "image_metadata.parquet")
+        cycle_index = pd.read_parquet(dataset / "cycle_index.parquet")
+        image_metadata = pd.read_parquet(dataset / "image_metadata.parquet")
         print(
             "dataset valid: "
             f"{len(cycle_index)} cycles, {len(image_metadata)} images"
         )
         return 0
-    print(
-        "dataset valid: "
-        f"{manifest['published_cycle_count']} published cycles, "
-        f"{manifest['image_count']} images"
-    )
+    if manifest.get("dataset_schema_version") == 3:
+        print(
+            "dataset valid: "
+            f"{manifest.get('summary_cycle_count', 0)} cycles, "
+            f"{manifest.get('image_count', 0)} images"
+        )
+    else:
+        print(
+            "dataset valid: "
+            f"{manifest.get('published_cycle_count', 0)} published cycles, "
+            f"{manifest.get('image_count', 0)} images"
+        )
     return 0
+
+
+def _require_assigned_roles(dataset: Path) -> None:
+    manifest = json.loads((dataset / "dataset_manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("dataset_schema_version") == 3:
+        from frost_analysis.dataset_validation_v3 import validate_v3_dataset
+
+        validate_v3_dataset(dataset, require_assigned=True)
+        return
+    image_root = dataset / "images"
+    unassigned = sorted(
+        path.as_posix()
+        for path in image_root.glob("*/unassigned_*")
+        if path.is_dir()
+    )
+    if unassigned:
+        raise ValueError(f"unassigned camera roles remain: {unassigned}")
 
 
 def _read_cycle_summary(path: Path) -> pd.DataFrame:

@@ -84,7 +84,13 @@ from .images import match_images
 # git_commit：记录当前代码提交。
 # optional_sha256：在路径存在时计算文件哈希。
 # source_file_metadata：记录每个原始传感器文件的路径、大小和哈希等来源信息。
-from .io import discover_inputs, git_commit, optional_sha256, source_file_metadata
+from .io import (
+    discover_inputs,
+    git_commit,
+    input_inventory_sha256,
+    optional_sha256,
+    source_file_metadata,
+)
 from .sensors import read_edf_environment
 
 # =============================================================================
@@ -330,6 +336,9 @@ def prepare(
         # 输入发现统计。
         "image_file_count": len(inputs.image_files),
         "sensor_file_count": len(inputs.sensor_files),
+        "input_inventory_sha256": input_inventory_sha256(
+            (*inputs.sensor_files, *inputs.image_files), config.input_dir
+        ),
 
         # Prepare 产物规模。
         "prepared_row_count": len(prepared),

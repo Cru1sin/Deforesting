@@ -541,6 +541,18 @@ def _plot_one_cycle_publication(
         publication=True,
         processed_only=processed_only,
     )
+    if str(cycle.get("cycle_status", "valid")) != "valid" or str(
+        cycle.get("baseline_status", "available")
+    ) != "available":
+        reason = cycle.get("baseline_failure_reason") or "incomplete cycle boundary"
+        axes[0].text(
+            0.01,
+            0.05,
+            f"Baseline unavailable — {reason}",
+            transform=axes[0].transAxes,
+            fontsize=8.5,
+            color="#4D4D4D",
+        )
     if humidity_channels:
         _plot_humidity_panel(
             axes[-1],

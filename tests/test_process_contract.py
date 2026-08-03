@@ -262,6 +262,22 @@ def test_partial_cycle_uses_observed_fallback(tmp_path: Path) -> None:
     assert final_summary.loc[0, "processed_row_count"] == 3
 
 
+def test_explicit_partial_status_uses_observed_fallback(tmp_path: Path) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=2, freq="10s")
+    frame = _frame(timestamps, temperature=[1.0, 2.0], stage="partial")
+    frame["cycle_status"] = "partial"
+    frame["cycle_id"] = "partial_001"
+    summary = _summary(status="partial")
+    summary["cycle_id"] = "partial_001"
+    summary[["heating_start", "stable_heating_start", "defrost_start", "defrost_end"]] = pd.NaT
+
+    processed, _ = process(frame, summary, _config(tmp_path), _channels())
+
+    assert processed["cycle_status"].eq("partial").all()
+    assert processed["cycle_stage"].eq("partial").all()
+    assert processed["temperature"].tolist() == [1.0, 2.0]
+
+
 def test_cop_preserves_dependency_gaps_instead_of_using_filled_values(
     tmp_path: Path,
 ) -> None:

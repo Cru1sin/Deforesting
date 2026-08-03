@@ -70,6 +70,14 @@ def validate_dataset(dataset_dir: Path) -> None:
             payload = None
         if (
             isinstance(payload, dict)
+            and payload.get("dataset_schema_version") == 3
+        ):
+            from .dataset_validation_v3 import validate_v3_dataset
+
+            validate_v3_dataset(dataset_dir)
+            return
+        if (
+            isinstance(payload, dict)
             and payload.get("dataset_schema_version") == DATASET_V2_SCHEMA_VERSION
         ):
             _validate_v2_dataset(dataset_dir, payload)

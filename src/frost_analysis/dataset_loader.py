@@ -12,6 +12,7 @@ import pandas as pd
 from .dataset import DATASET_V2_SCHEMA_VERSION
 from .dataset_images import scan_cycle_images
 from .dataset_manifest import ASSESSMENT_STATUSES
+from .dataset_v3 import V3_DATASET_SCHEMA_VERSION
 
 
 class DatasetLoader:
@@ -22,12 +23,18 @@ class DatasetLoader:
         if not self.dataset_root.is_dir():
             raise FileNotFoundError(f"dataset directory does not exist: {dataset_root}")
         self._manifest = _read_json(self.dataset_root / "dataset_manifest.json")
-        if self._manifest.get("dataset_schema_version") != DATASET_V2_SCHEMA_VERSION:
-            raise ValueError("DatasetLoader requires dataset schema version 2")
+        version = self._manifest.get("dataset_schema_version")
+        if version not in {DATASET_V2_SCHEMA_VERSION, V3_DATASET_SCHEMA_VERSION}:
+            raise ValueError("DatasetLoader requires dataset schema version 2 or 3")
+        self._version = int(version)
         self._cycle_index = pd.read_parquet(self.dataset_root / "cycle_index.parquet")
         self._image_metadata = pd.read_parquet(
             self.dataset_root / "image_metadata.parquet"
         )
+        if self._version == V3_DATASET_SCHEMA_VERSION:
+            self._registry = _read_json(self.dataset_root / "channel_registry.json")
+        else:
+            self._registry = {}
         if not (self.dataset_root / "cycles").is_dir():
             raise FileNotFoundError("dataset is missing cycles/")
         if not (self.dataset_root / "images").is_dir():
@@ -36,6 +43,10 @@ class DatasetLoader:
     @property
     def manifest(self) -> dict[str, object]:
         return self._manifest
+
+    @property
+    def schema_version(self) -> int:
+        return self._version
 
     @property
     def cycle_index(self) -> pd.DataFrame:
@@ -99,6 +110,8 @@ class DatasetLoader:
         if not path.is_file():
             raise FileNotFoundError(f"cycle parquet does not exist: {path}")
         frame = pd.read_parquet(path, columns=columns)
+        if self._version == V3_DATASET_SCHEMA_VERSION:
+            return frame
         path_columns = [
             column
             for column in frame.columns
@@ -127,7 +140,13 @@ class DatasetLoader:
 
     def load_cycle_images(self, cycle_name: str) -> pd.DataFrame:
         self.get_cycle_record(cycle_name)
+        if self._version == V3_DATASET_SCHEMA_VERSION:
+            return _scan_v3_cycle_images(self.dataset_root, cycle_name, self._image_metadata)
         return scan_cycle_images(self.dataset_root, cycle_name, self._image_metadata)
+
+    @property
+    def registry(self) -> dict[str, object]:
+        return dict(self._registry)
 
     def iter_cycle_frames(
         self,
@@ -158,3 +177,63 @@ def _read_json(path: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError(f"dataset manifest must be an object: {path}")
     return payload
+
+
+def _scan_v3_cycle_images(
+    dataset_root: Path, cycle_name: str, metadata: pd.DataFrame
+) -> pd.DataFrame:
+    """Join current mutable role folders to immutable v3 image metadata."""
+    columns = [
+        "image_id",
+        "cycle_name",
+        "camera_role",
+        "path",
+        "cycle_uid",
+        "frame_index",
+        "source_camera_id",
+        "initial_camera_slot",
+        "image_time",
+        "matched_timestamp",
+        "offset_seconds",
+        "cycle_stage",
+        "source_relative_path",
+        "file_size_bytes",
+        "sha256",
+    ]
+    root = dataset_root / "images" / cycle_name
+    rows: list[dict[str, object]] = []
+    if root.is_dir():
+        for role_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+            for image_path in sorted(role_dir.iterdir()):
+                if image_path.is_file() and image_path.suffix.lower() in {
+                    ".jpg",
+                    ".jpeg",
+                    ".png",
+                    ".bmp",
+                    ".tif",
+                    ".tiff",
+                }:
+                    rows.append(
+                        {
+                            "image_id": image_path.stem,
+                            "cycle_name": cycle_name,
+                            "camera_role": role_dir.name,
+                            "path": image_path,
+                        }
+                    )
+    scanned = pd.DataFrame(rows)
+    scoped = metadata.loc[metadata["cycle_name"].eq(cycle_name)].copy()
+    if scoped["image_id"].duplicated().any():
+        raise ValueError(f"image metadata has duplicate image_id in {cycle_name}")
+    if scanned.empty and scoped.empty:
+        return pd.DataFrame(columns=columns)
+    joined = scanned.merge(scoped, on=["image_id", "cycle_name"], how="outer", indicator=True)
+    if joined["_merge"].ne("both").any():
+        raise ValueError(f"image metadata and files are not a closed set: {cycle_name}")
+    result = joined.drop(columns="_merge")[[column for column in columns if column in joined]]
+    if not result.empty:
+        result = result.sort_values(
+            ["image_time", "source_relative_path", "image_id"],
+            kind="stable",
+        ).reset_index(drop=True)
+    return result

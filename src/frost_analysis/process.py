@@ -102,7 +102,7 @@ def _partition_process_inputs(
     for group_values, group in prepared.groupby(
         ["experiment_id", "cycle_id"], sort=False, dropna=False
     ):
-        key = tuple(str(value) for value in group_values)
+        key = (str(group_values[0]), str(group_values[1]))
         summary = summary_lookup[key]
         target = (
             scientific_indices
@@ -252,7 +252,7 @@ def _resample_fallback(
     for group_values, bucket in source.groupby(keys, sort=False, dropna=False):
         ordered = bucket.sort_values("timestamp", kind="stable")
         experiment_id, cycle_id = (str(value) for value in group_values[:2])
-        timestamp = pd.Timestamp(group_values[2])
+        timestamp = pd.Timestamp(str(group_values[2]))
         stage = str(ordered["cycle_stage"].iloc[-1])
         row = _identity_row(ordered, (experiment_id, cycle_id, stage), timestamp)
         for name, settings in channels.items():
@@ -687,12 +687,12 @@ def _validate_cycle_summary_input(prepared: pd.DataFrame, summary: pd.DataFrame)
     grouped = prepared.groupby(["experiment_id", "cycle_id"], sort=False, dropna=False)
     prepared_keys: set[tuple[str, str]] = set()
     for group_values, group in grouped:
-        key = tuple(str(value) for value in group_values)
+        key = (str(group_values[0]), str(group_values[1]))
         prepared_keys.add(key)
         if key not in lookup:
             raise ValueError(f"missing cycle summary for cycle {key[1]}")
         status = str(group["cycle_status"].iloc[0])
-        if status not in {"valid", "invalid", "incomplete"}:
+        if status not in {"valid", "partial", "invalid", "incomplete"}:
             raise ValueError(f"invalid cycle status for cycle {key[1]}")
     summary_only = set(lookup) - prepared_keys
     if summary_only:

@@ -359,6 +359,20 @@ channels:
     assert channels["cop"]["dependencies"] == ["heating_capacity", "power_total"]
 
 
+def test_production_channels_declare_required_sensor_coverage() -> None:
+    channels = load_channels(ROOT / "configs" / "channels.yaml")
+
+    required = {
+        name for name, settings in channels.items() if settings.get("coverage_required")
+    }
+    assert required == {
+        name
+        for name, settings in channels.items()
+        if settings.get("role") == "sensor" and settings.get("kind") != "derived"
+    }
+    assert required
+
+
 def test_config_rejects_invalid_window_relationships(tmp_path: Path) -> None:
     path = _write_v2_config(
         tmp_path,

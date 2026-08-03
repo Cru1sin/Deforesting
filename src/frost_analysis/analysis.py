@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -49,6 +50,8 @@ def analyze(
     cycle_summary: pd.DataFrame,
     config: Any,
     channels: Mapping[str, Mapping[str, Any]],
+    *,
+    respect_cycle_status: bool = True,
 ) -> pd.DataFrame:
     """Compute one evidence row per experiment and configured candidate channel."""
     candidates = _candidate_names(channels)
@@ -62,12 +65,28 @@ def analyze(
         current = processed.loc[processed["experiment_id"].eq(experiment_id)].copy()
         cycles = cycle_summary.loc[cycle_summary["experiment_id"].eq(experiment_id)].copy()
         for channel in candidates:
-            trend = _trend_effects(current, cycles, channel, channels[channel], settings)
+            trend = _trend_effects(
+                current,
+                cycles,
+                channel,
+                channels[channel],
+                settings,
+                respect_cycle_status=respect_cycle_status,
+            )
             context_count, context_effect = _context_association(
-                current, cycles, channel, channels, settings
+                current,
+                cycles,
+                channel,
+                channels,
+                settings,
+                respect_cycle_status=respect_cycle_status,
             )
             future_count, future_effect = _future_association(
-                current, cycles, channel, settings
+                current,
+                cycles,
+                channel,
+                settings,
+                respect_cycle_status=respect_cycle_status,
             )
             trend_effect = _median_or_nan(trend)
             direction = _direction_consistency(trend)
@@ -127,12 +146,14 @@ def _trend_effects(
     channel: str,
     channel_settings: Mapping[str, Any],
     settings: Any,
+    *,
+    respect_cycle_status: bool,
 ) -> list[float]:
     residual = f"{channel}__baseline_residual"
     if residual not in frame or "cycle_progress" not in frame:
         return []
     quality = imputed_column_for_value(residual)
-    eligible = _eligible_cycle_ids(cycles)
+    eligible = _eligible_cycle_ids(cycles, respect_cycle_status=respect_cycle_status)
     development = frame.loc[
         frame["cycle_id"].isin(eligible)
         & frame["cycle_stage"].eq("frost_development")
@@ -152,19 +173,24 @@ def _trend_effects(
     return effects
 
 
-def _eligible_cycle_ids(cycles: pd.DataFrame) -> set[object]:
+def _eligible_cycle_ids(
+    cycles: pd.DataFrame, *, respect_cycle_status: bool = True
+) -> set[object]:
     if "baseline_status" not in cycles:
         return set()
-    return set(
-        cycles.loc[
-            cycles["cycle_status"].eq("valid") & cycles["baseline_status"].eq("available"),
-            "cycle_id",
-        ]
-    )
+    mask = cycles["baseline_status"].eq("available")
+    if respect_cycle_status and "cycle_status" in cycles:
+        mask &= cycles["cycle_status"].eq("valid")
+    return set(cycles.loc[mask, "cycle_id"])
 
 
 def _future_association(
-    frame: pd.DataFrame, cycles: pd.DataFrame, channel: str, settings: Any
+    frame: pd.DataFrame,
+    cycles: pd.DataFrame,
+    channel: str,
+    settings: Any,
+    *,
+    respect_cycle_status: bool,
 ) -> tuple[int, float]:
     residual = f"{channel}__baseline_residual"
     target = str(settings.performance_target)
@@ -172,7 +198,7 @@ def _future_association(
         return 0, np.nan
     candidate_quality = imputed_column_for_value(residual)
     target_quality = imputed_column_for_value(target)
-    eligible = _eligible_cycle_ids(cycles)
+    eligible = _eligible_cycle_ids(cycles, respect_cycle_status=respect_cycle_status)
     development = frame.loc[
         frame["cycle_id"].isin(eligible) & frame["cycle_stage"].eq("frost_development")
     ]
@@ -210,6 +236,8 @@ def _context_association(
     channel: str,
     channels: Mapping[str, Mapping[str, Any]],
     settings: Any,
+    *,
+    respect_cycle_status: bool,
 ) -> tuple[int, float]:
     residual = f"{channel}__baseline_residual"
     context_names = [
@@ -220,7 +248,7 @@ def _context_association(
     if residual not in frame or not context_names:
         return 0, np.nan
     candidate_quality = imputed_column_for_value(residual)
-    eligible = _eligible_cycle_ids(cycles)
+    eligible = _eligible_cycle_ids(cycles, respect_cycle_status=respect_cycle_status)
     development = frame.loc[
         frame["cycle_id"].isin(eligible) & frame["cycle_stage"].eq("frost_development")
     ]
@@ -310,13 +338,7 @@ def run_analysis(
     cycle_names: set[str] | None = None,
     output_dir: Path,
 ) -> Path:
-    """Run Loader-driven, reproducible cycle summaries outside the Dataset.
-
-    The existing ``analyze`` function above remains the scientific Pipeline stage
-    that consumes a formal Processed snapshot.  This function is the downstream
-    Dataset entry point: it only reads cycle files and image metadata supplied by
-    DatasetLoader and writes regenerable summaries.
-    """
+    """Run the scientific evidence analysis from DatasetLoader-selected cycles."""
     from .dataset_loader import DatasetLoader
     from .io import ensure_output_outside_input
 
@@ -345,11 +367,57 @@ def run_analysis(
                 else 0,
             }
         )
+    if loader.schema_version == 3:
+        evidence = _analyze_dataset_cycles(loader, selected)
+        evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
     pd.DataFrame(statistics).to_csv(output_dir / "cycle_statistics.csv", index=False)
     pd.DataFrame(image_statistics).to_csv(
         output_dir / "image_sensor_alignment.csv", index=False
     )
     return output_dir
+
+
+def _analyze_dataset_cycles(
+    loader: DatasetLoader, selected: pd.DataFrame
+) -> pd.DataFrame:
+    """Adapt canonical Dataset tables to the existing evidence function."""
+    registry = loader.registry
+    raw_channels = registry.get("channels", {})
+    raw_settings = registry.get("analysis_settings", {})
+    if not isinstance(raw_channels, Mapping):
+        raise ValueError("Dataset registry channels must be a mapping")
+    if not isinstance(raw_settings, Mapping):
+        raise ValueError("Dataset registry analysis_settings must be a mapping")
+    channels = {
+        str(name): dict(value)
+        for name, value in raw_channels.items()
+        if isinstance(value, Mapping)
+    }
+    if not any(bool(value.get("analysis_candidate", False)) for value in channels.values()):
+        return pd.DataFrame(columns=EVIDENCE_COLUMNS)
+    from .config import AnalysisSettings
+
+    settings = AnalysisSettings.from_mapping(raw_settings)
+    frames = [loader.load_cycle(str(name)) for name in selected["cycle_name"].astype(str)]
+    if not frames:
+        return pd.DataFrame(columns=EVIDENCE_COLUMNS)
+    processed = pd.concat(frames, ignore_index=True)
+    summary = selected.copy()
+    summary = summary.rename(columns={"cycle_name": "dataset_cycle_name"})
+    if "experiment_date" not in summary:
+        summary["experiment_date"] = processed["experiment_date"].iloc[0]
+    config = SimpleNamespace(
+        analysis=settings,
+        experiment_id=str(processed["experiment_id"].iloc[0]),
+        experiment_date=str(processed["experiment_date"].iloc[0]),
+    )
+    return analyze(
+        processed,
+        summary,
+        config,
+        channels,
+        respect_cycle_status=False,
+    )
 
 
 def _cycle_numeric_statistics(

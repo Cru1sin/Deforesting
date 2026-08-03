@@ -283,6 +283,22 @@ def test_analysis_excludes_incomplete_cycles_from_trend_evidence() -> None:
     assert evidence.loc[0, "trend_cycle_count"] == 1
 
 
+def test_dataset_analysis_can_use_assessment_selected_cycle_with_nonvalid_source_status() -> None:
+    frame, cycles = _analysis_frame()
+    frame.loc[frame["cycle_id"].eq("cycle_002"), "cycle_status"] = "incomplete"
+    cycles.loc[cycles["cycle_id"].eq("cycle_002"), "cycle_status"] = "incomplete"
+
+    evidence = analyze(
+        frame,
+        cycles,
+        _config(Path("/tmp")),
+        _channels(),
+        respect_cycle_status=False,
+    )
+
+    assert evidence.loc[0, "trend_cycle_count"] == 2
+
+
 def test_structural_validators_reject_invalid_fields() -> None:
     prepared = pd.DataFrame(
         {
@@ -397,3 +413,32 @@ def test_processed_validator_accepts_partial_fallback_rows() -> None:
     )
 
     validate_processed(processed, summary)
+
+
+def test_structural_validators_accept_explicit_partial_cycle_status() -> None:
+    prepared = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "experiment_date": ["2026-07-15"],
+            "timestamp": pd.to_datetime(["2026-07-15"]),
+            "cycle_id": ["partial_001"],
+            "cycle_stage": ["partial"],
+            "cycle_status": ["partial"],
+            "cycle_progress": [np.nan],
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test"],
+            "cycle_id": ["partial_001"],
+            "cycle_status": ["partial"],
+            "baseline_status": ["not_applicable"],
+            "baseline_failure_reason": ["cycle_not_valid"],
+        }
+    )
+
+    validate_prepared(prepared, summary)
+    validate_processed(
+        prepared.assign(value=[1.0], value__imputed=pd.Series([False], dtype=bool)),
+        summary,
+    )

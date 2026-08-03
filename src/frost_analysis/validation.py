@@ -6,7 +6,7 @@ import pandas as pd
 from pandas.api.types import is_bool_dtype, is_integer_dtype
 
 _STAGES = {"recovery", "frost_development", "defrost", "partial"}
-_STATUSES = {"valid", "incomplete", "invalid"}
+_STATUSES = {"valid", "partial", "incomplete", "invalid"}
 _DECISIONS = {
     "trend_supported_candidate",
     "partial_evidence",

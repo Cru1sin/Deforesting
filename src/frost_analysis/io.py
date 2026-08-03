@@ -387,6 +387,7 @@ def write_run_outputs(
         },
         "resolved_config": resolved_config_mapping(config),
         "git_commit": _git_commit(config.project_root),
+        "input_inventory_sha256": prepare_summary.get("input_inventory_sha256"),
         "prepare_summary": prepare_summary,
         "outputs": {
             "prepared_data": "prepared_data.parquet",
@@ -400,6 +401,15 @@ def write_run_outputs(
             "cycle_summary": len(cycle_summary),
             "candidate_channel_evidence": len(evidence),
         },
+    }
+    manifest["output_sha256"] = {
+        key: sha256_file(output_dir / filename)
+        for key, filename in {
+            "prepared_data": "prepared_data.parquet",
+            "processed_data": "processed_data.parquet",
+            "cycle_summary": "cycle_summary.csv",
+            "candidate_channel_evidence": "candidate_channel_evidence.csv",
+        }.items()
     }
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=_json_default) + "\n",
@@ -456,6 +466,31 @@ def _relative_path(path: Path, root: Path) -> str:
 def optional_sha256(path: Path | None) -> str | None:
     """Return a file hash when a source file is available."""
     return None if path is None else _optional_sha256(path)
+
+
+def input_inventory_sha256(paths: Sequence[Path], root: Path) -> str:
+    """Hash the sorted source-file inventory while the Pipeline already has it open."""
+    records = sorted(
+        (
+            _inventory_relative_path(path, root),
+            sha256_file(path),
+            path.stat().st_size,
+        )
+        for path in paths
+    )
+    payload = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _inventory_relative_path(path: Path, root: Path) -> str:
+    """Keep symlink paths relative to the declared input root."""
+    lexical_path = path.absolute()
+    lexical_root = root.absolute()
+    try:
+        relative = lexical_path.relative_to(lexical_root)
+    except ValueError:
+        return relative_posix_path(path, root)
+    return relative.as_posix()
 
 
 def relative_posix_path(path: Path, root: Path) -> str:
