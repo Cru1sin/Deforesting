@@ -245,8 +245,14 @@ def _resample_fallback(
     if frame.empty:
         return pd.DataFrame(columns=_processed_columns(channels, list(roles)))
     source = frame.copy()
-    frequency = f"{interval_seconds}s"
-    source["_process_bucket"] = source["timestamp"].dt.floor(frequency)
+    cycle_origins = source.groupby(
+        ["experiment_id", "cycle_id"], sort=False, dropna=False
+    )["timestamp"].transform("min")
+    elapsed_seconds = (source["timestamp"] - cycle_origins).dt.total_seconds()
+    source["_process_bucket"] = cycle_origins + pd.to_timedelta(
+        (elapsed_seconds // interval_seconds) * interval_seconds,
+        unit="s",
+    )
     rows: list[dict[str, object]] = []
     keys = ["experiment_id", "cycle_id", "_process_bucket"]
     for group_values, bucket in source.groupby(keys, sort=False, dropna=False):

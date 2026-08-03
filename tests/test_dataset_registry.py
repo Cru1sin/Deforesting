@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 
 from frost_analysis.dataset_registry import (
@@ -111,6 +112,20 @@ def test_canonical_frame_promotes_existing_all_null_field_to_registry_type() -> 
     canonical = canonical_frame(frame, _registry())
 
     assert pd.api.types.is_float_dtype(canonical["signal"])
+
+
+def test_canonical_frame_writes_unknown_all_null_field_as_arrow_null(tmp_path) -> None:
+    frame = pd.DataFrame({"signal": pd.Series([float("nan")], dtype="float64")})
+    registry = registry_from_frame(
+        frame,
+        {"signal": {"kind": "continuous", "resample": "mean"}},
+    )
+
+    canonical = canonical_frame(frame, registry)
+    path = tmp_path / "canonical.parquet"
+    canonical.to_parquet(path, index=False)
+
+    assert str(pq.read_schema(path).field("signal").type) == "null"
 
 
 def test_registry_treats_all_null_candidate_field_as_nullable_unknown() -> None:

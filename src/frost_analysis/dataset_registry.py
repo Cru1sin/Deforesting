@@ -114,16 +114,10 @@ def canonical_frame(frame: pd.DataFrame, registry: Mapping[str, Any]) -> pd.Data
     if unknown:
         raise ValueError(f"Processed columns are not in channel registry: {unknown}")
     for name, field in fields.items():
-        if name not in source:
+        if name not in source or source[name].isna().all():
             source[name] = _null_series(
                 len(source), str(field.get("logical_type", "null")), index=source.index
             )
-        elif source[name].isna().all():
-            logical_type = str(field.get("logical_type", "null"))
-            if logical_type != "null":
-                source[name] = _null_series(
-                    len(source), logical_type, index=source.index
-                )
     return source.loc[:, list(fields)]
 
 
@@ -227,6 +221,8 @@ def _null_series(
     length: int, logical_type: str, *, index: pd.Index | None = None
 ) -> pd.Series:
     series_index = range(length) if index is None else index
+    if logical_type == "null":
+        return pd.Series([None] * length, index=series_index, dtype=object)
     if logical_type.startswith("timestamp"):
         return pd.Series(pd.NaT, index=series_index, dtype="datetime64[ns]")
     if logical_type in {"double", "float", "float32", "float64"}:

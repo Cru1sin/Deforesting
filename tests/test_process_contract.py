@@ -278,6 +278,40 @@ def test_explicit_partial_status_uses_observed_fallback(tmp_path: Path) -> None:
     assert processed["temperature"].tolist() == [1.0, 2.0]
 
 
+def test_fallback_cycles_anchor_buckets_to_each_cycle_start(tmp_path: Path) -> None:
+    first_timestamps = pd.to_datetime(
+        ["2026-07-15 00:00:11", "2026-07-15 00:00:15"]
+    )
+    first = _frame(first_timestamps, temperature=[1.0, 2.0], stage="partial")
+    first["cycle_id"] = "partial_001"
+    first["cycle_status"] = "incomplete"
+
+    second_timestamps = pd.to_datetime(
+        ["2026-07-15 00:00:16", "2026-07-15 00:00:19"]
+    )
+    second = _frame(second_timestamps, temperature=[3.0, 4.0], stage="partial")
+    second["cycle_id"] = "partial_002"
+    second["cycle_status"] = "incomplete"
+
+    first_summary = _summary(status="incomplete")
+    first_summary["cycle_id"] = "partial_001"
+    second_summary = _summary(status="incomplete")
+    second_summary["cycle_id"] = "partial_002"
+    summary = pd.concat([first_summary, second_summary], ignore_index=True)
+    summary[["heating_start", "stable_heating_start", "defrost_start", "defrost_end"]] = pd.NaT
+
+    processed, _ = process(
+        pd.concat([first, second], ignore_index=True),
+        summary,
+        _config(tmp_path),
+        _channels(),
+    )
+
+    assert not processed.duplicated(["experiment_id", "timestamp"]).any()
+    assert processed["timestamp"].tolist() == [first_timestamps[0], second_timestamps[0]]
+    assert processed["cycle_id"].tolist() == ["partial_001", "partial_002"]
+
+
 def test_cop_preserves_dependency_gaps_instead_of_using_filled_values(
     tmp_path: Path,
 ) -> None:
