@@ -11,6 +11,7 @@ import pandas as pd
 from .baseline import add_baseline_residuals
 from .config import Config
 from .features import add_dynamic_features, calculate_derived_features
+from .images import image_columns, image_roles
 
 _PARTITION_KEYS = ["experiment_id", "cycle_id", "cycle_stage"]
 _SOURCE_QUALITY_SUFFIXES = ("__missing", "__invalid", "__duplicate", "__conflict")
@@ -127,7 +128,7 @@ def _resample(
     eligible_channel_buckets: dict[tuple[str, str], int] = {}
     processed_cycles: set[tuple[str, str]] = set()
     frequency = f"{interval_seconds}s"
-    image_roles = _image_roles(frame)
+    roles = image_roles(frame)
     summary_lookup = _summary_lookup(cycle_summary)
     cycle_keys = ["experiment_id", "cycle_id"]
     for group_values, group in frame.groupby(cycle_keys, sort=False, dropna=False):
@@ -143,7 +144,7 @@ def _resample(
         intervals = _cycle_stage_intervals(
             summary, observed_end=observed_end, frequency=frequency
         )
-        image_records = {role: _image_records(ordered, role) for role in image_roles}
+        image_records = {role: _image_records(ordered, role) for role in roles}
         cycle_key = (experiment_id, cycle_id)
         for timestamp in grid:
             stage, transition = _stage_for_complete_bucket(timestamp, interval_seconds, intervals)
@@ -176,11 +177,11 @@ def _resample(
                     if name in low_names
                     else _aggregate_channel(bucket, name, settings)
                 )
-            for role in image_roles:
+            for role in roles:
                 _add_bucket_image(row, image_records[role], role, timestamp, interval_seconds)
             rows.append(row)
     if not rows:
-        empty = pd.DataFrame(columns=_processed_columns(channels, image_roles))
+        empty = pd.DataFrame(columns=_processed_columns(channels, list(roles)))
         return (
             empty,
             excluded_transition_buckets,
@@ -286,17 +287,6 @@ def _coverage_for_bucket(
     return low_names, len(low_names), len(channel_names)
 
 
-def _image_roles(frame: pd.DataFrame) -> list[str]:
-    prefix = "image_"
-    suffix = "_path"
-    roles = {
-        str(column)[len(prefix) : -len(suffix)]
-        for column in frame.columns
-        if str(column).startswith(prefix) and str(column).endswith(suffix)
-    }
-    return sorted(roles)
-
-
 def _add_bucket_image(
     row: dict[str, object],
     records: list[tuple[str, pd.Timestamp]],
@@ -304,9 +294,7 @@ def _add_bucket_image(
     timestamp: pd.Timestamp,
     interval_seconds: int,
 ) -> None:
-    path_column = f"image_{role}_path"
-    time_column = f"image_{role}_time"
-    offset_column = f"image_{role}_offset_seconds"
+    path_column, time_column, offset_column = image_columns(role)
     bucket_end = timestamp + pd.Timedelta(seconds=interval_seconds)
     candidates = [
         (path, image_time)
@@ -328,8 +316,7 @@ def _add_bucket_image(
 
 
 def _image_records(frame: pd.DataFrame, role: str) -> list[tuple[str, pd.Timestamp]]:
-    path_column = f"image_{role}_path"
-    time_column = f"image_{role}_time"
+    path_column, time_column, _ = image_columns(role)
     if path_column not in frame or time_column not in frame:
         return []
     records = frame.loc[frame[path_column].notna(), [path_column, time_column]].copy()
@@ -355,9 +342,7 @@ def _processed_columns(
         name for name, settings in channels.items() if settings.get("kind") != "derived"
     )
     for role in image_roles:
-        columns.extend(
-            [f"image_{role}_path", f"image_{role}_time", f"image_{role}_offset_seconds"]
-        )
+        columns.extend(image_columns(role))
     return columns
 
 

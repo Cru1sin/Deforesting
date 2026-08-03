@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -13,6 +14,8 @@ from frost_analysis import run_pipeline
 from frost_analysis.analysis import analyze
 from frost_analysis.channels import load_channels
 from frost_analysis.config import find_project_root, load_config, load_evidence_settings
+from frost_analysis.dataset import append_dataset, build_dataset
+from frost_analysis.dataset_validation import validate_dataset
 from frost_analysis.evidence import build_evidence_bundle
 from frost_analysis.io import (
     ensure_output_outside_input,
@@ -47,7 +50,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     report_parser = subparsers.add_parser("report")
     _add_report_input_output(report_parser)
     report_parser.add_argument("--overwrite", action="store_true")
+    _add_dataset_commands(subparsers)
     arguments = parser.parse_args(argv)
+    if arguments.command == "dataset":
+        return _run_dataset_command(arguments)
     if arguments.command == "run":
         run_dir = run_pipeline(arguments.config, arguments.output, arguments.overwrite)
         if arguments.report:
@@ -147,6 +153,41 @@ def _add_analyze_arguments(parser: argparse.ArgumentParser) -> None:
 def _add_report_input_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+
+
+def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    dataset = subparsers.add_parser("dataset")
+    dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
+
+    build_parser = dataset_commands.add_parser("build")
+    build_parser.add_argument("--run", action="append", required=True, type=Path)
+    build_parser.add_argument("--output", required=True, type=Path)
+
+    append_parser = dataset_commands.add_parser("append")
+    append_parser.add_argument("--run", required=True, type=Path)
+    append_parser.add_argument("--dataset", required=True, type=Path)
+
+    validate_parser = dataset_commands.add_parser("validate")
+    validate_parser.add_argument("--input", required=True, type=Path)
+
+
+def _run_dataset_command(arguments: argparse.Namespace) -> int:
+    if arguments.dataset_command == "build":
+        print(build_dataset(arguments.run, arguments.output))
+        return 0
+    if arguments.dataset_command == "append":
+        print(append_dataset(arguments.run, arguments.dataset))
+        return 0
+    validate_dataset(arguments.input)
+    manifest = json.loads(
+        (arguments.input / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    print(
+        "dataset valid: "
+        f"{manifest['published_cycle_count']} published cycles, "
+        f"{manifest['image_count']} images"
+    )
+    return 0
 
 
 def _read_cycle_summary(path: Path) -> pd.DataFrame:

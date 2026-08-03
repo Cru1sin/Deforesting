@@ -253,6 +253,19 @@ SHA-256 hash；禁止重新执行 cycle segmentation、resampling、coverage thr
 imputation、derived quantities、baseline/residual calculation、correlation、future/context
 evidence、direction consistency 或 decision thresholding。
 
+## 7. Cycle Dataset 导出层
+
+正式 run 完成并通过本合同验证后，可以由 Dataset 层读取并发布。Dataset 不调用 Prepare、
+Process 或 Analyze，也不重新判断 cycle 状态、重采样、填补、计算 baseline、派生量或候选
+证据。它只按已有 `cycle_id` 拆分 Processed，从 Prepared 展开完整匹配图片，改写图片路径，
+并生成 `cycle_index.parquet`、`image_index.parquet` 和 `dataset_manifest.json`。
+
+Dataset 的唯一公开事实是是否存在 Processed 行；`recommended_for_analysis` 只是
+`published and cycle_status == "valid" and baseline_status == "available"`，不是所有模型
+共享的训练资格。Build 使用完整 staging；Append 使用同级新增文件 staging、metadata 原子
+替换和普通异常回滚。公开 Dataset validator 会检查文件、SHA、逻辑 schema、索引引用、时间
+顺序和 orphan 文件。完整合同见 [`docs/dataset_contract.md`](dataset_contract.md)。
+
 固定数据源如下：
 
 | 图中内容 | 正式来源 |

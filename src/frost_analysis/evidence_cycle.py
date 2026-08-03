@@ -270,10 +270,12 @@ def build_channel_evidence(
         reference = _unavailable(
             grid,
             cycle.exclusion_reason or "cycle_not_eligible",
-            cycle.start if cycle.start is not None else pd.NaT,
+            cycle.start if cycle.start is not None else cast(pd.Timestamp, pd.NaT),
         )
     elif cycle.start is None or cycle.end is None or grid.empty:
-        reference = _unavailable(grid, "frost_development_unavailable", pd.NaT)
+        reference = _unavailable(
+            grid, "frost_development_unavailable", cast(pd.Timestamp, pd.NaT)
+        )
     else:
         reference = _resolve_cycle_reference(cycle, channel, policy, interval_seconds)
     residual = reference.residual.reindex(grid).astype(float)
@@ -467,6 +469,7 @@ def _future_record(  # noqa: C901
     future_positions = np.arange(len(grid)) + horizon_buckets
     in_grid = future_positions < len(grid)
     anchor = pd.Series(in_grid, index=grid)
+    feature_values: pd.Series | None
     if variant == "residual_level":
         anchor &= grid >= feature_reference.valid_from
         feature_values = feature_cache.analysis_residual
@@ -481,7 +484,9 @@ def _future_record(  # noqa: C901
         future_times = _shift_grid(grid, horizon_buckets)
         anchor &= future_times >= target_reference.valid_from
         outcome = target_cache.analysis_residual.shift(-horizon_buckets)
-        target_pair_valid = target_cache.target_valid.shift(-horizon_buckets).fillna(False)
+        target_pair_valid: pd.Series = target_cache.target_valid.shift(
+            -horizon_buckets
+        ).fillna(False)
     else:
         current = target_cache.values
         outcome = current.shift(-horizon_buckets) - current
@@ -508,7 +513,7 @@ def _future_record(  # noqa: C901
             status, reason = "insufficient_coverage", "pair_coverage_below_minimum"
         else:
             effect = _spearman(
-                feature_values.loc[valid],
+                cast(pd.Series, feature_values).loc[valid],
                 outcome.loc[valid],
                 policy.min_valid_pairs,
             )

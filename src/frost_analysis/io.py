@@ -192,7 +192,7 @@ def _load_evidence_run(  # noqa: C901
         channels_sha256=channels_sha256,
         baseline_policy_sha256=baseline_hash,
         baseline_reference_type=str(types.iloc[0]),
-        manifest_sha256=_sha256(manifest_path),
+        manifest_sha256=sha256_file(manifest_path),
     )
     return processed, summary, contract
 
@@ -433,7 +433,8 @@ def _prepare_output_dir(
             (output_dir / name).unlink(missing_ok=True)
 
 
-def _sha256(path: Path) -> str:
+def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of one file."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -442,7 +443,7 @@ def _sha256(path: Path) -> str:
 
 
 def _optional_sha256(path: Path) -> str | None:
-    return _sha256(path) if path.is_file() else None
+    return sha256_file(path) if path.is_file() else None
 
 
 def _relative_path(path: Path, root: Path) -> str:
@@ -457,12 +458,21 @@ def optional_sha256(path: Path | None) -> str | None:
     return None if path is None else _optional_sha256(path)
 
 
+def relative_posix_path(path: Path, root: Path) -> str:
+    """Return a safe POSIX path relative to root, or reject paths outside it."""
+    try:
+        relative = path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise ValueError(f"path must be inside root: {path}") from error
+    return relative.as_posix()
+
+
 def source_file_metadata(path: Path, root: Path) -> dict[str, Any]:
     """Return stable metadata for one raw source file."""
     return {
         "relative_path": str(path.relative_to(root)),
         "size_bytes": path.stat().st_size,
-        "sha256": _sha256(path),
+        "sha256": sha256_file(path),
     }
 
 

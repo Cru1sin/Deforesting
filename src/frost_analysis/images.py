@@ -25,6 +25,27 @@ def validate_camera_directories(
     return tuple(discovered)
 
 
+def image_roles(frame: pd.DataFrame) -> tuple[str, ...]:
+    """Return image roles represented by complete path-column names."""
+    prefix = "image_"
+    suffix = "_path"
+    roles = {
+        str(column)[len(prefix) : -len(suffix)]
+        for column in frame.columns
+        if str(column).startswith(prefix) and str(column).endswith(suffix)
+    }
+    return tuple(sorted(roles))
+
+
+def image_columns(role: str) -> tuple[str, str, str]:
+    """Return the path, timestamp, and offset columns for one image role."""
+    return (
+        f"image_{role}_path",
+        f"image_{role}_time",
+        f"image_{role}_offset_seconds",
+    )
+
+
 def match_images(
     timestamps: Iterable[pd.Timestamp],
     image_files: Iterable[Path],
