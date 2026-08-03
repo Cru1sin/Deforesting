@@ -7,12 +7,13 @@ input_dir: data/0716
 expected_sensor_interval_seconds: 1
 
 camera_roles:
-  "192.168.1.1_1": unverified_camera_01
-  "192.168.1.2_1": unverified_camera_02
-  "192.168.1.11_1": unverified_camera_03
-  "192.168.1.12_1": unverified_camera_04
-  "192.168.1.13_1": unverified_camera_05
-  "192.168.1.14_1": unverified_camera_06
+  # Verified against 0715 image viewpoints: same six physical camera positions.
+  "192.168.1.1_1": top_center
+  "192.168.1.2_1": left_near
+  "192.168.1.11_1": top_near
+  "192.168.1.12_1": right_extreme
+  "192.168.1.13_1": front_center
+  "192.168.1.14_1": left_oblique
 
 overrides:
   cycles:
