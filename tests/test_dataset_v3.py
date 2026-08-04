@@ -170,6 +170,62 @@ def test_canonical_v3_manifest_and_original_cycle_contract(tmp_path: Path) -> No
     assert not loader.load_cycle_original("frost_cycle_000001").empty
 
 
+def test_original_cycle_export_drops_source_quality_columns_but_keeps_empty_channels() -> None:
+    from frost_analysis.dataset import _canonical_original_frame
+
+    suffixes = ("__missing", "__invalid", "__duplicate", "__conflict")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-07-14 10:00:00", periods=2, freq="s"),
+            "environment_temperature": [pd.NA, pd.NA],
+            "signal": [1.0, 2.0],
+            "cycle_stage": ["frost_development", "frost_development"],
+            "cycle_status": ["partial", "partial"],
+            "cycle_status_reason": ["defrost_state_gap", "defrost_state_gap"],
+            "cycle_elapsed_seconds": [0.0, 1.0],
+            "cycle_progress": [pd.NA, pd.NA],
+        }
+    )
+    for suffix in suffixes:
+        frame[f"environment_temperature{suffix}"] = [True, True]
+        frame[f"signal{suffix}"] = [False, False]
+
+    original = _canonical_original_frame(frame)
+
+    assert "environment_temperature" in original.columns
+    assert "signal" in original.columns
+    assert "cycle_stage" in original.columns
+    assert "cycle_status" in original.columns
+    assert "cycle_status_reason" in original.columns
+    assert not any(
+        str(column).endswith(suffix)
+        for column in original.columns
+        for suffix in suffixes
+    )
+
+
+def test_canonical_validator_rejects_source_quality_columns_in_original_cycle(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path, "0714", "2026-07-14")
+    dataset = tmp_path / "dataset-review"
+    add_canonical_formal_run(run, dataset)
+
+    original_path = dataset / "cycles_original" / "frost_cycle_000001.csv"
+    original = pd.read_csv(original_path)
+    original["signal__missing"] = False
+    original.to_csv(original_path, index=False)
+    manifest_path = dataset / "dataset_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["cycles"][0]["original_data"]["sha256"] = hashlib.sha256(
+        original_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source-quality columns"):
+        validate_canonical_dataset(dataset)
+
+
 def test_canonical_v3_add_appends_in_time_order_and_repeated_source_is_noop(
     tmp_path: Path,
 ) -> None:

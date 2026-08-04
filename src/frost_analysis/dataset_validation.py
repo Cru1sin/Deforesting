@@ -105,6 +105,7 @@ def validate_canonical_dataset(dataset_dir: Path, *, require_assigned: bool = Fa
         _CANONICAL_IMAGE_SUFFIXES,
         CANONICAL_DATASET_ID,
         CANONICAL_DATASET_SCHEMA_VERSION,
+        SOURCE_QUALITY_SUFFIXES,
     )
     from .dataset_registry import canonical_registry_hash, is_image_column
     from .dataset_v3 import make_image_id
@@ -256,6 +257,16 @@ def validate_canonical_dataset(dataset_dir: Path, *, require_assigned: bool = Fa
         original_frame = pd.read_csv(original)
         if original_frame.empty or len(original_frame) != int(row["original_row_count"]):
             raise ValueError(f"original cycle data is empty or miscounted: {name}")
+        quality_columns = [
+            str(column)
+            for column in original_frame.columns
+            if str(column).endswith(SOURCE_QUALITY_SUFFIXES)
+        ]
+        if quality_columns:
+            raise ValueError(
+                "cycles_original contains source-quality columns: "
+                f"{quality_columns}"
+            )
         original_timestamps = pd.to_datetime(original_frame["timestamp"], errors="coerce")
         if original_timestamps.isna().any() or not original_timestamps.is_monotonic_increasing:
             raise ValueError(f"original cycle timestamps are not monotonic: {name}")

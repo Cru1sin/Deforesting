@@ -21,6 +21,12 @@ from .io import ensure_output_outside_input, relative_posix_path, sha256_file
 
 DATASET_SCHEMA_VERSION = 1
 CYCLE_NAME_WIDTH = 6
+SOURCE_QUALITY_SUFFIXES = (
+    "__missing",
+    "__invalid",
+    "__duplicate",
+    "__conflict",
+)
 _DATASET_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _CYCLE_NUMBER_RE = re.compile(r"(?:^|_)cycle_(\d+)$")
 CycleKey = tuple[str, str]
@@ -1820,7 +1826,11 @@ def _canonical_original_frame(frame: pd.DataFrame) -> pd.DataFrame:
     columns = [
         str(column)
         for column in frame.columns
-        if str(column) not in drop and not image_pattern.fullmatch(str(column))
+        if (
+            str(column) not in drop
+            and not image_pattern.fullmatch(str(column))
+            and not str(column).endswith(SOURCE_QUALITY_SUFFIXES)
+        )
     ]
     return frame.loc[:, columns].sort_values("timestamp", kind="stable").reset_index(drop=True)
 
