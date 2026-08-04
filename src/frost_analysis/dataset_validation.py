@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pyarrow.parquet as pq  # type: ignore[import-untyped]
@@ -72,9 +72,19 @@ def validate_dataset(dataset_dir: Path) -> None:
             isinstance(payload, dict)
             and payload.get("dataset_schema_version") == 3
         ):
-            from .dataset_validation_v3 import validate_v3_dataset
+            if set(payload) == {
+                "dataset_schema_version",
+                "dataset_id",
+                "created_at",
+                "updated_at",
+                "source_experiments",
+                "cycles",
+            }:
+                validate_canonical_dataset(dataset_dir)
+            else:
+                from .dataset_validation_v3 import validate_v3_dataset
 
-            validate_v3_dataset(dataset_dir)
+                validate_v3_dataset(dataset_dir)
             return
         if (
             isinstance(payload, dict)
@@ -86,6 +96,192 @@ def validate_dataset(dataset_dir: Path) -> None:
     _validate_cycle_files(dataset_dir, manifest, cycle_index, image_index)
     _validate_image_files(dataset_dir, image_index)
     _validate_orphans(dataset_dir, cycle_index, image_index)
+
+
+def validate_canonical_dataset(dataset_dir: Path, *, require_assigned: bool = False) -> None:  # noqa: C901
+    """Validate the schema-3 Dataset without consulting source-run files."""
+    from .dataset import (
+        _CANONICAL_DATASET_FIELDS,
+        _CANONICAL_IMAGE_SUFFIXES,
+        CANONICAL_DATASET_ID,
+        CANONICAL_DATASET_SCHEMA_VERSION,
+    )
+    from .dataset_registry import canonical_registry_hash, is_image_column
+    from .dataset_v3 import make_image_id
+
+    root = Path(dataset_dir).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"dataset directory does not exist: {root}")
+    manifest = _read_json_object(root / "dataset_manifest.json")
+    expected_top = {
+        "dataset_schema_version",
+        "dataset_id",
+        "created_at",
+        "updated_at",
+        "source_experiments",
+        "cycles",
+    }
+    if set(manifest) != expected_top:
+        raise ValueError("canonical Dataset manifest has unexpected top-level fields")
+    if manifest.get("dataset_schema_version") != CANONICAL_DATASET_SCHEMA_VERSION:
+        raise ValueError("unsupported Dataset schema version")
+    if manifest.get("dataset_id") != CANONICAL_DATASET_ID:
+        raise ValueError("Dataset identity disagrees with the canonical contract")
+    for folder in ("cycles", "cycles_original", "images"):
+        if not (root / folder).is_dir():
+            raise FileNotFoundError(f"Dataset is missing {folder}/")
+    registry = _read_json_object(root / "channel_registry.json")
+    if str(registry.get("canonical_hash")) != canonical_registry_hash(registry):
+        raise ValueError("channel_registry canonical hash mismatch")
+    image_coverage = registry.get("image_coverage")
+    if not isinstance(image_coverage, dict) or float(
+        image_coverage.get("max_image_gap_seconds", 0)
+    ) <= 0:
+        raise ValueError("channel_registry image coverage setting is invalid")
+
+    index = _read_parquet_required(root / "cycle_index.parquet")
+    index_columns = {
+        "cycle_name",
+        "cycle_uid",
+        "experiment_id",
+        "experiment_date",
+        "cycle_id",
+        "start_time",
+        "end_time",
+        "processed_row_count",
+        "original_row_count",
+        "parquet_sha256",
+        "csv_sha256",
+        "publication_sha256",
+        "rgb_coverage_sha256",
+    }
+    _require_columns(index, index_columns, "cycle_index")
+    if len(index) == 0 or index["cycle_name"].duplicated().any():
+        raise ValueError("cycle_index must contain unique non-empty cycles")
+    if index["cycle_name"].astype(str).tolist() != [
+        f"frost_cycle_{number:06d}" for number in range(1, len(index) + 1)
+    ]:
+        raise ValueError("cycle_index cycle names are not consecutive")
+    metadata = _read_parquet_required(root / "image_metadata.parquet")
+    metadata_columns = {
+        "image_id",
+        "cycle_uid",
+        "cycle_name",
+        "frame_index",
+        "source_camera_id",
+        "image_time",
+        "matched_timestamp",
+        "offset_seconds",
+        "cycle_stage",
+        "source_relative_path",
+        "file_size_bytes",
+        "sha256",
+    }
+    _require_columns(metadata, metadata_columns, "image_metadata")
+    if metadata["image_id"].duplicated().any():
+        raise ValueError("image_metadata image_id must be globally unique")
+
+    records = manifest.get("cycles")
+    sources = manifest.get("source_experiments")
+    if not isinstance(records, list) or not isinstance(sources, list):
+        raise ValueError("canonical Dataset manifest lists are invalid")
+    source_fields = {"experiment_id", "experiment_date", "source_fingerprint"}
+    for source in sources:
+        if not isinstance(source, dict) or set(source) != source_fields:
+            raise ValueError("source_experiments contains an invalid record")
+    record_fields = {
+        "cycle_name",
+        "cycle_uid",
+        "experiment_id",
+        "experiment_date",
+        "cycle_id",
+        "cycle_status",
+        "original_data",
+        "image",
+    }
+    if len(records) != len(index):
+        raise ValueError("manifest cycle count disagrees with cycle_index")
+    by_name = {}
+    for record in records:
+        if not isinstance(record, dict) or set(record) != record_fields:
+            raise ValueError("manifest contains an invalid canonical cycle record")
+        by_name[str(record["cycle_name"])] = record
+    if set(by_name) != set(index["cycle_name"].astype(str)):
+        raise ValueError("manifest cycles do not cover cycle_index")
+
+    registry_fields = registry.get("fields")
+    if not isinstance(registry_fields, list):
+        raise ValueError("channel_registry fields are missing")
+    expected_columns = [str(field["name"]) for field in registry_fields] + list(
+        _CANONICAL_DATASET_FIELDS
+    )
+    for row in index.to_dict(orient="records"):
+        name = str(row["cycle_name"])
+        record = by_name[name]
+        for identity in ("cycle_uid", "experiment_id", "experiment_date", "cycle_id"):
+            if str(record[identity]) != str(row[identity]):
+                raise ValueError(f"cycle identity mismatch: {name}/{identity}")
+        if str(row["cycle_uid"]) != f"{row['experiment_id']}::{row['cycle_id']}":
+            raise ValueError(f"invalid cycle_uid: {row['cycle_uid']}")
+        parquet = root / "cycles" / f"{name}.parquet"
+        csv = root / "cycles" / f"{name}.csv"
+        publication = root / "cycles" / f"{name}.png"
+        coverage = root / "cycles" / f"{name}_rgb_coverage.png"
+        for path in (parquet, csv, publication, coverage):
+            if not path.is_file():
+                raise FileNotFoundError(f"cycle asset is missing: {path}")
+        for column, path in (
+            ("parquet_sha256", parquet),
+            ("csv_sha256", csv),
+            ("publication_sha256", publication),
+            ("rgb_coverage_sha256", coverage),
+        ):
+            if str(row[column]) != sha256_file(path):
+                raise ValueError(f"cycle asset SHA mismatch: {path}")
+        frame = pd.read_parquet(parquet)
+        csv_frame = pd.read_csv(csv)
+        if frame.empty or len(frame) != int(row["processed_row_count"]):
+            raise ValueError(f"cycle Processed data is empty or miscounted: {name}")
+        if (
+            frame.columns.tolist() != csv_frame.columns.tolist()
+            or frame.columns.tolist() != expected_columns
+        ):
+            raise ValueError(f"cycle schema mismatch: {name}")
+        if any(is_image_column(column) for column in frame.columns):
+            raise ValueError(f"cycle contains image columns: {name}")
+        timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+        if timestamps.isna().any() or not timestamps.is_monotonic_increasing:
+            raise ValueError(f"cycle timestamps are not monotonic: {name}")
+        original = root / "cycles_original" / f"{name}.csv"
+        original_frame = pd.read_csv(original)
+        if original_frame.empty or len(original_frame) != int(row["original_row_count"]):
+            raise ValueError(f"original cycle data is empty or miscounted: {name}")
+        original_timestamps = pd.to_datetime(original_frame["timestamp"], errors="coerce")
+        if original_timestamps.isna().any() or not original_timestamps.is_monotonic_increasing:
+            raise ValueError(f"original cycle timestamps are not monotonic: {name}")
+        # cycle_status in original data is the immutable Pipeline source fact.
+        # The manifest status is editable Dataset state and may intentionally
+        # differ after a status-only review edit.
+        for identity in ("experiment_id", "experiment_date", "cycle_id"):
+            if identity in original_frame and not original_frame[identity].astype(str).eq(
+                str(record[identity])
+            ).all():
+                raise ValueError(f"original cycle identity mismatch: {name}/{identity}")
+        original_info = record["original_data"]
+        if not isinstance(original_info, dict) or set(original_info) != {
+            "row_count", "start_time", "end_time", "median_interval_seconds", "sha256"
+        }:
+            raise ValueError(f"original_data metadata is invalid: {name}")
+        if str(original_info["sha256"]) != sha256_file(original):
+            raise ValueError(f"original cycle SHA mismatch: {name}")
+    _validate_canonical_images(
+        root,
+        metadata,
+        index,
+        make_image_id,
+        _CANONICAL_IMAGE_SUFFIXES,
+        require_assigned=require_assigned,
+    )
 
 
 def _validate_append_candidate(
@@ -350,7 +546,7 @@ def _validate_image_files(dataset_dir: Path, image_index: pd.DataFrame) -> None:
             raise FileNotFoundError(f"dataset image does not exist: {path}")
         if sha256_file(path) != str(row["sha256"]):
             raise ValueError(f"dataset image SHA mismatch: {path}")
-        if path.stat().st_size != int(row["file_size_bytes"]):
+        if path.stat().st_size != int(cast(Any, row["file_size_bytes"])):
             raise ValueError(f"dataset image size mismatch: {path}")
 
 
@@ -801,3 +997,79 @@ def _validate_v2_orphans(
 
 def _ignored_v2_name(name: str) -> bool:
     return name == ".DS_Store" or name.startswith(".tmp-") or name.endswith(".tmp")
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Dataset is missing {path.name}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"JSON object required: {path}")
+    return payload
+
+
+def _read_parquet_required(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(f"Dataset is missing {path.name}")
+    return pd.read_parquet(path)
+
+
+def _validate_canonical_images(  # noqa: C901
+    root: Path,
+    metadata: pd.DataFrame,
+    index: pd.DataFrame,
+    make_image_id_function: Any,
+    suffixes: set[str],
+    *,
+    require_assigned: bool = False,
+) -> None:
+    found: dict[str, Path] = {}
+    expected_cycles = set(index["cycle_name"].astype(str))
+    for cycle_root in (root / "images").iterdir():
+        if not cycle_root.is_dir():
+            if cycle_root.name != ".DS_Store":
+                raise ValueError(f"image orphan path: {cycle_root}")
+            continue
+        if cycle_root.name not in expected_cycles:
+            raise ValueError(f"image orphan cycle: {cycle_root.name}")
+        for role_root in cycle_root.iterdir():
+            if not role_root.is_dir():
+                if role_root.name != ".DS_Store":
+                    raise ValueError(f"image orphan path: {role_root}")
+                continue
+            if require_assigned and role_root.name.startswith("unassigned_"):
+                raise ValueError(f"unassigned camera role remains: {role_root}")
+            for path in role_root.iterdir():
+                if path.name == ".DS_Store":
+                    continue
+                if not path.is_file() or path.suffix.lower() not in suffixes:
+                    raise ValueError(f"invalid Dataset image file: {path}")
+                if path.stem in found:
+                    raise ValueError(f"duplicate Dataset image stem: {path.stem}")
+                found[path.stem] = path
+    metadata_ids = set(metadata["image_id"].astype(str))
+    if set(found) != metadata_ids:
+        raise ValueError("Dataset image files and image_metadata are not a closed set")
+    by_id = metadata.set_index("image_id")
+    for image_id, path in found.items():
+        row = by_id.loc[image_id]
+        if str(image_id) != make_image_id_function(
+            str(row["cycle_uid"]), str(row["source_camera_id"]), str(row["source_relative_path"])
+        ):
+            raise ValueError(f"image_id does not match immutable source identity: {image_id}")
+        if path.parent.parent.name != str(row["cycle_name"]):
+            raise ValueError(f"image cycle path mismatch: {path}")
+        if path.parent.name == "":
+            raise ValueError(f"image camera role is empty: {path}")
+        if path.stat().st_size != int(cast(Any, row["file_size_bytes"])):
+            raise ValueError(f"image size mismatch: {path}")
+        if sha256_file(path) != str(row["sha256"]):
+            raise ValueError(f"image SHA mismatch: {path}")
+        source_relative = str(row["source_relative_path"]).replace("\\", "/")
+        source_path = Path(source_relative)
+        if (
+            source_path.is_absolute()
+            or ".." in source_path.parts
+            or source_path.as_posix() != source_relative
+        ):
+            raise ValueError(f"source image path is unsafe: {source_relative}")

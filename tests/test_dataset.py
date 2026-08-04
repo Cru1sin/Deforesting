@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from frost_analysis.channels import load_channels
 from frost_analysis.dataset import (
     CYCLE_NAME_WIDTH,
     DATASET_SCHEMA_VERSION,
@@ -21,6 +22,7 @@ from frost_analysis.dataset import (
     source_processed_schema,
     validate_dataset_id,
 )
+from frost_analysis.dataset_coverage import _mask_intervals, sensor_overall_mask
 from frost_analysis.images import image_columns, image_roles
 from frost_analysis.io import relative_posix_path, sha256_file
 
@@ -73,6 +75,44 @@ def test_dataset_id_rejects_unsafe_names(value: str) -> None:
 
 def test_dataset_id_accepts_versioned_names() -> None:
     assert validate_dataset_id("frost_cycles_v1") == "frost_cycles_v1"
+
+
+def test_unobserved_fin_temperature_is_not_required_for_sensor_overall() -> None:
+    channels = load_channels(Path(__file__).resolve().parents[1] / "configs" / "channels.yaml")
+
+    assert channels["fin_temperature"]["coverage_required"] is False
+
+
+def test_sensor_overall_uses_only_observed_required_channels() -> None:
+    frame = pd.DataFrame(
+        {
+            "observed": [1.0, 2.0, None],
+            "observed__imputed": [False, False, False],
+            "optional_empty": [None, None, None],
+        }
+    )
+
+    mask = sensor_overall_mask(
+        frame,
+        {
+            "channels": {
+                "observed": {"coverage_required": True},
+                "optional_empty": {"coverage_required": False},
+            }
+        },
+    )
+
+    assert mask.tolist() == [True, True, False]
+
+
+def test_mask_intervals_returns_only_true_runs() -> None:
+    timestamps = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
+    mask = pd.Series([True, True, False, True])
+
+    assert _mask_intervals(timestamps.to_series(index=range(4)), mask) == [
+        (timestamps[0], timestamps[2]),
+        (timestamps[3], timestamps[3] + pd.Timedelta(seconds=10)),
+    ]
 
 
 def test_fingerprint_uses_dataset_inputs_not_audit_metadata(tmp_path: Path) -> None:

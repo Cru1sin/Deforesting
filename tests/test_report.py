@@ -23,13 +23,19 @@ from frost_analysis.report import (
     _cop_inset_required,
     _cycle_image_counts,
     _finish_cycle_axes,
+    _humidity_columns,
+    _infer_cycle_stage_boundaries,
     _observed_segments,
+    _plot_cycle_panels,
     _plot_defrost_state_strip,
     _plot_prepared_line,
+    _plot_publication_stage_ribbon,
     _plot_stage_and_defrost,
     _prepared_observed_series,
     _processed_observed_series,
     _publication_stage_labels,
+    _shade_cycle_stages,
+    _stage_intervals,
     generate_report,
 )
 
@@ -558,6 +564,146 @@ def test_publication_panel_contract_uses_formal_labels_and_physical_order() -> N
         "Temperature [°C]",
     )
     assert _AXIS_LABELS["cop"] == "COP [-]"
+
+
+def test_publication_infers_stage_intervals_from_canonical_cycle_frame() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=6, freq="10s"),
+            "cycle_stage": [
+                "recovery",
+                "recovery",
+                "frost_development",
+                "frost_development",
+                "defrost",
+                "defrost",
+            ],
+        }
+    )
+
+    cycle = _infer_cycle_stage_boundaries(frame, pd.Series({"cycle_name": "frost_cycle_000001"}))
+
+    assert cycle["heating_start"] == start
+    assert cycle["stable_heating_start"] == start + pd.Timedelta(seconds=20)
+    assert cycle["defrost_start"] == start + pd.Timedelta(seconds=40)
+    assert cycle["defrost_end"] == start + pd.Timedelta(seconds=60)
+    assert cycle["_stage_intervals"] == [
+        ("recovery", start, start + pd.Timedelta(seconds=20)),
+        (
+            "frost_development",
+            start + pd.Timedelta(seconds=20),
+            start + pd.Timedelta(seconds=40),
+        ),
+        ("defrost", start + pd.Timedelta(seconds=40), start + pd.Timedelta(seconds=60)),
+    ]
+
+
+def test_stage_background_covers_cycle_when_all_stage_labels_are_missing() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    end = start + pd.Timedelta(minutes=10)
+    cycle = pd.Series({"_render_time_bounds": (start, end)})
+    figure, axis = plt.subplots()
+
+    _shade_cycle_stages([axis], cycle, start)
+
+    assert len(axis.patches) == 1
+    assert axis.patches[0].get_x() == 0.0
+    assert axis.patches[0].get_width() == 10.0
+    plt.close(figure)
+
+
+def test_stage_background_fills_missing_stage_gaps_without_hiding_known_stages() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    cycle = pd.Series(
+        {
+            "_render_time_bounds": (start, start + pd.Timedelta(minutes=10)),
+            "_stage_intervals": [
+                ("recovery", start, start + pd.Timedelta(minutes=2)),
+                ("defrost", start + pd.Timedelta(minutes=8), start + pd.Timedelta(minutes=10)),
+            ],
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _shade_cycle_stages([axis], cycle, start)
+
+    assert len(axis.patches) == 3
+    assert _stage_intervals(cycle) == [
+        ("recovery", start, start + pd.Timedelta(minutes=2)),
+        ("defrost", start + pd.Timedelta(minutes=8), start + pd.Timedelta(minutes=10)),
+    ]
+    plt.close(figure)
+
+
+def test_publication_ribbon_draws_neutral_background_for_unknown_stage_interval() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    cycle = pd.Series({"_render_time_bounds": (start, start + pd.Timedelta(minutes=10))})
+    figure, axis = plt.subplots()
+
+    _plot_publication_stage_ribbon(axis, cycle, [], start)
+
+    assert len(axis.patches) == 1
+    plt.close(figure)
+
+
+def test_publication_omits_humidity_panel_when_all_humidity_values_are_missing() -> None:
+    frame = pd.DataFrame(
+        {
+            "environment_relative_humidity": [pd.NA, pd.NA],
+            "environment_relative_humidity__imputed": [False, False],
+        }
+    )
+
+    assert _humidity_columns(frame) == []
+
+
+def test_publication_legends_describe_processed_curves_on_each_panel() -> None:
+    timestamps = pd.date_range("2026-07-15 08:00:00", periods=2, freq="10s")
+    channels = {
+        "compressor_frequency": [1.0, 2.0],
+        "compressor_frequency_setpoint": [1.0, 2.0],
+        "heating_capacity": [3.0, 4.0],
+        "cop": [2.0, 2.1],
+        "water_in_temperature": [30.0, 31.0],
+        "water_out_temperature": [35.0, 36.0],
+        "water_temperature_setpoint": [40.0, 40.0],
+        "ambient_temperature": [5.0, 6.0],
+        "coil_temperature": [-2.0, -3.0],
+        "evaporating_temperature": [-1.0, -2.0],
+    }
+    frame = pd.DataFrame({"timestamp": timestamps, **channels})
+    for channel in channels:
+        frame[f"{channel}__imputed"] = False
+    figure, axes = plt.subplots(5, 1)
+    cycle = pd.Series(
+        {
+            "cycle_id": "cycle_1",
+            "heating_start": timestamps[0],
+            "stable_heating_start": timestamps[0] + pd.Timedelta(seconds=10),
+            "defrost_start": timestamps[0] + pd.Timedelta(seconds=20),
+            "defrost_end": timestamps[0] + pd.Timedelta(seconds=30),
+        }
+    )
+
+    _plot_cycle_panels(
+        list(axes),
+        frame,
+        frame,
+        cycle,
+        "cycle_1",
+        [],
+        timestamps[0],
+        publication=True,
+        processed_only=True,
+    )
+
+    assert all(axis.get_legend() is not None for axis in axes)
+    assert any(
+        "Compressor frequency" in text.get_text()
+        for text in axes[0].get_legend().get_texts()
+    )
+    plt.close(figure)
 
 
 def test_publication_inset_is_small_and_upper_right() -> None:

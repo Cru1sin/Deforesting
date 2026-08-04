@@ -16,9 +16,7 @@ from frost_analysis.channels import load_channels
 from frost_analysis.config import load_config
 from frost_analysis.dataset import add_dataset, append_dataset, build_dataset
 from frost_analysis.dataset_loader import DatasetLoader
-from frost_analysis.dataset_manifest import refresh_manifest, review_cycle
-from frost_analysis.dataset_manifest_v3 import refresh_manifest as refresh_manifest_v3
-from frost_analysis.dataset_v3 import add_dataset as add_dataset_v3
+from frost_analysis.dataset_manifest import edit_dataset, refresh_manifest, review_cycle
 from frost_analysis.dataset_v3 import resolve_project_root
 from frost_analysis.dataset_validation import validate_dataset
 from frost_analysis.io import (
@@ -195,6 +193,15 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     )
     review_parser.add_argument("--note")
 
+    edit_parser = dataset_commands.add_parser("edit")
+    edit_parser.add_argument("--dataset", type=Path)
+    edit_parser.add_argument("--baseline-seconds", type=int)
+    recovery_group = edit_parser.add_mutually_exclusive_group()
+    recovery_group.add_argument("--recovery-seconds", type=int)
+    recovery_group.add_argument("--recovery-end-by", choices=["ts-minus"])
+    edit_parser.add_argument("--status", action="append", default=[])
+    edit_parser.add_argument("--rename-camera", action="append", default=[])
+
     render_parser = dataset_commands.add_parser("render")
     render_parser.add_argument("--dataset", type=Path)
     render_parser.add_argument("cycle", nargs="?", type=str)
@@ -206,7 +213,7 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
 def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
     if arguments.dataset_command == "add":
         if arguments.input_dir is not None:
-            print(add_dataset_v3(arguments.input_dir, arguments.dataset))
+            print(add_dataset(arguments.input_dir, arguments.dataset))
             return 0
         if arguments.run is None or arguments.dataset is None:
             raise ValueError("dataset add requires INPUT_DIR or --run with --dataset")
@@ -214,39 +221,13 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
         return 0
     if arguments.dataset_command in {"refresh-manifest", "refresh"}:
         dataset = arguments.dataset or (resolve_project_root() / "dataset")
-        manifest_path = dataset / "dataset_manifest.json"
-        manifest = (
-            json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest_path.is_file()
-            else {}
-        )
-        if manifest.get("dataset_schema_version") == 3:
-            print(refresh_manifest_v3(dataset))
-        else:
-            print(refresh_manifest(dataset))
+        print(refresh_manifest(dataset))
         return 0
     if arguments.dataset_command == "review-cycle":
         dataset = arguments.dataset or (resolve_project_root() / "dataset")
         cycle = arguments.cycle_option or arguments.cycle
         if cycle is None:
             raise ValueError("dataset review-cycle requires a cycle name")
-        manifest_path = dataset / "dataset_manifest.json"
-        manifest = (
-            json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest_path.is_file()
-            else {}
-        )
-        if manifest.get("dataset_schema_version") == 3:
-            from frost_analysis.dataset_manifest_v3 import review_cycle as review_cycle_v3
-
-            review_cycle_v3(
-                dataset,
-                cycle,
-                status=arguments.status,
-                note=arguments.note,
-            )
-            print(dataset)
-            return 0
         review_cycle(
             dataset,
             cycle,
@@ -254,6 +235,19 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
             note=arguments.note,
         )
         print(dataset)
+        return 0
+    if arguments.dataset_command == "edit":
+        dataset = arguments.dataset or (resolve_project_root() / "dataset")
+        print(
+            edit_dataset(
+                dataset,
+                baseline_seconds=arguments.baseline_seconds,
+                recovery_seconds=arguments.recovery_seconds,
+                recovery_end_by=arguments.recovery_end_by,
+                statuses=arguments.status,
+                camera_renames=arguments.rename_camera,
+            )
+        )
         return 0
     if arguments.dataset_command == "render":
         dataset = arguments.dataset or (resolve_project_root() / "dataset")
@@ -292,10 +286,12 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
         )
         return 0
     if manifest.get("dataset_schema_version") == 3:
+        cycle_index = pd.read_parquet(dataset / "cycle_index.parquet")
+        image_metadata = pd.read_parquet(dataset / "image_metadata.parquet")
         print(
             "dataset valid: "
-            f"{manifest.get('summary_cycle_count', 0)} cycles, "
-            f"{manifest.get('image_count', 0)} images"
+            f"{len(cycle_index)} cycles, "
+            f"{len(image_metadata)} images"
         )
     else:
         print(
@@ -309,9 +305,16 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
 def _require_assigned_roles(dataset: Path) -> None:
     manifest = json.loads((dataset / "dataset_manifest.json").read_text(encoding="utf-8"))
     if manifest.get("dataset_schema_version") == 3:
-        from frost_analysis.dataset_validation_v3 import validate_v3_dataset
+        from frost_analysis.dataset_validation import validate_canonical_dataset
 
-        validate_v3_dataset(dataset, require_assigned=True)
+        try:
+            validate_canonical_dataset(dataset, require_assigned=True)
+        except ValueError as error:
+            if "canonical Dataset manifest" not in str(error):
+                raise
+            from frost_analysis.dataset_validation_v3 import validate_v3_dataset
+
+            validate_v3_dataset(dataset, require_assigned=True)
         return
     image_root = dataset / "images"
     unassigned = sorted(

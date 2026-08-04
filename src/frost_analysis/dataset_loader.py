@@ -37,6 +37,18 @@ class DatasetLoader:
             self._registry = {}
         if not (self.dataset_root / "cycles").is_dir():
             raise FileNotFoundError("dataset is missing cycles/")
+        canonical_manifest = self._version == V3_DATASET_SCHEMA_VERSION and set(self._manifest) == {
+            "dataset_schema_version",
+            "dataset_id",
+            "created_at",
+            "updated_at",
+            "source_experiments",
+            "cycles",
+        }
+        if canonical_manifest and not (
+            self.dataset_root / "cycles_original"
+        ).is_dir():
+            raise FileNotFoundError("Dataset v3 is missing cycles_original/")
         if not (self.dataset_root / "images").is_dir():
             raise FileNotFoundError("dataset is missing images/")
 
@@ -58,28 +70,40 @@ class DatasetLoader:
         statuses: set[str] | None = None,
         experiment_ids: set[str] | None = None,
     ) -> pd.DataFrame:
-        """Return cycles joined with their current single assessment."""
+        """Return cycles joined with their current canonical status."""
         if statuses is not None and not statuses <= ASSESSMENT_STATUSES:
             raise ValueError(f"invalid cycle statuses: {sorted(statuses - ASSESSMENT_STATUSES)}")
         records = self._manifest.get("cycles")
         if not isinstance(records, list):
             raise ValueError("dataset manifest is missing cycles")
         assessments = {
-            str(record["cycle_name"]): record["assessment"]
+            str(record["cycle_name"]): record
             for record in records
-            if isinstance(record, dict) and isinstance(record.get("assessment"), dict)
+            if isinstance(record, dict)
         }
         result = self._cycle_index.copy()
-        result["status"] = [
-            str(assessments.get(str(name), {}).get("status", "invalid"))
-            for name in result["cycle_name"]
-        ]
-        result["assessment_reasons"] = [
-            assessments.get(str(name), {}).get("reasons", []) for name in result["cycle_name"]
-        ]
-        result["assessment_note"] = [
-            assessments.get(str(name), {}).get("note") for name in result["cycle_name"]
-        ]
+        if self._version == V3_DATASET_SCHEMA_VERSION and not any(
+            isinstance(record, dict) and "assessment" in record for record in records
+        ):
+            result["status"] = [
+                str(assessments.get(str(name), {}).get("cycle_status", "invalid"))
+                for name in result["cycle_name"]
+            ]
+            result["assessment_reasons"] = [[] for _ in result["cycle_name"]]
+            result["assessment_note"] = [None for _ in result["cycle_name"]]
+        else:
+            result["status"] = [
+                str(assessments.get(str(name), {}).get("assessment", {}).get("status", "invalid"))
+                for name in result["cycle_name"]
+            ]
+            result["assessment_reasons"] = [
+                assessments.get(str(name), {}).get("assessment", {}).get("reasons", [])
+                for name in result["cycle_name"]
+            ]
+            result["assessment_note"] = [
+                assessments.get(str(name), {}).get("assessment", {}).get("note")
+                for name in result["cycle_name"]
+            ]
         if statuses is not None:
             result = result.loc[result["status"].isin(statuses)]
         if experiment_ids is not None:
@@ -143,6 +167,18 @@ class DatasetLoader:
         if self._version == V3_DATASET_SCHEMA_VERSION:
             return _scan_v3_cycle_images(self.dataset_root, cycle_name, self._image_metadata)
         return scan_cycle_images(self.dataset_root, cycle_name, self._image_metadata)
+
+    def load_cycle_original(
+        self, cycle_name: str, *, columns: list[str] | None = None
+    ) -> pd.DataFrame:
+        """Load the preserved Prepared-resolution cycle CSV."""
+        if self._version != V3_DATASET_SCHEMA_VERSION:
+            raise ValueError("load_cycle_original requires Dataset schema version 3")
+        self.get_cycle_record(cycle_name)
+        path = self.dataset_root / "cycles_original" / f"{cycle_name}.csv"
+        if not path.is_file():
+            raise FileNotFoundError(f"original cycle CSV does not exist: {path}")
+        return pd.read_csv(path, usecols=columns)
 
     @property
     def registry(self) -> dict[str, object]:

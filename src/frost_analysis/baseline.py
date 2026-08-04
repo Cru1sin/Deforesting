@@ -108,26 +108,27 @@ def _find_common_window(
 ) -> tuple[tuple[pd.Timestamp, pd.Timestamp, pd.DataFrame], str] | tuple[None, str]:
     stable = _timestamp_or_none(cycle.get("stable_heating_start"))
     defrost = _timestamp_or_none(cycle.get("defrost_start"))
-    if stable is None or defrost is None:
+    if stable is None:
+        return None, "no_candidate_window"
+
+    start = stable
+    end = stable + pd.Timedelta(seconds=settings.baseline_seconds)
+    timestamp_values = (
+        cycle_frame["timestamp"]
+        if "timestamp" in cycle_frame
+        else pd.Series(dtype="datetime64[ns]")
+    )
+    timestamps = pd.to_datetime(timestamp_values, errors="coerce").dropna()
+    if timestamps.empty or timestamps.max() < end:
+        return None, "no_candidate_window"
+    if defrost is not None and end > defrost:
         return None, "no_candidate_window"
     stage = cycle_frame.loc[cycle_frame["cycle_stage"].eq(settings.stage)].copy()
-    search_start = stable + pd.Timedelta(minutes=settings.search_start_minutes)
-    search_end = stable + pd.Timedelta(minutes=settings.search_end_minutes)
-    search_end = min(search_end, defrost)
-    window_length = pd.Timedelta(minutes=settings.window_minutes)
-    if search_end - search_start < window_length:
-        return None, "no_candidate_window"
-    last_failure = "no_candidate_window"
-    start = search_start
-    while start + window_length <= search_end:
-        end = start + window_length
-        window = stage.loc[stage["timestamp"].ge(start) & stage["timestamp"].lt(end)]
-        valid, failure = _anchors_are_stable(window, settings)
-        if valid:
-            return (start, end, window), ""
-        last_failure = failure
-        start += pd.Timedelta(minutes=settings.window_step_minutes)
-    return None, last_failure
+    window = stage.loc[stage["timestamp"].ge(start) & stage["timestamp"].lt(end)]
+    valid, failure = _anchors_are_stable(window, settings)
+    if valid:
+        return (start, end, window), ""
+    return None, failure
 
 
 def _anchors_are_stable(

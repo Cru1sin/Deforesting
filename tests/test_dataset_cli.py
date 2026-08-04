@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from frost_analysis import cli
@@ -114,3 +115,33 @@ def test_cli_help_does_not_expose_legacy_analyze_entry(
         cli.main(["--help"])
 
     assert "analyze" not in capsys.readouterr().out
+
+
+def test_dataset_cli_reports_canonical_index_counts(
+    monkeypatch: object, tmp_path: Path, capsys: object
+) -> None:
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    (dataset / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_schema_version": 3,
+                "dataset_id": "frost_cycle_dataset",
+                "created_at": "2026-07-14T00:00:00+00:00",
+                "updated_at": "2026-07-14T00:00:00+00:00",
+                "source_experiments": [],
+                "cycles": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pd.DataFrame({"cycle_name": ["frost_cycle_000001"]}).to_parquet(
+        dataset / "cycle_index.parquet", index=False
+    )
+    pd.DataFrame({"image_id": ["img_a", "img_b"]}).to_parquet(
+        dataset / "image_metadata.parquet", index=False
+    )
+    monkeypatch.setattr(cli, "validate_dataset", lambda path: None)
+
+    assert cli.main(["dataset", "validate", "--dataset", str(dataset)]) == 0
+    assert capsys.readouterr().out.strip() == "dataset valid: 1 cycles, 2 images"

@@ -243,6 +243,11 @@ class BaselineSettings:
     # from_mapping() 会拒绝其他阶段，避免 recovery 或 defrost 被用作参考。
     stage: str = "frost_development"
 
+    # The baseline is the first fixed window after recovery.  The older
+    # search_* fields remain readable for existing configs, but are no longer
+    # used to slide the window forward.
+    baseline_seconds: int = 60
+
     # Baseline 搜索区间相对于 stable_heating_start 的起点和终点（分钟）。
     # 默认在结霜发展开始后的第 0～20 分钟内寻找候选窗口。
     search_start_minutes: int = 0
@@ -307,6 +312,9 @@ class BaselineSettings:
 
         result = cls(
             stage=str(mapping.get("stage", cls.stage)),
+            baseline_seconds=int(
+                mapping.get("baseline_seconds", cls.baseline_seconds)
+            ),
             search_start_minutes=int(
                 mapping.get(
                     "search_start_minutes",
@@ -352,6 +360,9 @@ class BaselineSettings:
             raise ValueError(
                 "baseline stage must be frost_development"
             )
+
+        if result.baseline_seconds <= 0:
+            raise ValueError("baseline_seconds must be positive")
 
         # 搜索起点相对于 stable_heating_start，不能是负数。
         if result.search_start_minutes < 0:

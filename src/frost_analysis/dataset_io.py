@@ -61,6 +61,7 @@ def create_append_staging(dataset_dir: Path) -> tuple[Path, Path]:
     staging_root = dataset_dir.parent / f".{dataset_dir.name}.append-{uuid4().hex}"
     staging_dataset = staging_root / dataset_dir.name
     (staging_dataset / "cycles").mkdir(parents=True, exist_ok=False)
+    (staging_dataset / "cycles_original").mkdir(parents=True, exist_ok=False)
     (staging_dataset / "images").mkdir(parents=True, exist_ok=False)
     return staging_root, staging_dataset
 

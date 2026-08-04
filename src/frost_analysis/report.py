@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
-from matplotlib.ticker import MultipleLocator, NullLocator
+from matplotlib.ticker import FuncFormatter, MultipleLocator, NullLocator
 
 from .analysis import imputed_column_for_value
 from .validation import validate_analysis, validate_prepared, validate_processed
@@ -89,9 +89,9 @@ _EXCLUDED_COVERAGE_COLUMNS = {
     "cycle_progress",
 }
 _STAGE_COLORS = {
-    "recovery": "#9ecae1",
-    "frost_development": "#fdae6b",
-    "defrost": "#a1d99b",
+    "recovery": "#78A6BC",
+    "frost_development": "#F2A35E",
+    "defrost": "#70B184",
     "partial": "#bdbdbd",
 }
 _STAGE_LABELS = {
@@ -447,6 +447,7 @@ def _plot_one_cycle_qa(
     path: Path,
     warnings: list[dict[str, str]],
 ) -> None:
+    cycle = _infer_cycle_stage_boundaries(prepared, cycle)
     figure = plt.figure(figsize=(14, 15), dpi=_PLOT_DPI)
     grid = figure.add_gridspec(
         6,
@@ -508,6 +509,7 @@ def _plot_one_cycle_publication(
     processed_only: bool = False,
     include_humidity: bool = False,
 ) -> None:
+    cycle = _infer_cycle_stage_boundaries(prepared, cycle)
     humidity_channels = _humidity_columns(processed) if include_humidity else []
     height_ratios = _PUBLICATION_HEIGHT_RATIOS + ((0.9,) if humidity_channels else ())
     figure = plt.figure(figsize=(7.2, 10.8 + 1.25 * len(humidity_channels)), dpi=_PLOT_DPI)
@@ -515,7 +517,7 @@ def _plot_one_cycle_publication(
         len(height_ratios),
         1,
         height_ratios=height_ratios,
-        hspace=0.50,
+        hspace=0.58,
     )
     ribbon_axis = figure.add_subplot(grid[0, 0])
     axes = [figure.add_subplot(grid[1, 0], sharex=ribbon_axis)]
@@ -541,18 +543,6 @@ def _plot_one_cycle_publication(
         publication=True,
         processed_only=processed_only,
     )
-    if str(cycle.get("cycle_status", "valid")) != "valid" or str(
-        cycle.get("baseline_status", "available")
-    ) != "available":
-        reason = cycle.get("baseline_failure_reason") or "incomplete cycle boundary"
-        axes[0].text(
-            0.01,
-            0.05,
-            f"Baseline unavailable — {reason}",
-            transform=axes[0].transAxes,
-            fontsize=8.5,
-            color="#4D4D4D",
-        )
     if humidity_channels:
         _plot_humidity_panel(
             axes[-1],
@@ -563,7 +553,6 @@ def _plot_one_cycle_publication(
             origin,
         )
 
-    _add_startup_annotation(axes[2], cycle, origin)
     _finish_cycle_axes(axes, None, publication=True, panel_label_x=-0.11)
     _add_cycle_title(figure, cycle, publication=True)
     figure.subplots_adjust(left=0.21, right=0.985, bottom=0.06, top=0.94)
@@ -623,41 +612,38 @@ def _plot_cycle_panels(
                     step=channel in dashed_channels,
                     zorder=line_zorder,
                 )
-        if len(channels) > 1:
-            handles = [
-                Line2D(
-                    [],
-                    [],
-                    color=_CHANNEL_COLORS[channel],
-                    linestyle="--" if channel in dashed_channels else "-",
-                    linewidth=1.35 if channel == channels[0] else 1.05,
-                    label=display_labels[channel],
-                )
-                for channel in channels
-                if _channel_has_observations(
-                    processed if channel == "cop" else prepared,
-                    channel,
-                    processed=channel == "cop",
-                )
-            ]
-            if handles:
-                axis.legend(
-                    handles=handles,
-                    loc="lower left",
-                    bbox_to_anchor=(0.0, 1.02),
-                    ncols=len(handles),
-                    fontsize=8.5 if publication else 8,
-                    frameon=False,
-                    borderaxespad=0,
-                    handlelength=2.0,
-                    columnspacing=1.2,
-                )
+        handles = [
+            Line2D(
+                [],
+                [],
+                color=_CHANNEL_COLORS[channel],
+                linestyle="--" if channel in dashed_channels else "-",
+                linewidth=1.35 if channel == channels[0] else 1.05,
+                label=_legend_label(channel, display_labels[channel]),
+            )
+            for channel in channels
+            if _channel_has_observations(
+                processed if (processed_only or channel == "cop") else prepared,
+                channel,
+                processed=processed_only or channel == "cop",
+            )
+        ]
+        if handles:
+            axis.legend(
+                handles=handles,
+                loc="lower left",
+                bbox_to_anchor=(0.0, 1.02),
+                ncols=len(handles),
+                fontsize=8.5 if publication else 8,
+                frameon=False,
+                borderaxespad=0,
+                handlelength=2.0,
+                columnspacing=1.2,
+            )
         if publication and axis is axes[1]:
             axis.margins(y=0.07)
         if axis is axes[2]:
             _configure_cop_axis(axis, processed, cycle, origin)
-        if publication and axis is axes[-1]:
-            _add_freezing_reference(axis)
 
 
 def _channel_has_observations(
@@ -735,11 +721,19 @@ def _plot_prepared_line(
 
 
 def _humidity_columns(frame: pd.DataFrame) -> list[str]:
-    return [
-        str(column)
-        for column in frame.columns
-        if "humidity" in str(column).lower() and not str(column).endswith("__imputed")
-    ]
+    columns: list[str] = []
+    for column in frame.columns:
+        name = str(column)
+        if "humidity" not in name.lower() or name.endswith("__imputed"):
+            continue
+        values = pd.to_numeric(frame[name], errors="coerce")
+        imputed = frame.get(f"{name}__imputed")
+        observed = values.notna()
+        if imputed is not None:
+            observed &= imputed.eq(False).fillna(False).astype(bool)
+        if observed.any():
+            columns.append(name)
+    return columns
 
 
 def _plot_humidity_panel(
@@ -755,16 +749,61 @@ def _plot_humidity_panel(
             axis,
             frame,
             column,
-            column,
+            _legend_label(column, _DISPLAY_LABELS.get(column, column)),
             cycle_id,
             warnings,
             color="#CC79A7",
             x_origin=origin,
             show_legend=False,
-            y_label="Relative humidity [%]",
+            y_label="RH [%]",
         )
-    if len(columns) > 1:
-        axis.legend(frameon=False, fontsize=8, loc="upper left", ncol=3)
+    observed = pd.concat(
+        [
+            pd.to_numeric(frame[column], errors="coerce")
+            for column in columns
+            if column in frame
+        ],
+        ignore_index=True,
+    ).dropna()
+    if not observed.empty:
+        minimum = float(observed.min())
+        maximum = float(observed.max())
+        if minimum >= 75.0 and maximum <= 110.0:
+            lower, upper = 75.0, 110.0
+        else:
+            padding = max((maximum - minimum) * 0.08, 2.0)
+            lower, upper = minimum - padding, maximum + padding
+        axis.set_ylim(lower, upper)
+        axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:.0f}%"))
+    handles = [
+        Line2D(
+            [],
+            [],
+            color="#CC79A7",
+            linewidth=1.35,
+            label=_legend_label(column, _DISPLAY_LABELS.get(column, column)),
+        )
+        for column in columns
+        if column in frame
+    ]
+    if handles:
+        axis.legend(
+            handles=handles,
+            frameon=False,
+            fontsize=8,
+            loc="lower left",
+            bbox_to_anchor=(0.0, 1.02),
+            ncols=len(handles),
+            borderaxespad=0,
+        )
+
+
+def _legend_label(channel: str, label: str) -> str:
+    """Return a compact human-readable curve label with its unit."""
+    unit = _DISPLAY_UNITS.get(channel)
+    if "humidity" in channel.lower():
+        return "Relative humidity [RH %]"
+    return f"{label} [{unit}]" if unit and f"[{unit}]" not in label else label
 
 
 def _plot_processed_line(
@@ -1002,6 +1041,89 @@ def _cycle_time_origin(prepared: pd.DataFrame, cycle: pd.Series) -> pd.Timestamp
     return pd.Timestamp(timestamps.min())
 
 
+def _infer_cycle_stage_boundaries(  # noqa: C901
+    frame: pd.DataFrame,
+    cycle: pd.Series,
+) -> pd.Series:
+    """Fill render-only stage context from the canonical cycle frame.
+
+    Dataset v3 deliberately keeps the Manifest focused on identity, status and
+    original-data facts.  Publication and coverage therefore derive their
+    shading context from the immutable ``cycle_stage`` column when the compact
+    cycle record does not carry the legacy summary boundaries.
+    """
+    result = cycle.copy()
+    timestamps = pd.to_datetime(
+        frame.get("timestamp", pd.Series(dtype="datetime64[ns]")),
+        errors="coerce",
+    )
+    valid = timestamps.notna()
+    if not valid.any() or "cycle_stage" not in frame:
+        return result
+
+    ordered_timestamps = timestamps.loc[valid].sort_values(kind="stable")
+    positive = ordered_timestamps.diff().dropna().dt.total_seconds()
+    positive = positive.loc[positive > 0]
+    step_seconds = float(positive.median()) if not positive.empty else 1.0
+    first_timestamp = pd.Timestamp(ordered_timestamps.iloc[0])
+    last_timestamp = pd.Timestamp(ordered_timestamps.iloc[-1])
+    result["_render_time_bounds"] = (
+        first_timestamp,
+        last_timestamp + pd.Timedelta(seconds=step_seconds),
+    )
+
+    def missing(value: object) -> bool:
+        if value is None:
+            return True
+        try:
+            return bool(pd.isna(cast(Any, value)))
+        except (TypeError, ValueError):
+            return False
+
+    if missing(result.get("heating_start")):
+        result["heating_start"] = first_timestamp
+
+    stage_series = frame.loc[valid, "cycle_stage"].astype(str)
+    stage_intervals: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    stage_times: dict[str, pd.Series] = {}
+    for stage in ("recovery", "frost_development", "defrost"):
+        # The index-aware selection keeps timestamps and stage labels aligned
+        # even when a caller passes a non-default DataFrame index.
+        values = timestamps.loc[stage_series.index[stage_series.eq(stage)]]
+        values = values.dropna().sort_values(kind="stable")
+        if values.empty:
+            continue
+        stage_times[stage] = values
+        stage_intervals.append(
+            (
+                stage,
+                pd.Timestamp(values.iloc[0]),
+                pd.Timestamp(values.iloc[-1]) + pd.Timedelta(seconds=step_seconds),
+            )
+        )
+
+    existing_intervals = _stage_intervals(result)
+    if existing_intervals:
+        result["_stage_intervals"] = existing_intervals
+        return result
+
+    if "frost_development" in stage_times and missing(result.get("stable_heating_start")):
+        result["stable_heating_start"] = pd.Timestamp(
+            stage_times["frost_development"].iloc[0]
+        )
+    if "defrost" in stage_times:
+        defrost_values = stage_times["defrost"]
+        if missing(result.get("defrost_start")):
+            result["defrost_start"] = pd.Timestamp(defrost_values.iloc[0])
+        if missing(result.get("defrost_end")):
+            result["defrost_end"] = pd.Timestamp(defrost_values.iloc[-1]) + pd.Timedelta(
+                seconds=step_seconds
+            )
+    if stage_intervals:
+        result["_stage_intervals"] = stage_intervals
+    return result
+
+
 def _elapsed_minutes(timestamps: Any, origin: pd.Timestamp | None) -> pd.Series:
     parsed = pd.to_datetime(pd.Series(timestamps), errors="coerce")
     if origin is None:
@@ -1010,6 +1132,23 @@ def _elapsed_minutes(timestamps: Any, origin: pd.Timestamp | None) -> pd.Series:
 
 
 def _stage_intervals(cycle: pd.Series) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    render_intervals = cycle.get("_stage_intervals")
+    if isinstance(render_intervals, list):
+        explicit_intervals: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+        for value in render_intervals:
+            if not isinstance(value, tuple) or len(value) != 3:
+                continue
+            stage, start, end = value
+            start_timestamp = pd.Timestamp(start)
+            end_timestamp = pd.Timestamp(end)
+            if (
+                pd.notna(start_timestamp)
+                and pd.notna(end_timestamp)
+                and start_timestamp < end_timestamp
+            ):
+                explicit_intervals.append((str(stage), start_timestamp, end_timestamp))
+        if explicit_intervals:
+            return explicit_intervals
     boundaries = {
         "recovery": (cycle.get("heating_start"), cycle.get("stable_heating_start")),
         "frost_development": (cycle.get("stable_heating_start"), cycle.get("defrost_start")),
@@ -1022,10 +1161,49 @@ def _stage_intervals(cycle: pd.Series) -> list[tuple[str, pd.Timestamp, pd.Times
     return intervals
 
 
+def _stage_intervals_for_render(
+    cycle: pd.Series,
+) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    """Return known stage intervals plus neutral intervals for unknown time.
+
+    ``partial`` is deliberately a render-only fallback.  It records that the
+    cycle has data but its stage boundary is unavailable; it never reclassifies
+    the scientific ``cycle_stage`` values or creates a missing stage boundary.
+    """
+    known = [
+        interval
+        for interval in _stage_intervals(cycle)
+        if interval[0] in _STAGE_COLORS and interval[0] != "partial"
+    ]
+    bounds = cycle.get("_render_time_bounds")
+    if not isinstance(bounds, tuple) or len(bounds) != 2:
+        return known
+    start, end = pd.Timestamp(bounds[0]), pd.Timestamp(bounds[1])
+    if pd.isna(start) or pd.isna(end) or start >= end:
+        return known
+    if not known:
+        return [("partial", start, end)]
+
+    intervals: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    cursor = start
+    for stage, raw_start, raw_end in sorted(known, key=lambda item: item[1]):
+        stage_start = max(start, pd.Timestamp(raw_start))
+        stage_end = min(end, pd.Timestamp(raw_end))
+        if stage_start >= stage_end:
+            continue
+        if cursor < stage_start:
+            intervals.append(("partial", cursor, stage_start))
+        intervals.append((stage, stage_start, stage_end))
+        cursor = max(cursor, stage_end)
+    if cursor < end:
+        intervals.append(("partial", cursor, end))
+    return intervals
+
+
 def _shade_cycle_stages(
     axes: list[Any], cycle: pd.Series, origin: pd.Timestamp
 ) -> None:
-    for stage, start, end in _stage_intervals(cycle):
+    for stage, start, end in _stage_intervals_for_render(cycle):
         left = (start - origin).total_seconds() / 60.0
         right = (end - origin).total_seconds() / 60.0
         for axis in axes:
@@ -1033,7 +1211,7 @@ def _shade_cycle_stages(
                 left,
                 right,
                 color=_STAGE_COLORS[stage],
-                alpha=0.05,
+                alpha=0.10 if stage == "partial" else 0.14,
                 linewidth=0,
                 zorder=0,
             )
@@ -1054,7 +1232,7 @@ def _plot_publication_stage_ribbon(
     axis.tick_params(axis="x", labelbottom=False, length=0)
     for spine in axis.spines.values():
         spine.set_visible(False)
-    for stage, start, end in _stage_intervals(cycle):
+    for stage, start, end in _stage_intervals_for_render(cycle):
         left = (start - origin).total_seconds() / 60.0
         right = (end - origin).total_seconds() / 60.0
         width = right - left
@@ -1062,10 +1240,13 @@ def _plot_publication_stage_ribbon(
             left,
             right,
             color=_STAGE_COLORS[stage],
-            alpha=0.62,
+            alpha=0.52 if stage == "partial" else 0.62,
+            hatch="//" if stage == "partial" else None,
             linewidth=0,
             zorder=0,
         )
+        if stage == "partial":
+            continue
         if stage == "defrost" and width < 8.0:
             axis.annotate(
                 "Defrost onset",
@@ -1442,18 +1623,8 @@ def _finish_cycle_axes(
 
 
 def _add_cycle_title(figure: Any, cycle: pd.Series, publication: bool) -> None:
-    cycle_id = str(cycle.get("cycle_id", "cycle")).replace("_", " ").title()
+    cycle_id = str(cycle.get("cycle_name") or cycle.get("cycle_id", "cycle"))
     status = str(cycle.get("cycle_status", "unknown")).title()
-    raw_reason = cycle.get("cycle_status_reason", "")
-    if raw_reason is None or pd.isna(raw_reason):
-        reason = ""
-    else:
-        reason = str(raw_reason).strip()
-        reason = (
-            ""
-            if reason.lower() in {"", "nan", "none"}
-            else reason.replace("_", " ").title()
-        )
     figure.suptitle(
         f"{cycle_id} — {status}",
         x=0.04,
@@ -1463,16 +1634,6 @@ def _add_cycle_title(figure: Any, cycle: pd.Series, publication: bool) -> None:
         fontsize=14 if publication else 15,
         fontweight="bold",
     )
-    if reason:
-        figure.text(
-            0.04,
-            0.968,
-            reason,
-            ha="left",
-            va="top",
-            fontsize=9 if publication else 10,
-            color="#4D4D4D",
-        )
 
 
 def _cycle_legend_handles(

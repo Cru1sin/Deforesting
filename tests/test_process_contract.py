@@ -241,7 +241,8 @@ def test_incomplete_cycle_with_observed_defrost_onset_keeps_observed_processed_g
 
     assert not processed.empty
     assert processed["temperature"].notna().any()
-    assert processed["cop"].isna().all()
+    assert processed["cop"].notna().all()
+    assert processed["cop"].tolist() == [5.0] * len(processed)
 
 
 def test_partial_cycle_uses_observed_fallback(tmp_path: Path) -> None:
@@ -596,7 +597,9 @@ def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
     assert processed["cycle_status"].eq("incomplete").all()
     assert processed["cycle_progress"].isna().all()
     assert processed["cycle_elapsed_seconds"].isna().all()
-    assert processed["cop"].isna().all()
+    assert processed["cop"].notna().all()
+    assert processed["cop"].tolist() == [5.0, 5.0]
+    assert processed["cop__imputed"].eq(False).all()
     assert processed["temperature__baseline"].isna().all()
     assert processed["temperature__baseline_residual"].isna().all()
     assert processed["temperature__lag_1min"].isna().all()
@@ -621,7 +624,7 @@ def test_valid_cycle_without_boundaries_uses_observed_fallback(tmp_path: Path) -
 
     assert processed["timestamp"].tolist() == frame["timestamp"].tolist()
     assert processed["temperature"].tolist() == frame["temperature"].tolist()
-    assert processed["cop"].isna().all()
+    assert processed["cop"].tolist() == [5.0, 5.0]
     assert processed["cycle_progress"].isna().all()
     assert final_summary.loc[0, "processed_row_count"] == 2
 
@@ -667,10 +670,26 @@ def test_invalid_cycle_has_no_baseline_and_does_not_change_status(tmp_path: Path
     assert final_summary.loc[0, "cycle_status"] == "invalid"
     assert final_summary.loc[0, "baseline_status"] == "not_applicable"
     assert processed["temperature"].tolist() == [1.0, 2.0, 3.0]
-    assert processed["cop"].isna().all()
+    assert processed["cop"].notna().any()
     assert processed["cycle_progress"].isna().all()
     assert processed["temperature__baseline"].isna().all()
     assert processed["temperature__baseline_residual"].isna().all()
+
+
+def test_invalid_cycle_fallback_recomputes_cop_from_aggregated_dependencies(
+    tmp_path: Path,
+) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
+    frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0])
+    frame["cycle_status"] = "invalid"
+    summary = _summary(status="invalid", defrost="2026-07-15 00:05:00")
+
+    processed, _ = process(frame, summary, _config(tmp_path), _channels())
+
+    assert processed["heating_capacity"].notna().all()
+    assert processed["power_total"].notna().all()
+    assert processed["cop"].notna().all()
+    assert processed["cop"].tolist() == [5.0, 5.0, 5.0]
 
 
 def test_baseline_uses_one_common_non_imputed_anchor_window(tmp_path: Path) -> None:
@@ -692,6 +711,24 @@ def test_baseline_uses_one_common_non_imputed_anchor_window(tmp_path: Path) -> N
         minutes=1
     )
     assert processed["temperature__baseline"].notna().any()
+
+
+def test_baseline_does_not_shift_past_fixed_recovery_window(tmp_path: Path) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=37, freq="10s")
+    frame = _frame(timestamps, temperature=list(np.linspace(10, 8, len(timestamps))))
+    frame.loc[:1, "anchor"] = np.nan
+    frame["anchor__imputed"] = False
+    frame["temperature__imputed"] = False
+    frame["heating_capacity__imputed"] = False
+    frame["power_total__imputed"] = False
+    summary = _summary(defrost="2026-07-15 00:06:00")
+
+    _, final_summary = process(frame, summary, _config(tmp_path), _channels())
+
+    assert final_summary.loc[0, "baseline_status"] == "unavailable"
+    assert final_summary.loc[0, "baseline_failure_reason"] == "insufficient_observed_coverage"
+    assert pd.isna(final_summary.loc[0, "baseline_start"])
+    assert pd.isna(final_summary.loc[0, "baseline_end"])
 
 
 def test_duplicate_source_value_is_not_observed_by_resampling(tmp_path: Path) -> None:

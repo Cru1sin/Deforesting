@@ -8,8 +8,10 @@ import pandas as pd
 import pytest
 
 from frost_analysis.analysis import EVIDENCE_COLUMNS
+from frost_analysis.dataset import add_formal_run as add_canonical_formal_run
 from frost_analysis.dataset_loader import DatasetLoader
 from frost_analysis.dataset_v3 import add_formal_run, load_v3_source_run
+from frost_analysis.dataset_validation import validate_canonical_dataset
 from frost_analysis.dataset_validation_v3 import validate_v3_dataset
 
 
@@ -120,6 +122,115 @@ def test_v3_add_removes_image_contract_from_cycle_and_is_self_contained(tmp_path
         "cycle_name",
         "cycle_uid",
     ]
+
+
+def test_canonical_v3_manifest_and_original_cycle_contract(tmp_path: Path) -> None:
+    run = _write_run(tmp_path, "0714", "2026-07-14", include_image=True)
+    dataset = tmp_path / "dataset-review"
+
+    add_canonical_formal_run(run, dataset)
+
+    manifest = json.loads((dataset / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert list(manifest) == [
+        "dataset_schema_version",
+        "dataset_id",
+        "created_at",
+        "updated_at",
+        "source_experiments",
+        "cycles",
+    ]
+    assert manifest["dataset_id"] == "frost_cycle_dataset"
+    assert set(manifest["cycles"][0]) == {
+        "cycle_name",
+        "cycle_uid",
+        "experiment_id",
+        "experiment_date",
+        "cycle_id",
+        "cycle_status",
+        "original_data",
+        "image",
+    }
+    assert (dataset / "cycles_original" / "frost_cycle_000001.csv").is_file()
+    assert pd.read_parquet(dataset / "image_metadata.parquet").columns.tolist() == [
+        "image_id",
+        "cycle_uid",
+        "cycle_name",
+        "frame_index",
+        "source_camera_id",
+        "image_time",
+        "matched_timestamp",
+        "offset_seconds",
+        "cycle_stage",
+        "source_relative_path",
+        "file_size_bytes",
+        "sha256",
+    ]
+    validate_canonical_dataset(dataset)
+    loader = DatasetLoader(dataset)
+    assert not loader.load_cycle_original("frost_cycle_000001").empty
+
+
+def test_canonical_v3_add_appends_in_time_order_and_repeated_source_is_noop(
+    tmp_path: Path,
+) -> None:
+    first = _write_run(tmp_path, "0714", "2026-07-14")
+    second = _write_run(tmp_path, "0715", "2026-07-15")
+    dataset = tmp_path / "dataset-review"
+
+    add_canonical_formal_run(first, dataset)
+    add_canonical_formal_run(second, dataset)
+    before = (dataset / "dataset_manifest.json").read_bytes()
+    add_canonical_formal_run(second, dataset)
+
+    assert (dataset / "dataset_manifest.json").read_bytes() == before
+    index = pd.read_parquet(dataset / "cycle_index.parquet")
+    assert index["cycle_name"].tolist() == [
+        "frost_cycle_000001",
+        "frost_cycle_000002",
+    ]
+    validate_canonical_dataset(dataset)
+
+
+def test_v3_validator_orders_partial_cycles_by_segment_start() -> None:
+    from frost_analysis.dataset_validation_v3 import _validate_cycle_index
+
+    index = pd.DataFrame(
+        {
+            "dataset_cycle_index": [1, 2, 3, 4],
+            "cycle_name": [
+                "frost_cycle_000001",
+                "frost_cycle_000002",
+                "frost_cycle_000003",
+                "frost_cycle_000004",
+            ],
+            "cycle_uid": [
+                "exp_20260714::partial_001",
+                "exp_20260714::cycle_001",
+                "exp_20260714::cycle_002",
+                "exp_20260714::partial_002",
+            ],
+            "experiment_id": ["exp_20260714"] * 4,
+            "experiment_date": ["2026-07-14"] * 4,
+            "cycle_id": ["partial_001", "cycle_001", "cycle_002", "partial_002"],
+            "segment_start": pd.to_datetime(
+                [
+                    "2026-07-14 17:23:01",
+                    "2026-07-14 17:41:16",
+                    "2026-07-14 18:01:04",
+                    "2026-07-14 21:11:42",
+                ]
+            ),
+            "published": [True] * 4,
+            "data_path": ["cycles/data.parquet"] * 4,
+            "csv_path": ["cycles/data.csv"] * 4,
+            "publication_path": ["cycles/data.png"] * 4,
+            "rgb_coverage_path": ["cycles/data_rgb_coverage.png"] * 4,
+            "processed_row_count": [1] * 4,
+            "image_count": [0] * 4,
+        }
+    )
+
+    _validate_cycle_index(index)
 
 
 def test_v3_build_removes_published_dataset_when_final_validation_fails(
@@ -698,6 +809,128 @@ def test_v3_rgb_coverage_reuses_publication_time_and_gap_context(
     assert calls["origin_cycle"].to_dict() == record
     assert calls["stage"][2] == origin
     assert calls["gap"][2] == origin
+
+
+def test_ts_minus_recovery_crossing_uses_earliest_time_within_priority_level() -> None:
+    from frost_analysis.dataset_manifest import _first_ts_minus_crossing
+
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-14 10:00:30",
+            "2026-07-14 10:00:10",
+            "2026-07-14 10:00:20",
+            "2026-07-14 10:00:40",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "water_out_temperature": [8.1, 8.1, 7.0, 7.0],
+            "water_temperature_setpoint": 10.0,
+        }
+    )
+
+    assert _first_ts_minus_crossing(frame, timestamps) == pd.Timestamp(
+        "2026-07-14 10:00:10"
+    )
+
+
+def test_ts_minus_recovery_crossing_falls_back_by_threshold_priority() -> None:
+    from frost_analysis.dataset_manifest import _first_ts_minus_crossing
+
+    timestamps = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "water_out_temperature": [6.0, 7.1, 7.0, 8.1],
+            "water_temperature_setpoint": 10.0,
+        }
+    )
+
+    assert _first_ts_minus_crossing(frame, timestamps) == timestamps[3]
+
+
+def test_recovery_edit_updates_original_data_sha_and_keeps_dataset_valid(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path, "0714", "2026-07-14", include_image=True)
+    dataset = tmp_path / "dataset-review"
+    add_canonical_formal_run(run, dataset)
+    before = json.loads((dataset / "dataset_manifest.json").read_text(encoding="utf-8"))
+
+    from frost_analysis.dataset_manifest import edit_dataset
+
+    edit_dataset(dataset, recovery_seconds=10)
+
+    original_path = dataset / "cycles_original" / "frost_cycle_000001.csv"
+    after = json.loads((dataset / "dataset_manifest.json").read_text(encoding="utf-8"))
+    original_sha = hashlib.sha256(original_path.read_bytes()).hexdigest()
+    assert after["cycles"][0]["original_data"]["sha256"] == original_sha
+    assert (
+        after["cycles"][0]["original_data"]["sha256"]
+        != before["cycles"][0]["original_data"]["sha256"]
+    )
+    assert pd.read_csv(original_path)["cycle_stage"].tolist() == [
+        "recovery",
+        "frost_development",
+        "frost_development",
+    ]
+    validate_canonical_dataset(dataset)
+
+
+def test_status_edit_preserves_original_source_status_and_validates(
+    tmp_path: Path,
+) -> None:
+    run = _write_run(tmp_path, "0714", "2026-07-14")
+    dataset = tmp_path / "dataset-review"
+    add_canonical_formal_run(run, dataset)
+
+    original_path = dataset / "cycles_original" / "frost_cycle_000001.csv"
+    original_bytes = original_path.read_bytes()
+    before_index = pd.read_parquet(dataset / "cycle_index.parquet")
+    before_publication = (
+        dataset / "cycles" / "frost_cycle_000001.png"
+    ).read_bytes()
+
+    from frost_analysis.dataset_manifest import edit_dataset
+
+    edit_dataset(dataset, statuses=["frost_cycle_000001=incomplete"])
+
+    manifest = json.loads(
+        (dataset / "dataset_manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["cycles"][0]["cycle_status"] == "incomplete"
+    assert original_path.read_bytes() == original_bytes
+    assert pd.read_csv(original_path)["cycle_status"].eq("valid").all()
+    after_index = pd.read_parquet(dataset / "cycle_index.parquet")
+    assert after_index.loc[0, "publication_sha256"] != before_index.loc[0, "publication_sha256"]
+    assert (
+        dataset / "cycles" / "frost_cycle_000001.png"
+    ).read_bytes() != before_publication
+    validate_canonical_dataset(dataset)
+
+
+def test_cycle_image_summary_uses_frozen_coverage_gap_parameter() -> None:
+    from frost_analysis.dataset import _canonical_role_summary
+    from frost_analysis.dataset_coverage import coverage_ratio
+
+    timestamps = pd.date_range("2026-07-14 10:00:00", periods=3, freq="10s")
+    frame = pd.DataFrame({"timestamp": timestamps})
+    images = pd.DataFrame(
+        {
+            "camera_role": ["top", "top"],
+            "image_time": [timestamps[0], timestamps[2]],
+        }
+    )
+
+    summary = _canonical_role_summary(frame, images, max_image_gap_seconds=15)
+
+    assert summary["top"]["coverage_ratio"] == pytest.approx(
+        coverage_ratio(frame, images, max_image_gap_seconds=15)
+    )
+    assert summary["top"]["coverage_ratio"] != pytest.approx(
+        coverage_ratio(frame, images, max_image_gap_seconds=40)
+    )
 
 
 @pytest.mark.parametrize("failure", ["asset", "metadata"])

@@ -18,13 +18,16 @@ def render_cycle_publication(
     output_path: Path,
 ) -> None:
     """Render Dataset values through the existing publication renderer."""
-    from .report import _plot_one_cycle_publication
+    from .report import _infer_cycle_stage_boundaries, _plot_one_cycle_publication
 
-    report_cycle = pd.Series(
+    report_cycle = _infer_cycle_stage_boundaries(
+        cycle_frame,
+        pd.Series(
         {
             **dict(cycle_record),
             "cycle_id": cycle_record.get("source_cycle_id", cycle_record.get("cycle_id")),
         }
+        ),
     )
     _plot_one_cycle_publication(
         cycle_frame,
@@ -61,7 +64,7 @@ def generate_rgb_coverage(loader: DatasetLoader, cycle_name: str) -> Path:
         raise TypeError("generate_rgb_coverage requires DatasetLoader")
     path = loader.rgb_coverage_path(cycle_name)
     if loader.schema_version == 3:
-        from .dataset_coverage_v3 import render_rgb_coverage
+        from .dataset_coverage import render_rgb_coverage
 
         render_rgb_coverage(
             loader.load_cycle(cycle_name),
@@ -71,9 +74,9 @@ def generate_rgb_coverage(loader: DatasetLoader, cycle_name: str) -> Path:
             registry=loader.registry,
         )
     else:
-        from .dataset_coverage import render_rgb_coverage as render_legacy_rgb_coverage
+        from .dataset_coverage import render_rgb_coverage_legacy
 
-        render_legacy_rgb_coverage(
+        render_rgb_coverage_legacy(
             loader.load_cycle(cycle_name),
             loader.load_cycle_images(cycle_name),
             loader.get_cycle_record(cycle_name),

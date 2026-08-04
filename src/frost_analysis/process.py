@@ -273,9 +273,14 @@ def _resample_fallback(
                 interval_seconds,
             )
         rows.append(row)
-    return pd.DataFrame(rows).sort_values(
+    result = pd.DataFrame(rows).sort_values(
         ["experiment_id", "timestamp"], kind="stable"
     ).reset_index(drop=True)
+    raw_cop = _calculate_unfilled_cop(result, channels)
+    if raw_cop is not None:
+        result["cop"] = raw_cop.to_numpy()
+        result["cop__imputed"] = False
+    return result
 
 
 def _identity_row(

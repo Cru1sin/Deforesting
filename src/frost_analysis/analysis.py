@@ -176,9 +176,11 @@ def _trend_effects(
 def _eligible_cycle_ids(
     cycles: pd.DataFrame, *, respect_cycle_status: bool = True
 ) -> set[object]:
-    if "baseline_status" not in cycles:
-        return set()
-    mask = cycles["baseline_status"].eq("available")
+    mask = (
+        cycles["baseline_status"].eq("available")
+        if "baseline_status" in cycles
+        else pd.Series(True, index=cycles.index, dtype=bool)
+    )
     if respect_cycle_status and "cycle_status" in cycles:
         mask &= cycles["cycle_status"].eq("valid")
     return set(cycles.loc[mask, "cycle_id"])
@@ -446,7 +448,8 @@ def _assessment_status(record: Mapping[str, object]) -> str | None:
     if isinstance(assessment, dict):
         value = assessment.get("status")
         return None if value is None else str(value)
-    return None
+    value = record.get("cycle_status")
+    return None if value is None else str(value)
 
 
 def _require_analysis_quality_columns(

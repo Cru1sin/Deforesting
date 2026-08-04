@@ -32,6 +32,7 @@ process:
   control_max_gap_seconds: 30
   baseline:
     stage: frost_development
+    baseline_seconds: 60
     search_start_minutes: 0
     search_end_minutes: 20
     window_minutes: 5

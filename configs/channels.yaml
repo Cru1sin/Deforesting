@@ -113,7 +113,9 @@ channels:
     resample: mean
     missing: interpolate
     analysis_candidate: true
-    coverage_required: true
+    # This channel is not observed in the current experiments; an absent
+    # optional sensor must not make sensor_overall missing everywhere.
+    coverage_required: false
     expected_frost_direction: decrease
     valid_range: [-50, 80]
 

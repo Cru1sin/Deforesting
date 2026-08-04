@@ -369,7 +369,8 @@ def test_production_channels_declare_required_sensor_coverage() -> None:
         name
         for name, settings in channels.items()
         if settings.get("role") == "sensor" and settings.get("kind") != "derived"
-    }
+    } - {"fin_temperature"}
+    assert channels["fin_temperature"]["coverage_required"] is False
     assert required
 
 

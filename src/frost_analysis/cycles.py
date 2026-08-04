@@ -10,6 +10,7 @@ import pandas as pd
 
 _STAGES = {"recovery", "frost_development", "defrost", "partial"}
 _STATUSES = {"valid", "incomplete", "invalid"}
+_RECOVERY_THRESHOLD_OFFSETS = (2.0, 3.0, 4.0)
 
 
 def label_cycles(
@@ -44,7 +45,14 @@ def label_cycles(
     )
     labeled = _assign_cycle_ranges(labeled, cycle_ranges)
 
-    _label_unassigned_rows(labeled, cycles, experiment_id, experiment_date)
+    _label_unassigned_rows(
+        labeled,
+        cycles,
+        experiment_id,
+        experiment_date,
+        defrost_column=defrost_column,
+        settings=settings,
+    )
     _add_cycle_coordinates(labeled, cycles)
     labeled["cycle_stage"] = labeled["cycle_stage"].astype("string")
     if not labeled["cycle_stage"].dropna().isin(_STAGES).all():
@@ -111,7 +119,9 @@ def _make_cycle_record(
         long_gaps,
         settings,
     )
-    stable_start = _stable_start(heating_start, settings)
+    stable_start = _stable_start(labeled, heating_start, defrost_start, settings)
+    if stable_start is None and status == "valid":
+        status, reason = "incomplete", "recovery_end_not_observed"
     if (
         stable_start is not None
         and isinstance(defrost_start, pd.Timestamp)
@@ -182,13 +192,43 @@ def _cycle_status(
 
 
 def _stable_start(
-    heating_start: Any, settings: Mapping[str, Any] | Any
+    frame: pd.DataFrame,
+    heating_start: Any,
+    defrost_start: Any,
+    settings: Mapping[str, Any] | Any,
 ) -> pd.Timestamp | None:
     if not isinstance(heating_start, pd.Timestamp):
         return None
-    return heating_start + pd.Timedelta(
-        seconds=_setting(settings, "stable_heating_seconds", 180)
+    required = {"timestamp", "water_out_temperature", "water_temperature_setpoint"}
+    if not required <= set(frame.columns):
+        return heating_start + pd.Timedelta(
+            seconds=_setting(settings, "stable_heating_seconds", 180)
+        )
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    water_out = pd.to_numeric(frame["water_out_temperature"], errors="coerce")
+    setpoint = pd.to_numeric(
+        frame["water_temperature_setpoint"], errors="coerce"
     )
+    mask = timestamps.ge(heating_start) & timestamps.notna() & water_out.notna() & setpoint.notna()
+    if isinstance(defrost_start, pd.Timestamp):
+        mask &= timestamps.lt(defrost_start)
+    if not mask.any():
+        return None
+    observations = pd.DataFrame(
+        {
+            "timestamp": timestamps.loc[mask],
+            "water_out": water_out.loc[mask],
+            "setpoint": setpoint.loc[mask],
+        }
+    ).sort_values("timestamp", kind="stable")
+    for offset in _RECOVERY_THRESHOLD_OFFSETS:
+        crossing = observations.loc[
+            observations["water_out"].ge(observations["setpoint"] - offset),
+            "timestamp",
+        ]
+        if not crossing.empty:
+            return pd.Timestamp(crossing.iloc[0])
+    return None
 
 
 def _assign_cycle_ranges(
@@ -358,6 +398,7 @@ def _cycle_row(
         "experiment_id": experiment_id,
         "experiment_date": experiment_date,
         "cycle_id": cycle_id,
+        "segment_start": heating_start,
         "cycle_status": status,
         "cycle_status_reason": reason,
         "heating_start": heating_start,
@@ -427,6 +468,9 @@ def _label_unassigned_rows(
     cycles: list[dict[str, object]],
     experiment_id: str,
     experiment_date: str,
+    *,
+    defrost_column: str,
+    settings: Mapping[str, Any] | Any,
 ) -> None:
     unassigned = labeled["cycle_id"].isna().to_numpy()
     position = 0
@@ -440,31 +484,139 @@ def _label_unassigned_rows(
             end += 1
         partial_id = f"partial_{partial_index:03d}"
         index = labeled.index[position : end + 1]
+        segment = labeled.loc[index].copy()
+        (
+            segment_stages,
+            heating_start,
+            stable_start,
+            defrost_start,
+            defrost_end,
+        ) = _partial_stage_context(segment, defrost_column, settings)
         labeled.loc[index, "cycle_id"] = partial_id
-        labeled.loc[index, "cycle_stage"] = "partial"
+        labeled.loc[index, "cycle_stage"] = segment_stages.to_numpy()
         labeled.loc[index, "cycle_status"] = "incomplete"
         labeled.loc[index, "cycle_status_reason"] = "outside_complete_cycle"
-        cycles.append(
-            _cycle_row(
-                experiment_id,
-                experiment_date,
-                partial_id,
-                "incomplete",
-                "outside_complete_cycle",
-                None,
-                None,
-                None,
-                None,
-            )
+        partial = _cycle_row(
+            experiment_id,
+            experiment_date,
+            partial_id,
+            "incomplete",
+            "outside_complete_cycle",
+            heating_start,
+            stable_start,
+            defrost_start,
+            defrost_end,
         )
+        partial["segment_start"] = heating_start
+        cycles.append(partial)
         partial_index += 1
         position = end + 1
+
+
+def _partial_stage_context(  # noqa: C901
+    segment: pd.DataFrame,
+    defrost_column: str,
+    settings: Mapping[str, Any] | Any,
+) -> tuple[
+    pd.Series,
+    pd.Timestamp | None,
+    pd.Timestamp | None,
+    pd.Timestamp | None,
+    pd.Timestamp | None,
+]:
+    """Infer only the stage boundaries supported by an open segment.
+
+    An open segment has no trusted cycle boundary on one side, but its observed
+    water temperature and defrost state can still identify useful phases.  The
+    status remains ``incomplete``; these labels are only the best supported
+    stage facts for Process and publication.
+    """
+    times = pd.to_datetime(segment["timestamp"], errors="coerce")
+    valid_times = times.dropna().sort_values(kind="stable")
+    if valid_times.empty:
+        return (
+            pd.Series("partial", index=segment.index, dtype="string"),
+            None,
+            None,
+            None,
+            None,
+        )
+
+    heating_start = pd.Timestamp(valid_times.iloc[0])
+    states = (
+        segment[defrost_column].map(_normalize_state)
+        if defrost_column in segment
+        else pd.Series(np.nan, index=segment.index, dtype="float64")
+    )
+    active_times = times.loc[states.eq(True)].dropna().sort_values(kind="stable")
+    defrost_start = (
+        pd.Timestamp(active_times.iloc[0]) if not active_times.empty else None
+    )
+    defrost_end: pd.Timestamp | None = None
+    if defrost_start is not None:
+        inactive_after_start = times.loc[
+            states.eq(False) & times.gt(defrost_start)
+        ].dropna().sort_values(kind="stable")
+        if not inactive_after_start.empty:
+            defrost_end = pd.Timestamp(inactive_after_start.iloc[0])
+
+    stable_start: pd.Timestamp | None = None
+    required = {"timestamp", "water_out_temperature", "water_temperature_setpoint"}
+    if required <= set(segment.columns):
+        water_out = pd.to_numeric(segment["water_out_temperature"], errors="coerce")
+        setpoint = pd.to_numeric(
+            segment["water_temperature_setpoint"], errors="coerce"
+        )
+        observed = times.notna() & water_out.notna() & setpoint.notna()
+        has_temperature_evidence = bool(observed.any())
+        if has_temperature_evidence:
+            stable_start = _stable_start(
+                segment,
+                heating_start,
+                defrost_start,
+                settings,
+            )
+    else:
+        has_temperature_evidence = False
+
+    if not has_temperature_evidence:
+        # A state transition without a temperature/setpoint anchor is not
+        # enough to assign scientific phases to the open segment.
+        return stages_for_partial(segment.index), heating_start, None, None, None
+
+    stages = pd.Series("partial", index=segment.index, dtype="string")
+    before_defrost = (
+        times.lt(defrost_start) if defrost_start is not None else times.notna()
+    )
+    if stable_start is not None:
+        stages.loc[before_defrost & times.lt(stable_start)] = "recovery"
+        stages.loc[before_defrost & times.ge(stable_start)] = "frost_development"
+    elif defrost_start is not None:
+        # No temperature crossing means no evidence for frost development;
+        # retain the known pre-defrost interval as recovery rather than hiding it.
+        stages.loc[before_defrost] = "recovery"
+
+    if defrost_start is not None:
+        active_interval = times.ge(defrost_start)
+        if defrost_end is not None:
+            active_interval &= times.lt(defrost_end)
+        stages.loc[active_interval] = "defrost"
+    elif stable_start is not None:
+        stages.loc[times.ge(stable_start)] = "frost_development"
+    return stages, heating_start, stable_start, defrost_start, defrost_end
+
+
+def stages_for_partial(index: pd.Index) -> pd.Series:
+    """Return the neutral label used when an open segment has no temperature evidence."""
+    return pd.Series("partial", index=index, dtype="string")
 
 
 def _add_cycle_coordinates(labeled: pd.DataFrame, cycles: list[dict[str, object]]) -> None:
     labeled["cycle_elapsed_seconds"] = np.nan
     labeled["cycle_progress"] = np.nan
     for row in cycles:
+        if str(row.get("cycle_status")) != "valid":
+            continue
         stable_start = row["stable_heating_start"]
         defrost_start = row["defrost_start"]
         if not isinstance(stable_start, pd.Timestamp) or not isinstance(
@@ -506,6 +658,7 @@ def _cycle_columns() -> list[str]:
         "experiment_id",
         "experiment_date",
         "cycle_id",
+        "segment_start",
         "cycle_status",
         "cycle_status_reason",
         "heating_start",

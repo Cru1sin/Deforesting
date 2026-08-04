@@ -107,9 +107,15 @@ def _validate_cycle_index(frame: pd.DataFrame) -> None:
         raise ValueError("published cycle indices must be consecutive")
     ordered = frame.assign(
         _date=pd.to_datetime(frame["experiment_date"], errors="raise"),
+        _segment_start=pd.to_datetime(
+            frame.get("segment_start", frame["experiment_date"]), errors="coerce"
+        ),
         _cycle_number=frame["cycle_id"].astype(str).map(_natural_cycle_number),
+        _row_order=range(len(frame)),
     ).sort_values(
-        ["_date", "experiment_id", "_cycle_number", "cycle_id"], kind="stable"
+        ["_date", "experiment_id", "_segment_start", "_row_order", "_cycle_number", "cycle_id"],
+        kind="stable",
+        na_position="last",
     )
     if ordered["cycle_uid"].astype(str).tolist() != frame["cycle_uid"].astype(str).tolist():
         raise ValueError("cycle_index is not in canonical chronological order")

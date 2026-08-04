@@ -16,6 +16,7 @@ from frost_analysis.cycles import (
     _defrost_runs,
     _fill_short_state_gaps,
     _normalize_state,
+    _stable_start,
     label_cycles,
 )
 from frost_analysis.images import match_images
@@ -474,6 +475,86 @@ def test_single_defrost_event_creates_only_partial_cycles() -> None:
     assert labeled["cycle_stage"].eq("partial").all()
 
 
+def test_partial_cycle_uses_water_setpoint_and_defrost_to_label_known_stages() -> None:
+    timestamps = pd.date_range("2026-07-15 00:00:00", periods=5, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [False, False, False, True, True],
+            "water_out_temperature": [40.0, 45.0, 50.0, 50.0, 50.0],
+            "water_temperature_setpoint": [50.0] * 5,
+        }
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    assert summary["cycle_id"].tolist() == ["partial_001"]
+    assert labeled["cycle_stage"].tolist() == [
+        "recovery",
+        "recovery",
+        "frost_development",
+        "defrost",
+        "defrost",
+    ]
+
+
+def test_partial_cycle_without_defrost_is_frost_after_starting_at_setpoint() -> None:
+    timestamps = pd.date_range("2026-07-15 00:00:00", periods=4, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [False] * 4,
+            "water_out_temperature": [50.0] * 4,
+            "water_temperature_setpoint": [50.0] * 4,
+        }
+    )
+
+    labeled, _ = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    assert labeled["cycle_stage"].eq("frost_development").all()
+
+
+def test_partial_cycle_without_setpoint_crossing_still_labels_defrost_boundary() -> None:
+    timestamps = pd.date_range("2026-07-15 00:00:00", periods=4, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [False, False, True, True],
+            "water_out_temperature": [40.0, 41.0, 42.0, 43.0],
+            "water_temperature_setpoint": [50.0] * 4,
+        }
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    assert labeled["cycle_stage"].tolist() == [
+        "recovery",
+        "recovery",
+        "defrost",
+        "defrost",
+    ]
+    assert pd.isna(summary.iloc[0]["stable_heating_start"])
+    assert summary.iloc[0]["defrost_start"] == timestamps[2]
+
+
 def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> None:
     timestamps = pd.to_datetime(
         [
@@ -683,6 +764,51 @@ def test_data_ending_on_keeps_only_an_incomplete_cycle_with_data() -> None:
     assert formal["cycle_status_reason"] == "defrost_end_not_observed"
     assert labeled.loc[labeled["cycle_id"].eq("cycle_001")].shape[0] > 0
     assert not summary["cycle_id"].eq("cycle_002").any()
+
+
+def test_stable_start_uses_ts_minus_two_before_looser_thresholds() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=5, freq="s"),
+            "water_out_temperature": [45.0, 47.5, 47.8, 48.2, 48.5],
+            "water_temperature_setpoint": [50.0] * 5,
+        }
+    )
+
+    stable = _stable_start(frame, start, start + pd.Timedelta(seconds=5), {})
+
+    assert stable == start + pd.Timedelta(seconds=3)
+
+
+def test_stable_start_falls_back_to_ts_minus_three_only_if_minus_two_is_absent() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=4, freq="s"),
+            "water_out_temperature": [45.0, 46.5, 47.1, 47.2],
+            "water_temperature_setpoint": [50.0] * 4,
+        }
+    )
+
+    stable = _stable_start(frame, start, start + pd.Timedelta(seconds=4), {})
+
+    assert stable == start + pd.Timedelta(seconds=2)
+
+
+def test_stable_start_is_missing_when_all_priority_thresholds_have_no_observation() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=3, freq="s"),
+            "water_out_temperature": [40.0, 44.0, 45.0],
+            "water_temperature_setpoint": [50.0] * 3,
+        }
+    )
+
+    stable = _stable_start(frame, start, start + pd.Timedelta(seconds=3), {})
+
+    assert stable is None
 
 
 def test_short_state_gap_with_irregular_timestamps_does_not_split_defrost_event() -> None:

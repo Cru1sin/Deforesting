@@ -618,6 +618,7 @@ def _materialize_source(
                 "experiment_id": key[0],
                 "experiment_date": str(row["experiment_date"])[:10],
                 "cycle_id": key[1],
+                "segment_start": row.get("segment_start"),
                 "cycle_status": row.get("cycle_status"),
                 "cycle_status_reason": row.get("cycle_status_reason"),
                 "baseline_status": row.get("baseline_status"),
@@ -1046,10 +1047,24 @@ def _assign_cycle_names(summary: pd.DataFrame, *, start_index: int) -> dict[tupl
 def _sort_summary(summary: pd.DataFrame) -> pd.DataFrame:
     result = summary.copy()
     result["_date"] = pd.to_datetime(result["experiment_date"], errors="raise")
+    if "segment_start" in result:
+        result["_segment_start"] = pd.to_datetime(
+            result["segment_start"], errors="coerce"
+        )
+    else:
+        result["_segment_start"] = pd.to_datetime(
+            result.get("heating_start", pd.Series(pd.NaT, index=result.index)),
+            errors="coerce",
+        )
+    result["_row_order"] = range(len(result))
     result["_cycle_number"] = result["cycle_id"].astype(str).map(_natural_cycle_number)
     return result.sort_values(
-        ["_date", "experiment_id", "_cycle_number", "cycle_id"], kind="stable"
-    ).drop(columns=["_date", "_cycle_number"]).reset_index(drop=True)
+        ["_date", "experiment_id", "_segment_start", "_row_order", "_cycle_number", "cycle_id"],
+        kind="stable",
+        na_position="last",
+    ).drop(
+        columns=["_date", "_segment_start", "_row_order", "_cycle_number"]
+    ).reset_index(drop=True)
 
 
 def _natural_cycle_number(value: str) -> int:
