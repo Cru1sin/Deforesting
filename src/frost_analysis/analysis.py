@@ -362,7 +362,7 @@ def run_analysis(
         image_statistics.append(
             {
                 "cycle_name": cycle_name,
-                "status": _assessment_status(record),
+                "status": _dataset_status(record),
                 "image_count": len(images),
                 "camera_role_count": images["camera_role"].nunique()
                 if not images.empty
@@ -442,7 +442,7 @@ def _cycle_numeric_statistics(
     return rows
 
 
-def _assessment_status(record: Mapping[str, object]) -> str | None:
+def _dataset_status(record: Mapping[str, object]) -> str | None:
     value = record.get("status")
     if value is None:
         value = record.get("pipeline_status")

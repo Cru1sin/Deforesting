@@ -143,7 +143,7 @@ python -m frost_analysis run \
 | 科研 QA 图片 | `src/frost_analysis/report.py` |
 | 阶段编排 | `src/frost_analysis/pipeline.py` |
 | 合同检查 | `src/frost_analysis/validation.py` |
-| Cycle Dataset 发布与读取 | `src/frost_analysis/dataset.py`、`dataset_images.py`、`dataset_loader.py`、`dataset_manifest.py`、`dataset_validation.py` |
+| Cycle Dataset 发布与读取 | `src/frost_analysis/dataset.py`、`dataset_metadata.py`、`dataset_images.py`、`dataset_loader.py`、`dataset_validation.py` |
 
 建议阅读顺序：
 
@@ -190,32 +190,24 @@ Report 只读取正式输出，允许为展示进行筛选、分组、遮罩、�
 
 ## Cycle Dataset 自包含发布层
 
-正式 run 可以在不重跑科学 Pipeline 的情况下发布为自包含的 cycle Dataset。每个 Summary
-cycle 都保存 Parquet、CSV、publication PNG 和 RGB coverage PNG；Prepared 中的全部匹配图片
-进入 `images/<cycle>/<camera_role>/`，当前父目录名是 camera role 的权威来源。Manifest 使用
-单一可人工修改的 assessment，`DatasetLoader` 是所有 Dataset 下游的统一读取入口。
+Dataset 直接从日期原始目录构建，不持久化 Run、不经过中间 Dataset 或 canonicalize。每个
+cycle 保存 10 秒 Parquet/CSV、Original CSV、publication PNG 和 RGB coverage PNG；图片保留
+原始 basename，并按 `images/<cycle>/<source_camera_id>__<current_role>/` 组织。
 
 ```bash
-python -m frost_analysis dataset add \
-  --run outputs/runs/0714 \
-  --dataset outputs/datasets/frost_cycles_v2
-
-python -m frost_analysis dataset add \
-  --run outputs/runs/0715 \
-  --dataset outputs/datasets/frost_cycles_v2
-
-python -m frost_analysis dataset validate \
-  --input outputs/datasets/frost_cycles_v2
-
-python -m frost_analysis analysis \
-  --dataset outputs/datasets/frost_cycles_v2 \
-  --status valid \
-  --output outputs/analysis/frost_cycles_v2
+python -m frost_analysis dataset add data/0714
+python -m frost_analysis dataset add data/0715
+python -m frost_analysis dataset validate --dataset dataset
+python -m frost_analysis dataset refresh --dataset dataset
+python -m frost_analysis dataset review-cycle frost_cycle_000001 \
+  --status valid --reason manual_review_confirmed
+python -m frost_analysis analysis --dataset dataset --status valid \
+  --output outputs/analysis/frost_dataset
 ```
 
-Dataset 的目录、单一 assessment、图片角色、Loader、追加和独立验证合同见
-[`docs/dataset_contract.md`](docs/dataset_contract.md)。Dataset 层只组织正式产物，不重新
-执行循环切分、重采样、缺失处理、Baseline、特征工程或候选证据分析。
+Dataset 的目录、Manifest、Catalog、图片角色、Loader、追加、科学 edit、refresh 和验证
+合同见 [`docs/dataset_contract.md`](docs/dataset_contract.md)。`source_directory` 只用于
+人工 provenance；Dataset 下游不会重新读取 Raw 或配置。
 
 ## 科学边界
 

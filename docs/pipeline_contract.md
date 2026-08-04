@@ -255,17 +255,17 @@ evidence、direction consistency 或 decision thresholding。
 
 ## 7. Cycle Dataset 自包含发布层
 
-正式 run 完成并通过本合同验证后，可以由 Dataset 层读取并发布。Dataset 不调用 Prepare、
-Process 或 Analyze，也不重新判断 cycle 状态、重采样、填补、计算 baseline、派生量或候选
-证据。它保存每个 Summary cycle 的四件套（Parquet、CSV、publication PNG 和 RGB coverage
-PNG），从 Prepared 展开全部匹配图片，并生成 `cycle_index.parquet`、
-`image_metadata.parquet` 和单一 assessment 的 `dataset_manifest.json`。
+Dataset 构建链直接从日期原始目录执行 Prepare/Process 并物化最终 Dataset，不持久化 Run，
+也不经过 trial、canonicalize 或旧版本入口。Dataset 不在构建外重复执行 cycle segmentation、
+resampling、填补、派生量或候选证据分析；每个有 Prepared 行且有 Processed 行的 cycle 保存
+Parquet、CSV、Original CSV、publication PNG 和 RGB coverage PNG。
 
-没有 Processed 行的 cycle 仍然归档为空 schema 文件和两张图，不伪造科学数值。图片当前父目录
-名是 camera role 的权威来源；所有 publication、coverage 和 Dataset analysis 下游通过
-`DatasetLoader` 读取。新增数据使用 `dataset add`，append 在同级 staging 中保留旧文件并
-原子替换 metadata。公开 validator 会检查文件、SHA、逻辑 schema、索引引用、assessment、
-时间顺序和 orphan 文件。完整合同见 [`docs/dataset_contract.md`](dataset_contract.md)。
+`dataset_manifest.json` 只保存 Dataset 身份和实验 provenance；`cycle_catalog.json` 保存
+cycle 边界、Pipeline 状态、当前唯一 Dataset 使用状态、数据/图片摘要、固定资产路径和资产
+SHA。图片 metadata 不保存图片内容 SHA，Dataset validator 也不做图片闭包或 orphan 校验。
+Original CSV 保留标准化高分辨率传感器数据并删除逐通道质量审计列；追加新通道时历史
+Original CSV 补 null 以保持统一 schema。所有下游通过 `DatasetLoader` 读取，完整合同见
+[`docs/dataset_contract.md`](dataset_contract.md)。
 
 固定数据源如下：
 

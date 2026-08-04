@@ -61,6 +61,7 @@ def _safe_source_relative(value: str) -> str:
 
 def validate_staging_structure(dataset_dir: Path) -> None:  # noqa: C901
     """Validate only the files and keys needed immediately before publish."""
+    from .dataset import _cycle_assets, parse_cycle_name
     from .dataset_images import _parse_role_directory
     from .dataset_metadata import read_catalog, read_manifest
 
@@ -77,6 +78,7 @@ def validate_staging_structure(dataset_dir: Path) -> None:  # noqa: C901
 
     experiments = manifest["experiments"]
     identities: list[tuple[str, str]] = []
+    experiment_ids: set[str] = set()
     previous_date = ""
     for item in experiments:
         if not isinstance(item, Mapping):
@@ -88,11 +90,14 @@ def validate_staging_structure(dataset_dir: Path) -> None:  # noqa: C901
             raise ValueError("manifest experiments are not date ordered")
         previous_date = identity[1]
         identities.append(identity)
+        experiment_ids.add(identity[0])
 
     records = catalog["cycles"]
     names: set[str] = set()
     uids: set[str] = set()
     expected_cycles: set[str] = set()
+    cycle_indices: list[int] = []
+    allowed_statuses = {"valid", "partial", "incomplete", "invalid"}
     for record in records:
         if not isinstance(record, Mapping):
             raise ValueError("cycle catalog record is invalid")
@@ -100,6 +105,18 @@ def validate_staging_structure(dataset_dir: Path) -> None:  # noqa: C901
         cycle_uid = str(record.get("cycle_uid", ""))
         if not cycle_name or not cycle_uid or cycle_name in names or cycle_uid in uids:
             raise ValueError("cycle catalog contains duplicate or empty identity")
+        cycle_index = parse_cycle_name(cycle_name)
+        cycle_indices.append(cycle_index)
+        experiment_id = str(record.get("experiment_id", ""))
+        cycle_id = str(record.get("cycle_id", ""))
+        if experiment_id not in experiment_ids:
+            raise ValueError(f"cycle references an unknown experiment: {cycle_name}")
+        if cycle_uid != f"{experiment_id}::{cycle_id}":
+            raise ValueError(f"cycle_uid disagrees with cycle identity: {cycle_name}")
+        if str(record.get("pipeline_status", "")) not in allowed_statuses:
+            raise ValueError(f"invalid pipeline_status: {cycle_name}")
+        if str(record.get("status", "")) not in allowed_statuses:
+            raise ValueError(f"invalid Dataset status: {cycle_name}")
         names.add(cycle_name)
         uids.add(cycle_uid)
         expected_cycles.add(cycle_name)
@@ -109,11 +126,16 @@ def validate_staging_structure(dataset_dir: Path) -> None:  # noqa: C901
         required_assets = {"parquet", "csv", "original_csv", "publication", "rgb_coverage"}
         if set(assets) != required_assets:
             raise ValueError(f"cycle assets are incomplete: {cycle_name}")
+        if dict(assets) != _cycle_assets(cycle_name):
+            raise ValueError(f"cycle assets disagree with cycle_name: {cycle_name}")
         for relative in assets.values():
             if not isinstance(relative, str) or _safe_relative(relative) != relative:
                 raise ValueError(f"unsafe cycle asset path: {cycle_name}")
             if not (root / relative).is_file():
                 raise FileNotFoundError(f"cycle asset is missing: {root / relative}")
+
+    if sorted(cycle_indices) != list(range(1, len(cycle_indices) + 1)):
+        raise ValueError("cycle_name values must be continuous from frost_cycle_000001")
 
     metadata_path = root / "image_metadata.parquet"
     if not metadata_path.is_file():

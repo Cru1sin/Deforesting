@@ -38,6 +38,13 @@ def read_manifest(dataset_dir: Path) -> dict[str, Any]:
         raise ValueError("Dataset manifest has an invalid dataset_id")
     if not isinstance(payload.get("experiments"), list):
         raise ValueError("Dataset manifest experiments must be a list")
+    expected_experiment = {"experiment_id", "experiment_date", "source_directory"}
+    for item in payload["experiments"]:
+        if not isinstance(item, Mapping) or set(item) != expected_experiment:
+            raise ValueError(
+                "Dataset experiment records must contain only identity and "
+                "informational source_directory"
+            )
     return payload
 
 
@@ -95,8 +102,14 @@ def build_cycle_record(
     """Build one complete, human-readable cycle record."""
     pipeline_status = _clean(summary_row.get("cycle_status")) or "invalid"
     pipeline_reason = _clean(summary_row.get("cycle_status_reason"))
-    timestamps = pd.to_datetime(processed.get("timestamp"), errors="coerce").dropna()
-    original_times = pd.to_datetime(original.get("timestamp"), errors="coerce").dropna()
+    processed_timestamps = (
+        processed["timestamp"] if "timestamp" in processed else pd.Series(dtype=object)
+    )
+    original_timestamps = (
+        original["timestamp"] if "timestamp" in original else pd.Series(dtype=object)
+    )
+    timestamps = pd.to_datetime(processed_timestamps, errors="coerce").dropna()
+    original_times = pd.to_datetime(original_timestamps, errors="coerce").dropna()
     boundaries = {
         name: _iso(summary_row.get(name))
         for name in (

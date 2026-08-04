@@ -1,94 +1,120 @@
-# Cycle Dataset v2 数据合同
+# Cycle Dataset v3 数据合同
 
-Cycle Dataset 是正式日期 run 的自包含发布层。它只读取已经通过科学 validator 的
-Prepared、Processed 和 Summary 产物；它不重新切分 cycle、重采样、匹配图片、计算
-baseline、派生量或质量结论。
+Cycle Dataset 是自包含的科学数据发布层。构建链直接从日期原始目录执行
+`prepare → validate_prepared → process → validate_processed → Dataset staging`；Dataset
+操作不读取 Raw、Run、YAML 或任何旧版本 Dataset。
 
 ## 目录
 
 ```text
 dataset/
-├── cycle_index.parquet
-├── image_metadata.parquet
 ├── dataset_manifest.json
+├── cycle_catalog.json
+├── image_metadata.parquet
+├── channel_registry.json
 ├── README.md
 ├── cycles/
 │   ├── frost_cycle_000001.parquet
 │   ├── frost_cycle_000001.csv
 │   ├── frost_cycle_000001.png
 │   └── frost_cycle_000001_rgb_coverage.png
+├── cycles_original/
+│   └── frost_cycle_000001.csv
 └── images/
     └── frost_cycle_000001/
-        └── unassigned_01/
-            └── <image-id>.jpg
+        └── <source_camera_id>__<current_role>/
+            └── <original-basename>
 ```
 
-每个 Summary cycle 都会有上述四个 cycle 文件。没有 Processed 行的 cycle 使用保留来源
-schema 的空 Parquet/CSV；它仍有 publication 和 RGB coverage 图，不伪造科学数值。
+`cycles/` 保存 10 秒 Processed 科学数据；`cycles_original/` 保存按 cycle 切分的
+Prepared 分辨率标准化数据。Original CSV 保留真实 timestamp、标准通道、identity、
+Pipeline 状态和 cycle stage，但不保存逐通道质量审计列、图片字段、baseline、residual、
+dynamic features 或 10 秒聚合列。追加日期发现新标准通道时，历史 Original CSV 会补充
+该列并写入空值，保持跨日期 schema 一致。
 
-`cycle_uid` 为 `experiment_id + "::" + source_cycle_id`，`cycle_name` 按
-`experiment_date → experiment_id → cycle_id`（cycle 数字自然排序）分配全局六位编号。
-图片在每个 cycle 和初始 camera slot 内按 `image_time → source_relative_path` 稳定排序，
-`image_id` 等于发布文件的 stem。
+## Manifest 与 Catalog
 
-## 单一 assessment
-
-Manifest 的每个 cycle 只有一个可人工修改的 `assessment`：
+`dataset_manifest.json` 只记录 Dataset 身份和实验来源：
 
 ```json
 {
-  "status": "valid",
-  "reasons": [],
-  "note": null,
-  "updated_at": "2026-08-03T16:00:00+08:00"
+  "dataset_schema_version": 3,
+  "dataset_id": "frost_cycle_dataset",
+  "created_at": "...",
+  "updated_at": "...",
+  "experiments": [
+    {
+      "experiment_id": "exp_20260714",
+      "experiment_date": "2026-07-14",
+      "source_directory": "data/0714"
+    }
+  ]
 }
 ```
 
-状态为 `valid`、`partial`、`incomplete` 或 `invalid`。初始值来自现有 Summary；人工审阅
-直接修改同一对象。`dataset refresh-manifest` 只刷新文件事实和图片覆盖摘要，不覆盖四个
-assessment 字段。`dataset review-cycle` 是该 JSON 编辑的轻量 CLI 入口。
+`source_directory` 只是人工 provenance，任何 Loader、validator、edit、refresh、render
+或 analysis 都不会解析或重新读取它。Manifest 不保存 source fingerprint、配置 hash、
+Run 路径或全局图片统计。
 
-## 图片角色和读取入口
+`cycle_catalog.json` 保存每个 cycle 的身份、Pipeline 状态、当前人工状态、边界、数据摘要、
+图片摘要、固定资产路径和五类非图片/图形资产 SHA。`pipeline_status` 是上游事实；
+`status` 是当前唯一 Dataset 使用状态，只能通过 `review-cycle` 修改。Analysis 只按
+`status` 过滤。
 
-图片当前的直接父目录名是 camera role 的唯一权威来源。Loader 不读取 YAML 角色映射；将
-`images/<cycle>/<old-role>/` 重命名后，新的 `DatasetLoader.load_cycle_images()` 直接返回
-新目录名。`image_metadata.parquet` 保存 source camera、初始 slot、匹配时间、offset、来源
-相对路径、文件大小和 SHA-256，但不覆盖当前目录角色。
+## 图片与 coverage
 
-所有 Dataset 下游通过 `frost_analysis.dataset_loader.DatasetLoader` 读取：
+图片的稳定逻辑身份由 cycle UID、source camera ID 和来源相对路径生成；图片文件名保持
+原始 basename，不按 cycle 重新编号。当前角色只体现在父目录后缀：
 
-```python
-loader = DatasetLoader(Path("dataset"))
-cycles = loader.list_cycles(statuses={"valid"})
-frame = loader.load_cycle("frost_cycle_000001")
-images = loader.load_cycle_images("frost_cycle_000001")
+```text
+camera01__unassigned_01 → camera01__front
 ```
 
-Publication、RGB coverage 和 Dataset analysis 只接收 Loader 提供的数据。分析结果写入
-Dataset 外部的可再生输出目录，不回写 Dataset。
+`image_metadata.parquet` 保留图片匹配、来源、frame index、文件大小和 stage 信息，但不
+保存当前角色目录、最终路径或图片内容 SHA。Loader、refresh 和 coverage 通过扫描当前
+父目录并连接 metadata 获取实际存在的图片；不会做图片内容哈希、闭包校验或 orphan 失败。
 
-## 发布和验证
+RGB coverage 先按 `max_image_gap_seconds` 合并 available/missing 时间区间，再由同一组
+区间同时生成 Catalog 摘要和 coverage PNG。Sensor coverage 独立使用 Processed 10 秒网格。
 
-0714 从不存在的目录开始，0715 使用同一个 `add` 入口追加：
+## CLI
 
 ```bash
-python -m frost_analysis dataset add \
-  --run outputs/runs/0714 \
-  --dataset outputs/datasets/frost_cycles_v2
-
-python -m frost_analysis dataset add \
-  --run outputs/runs/0715 \
-  --dataset outputs/datasets/frost_cycles_v2
-
-python -m frost_analysis dataset validate \
-  --input outputs/datasets/frost_cycles_v2
+python -m frost_analysis dataset add data/0714
+python -m frost_analysis dataset add data/0715
+python -m frost_analysis dataset rebuild data/0714 data/0715
+python -m frost_analysis dataset validate --dataset dataset
+python -m frost_analysis dataset refresh --dataset dataset
+python -m frost_analysis dataset review-cycle frost_cycle_000001 \
+  --status valid --reason manual_review_confirmed
+python -m frost_analysis dataset edit --dataset dataset --baseline-seconds 60
+python -m frost_analysis dataset edit --dataset dataset --recovery-seconds 180
+python -m frost_analysis dataset edit --dataset dataset --rename-camera camera01=front
+python -m frost_analysis dataset render --dataset dataset frost_cycle_000001 \
+  --publication --coverage
 ```
 
-Append 在 Dataset 同级 staging 中写入新增 cycle、图片和合并 metadata；旧文件不重写，
-metadata 按 `cycle_index → image_metadata → manifest` 顺序替换。相同 source fingerprint
-是 no-op；不同 fingerprint 拒绝。普通异常会恢复旧 metadata、删除本次移动文件，并再次
-执行轻量结构检查。
+`dataset add` 对相同实验 identity 直接 no-op；原始数据或配置变化由用户显式执行
+`rebuild`。新日期必须晚于 Dataset 最后日期。`rebuild` 从 Raw 重新生成，不迁移旧
+status、人工边界、baseline 或 camera role。
 
-公开 validator 会重新计算所有 cycle 资产和图片 SHA，检查四件套、路径、schema、cycle
-引用、image metadata 闭包、assessment、时间和 orphan。进程被强制终止留下的临时文件由
-validator 发现；恢复方式是从正式 run 重新 `add` 到新的 Dataset。
+科学 edit 的当前规则保存在 `channel_registry.json`。后续 `add` 会对新 cycle 应用同一
+baseline/recovery 规则，避免一个 Dataset 混用不同的管理设定。`--recovery-seconds` 与
+`--recovery-end-by ts-minus` 互斥。Recovery edit 会同步更新 Original、Processed、
+cycle coordinates、stage-partitioned dynamic features、图片 metadata stage 和相关图形。
+
+## 事务与校验
+
+所有写操作都使用同一套 sibling staging、hardlink clone、结构检查和目录级 rollback。
+未修改文件只建立硬链接；修改文件使用临时文件后 atomic replace。构建期
+`validate_staging_structure()` 只检查身份、目录、资产存在性、metadata 主键和低成本
+合同；显式 `dataset validate` 才读取科学文件并核对 schema、时间、row count 和非图片
+资产 SHA。图片不参与内容 SHA 或闭包校验。
+
+Dataset 下游统一使用：
+
+```python
+loader.load_cycle("frost_cycle_000001")
+loader.load_cycle_original("frost_cycle_000001")
+loader.load_cycle_images("frost_cycle_000001")
+```

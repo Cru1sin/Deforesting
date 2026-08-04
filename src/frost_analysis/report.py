@@ -1120,7 +1120,7 @@ def _infer_cycle_stage_boundaries(  # noqa: C901
         end_value = cycle.get(end_field)
         if missing(start_value) or missing(end_value):
             continue
-        if pd.Timestamp(start_value) < pd.Timestamp(end_value):
+        if pd.Timestamp(cast(Any, start_value)) < pd.Timestamp(cast(Any, end_value)):
             known_stages.add(stage)
 
     if missing(result.get("heating_start")):
@@ -1165,8 +1165,8 @@ def _infer_cycle_stage_boundaries(  # noqa: C901
             end_value = fallback_interval[1]
         if missing(start_value) or missing(end_value):
             continue
-        start_timestamp = pd.Timestamp(start_value)
-        end_timestamp = pd.Timestamp(end_value)
+        start_timestamp = pd.Timestamp(cast(Any, start_value))
+        end_timestamp = pd.Timestamp(cast(Any, end_value))
         if (
             pd.notna(start_timestamp)
             and pd.notna(end_timestamp)

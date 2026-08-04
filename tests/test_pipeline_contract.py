@@ -283,7 +283,7 @@ def test_analysis_excludes_incomplete_cycles_from_trend_evidence() -> None:
     assert evidence.loc[0, "trend_cycle_count"] == 1
 
 
-def test_dataset_analysis_can_use_assessment_selected_cycle_with_nonvalid_source_status() -> None:
+def test_dataset_analysis_can_use_explicitly_selected_cycle_with_nonvalid_source_status() -> None:
     frame, cycles = _analysis_frame()
     frame.loc[frame["cycle_id"].eq("cycle_002"), "cycle_status"] = "incomplete"
     cycles.loc[cycles["cycle_id"].eq("cycle_002"), "cycle_status"] = "incomplete"

@@ -260,7 +260,7 @@ def scan_final_cycle_images(
             metadata = lookup.get(key)
             if metadata is None:
                 continue
-            row = dict(metadata)
+            row = {str(key): value for key, value in metadata.items()}
             row.update(
                 {
                     "camera_role": current_role,
@@ -269,6 +269,132 @@ def scan_final_cycle_images(
             )
             rows.append(row)
     return pd.DataFrame(rows, columns=columns)
+
+
+def _cycle_window(frame: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna().sort_values()
+    if timestamps.empty:
+        raise ValueError("cycle has no valid timestamp")
+    intervals = timestamps.diff().dropna().dt.total_seconds()
+    positive = intervals.loc[intervals > 0]
+    step = float(positive.median()) if not positive.empty else 1.0
+    return (
+        pd.Timestamp(timestamps.iloc[0]),
+        pd.Timestamp(timestamps.iloc[-1]) + pd.Timedelta(seconds=step),
+    )
+
+
+def _cycle_image_summary(
+    staging: Path,
+    cycle_name: str,
+    frame: pd.DataFrame,
+    image_metadata: pd.DataFrame,
+    registry: Mapping[str, Any],
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
+]:
+    start, end = _cycle_window(frame)
+    images = scan_final_cycle_images(staging, cycle_name, image_metadata)
+    settings = registry.get("image_coverage", {})
+    max_gap = float(
+        settings.get("max_image_gap_seconds", 40.0)
+        if isinstance(settings, Mapping)
+        else 40.0
+    )
+    by_role: dict[str, Any] = {}
+    intervals: dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] = {}
+    if not images.empty:
+        for role, group in images.groupby("camera_role", sort=True):
+            role_intervals = build_rgb_coverage_intervals(
+                start,
+                end,
+                group["image_time"],
+                max_image_gap_seconds=max_gap,
+            )
+            intervals[str(role)] = role_intervals
+            by_role[str(role)] = {
+                "image_count": int(len(group)),
+                "coverage_ratio": summarize_rgb_coverage(start, end, role_intervals),
+            }
+    return {"image_count": int(len(images)), "by_camera_role": by_role}, intervals
+
+
+def _sensor_coverage_intervals(  # noqa: C901
+    frame: pd.DataFrame,
+    registry: Mapping[str, Any],
+) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
+    """Build sensor availability from the same Processed rows used for drawing."""
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    valid = timestamps.notna()
+    ordered = timestamps.loc[valid].sort_values(kind="stable")
+    if ordered.empty:
+        return {"available": [], "missing": []}
+
+    diffs = ordered.diff().dropna().dt.total_seconds()
+    positive = diffs.loc[diffs > 0]
+    step = float(positive.median()) if not positive.empty else 10.0
+    channel_settings = registry.get("channels", {})
+    required_names = (
+        [
+            str(name)
+            for name, settings in channel_settings.items()
+            if isinstance(settings, Mapping)
+            and bool(settings.get("coverage_required", False))
+        ]
+        if isinstance(channel_settings, Mapping)
+        else []
+    )
+    observed_names = required_names
+    if not observed_names:
+        observed_names = [
+            str(field["name"])
+            for field in registry.get("fields", [])
+            if isinstance(field, Mapping)
+            and str(field.get("name")) in frame
+            and str(field.get("name")) not in {"timestamp", "cycle_stage"}
+            and not str(field.get("name")).endswith("__imputed")
+        ]
+
+    availability = pd.Series(True, index=frame.index, dtype=bool)
+    for name in observed_names:
+        if name not in frame:
+            availability &= False
+            continue
+        values = pd.to_numeric(frame[name], errors="coerce").notna()
+        imputed = frame.get(f"{name}__imputed")
+        if imputed is not None:
+            values &= ~imputed.fillna(False).astype(bool)
+        availability &= values
+
+    available_rows = frame.loc[valid & availability].sort_values(
+        "timestamp", kind="stable"
+    )
+    start = pd.Timestamp(ordered.iloc[0])
+    end = pd.Timestamp(ordered.iloc[-1]) + pd.Timedelta(seconds=step)
+    available: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if not available_rows.empty:
+        current_start = pd.Timestamp(available_rows.iloc[0]["timestamp"])
+        previous = current_start
+        for raw in available_rows["timestamp"].iloc[1:]:
+            current = pd.Timestamp(raw)
+            if (current - previous).total_seconds() > step * 1.5:
+                available.append(
+                    (current_start, previous + pd.Timedelta(seconds=step))
+                )
+                current_start = current
+            previous = current
+        available.append((current_start, previous + pd.Timedelta(seconds=step)))
+
+    missing: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    cursor = start
+    for available_start, available_end in available:
+        if cursor < available_start:
+            missing.append((cursor, available_start))
+        cursor = max(cursor, available_end)
+    if cursor < end:
+        missing.append((cursor, end))
+    return {"available": available, "missing": missing}
 
 
 def build_rgb_coverage_intervals(
