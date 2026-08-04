@@ -1,4 +1,4 @@
-"""Dataset-specific staging and atomic metadata writes."""
+"""Atomic Dataset writes and one directory-level staging transaction."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import pandas as pd
 
 
 def write_atomic_parquet(frame: pd.DataFrame, path: Path) -> None:
-    """Write a parquet file through a same-directory temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
     try:
@@ -24,7 +23,6 @@ def write_atomic_parquet(frame: pd.DataFrame, path: Path) -> None:
 
 
 def write_atomic_json(payload: Any, path: Path) -> None:
-    """Write JSON through a same-directory temporary file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
     try:
@@ -37,261 +35,98 @@ def write_atomic_json(payload: Any, path: Path) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def create_build_staging(output_dir: Path) -> tuple[Path, Path]:
-    """Create a build staging root containing the final dataset basename."""
-    output_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_root = output_dir.parent / f".dataset-build-{uuid4().hex}"
-    staging_dataset = staging_root / output_dir.name
-    staging_dataset.mkdir(parents=True, exist_ok=False)
-    (staging_dataset / "cycles").mkdir()
-    (staging_dataset / "images").mkdir()
-    return staging_root, staging_dataset
+def write_atomic_csv(frame: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+    try:
+        frame.to_csv(temporary, index=False)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
-def publish_build(staging_root: Path, staging_dataset: Path, output_dir: Path) -> None:
-    """Publish a validated build into a path that must not already exist."""
-    if output_dir.exists():
-        raise FileExistsError(f"dataset output already exists: {output_dir}")
-    os.replace(staging_dataset, output_dir)
-    shutil.rmtree(staging_root, ignore_errors=True)
-
-
-def create_append_staging(dataset_dir: Path) -> tuple[Path, Path]:
-    """Create sibling append staging with the final dataset basename."""
-    staging_root = dataset_dir.parent / f".{dataset_dir.name}.append-{uuid4().hex}"
+def clone_with_hardlinks(dataset_dir: Path) -> tuple[Path, Path]:
+    """Clone a Dataset tree without copying unchanged file contents."""
+    dataset_dir = dataset_dir.resolve()
+    if not dataset_dir.is_dir():
+        raise FileNotFoundError(f"Dataset directory does not exist: {dataset_dir}")
+    staging_root = dataset_dir.parent / f".{dataset_dir.name}.staging-{uuid4().hex}"
     staging_dataset = staging_root / dataset_dir.name
-    (staging_dataset / "cycles").mkdir(parents=True, exist_ok=False)
-    (staging_dataset / "cycles_original").mkdir(parents=True, exist_ok=False)
-    (staging_dataset / "images").mkdir(parents=True, exist_ok=False)
+    try:
+        staging_root.mkdir(parents=True, exist_ok=False)
+        shutil.copytree(
+            dataset_dir,
+            staging_dataset,
+            copy_function=os.link,
+            dirs_exist_ok=False,
+        )
+    except Exception:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise
     return staging_root, staging_dataset
 
 
-def backup_append_metadata(dataset_dir: Path, staging_root: Path) -> Path:
-    """Copy the three commit-marker metadata files into append staging."""
-    backup_dir = staging_root / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=False)
-    for name in ("cycle_index.parquet", "image_index.parquet", "dataset_manifest.json"):
-        source = dataset_dir / name
-        if not source.is_file():
-            raise FileNotFoundError(f"dataset metadata is missing: {source}")
-        shutil.copy2(source, backup_dir / name)
-    return backup_dir
+def create_empty_final_staging(dataset_dir: Path) -> tuple[Path, Path]:
+    """Create an empty sibling Dataset tree for add/rebuild."""
+    dataset_dir = dataset_dir.resolve()
+    dataset_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_root = dataset_dir.parent / f".{dataset_dir.name}.staging-{uuid4().hex}"
+    staging_dataset = staging_root / dataset_dir.name
+    try:
+        (staging_dataset / "cycles").mkdir(parents=True, exist_ok=False)
+        (staging_dataset / "cycles_original").mkdir(parents=True, exist_ok=False)
+        (staging_dataset / "images").mkdir(parents=True, exist_ok=False)
+    except Exception:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        raise
+    return staging_root, staging_dataset
 
 
-def commit_append_files(
+def publish_with_rollback(
+    staging_root: Path,
     staging_dataset: Path,
     dataset_dir: Path,
-    relative_paths: list[str],
-    moved_files: list[Path] | None = None,
-) -> list[Path]:
-    """Move new data files, then atomically replace metadata in commit order."""
-    moved = moved_files if moved_files is not None else []
-    for relative in relative_paths:
-        source = staging_dataset / relative
-        target = dataset_dir / relative
-        if target.exists():
-            raise FileExistsError(f"append target already exists: {target}")
-        if not source.is_file():
-            raise FileNotFoundError(f"append staging file is missing: {source}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, target)
-        moved.append(target)
-    for name in ("cycle_index.parquet", "image_index.parquet", "dataset_manifest.json"):
-        source = staging_dataset / name
-        if not source.is_file():
-            raise FileNotFoundError(f"append staging metadata is missing: {source}")
-        os.replace(source, dataset_dir / name)
-    return moved
-
-
-def rollback_append(
-    dataset_dir: Path,
-    backup_dir: Path | None,
-    moved_files: list[Path],
 ) -> None:
-    """Restore metadata and remove only files moved by the failed append."""
-    for path in moved_files:
-        path.unlink(missing_ok=True)
-    if backup_dir is None:
-        return
-    for name in ("cycle_index.parquet", "image_index.parquet", "dataset_manifest.json"):
-        backup = backup_dir / name
-        if backup.is_file():
-            shutil.copy2(backup, dataset_dir / name)
+    """Swap a complete sibling staging tree into place atomically."""
+    dataset_dir = dataset_dir.resolve()
+    rollback: Path | None = None
+    try:
+        if dataset_dir.exists():
+            rollback = dataset_dir.parent / f".{dataset_dir.name}.rollback-{uuid4().hex}"
+            dataset_dir.rename(rollback)
+        staging_dataset.rename(dataset_dir)
+    except Exception:
+        if dataset_dir.exists() and dataset_dir != staging_dataset:
+            shutil.rmtree(dataset_dir, ignore_errors=True)
+        if rollback is not None and rollback.exists() and not dataset_dir.exists():
+            rollback.rename(dataset_dir)
+        raise
+    else:
+        if rollback is not None:
+            shutil.rmtree(rollback, ignore_errors=True)
+        shutil.rmtree(staging_root, ignore_errors=True)
 
 
-def cleanup_append_staging(staging_root: Path) -> None:
-    """Remove an append staging tree after success or rollback."""
-    shutil.rmtree(staging_root, ignore_errors=True)
-
-
-def create_dataset_staging(dataset_dir: Path, *, kind: str) -> tuple[Path, Path]:
-    """Create a v2 staging tree with the final dataset basename."""
-    if kind not in {"build", "append"}:
-        raise ValueError(f"unsupported dataset staging kind: {kind}")
-    prefix = ".dataset-build-" if kind == "build" else f".{dataset_dir.name}.add-"
-    staging_root = dataset_dir.parent / f"{prefix}{uuid4().hex}"
-    staging_dataset = staging_root / dataset_dir.name
-    (staging_dataset / "cycles").mkdir(parents=True, exist_ok=False)
-    (staging_dataset / "images").mkdir(parents=True, exist_ok=False)
-    return staging_root, staging_dataset
-
-
-def commit_v2_append_files(
-    staging_dataset: Path,
+def mutate_dataset(
     dataset_dir: Path,
-    relative_paths: list[str],
+    operation: Any,
     *,
-    moved_files: list[Path] | None = None,
-) -> list[Path]:
-    """Move v2 cycle/image assets, then replace the three metadata files."""
-    moved = moved_files if moved_files is not None else []
-    for relative in relative_paths:
-        source = staging_dataset / relative
-        target = dataset_dir / relative
-        if target.exists():
-            raise FileExistsError(f"append target already exists: {target}")
-        if not source.is_file():
-            raise FileNotFoundError(f"append staging file is missing: {source}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, target)
-        moved.append(target)
-    for name in ("cycle_index.parquet", "image_metadata.parquet", "dataset_manifest.json"):
-        source = staging_dataset / name
-        if not source.is_file():
-            raise FileNotFoundError(f"append staging metadata is missing: {source}")
-        os.replace(source, dataset_dir / name)
-    return moved
-
-
-def backup_v2_metadata(dataset_dir: Path, staging_root: Path) -> Path:
-    """Back up v2 commit-marker metadata before an append."""
-    backup_dir = staging_root / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=False)
-    for name in ("cycle_index.parquet", "image_metadata.parquet", "dataset_manifest.json"):
-        source = dataset_dir / name
-        if not source.is_file():
-            raise FileNotFoundError(f"dataset metadata is missing: {source}")
-        shutil.copy2(source, backup_dir / name)
-    return backup_dir
-
-
-def rollback_v2_append(
-    dataset_dir: Path,
-    backup_dir: Path | None,
-    moved_files: list[Path],
-) -> None:
-    """Restore v2 metadata and remove only files moved by this append."""
-    for path in moved_files:
-        path.unlink(missing_ok=True)
-    if backup_dir is None:
-        return
-    for name in ("cycle_index.parquet", "image_metadata.parquet", "dataset_manifest.json"):
-        backup = backup_dir / name
-        if backup.is_file():
-            shutil.copy2(backup, dataset_dir / name)
-
-
-def backup_v3_metadata(
-    dataset_dir: Path, staging_root: Path, replaced_paths: list[str]
+    validate: Any,
+    rebuild: bool = False,
 ) -> Path:
-    """Back up v3 metadata and any historical cycle assets being rewritten."""
-    backup_dir = staging_root / "backups"
-    backup_dir.mkdir(parents=True, exist_ok=False)
-    names = (
-        "cycle_index.parquet",
-        "image_metadata.parquet",
-        "channel_registry.json",
-        "dataset_manifest.json",
-    )
-    for name in names:
-        source = dataset_dir / name
-        if not source.is_file():
-            raise FileNotFoundError(f"dataset metadata is missing: {source}")
-        shutil.copy2(source, backup_dir / name)
-    for relative in replaced_paths:
-        source = dataset_dir / relative
-        if not source.is_file():
-            raise FileNotFoundError(f"historical Dataset asset is missing: {source}")
-        target = backup_dir / "replaced" / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-    return backup_dir
-
-
-def commit_v3_append_files(
-    staging_dataset: Path,
-    dataset_dir: Path,
-    new_paths: list[str],
-    replaced_paths: list[str],
-    *,
-    moved_files: list[Path] | None = None,
-) -> list[Path]:
-    """Commit v3 new and rewritten assets, then replace metadata last."""
-    moved = moved_files if moved_files is not None else []
-    for relative in [*new_paths, *replaced_paths]:
-        source = staging_dataset / relative
-        target = dataset_dir / relative
-        if not source.is_file():
-            raise FileNotFoundError(f"append staging file is missing: {source}")
-        if relative in new_paths and target.exists():
-            raise FileExistsError(f"append target already exists: {target}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, target)
-        moved.append(target)
-    for name in (
-        "cycle_index.parquet",
-        "image_metadata.parquet",
-        "channel_registry.json",
-        "dataset_manifest.json",
-    ):
-        source = staging_dataset / name
-        if not source.is_file():
-            raise FileNotFoundError(f"append staging metadata is missing: {source}")
-        os.replace(source, dataset_dir / name)
-    return moved
-
-
-def rollback_v3_append(
-    dataset_dir: Path,
-    backup_dir: Path | None,
-    moved_files: list[Path],
-) -> None:
-    """Restore v3 metadata/assets after an append failure."""
-    if backup_dir is None:
-        for path in moved_files:
-            path.unlink(missing_ok=True)
-        _remove_empty_asset_parents(dataset_dir, moved_files)
-        return
-    replaced_root = backup_dir / "replaced"
-    for path in moved_files:
-        relative = path.relative_to(dataset_dir).as_posix()
-        backup = replaced_root / relative
-        if backup.is_file():
-            shutil.copy2(backup, path)
-        else:
-            path.unlink(missing_ok=True)
-    _remove_empty_asset_parents(dataset_dir, moved_files)
-    for name in (
-        "cycle_index.parquet",
-        "image_metadata.parquet",
-        "channel_registry.json",
-        "dataset_manifest.json",
-    ):
-        backup = backup_dir / name
-        if backup.is_file():
-            shutil.copy2(backup, dataset_dir / name)
-
-
-def _remove_empty_asset_parents(dataset_dir: Path, moved_files: list[Path]) -> None:
-    """Remove directories created only to hold assets from a failed append."""
-    for path in moved_files:
-        parent = path.parent
-        while parent != dataset_dir and parent != parent.parent:
-            if not parent.is_dir():
-                break
-            try:
-                parent.rmdir()
-            except OSError:
-                break
-            parent = parent.parent
+    """Run every Dataset write through staging, validation, and directory swap."""
+    dataset_dir = dataset_dir.resolve()
+    if rebuild or not dataset_dir.exists():
+        staging_root, staging_dataset = create_empty_final_staging(dataset_dir)
+    else:
+        staging_root, staging_dataset = clone_with_hardlinks(dataset_dir)
+    published = False
+    try:
+        operation(staging_dataset)
+        validate(staging_dataset)
+        publish_with_rollback(staging_root, staging_dataset, dataset_dir)
+        published = True
+        return dataset_dir
+    finally:
+        if not published:
+            shutil.rmtree(staging_root, ignore_errors=True)

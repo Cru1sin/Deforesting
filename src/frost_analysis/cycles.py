@@ -580,9 +580,17 @@ def _partial_stage_context(  # noqa: C901
         has_temperature_evidence = False
 
     if not has_temperature_evidence:
-        # A state transition without a temperature/setpoint anchor is not
-        # enough to assign scientific phases to the open segment.
-        return stages_for_partial(segment.index), heating_start, None, None, None
+        # Temperature evidence is required for recovery/frost labels, but a
+        # directly observed defrost state is an independent, useful boundary.
+        # Keep the pre-defrost rows neutral and preserve the known defrost
+        # interval instead of discarding it with the missing temperature data.
+        stages = stages_for_partial(segment.index)
+        if defrost_start is not None:
+            active_interval = times.ge(defrost_start)
+            if defrost_end is not None:
+                active_interval &= times.lt(defrost_end)
+            stages.loc[active_interval] = "defrost"
+        return stages, heating_start, None, defrost_start, defrost_end
 
     stages = pd.Series("partial", index=segment.index, dtype="string")
     before_defrost = (

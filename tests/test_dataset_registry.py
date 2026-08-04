@@ -4,6 +4,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
+from frost_analysis.dataset_images import stable_logical_image_id
 from frost_analysis.dataset_registry import (
     IMAGE_COLUMNS,
     canonical_frame,
@@ -11,11 +12,6 @@ from frost_analysis.dataset_registry import (
     drop_image_columns,
     merge_registries,
     registry_from_frame,
-)
-from frost_analysis.dataset_v3 import (
-    make_image_id,
-    resolve_project_root,
-    source_fingerprint,
 )
 
 
@@ -181,26 +177,9 @@ def test_registry_captures_source_channel_semantic_changes() -> None:
 
 
 def test_image_id_uses_immutable_source_identity_not_frame_index() -> None:
-    first = make_image_id("exp::cycle_1", "camera01", "camera01/frame.jpg")
-    second = make_image_id("exp::cycle_1", "camera01", "camera01/other.jpg")
+    first = stable_logical_image_id("exp::cycle_1", "camera01", "camera01/frame.jpg")
+    second = stable_logical_image_id("exp::cycle_1", "camera01", "camera01/other.jpg")
 
-    assert first.startswith("img_")
+    assert len(first) == 16
     assert first != second
-    assert make_image_id("exp::cycle_1", "camera01", "camera01/frame.jpg") == first
-
-
-def test_source_fingerprint_includes_run_inventory_and_registry() -> None:
-    first = source_fingerprint("exp", "2026-07-14", "run", "inventory", "registry")
-    changed = source_fingerprint("exp", "2026-07-14", "run-2", "inventory", "registry")
-
-    assert len(first) == 64
-    assert first != changed
-
-
-def test_project_root_is_resolved_from_repository_not_cwd(tmp_path):
-    root = tmp_path / "project"
-    nested = root / "src" / "pkg"
-    nested.mkdir(parents=True)
-    (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
-
-    assert resolve_project_root(nested) == root
+    assert stable_logical_image_id("exp::cycle_1", "camera01", "camera01/frame.jpg") == first

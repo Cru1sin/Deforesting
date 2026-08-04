@@ -369,9 +369,8 @@ def run_analysis(
                 else 0,
             }
         )
-    if loader.schema_version == 3:
-        evidence = _analyze_dataset_cycles(loader, selected)
-        evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
+    evidence = _analyze_dataset_cycles(loader, selected)
+    evidence.to_csv(output_dir / "candidate_channel_evidence.csv", index=False)
     pd.DataFrame(statistics).to_csv(output_dir / "cycle_statistics.csv", index=False)
     pd.DataFrame(image_statistics).to_csv(
         output_dir / "image_sensor_alignment.csv", index=False
@@ -444,11 +443,9 @@ def _cycle_numeric_statistics(
 
 
 def _assessment_status(record: Mapping[str, object]) -> str | None:
-    assessment = record.get("assessment")
-    if isinstance(assessment, dict):
-        value = assessment.get("status")
-        return None if value is None else str(value)
-    value = record.get("cycle_status")
+    value = record.get("status")
+    if value is None:
+        value = record.get("pipeline_status")
     return None if value is None else str(value)
 
 

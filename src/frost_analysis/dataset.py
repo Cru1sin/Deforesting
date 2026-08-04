@@ -1,25 +1,26 @@
-"""Cycle-level dataset publication helpers."""
+"""Build and manage the self-contained Cycle Dataset schema 3.
+
+The module owns orchestration only; scientific transforms remain in Prepare/Process
+and image, metadata, IO, and validation concerns live in their focused modules.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
 import re
-import shutil
-import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, cast
 
 import pandas as pd
-import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-from .config import find_project_root, is_iso_date
-from .io import ensure_output_outside_input, relative_posix_path, sha256_file
+from .config import find_project_root
+from .io import sha256_file
 
-DATASET_SCHEMA_VERSION = 1
+DATASET_SCHEMA_VERSION = 3
+DATASET_ID = "frost_cycle_dataset"
 CYCLE_NAME_WIDTH = 6
 SOURCE_QUALITY_SUFFIXES = (
     "__missing",
@@ -27,1800 +28,33 @@ SOURCE_QUALITY_SUFFIXES = (
     "__duplicate",
     "__conflict",
 )
-_DATASET_ID_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
-_CYCLE_NUMBER_RE = re.compile(r"(?:^|_)cycle_(\d+)$")
 CycleKey = tuple[str, str]
 
 
-@dataclass(frozen=True)
-class SourceRun:
-    """Static metadata for one formal experiment run."""
-
-    path: Path
-    experiment_id: str
-    experiment_date: str
-    input_dir: Path
-    prepared_path: Path
-    processed_path: Path
-    summary_path: Path
-    resolved_config_sha256: str
-    prepared_sha256: str
-    processed_sha256: str
-    summary_sha256: str
-    manifest_sha256: str
-    git_commit: str | None
-
-
-class SourceDescriptor(TypedDict):
-    source: SourceRun
-    project_root: Path
-    summary: pd.DataFrame
-    processed_counts: dict[CycleKey, int]
-    schema: list[dict[str, Any]]
-
-
-class SourceExport(TypedDict):
-    source: SourceRun
-    summary: pd.DataFrame
-    processed_counts: dict[CycleKey, int]
-    records: list[dict[str, object]]
-    inventory_hash: str
-    rewritten: pd.DataFrame
-    cycle_names: dict[CycleKey, str]
-
-
 def validate_dataset_id(value: str) -> str:
-    """Validate and return a dataset identifier suitable for a directory name."""
-    if not _DATASET_ID_RE.fullmatch(value):
+    if value != DATASET_ID:
         raise ValueError(f"invalid dataset_id: {value!r}")
     return value
 
 
 def make_cycle_uid(experiment_id: str, cycle_id: str) -> str:
-    """Build the stable source identity for one cycle."""
-    return f"{experiment_id}__{cycle_id}"
-
-
-def make_v2_cycle_uid(experiment_id: str, cycle_id: str) -> str:
-    """Build the v2 self-contained Dataset cycle identity."""
     return f"{experiment_id}::{cycle_id}"
 
 
 def format_cycle_name(index: int) -> str:
-    """Build the human-readable global cycle filename stem."""
     if index < 1:
         raise ValueError("dataset cycle index must be positive")
     return f"frost_cycle_{index:0{CYCLE_NAME_WIDTH}d}"
 
 
 def parse_cycle_name(name: str) -> int:
-    """Parse the positive global index from a dataset cycle name."""
     match = re.fullmatch(rf"frost_cycle_(\d{{{CYCLE_NAME_WIDTH},}})", name)
     if match is None or int(match.group(1)) < 1:
         raise ValueError(f"invalid cycle_name: {name!r}")
     return int(match.group(1))
 
 
-def cycle_sort_key(
-    experiment_date: str,
-    experiment_id: str,
-    cycle_id: str,
-) -> tuple[date, str, int, str]:
-    """Return a deterministic date/experiment/natural-cycle sort key."""
-    match = _CYCLE_NUMBER_RE.search(cycle_id)
-    number = int(match.group(1)) if match else 2**31 - 1
-    return date.fromisoformat(experiment_date), experiment_id, number, cycle_id
-
-
-def assign_cycle_names(
-    summary: pd.DataFrame,
-    processed_counts: Mapping[CycleKey, int],
-) -> dict[CycleKey, str]:
-    """Assign consecutive names to cycles that have Processed rows."""
-    required = {"experiment_id", "experiment_date", "cycle_id"}
-    missing = sorted(required - set(summary.columns))
-    if missing:
-        raise ValueError(f"cycle summary missing columns: {missing}")
-    keys = {
-        (str(row.experiment_id), str(row.cycle_id)): str(row.experiment_date)[:10]
-        for row in summary[["experiment_id", "experiment_date", "cycle_id"]].itertuples(
-            index=False
-        )
-    }
-    published = [key for key, count in processed_counts.items() if count > 0]
-    published.sort(key=lambda key: cycle_sort_key(keys[key], key[0], key[1]))
-    return {key: format_cycle_name(index) for index, key in enumerate(published, start=1)}
-
-
-def build_cycle_index(
-    summary: pd.DataFrame,
-    *,
-    processed_counts: Mapping[CycleKey, int],
-    cycle_names: Mapping[CycleKey, str],
-    cycle_files: Mapping[CycleKey, Mapping[str, object]],
-) -> pd.DataFrame:
-    """Build one index row for every Summary cycle."""
-    rows: list[dict[str, object]] = []
-    for row in summary.to_dict(orient="records"):
-        experiment_id = str(row["experiment_id"])
-        cycle_id = str(row["cycle_id"])
-        key = (experiment_id, cycle_id)
-        processed_row_count = int(processed_counts.get(key, 0))
-        published = processed_row_count > 0
-        cycle_name = cycle_names.get(key)
-        file_info = cycle_files.get(key, {})
-        baseline_status = row.get("baseline_status")
-        cycle_status = row.get("cycle_status")
-        rows.append(
-            {
-                "dataset_cycle_index": parse_cycle_name(cycle_name) if cycle_name else pd.NA,
-                "cycle_name": cycle_name,
-                "cycle_uid": make_cycle_uid(experiment_id, cycle_id),
-                "experiment_id": experiment_id,
-                "experiment_date": str(row["experiment_date"]),
-                "cycle_id": cycle_id,
-                "cycle_status": cycle_status,
-                "cycle_status_reason": row.get("cycle_status_reason"),
-                "baseline_status": baseline_status,
-                "baseline_failure_reason": row.get("baseline_failure_reason"),
-                "published": published,
-                "data_path": file_info.get("data_path"),
-                "data_sha256": file_info.get("data_sha256"),
-                "data_size_bytes": file_info.get("data_size_bytes"),
-                "processed_row_count": processed_row_count,
-                "image_count": int(cast(int, file_info.get("image_count", 0))),
-                "recommended_for_analysis": bool(
-                    published
-                    and cycle_status == "valid"
-                    and baseline_status == "available"
-                ),
-                "dataset_exclusion_reason": None if published else "no_processed_rows",
-            }
-        )
-    result = pd.DataFrame(rows)
-    if "dataset_cycle_index" in result:
-        result["dataset_cycle_index"] = result["dataset_cycle_index"].astype("Int64")
-    if "data_size_bytes" in result:
-        result["data_size_bytes"] = result["data_size_bytes"].astype("Int64")
-    return result
-
-
-def scientific_fingerprint(source_run: SourceRun, image_inventory_sha256: str) -> str:
-    """Hash only the inputs consumed by the cycle dataset exporter."""
-    payload = {
-        "experiment_id": source_run.experiment_id,
-        "experiment_date": source_run.experiment_date,
-        "resolved_config_sha256": source_run.resolved_config_sha256,
-        "prepared_data_sha256": source_run.prepared_sha256,
-        "processed_data_sha256": source_run.processed_sha256,
-        "cycle_summary_sha256": source_run.summary_sha256,
-        "matched_image_inventory_sha256": image_inventory_sha256,
-    }
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def logical_schema_compatible(
-    left: list[dict[str, Any]], right: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Merge two ordered Arrow schemas, allowing null to promote once."""
-    if len(left) != len(right) or [field["name"] for field in left] != [
-        field["name"] for field in right
-    ]:
-        raise ValueError(_schema_mismatch_message(left, right))
-    merged: list[dict[str, Any]] = []
-    for left_field, right_field in zip(left, right, strict=True):
-        left_type = str(left_field["logical_type"])
-        right_type = str(right_field["logical_type"])
-        if left_type == "null":
-            logical_type = right_type
-        elif right_type == "null":
-            logical_type = left_type
-        elif left_type != right_type:
-            raise ValueError(_schema_mismatch_message(left, right))
-        else:
-            logical_type = left_type
-        merged.append(
-            {
-                "name": left_field["name"],
-                "logical_type": logical_type,
-                "nullable": bool(left_field["nullable"] or right_field["nullable"]),
-            }
-        )
-    return merged
-
-
-def _schema_mismatch_message(
-    expected: list[dict[str, Any]], actual: list[dict[str, Any]]
-) -> str:
-    """Describe schema differences without attempting to repair them."""
-    expected_names = [str(field["name"]) for field in expected]
-    actual_names = [str(field["name"]) for field in actual]
-    expected_set = set(expected_names)
-    actual_set = set(actual_names)
-    missing = sorted(expected_set - actual_set)
-    extra = sorted(actual_set - expected_set)
-    order_changed = not missing and not extra and expected_names != actual_names
-
-    expected_by_name = {str(field["name"]): field for field in expected}
-    actual_by_name = {str(field["name"]): field for field in actual}
-    type_changes = []
-    for name in sorted(expected_set & actual_set):
-        expected_type = str(expected_by_name[name]["logical_type"])
-        actual_type = str(actual_by_name[name]["logical_type"])
-        if expected_type == "null" or actual_type == "null":
-            continue
-        if expected_type != actual_type:
-            type_changes.append(f"{name}: {expected_type} -> {actual_type}")
-
-    return (
-        "Processed schema mismatch:\n"
-        f"missing columns: {missing}\n"
-        f"extra columns: {extra}\n"
-        f"order changed: {str(order_changed).lower()}\n"
-        f"type changes: {type_changes}"
-    )
-
-
-def source_processed_schema(path: Path) -> list[dict[str, Any]]:
-    """Read the logical Arrow schema of a source Processed parquet file."""
-    schema = pq.read_schema(path)
-    return [
-        {
-            "name": field.name,
-            "logical_type": str(field.type),
-            "nullable": bool(field.nullable),
-        }
-        for field in schema
-    ]
-
-
-def load_source_run(run_path: Path) -> SourceRun:  # noqa: C901
-    """Load and preflight the static contract of one formal run directory."""
-    run_dir = run_path.resolve()
-    if not run_dir.is_dir():
-        raise FileNotFoundError(f"source run directory does not exist: {run_path}")
-    manifest_path = run_dir / "manifest.json"
-    if not manifest_path.is_file():
-        raise FileNotFoundError(f"source run is missing manifest.json: {run_dir}")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        raise ValueError(f"source manifest is not valid JSON: {manifest_path}") from error
-    if not isinstance(manifest, dict):
-        raise ValueError(f"source manifest must be an object: {manifest_path}")
-
-    experiment_id = str(manifest.get("experiment_id", ""))
-    experiment_date = str(manifest.get("experiment_date", ""))
-    if not experiment_id or not is_iso_date(experiment_date):
-        raise ValueError(f"source manifest has invalid experiment identity: {run_dir}")
-
-    project_root = find_project_root(manifest_path)
-    if project_root is None:
-        raise FileNotFoundError(f"could not find project root for source run: {run_dir}")
-    relative_posix_path(run_dir, project_root)
-
-    provenance = manifest.get("config_provenance")
-    resolved_config = manifest.get("resolved_config")
-    outputs = manifest.get("outputs")
-    if not isinstance(provenance, dict) or not isinstance(resolved_config, dict):
-        raise ValueError(f"source manifest lacks configuration provenance: {run_dir}")
-    if not isinstance(outputs, dict):
-        raise ValueError(f"source manifest lacks outputs: {run_dir}")
-    resolved_hash = str(provenance.get("resolved_config_sha256", ""))
-    input_value = resolved_config.get("input_dir")
-    if not resolved_hash or not isinstance(input_value, str) or Path(input_value).is_absolute():
-        raise ValueError(f"source manifest has invalid resolved input contract: {run_dir}")
-    input_dir = (project_root / input_value).resolve()
-    relative_posix_path(input_dir, project_root)
-    if not input_dir.is_dir():
-        raise FileNotFoundError(f"source input directory does not exist: {input_dir}")
-
-    required_outputs = {
-        "prepared_data": "prepared_data.parquet",
-        "processed_data": "processed_data.parquet",
-        "cycle_summary": "cycle_summary.csv",
-        "candidate_channel_evidence": "candidate_channel_evidence.csv",
-    }
-    output_paths: dict[str, Path] = {}
-    for key, expected_name in required_outputs.items():
-        declared = outputs.get(key)
-        if (
-            not isinstance(declared, str)
-            or Path(declared).is_absolute()
-            or ".." in Path(declared).parts
-            or Path(declared).name != expected_name
-        ):
-            raise ValueError(f"source manifest output {key!r} is invalid: {run_dir}")
-        output_path = (run_dir / declared).resolve()
-        relative_posix_path(output_path, run_dir)
-        if not output_path.is_file():
-            raise FileNotFoundError(f"source run is missing {expected_name}: {run_dir}")
-        output_paths[key] = output_path
-
-    git_value = manifest.get("git_commit")
-    git_commit = None if git_value is None else str(git_value)
-    return SourceRun(
-        path=run_dir,
-        experiment_id=experiment_id,
-        experiment_date=experiment_date,
-        input_dir=input_dir,
-        prepared_path=output_paths["prepared_data"],
-        processed_path=output_paths["processed_data"],
-        summary_path=output_paths["cycle_summary"],
-        resolved_config_sha256=resolved_hash,
-        prepared_sha256=sha256_file(output_paths["prepared_data"]),
-        processed_sha256=sha256_file(output_paths["processed_data"]),
-        summary_sha256=sha256_file(output_paths["cycle_summary"]),
-        manifest_sha256=sha256_file(manifest_path),
-        git_commit=git_commit,
-    )
-
-
-def build_dataset(run_paths: Sequence[Path], output_dir: Path) -> Path:  # noqa: C901
-    """Build a complete cycle dataset from explicit formal run directories."""
-    from .dataset_io import (
-        create_build_staging,
-        publish_build,
-        write_atomic_json,
-        write_atomic_parquet,
-    )
-    from .dataset_validation import validate_dataset
-
-    output_dir = output_dir.resolve()
-    dataset_id = validate_dataset_id(output_dir.name)
-    if output_dir.exists():
-        raise FileExistsError(f"dataset output already exists: {output_dir}")
-    if not run_paths:
-        raise ValueError("dataset build requires at least one --run")
-    resolved_paths = [path.resolve() for path in run_paths]
-    if len(set(resolved_paths)) != len(resolved_paths):
-        raise ValueError("duplicate source run path")
-
-    descriptors = [_source_descriptor(path) for path in resolved_paths]
-    sources = [descriptor["source"] for descriptor in descriptors]
-    experiment_ids = [source.experiment_id for source in sources]
-    if len(set(experiment_ids)) != len(experiment_ids):
-        duplicates = sorted({value for value in experiment_ids if experiment_ids.count(value) > 1})
-        raise ValueError(f"duplicate experiment_id in build inputs: {duplicates}")
-    project_roots = {descriptor["project_root"] for descriptor in descriptors}
-    if len(project_roots) != 1:
-        raise ValueError("source runs must share one project root")
-    for source in sources:
-        ensure_output_outside_input(output_dir, source.input_dir)
-
-    summary_frames = [descriptor["summary"] for descriptor in descriptors]
-    summary = pd.concat(summary_frames, ignore_index=True)
-    summary = _sort_summary(summary)
-    processed_counts: dict[CycleKey, int] = {}
-    for descriptor in descriptors:
-        processed_counts.update(descriptor["processed_counts"])
-    cycle_names = assign_cycle_names(summary, processed_counts)
-    merged_schema = descriptors[0]["schema"]
-    for descriptor in descriptors[1:]:
-        merged_schema = logical_schema_compatible(merged_schema, descriptor["schema"])
-
-    staging_root, staging_dataset = create_build_staging(output_dir)
-    published = False
-    try:
-        cycle_files: dict[tuple[str, str], dict[str, object]] = {}
-        image_records: list[dict[str, object]] = []
-        source_manifests: list[dict[str, object]] = []
-        for descriptor in sorted(
-            descriptors,
-            key=lambda item: (
-                item["source"].experiment_date,
-                item["source"].experiment_id,
-            ),
-        ):
-            export = _load_source_export(descriptor, cycle_names)
-            source = export["source"]
-            cycle_files.update(
-                _write_source_export(
-                    export,
-                    dataset_id=dataset_id,
-                    staging_dataset=staging_dataset,
-                )
-            )
-            records = export["records"]
-            image_records.extend(records)
-            source_manifests.append(
-                _source_manifest_record(source, str(export["inventory_hash"]))
-            )
-
-        cycle_index = build_cycle_index(
-            summary,
-            processed_counts=processed_counts,
-            cycle_names=cycle_names,
-            cycle_files=cycle_files,
-        )
-        image_index = _image_index_frame(image_records)
-        write_atomic_parquet(cycle_index, staging_dataset / "cycle_index.parquet")
-        write_atomic_parquet(image_index, staging_dataset / "image_index.parquet")
-        manifest = _dataset_manifest(
-            dataset_id=dataset_id,
-            source_schema=merged_schema,
-            source_runs=source_manifests,
-            cycle_index=cycle_index,
-            image_index=image_index,
-            staging_dataset=staging_dataset,
-        )
-        write_atomic_json(manifest, staging_dataset / "dataset_manifest.json")
-        (staging_dataset / "README.md").write_text(
-            _dataset_readme(dataset_id), encoding="utf-8"
-        )
-        validate_dataset(staging_dataset)
-        publish_build(staging_root, staging_dataset, output_dir)
-        published = True
-        return output_dir
-    finally:
-        if not published:
-            import shutil
-
-            shutil.rmtree(staging_root, ignore_errors=True)
-
-
-def append_dataset(run_path: Path, dataset_dir: Path) -> Path:  # noqa: C901
-    """Append one formal run using a metadata-first, recoverable transaction."""
-    from .dataset_io import (
-        backup_append_metadata,
-        cleanup_append_staging,
-        commit_append_files,
-        create_append_staging,
-        rollback_append,
-        write_atomic_json,
-        write_atomic_parquet,
-    )
-    from .dataset_validation import (
-        _validate_append_candidate,
-        _validate_dataset_structure,
-        _validate_existing_file_paths,
-        _validate_new_files,
-    )
-
-    dataset_dir = dataset_dir.resolve()
-    manifest, old_cycle_index, old_image_index = _validate_dataset_structure(dataset_dir)
-    _validate_existing_file_paths(dataset_dir, old_cycle_index, old_image_index)
-    dataset_id = validate_dataset_id(str(manifest["dataset_id"]))
-    descriptor = _source_descriptor(run_path)
-    source = descriptor["source"]
-    dataset_root = find_project_root(dataset_dir)
-    source_root = descriptor["project_root"]
-    if dataset_root is not None and source_root != dataset_root:
-        raise ValueError("source run and dataset must share one project root")
-    ensure_output_outside_input(dataset_dir, source.input_dir)
-
-    source_id = source.experiment_id
-    existing_runs = manifest.get("source_runs")
-    if not isinstance(existing_runs, list):
-        raise ValueError("dataset manifest is missing source_runs")
-    existing_record = next(
-        (
-            item
-            for item in existing_runs
-            if isinstance(item, dict) and item.get("experiment_id") == source_id
-        ),
-        None,
-    )
-    if existing_record is not None and not isinstance(existing_record, dict):
-        raise ValueError(f"invalid source run record for {source_id}")
-
-    existing_names = {
-        (str(row["experiment_id"]), str(row["cycle_id"])): str(row["cycle_name"])
-        for row in old_cycle_index.loc[old_cycle_index["published"].astype(bool)].to_dict(
-            orient="records"
-        )
-    }
-    processed_counts = descriptor["processed_counts"]
-    new_keys = [key for key, count in processed_counts.items() if count > 0]
-    if existing_record is None:
-        if any(str(value) == source_id for value in old_cycle_index["experiment_id"]):
-            raise ValueError(f"dataset already contains experiment_id: {source_id}")
-        next_index = int(old_cycle_index["dataset_cycle_index"].max()) + 1 if old_cycle_index[
-            "dataset_cycle_index"
-        ].notna().any() else 1
-        new_keys.sort(
-            key=lambda key: cycle_sort_key(source.experiment_date, key[0], key[1])
-        )
-        cycle_names = {
-            key: format_cycle_name(next_index + offset)
-            for offset, key in enumerate(new_keys)
-        }
-    else:
-        cycle_names = {key: existing_names[key] for key in new_keys if key in existing_names}
-        missing_names = [key for key in new_keys if key not in cycle_names]
-        if missing_names:
-            raise ValueError(
-                f"existing experiment has new cycle identities: {missing_names}"
-            )
-
-    export = _load_source_export(descriptor, {**existing_names, **cycle_names})
-    new_source_record = _source_manifest_record(source, str(export["inventory_hash"]))
-    if existing_record is not None:
-        old_fingerprint = str(existing_record.get("fingerprint", ""))
-        new_fingerprint = str(new_source_record["fingerprint"])
-        if old_fingerprint == new_fingerprint:
-            return dataset_dir
-        changed = [
-            field
-            for field in (
-                "resolved_config_sha256",
-                "prepared_data_sha256",
-                "processed_data_sha256",
-                "cycle_summary_sha256",
-                "matched_image_inventory_sha256",
-            )
-            if str(existing_record.get(field)) != str(new_source_record[field])
-        ]
-        details = ", ".join(changed) if changed else "fingerprint"
-        raise ValueError(f"fingerprint conflict for {source_id}; changed: {details}")
-
-    merged_schema = logical_schema_compatible(
-        cast(list[dict[str, Any]], manifest["source_processed_schema"]),
-        descriptor["schema"],
-    )
-    staging_root, staging_dataset = create_append_staging(dataset_dir)
-    moved_files: list[Path] = []
-    backup_dir: Path | None = None
-    committed = False
-    try:
-        new_cycle_files = _write_source_export(
-            export,
-            dataset_id=dataset_id,
-            staging_dataset=staging_dataset,
-        )
-        new_records = export["records"]
-        new_cycle_index = build_cycle_index(
-            export["summary"],
-            processed_counts=processed_counts,
-            cycle_names={**existing_names, **cycle_names},
-            cycle_files=new_cycle_files,
-        )
-        new_cycle_index = new_cycle_index.loc[
-            new_cycle_index["experiment_id"].eq(source_id)
-        ].reset_index(drop=True)
-        merged_cycle_index = pd.concat(
-            [old_cycle_index, new_cycle_index], ignore_index=True
-        )
-        merged_image_index = pd.concat(
-            [old_image_index, _image_index_frame(new_records)], ignore_index=True
-        )
-        write_atomic_parquet(merged_cycle_index, staging_dataset / "cycle_index.parquet")
-        write_atomic_parquet(merged_image_index, staging_dataset / "image_index.parquet")
-        source_runs = [
-            item for item in existing_runs if isinstance(item, dict)
-        ] + [new_source_record]
-        manifest_payload = _dataset_manifest(
-            dataset_id=dataset_id,
-            source_schema=merged_schema,
-            source_runs=source_runs,
-            cycle_index=merged_cycle_index,
-            image_index=merged_image_index,
-            staging_dataset=staging_dataset,
-        )
-        write_atomic_json(manifest_payload, staging_dataset / "dataset_manifest.json")
-        (staging_dataset / "README.md").write_text(
-            _dataset_readme(dataset_id), encoding="utf-8"
-        )
-        _validate_append_candidate(
-            staging_dataset,
-            manifest_payload,
-            merged_cycle_index,
-            merged_image_index,
-            new_cycle_index,
-            new_records,
-        )
-        backup_dir = backup_append_metadata(dataset_dir, staging_root)
-        moved_files = commit_append_files(
-            staging_dataset,
-            dataset_dir,
-            [
-                *[str(item["data_path"]) for item in new_cycle_files.values()],
-                *[str(item["image_path"]) for item in new_records],
-            ],
-            moved_files=moved_files,
-        )
-        committed = True
-        manifest_after, cycle_after, image_after = _validate_dataset_structure(dataset_dir)
-        _validate_new_files(
-            dataset_dir,
-            manifest_after,
-            cycle_after.loc[cycle_after["experiment_id"].eq(source_id)],
-            image_after,
-            new_records=new_records,
-        )
-        return dataset_dir
-    except Exception as append_error:
-        if committed or moved_files or backup_dir is not None:
-            try:
-                rollback_append(dataset_dir, backup_dir, moved_files)
-                _validate_dataset_structure(dataset_dir)
-                _validate_existing_file_paths(
-                    dataset_dir,
-                    old_cycle_index,
-                    old_image_index,
-                )
-            except Exception as rollback_error:
-                raise RuntimeError(
-                    "append failed and rollback validation also failed: "
-                    f"{rollback_error}"
-                ) from append_error
-        raise
-    finally:
-        cleanup_append_staging(staging_root)
-
-
-def _source_descriptor(run_path: Path) -> SourceDescriptor:
-    source = load_source_run(run_path)
-    project_root = find_project_root(source.path / "manifest.json")
-    if project_root is None:
-        raise FileNotFoundError(f"could not find project root for source run: {run_path}")
-    summary = _sort_summary(_read_cycle_summary(source.summary_path))
-    processed_keys = pd.read_parquet(
-        source.processed_path,
-        columns=["experiment_id", "cycle_id"],
-    )
-    counts = {
-        (str(experiment_id), str(cycle_id)): int(len(group))
-        for (experiment_id, cycle_id), group in processed_keys.groupby(
-            ["experiment_id", "cycle_id"], dropna=False, sort=False
-        )
-    }
-    return {
-        "source": source,
-        "project_root": project_root,
-        "summary": summary,
-        "processed_counts": counts,
-        "schema": source_processed_schema(source.processed_path),
-    }
-
-
-def _load_source_export(
-    descriptor: SourceDescriptor,
-    cycle_names: Mapping[CycleKey, str],
-) -> SourceExport:
-    """Load, scientifically validate, and transform one source run in memory."""
-    from .dataset_images import collect_matched_images, rewrite_processed_image_paths
-    from .validation import validate_prepared, validate_processed
-
-    source = descriptor["source"]
-    summary = descriptor["summary"]
-    prepared = pd.read_parquet(source.prepared_path)
-    processed = pd.read_parquet(source.processed_path)
-    validate_prepared(prepared, summary)
-    validate_processed(processed, summary)
-    if _identity_mismatch(prepared, source) or _identity_mismatch(processed, source):
-        raise ValueError(f"source data identity disagrees with manifest: {source.path}")
-    records, inventory_hash = collect_matched_images(
-        prepared,
-        input_dir=source.input_dir,
-        cycle_names=cycle_names,
-    )
-    rewritten = rewrite_processed_image_paths(processed, records)
-    return {
-        "source": source,
-        "summary": summary,
-        "processed_counts": descriptor["processed_counts"],
-        "records": records,
-        "inventory_hash": inventory_hash,
-        "rewritten": rewritten,
-        "cycle_names": dict(cycle_names),
-    }
-
-
-def _write_source_export(
-    export: SourceExport,
-    *,
-    dataset_id: str,
-    staging_dataset: Path,
-) -> dict[tuple[str, str], dict[str, object]]:
-    """Write one transformed source run into a build or append staging tree."""
-    from .dataset_images import copy_dataset_image
-    from .dataset_io import write_atomic_parquet
-
-    records = export["records"]
-    rewritten = export["rewritten"]
-    processed_counts = export["processed_counts"]
-    cycle_names = export["cycle_names"]
-    cycle_files: dict[CycleKey, dict[str, object]] = {}
-    for record in records:
-        destination = staging_dataset / str(record["image_path"])
-        if destination.exists():
-            raise FileExistsError(f"dataset image path collision: {destination}")
-        copy_dataset_image(record, staging_dataset)
-    for key, count in processed_counts.items():
-        if count <= 0:
-            continue
-        cycle_name = cycle_names.get(key)
-        if cycle_name is None:
-            raise ValueError(f"missing dataset cycle name for {key}")
-        cycle_uid = make_cycle_uid(*key)
-        cycle_frame = rewritten.loc[
-            rewritten["experiment_id"].astype(str).eq(key[0])
-            & rewritten["cycle_id"].astype(str).eq(key[1])
-        ].copy()
-        if len(cycle_frame) != count:
-            raise ValueError(f"Processed row count changed while exporting {key}")
-        cycle_frame = _append_dataset_fields(
-            cycle_frame,
-            dataset_id=dataset_id,
-            cycle_index=parse_cycle_name(cycle_name),
-            cycle_name=cycle_name,
-            cycle_uid=cycle_uid,
-        )
-        data_path = f"cycles/{cycle_name}.parquet"
-        output_path = staging_dataset / data_path
-        write_atomic_parquet(cycle_frame, output_path)
-        cycle_files[key] = {
-            "data_path": data_path,
-            "data_sha256": sha256_file(output_path),
-            "data_size_bytes": output_path.stat().st_size,
-            "image_count": sum(1 for record in records if record["cycle_uid"] == cycle_uid),
-        }
-    return cycle_files
-
-
-def _read_cycle_summary(path: Path) -> pd.DataFrame:
-    frame = pd.read_csv(path)
-    for column in (
-        "heating_start",
-        "stable_heating_start",
-        "defrost_start",
-        "defrost_end",
-        "baseline_start",
-        "baseline_end",
-    ):
-        if column in frame:
-            frame[column] = pd.to_datetime(frame[column], errors="coerce")
-    return frame
-
-
-def _identity_mismatch(frame: pd.DataFrame, source: SourceRun) -> bool:
-    return (
-        "experiment_id" not in frame
-        or bool(frame["experiment_id"].astype(str).ne(source.experiment_id).any())
-        or (
-            "experiment_date" in frame
-            and bool(
-                frame["experiment_date"].astype(str).str[:10].ne(source.experiment_date).any()
-            )
-        )
-    )
-
-
-def _append_dataset_fields(
-    frame: pd.DataFrame,
-    *,
-    dataset_id: str,
-    cycle_index: int,
-    cycle_name: str,
-    cycle_uid: str,
-) -> pd.DataFrame:
-    result = frame.reset_index(drop=True).copy()
-    result["dataset_id"] = pd.Series(
-        [dataset_id] * len(result), index=result.index, dtype="string"
-    )
-    result["dataset_schema_version"] = pd.Series(
-        [DATASET_SCHEMA_VERSION] * len(result), index=result.index, dtype="int64"
-    )
-    result["dataset_cycle_index"] = pd.Series(
-        [cycle_index] * len(result), index=result.index, dtype="int64"
-    )
-    result["cycle_name"] = pd.Series(
-        [cycle_name] * len(result), index=result.index, dtype="string"
-    )
-    result["cycle_uid"] = pd.Series(
-        [cycle_uid] * len(result), index=result.index, dtype="string"
-    )
-    return result
-
-
-def _sort_summary(summary: pd.DataFrame) -> pd.DataFrame:
-    """Return Summary rows in the same deterministic order as global cycles."""
-    required = {"experiment_id", "experiment_date", "cycle_id"}
-    missing = sorted(required - set(summary.columns))
-    if missing:
-        raise ValueError(f"cycle summary missing columns: {missing}")
-    result = summary.copy()
-    result["_dataset_sort_key"] = [
-        cycle_sort_key(str(row.experiment_date)[:10], str(row.experiment_id), str(row.cycle_id))
-        for row in result[["experiment_date", "experiment_id", "cycle_id"]].itertuples(
-            index=False
-        )
-    ]
-    result = result.sort_values("_dataset_sort_key", kind="stable").drop(
-        columns="_dataset_sort_key"
-    )
-    return result.reset_index(drop=True)
-
-
-def _image_index_frame(records: list[dict[str, object]]) -> pd.DataFrame:
-    columns = [
-        "image_id",
-        "cycle_uid",
-        "cycle_name",
-        "camera_role",
-        "image_time",
-        "matched_timestamp",
-        "offset_seconds",
-        "cycle_stage",
-        "image_path",
-        "source_relative_path",
-        "sha256",
-        "file_size_bytes",
-    ]
-    if not records:
-        return pd.DataFrame(columns=columns)
-    return pd.DataFrame([{column: record[column] for column in columns} for record in records])
-
-
-def _source_manifest_record(source: SourceRun, image_inventory_hash: str) -> dict[str, object]:
-    project_root = find_project_root(source.path / "manifest.json")
-    if project_root is None:
-        raise FileNotFoundError(f"could not find project root for source run: {source.path}")
-    return {
-        "experiment_id": source.experiment_id,
-        "experiment_date": source.experiment_date,
-        "source_run_path": relative_posix_path(source.path, project_root),
-        "resolved_config_sha256": source.resolved_config_sha256,
-        "prepared_data_sha256": source.prepared_sha256,
-        "processed_data_sha256": source.processed_sha256,
-        "cycle_summary_sha256": source.summary_sha256,
-        "matched_image_inventory_sha256": image_inventory_hash,
-        "fingerprint": scientific_fingerprint(source, image_inventory_hash),
-        "manifest_sha256": source.manifest_sha256,
-        "git_commit": source.git_commit,
-    }
-
-
-def _dataset_manifest(
-    *,
-    dataset_id: str,
-    source_schema: list[dict[str, Any]],
-    source_runs: list[dict[str, object]],
-    cycle_index: pd.DataFrame,
-    image_index: pd.DataFrame,
-    staging_dataset: Path,
-) -> dict[str, object]:
-    return {
-        "dataset_id": dataset_id,
-        "dataset_schema_version": DATASET_SCHEMA_VERSION,
-        "cycle_name_width": CYCLE_NAME_WIDTH,
-        "summary_cycle_count": len(cycle_index),
-        "published_cycle_count": int(cycle_index["published"].sum()),
-        "excluded_cycle_count": int((~cycle_index["published"]).sum()),
-        "image_count": len(image_index),
-        "source_processed_schema": source_schema,
-        "source_runs": sorted(
-            source_runs,
-            key=lambda item: (str(item["experiment_date"]), str(item["experiment_id"])),
-        ),
-        "files": {
-            "cycle_index": {
-                "path": "cycle_index.parquet",
-                "sha256": sha256_file(staging_dataset / "cycle_index.parquet"),
-                "row_count": len(cycle_index),
-            },
-            "image_index": {
-                "path": "image_index.parquet",
-                "sha256": sha256_file(staging_dataset / "image_index.parquet"),
-                "row_count": len(image_index),
-            },
-        },
-    }
-
-
-def _dataset_readme(dataset_id: str) -> str:
-    return (
-        f"# {dataset_id}\n\n"
-        "This dataset contains Processed cycle files and Prepared matched RGB images.\n"
-        "The source run paths in dataset_manifest.json are audit metadata only.\n"
-        "Use cycle_index.parquet and image_index.parquet for relationships.\n"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Dataset v2: self-contained cycle publication
-# ---------------------------------------------------------------------------
-
-DATASET_V2_SCHEMA_VERSION = 2
-
-
-def _add_legacy_dataset(run_path: Path, dataset_dir: Path) -> Path:  # noqa: C901
-    """Create a Dataset from one run, or append one new run to an existing Dataset."""
-    dataset_dir = dataset_dir.resolve()
-    if not dataset_dir.exists():
-        return _build_v2_dataset(run_path, dataset_dir)
-    from .dataset_validation import _validate_v2_structure
-
-    manifest, cycle_index, image_metadata = _validate_v2_structure(dataset_dir)
-    return _append_v2_dataset(run_path, dataset_dir, manifest, cycle_index, image_metadata)
-
-
-def _build_v2_dataset(run_path: Path, dataset_dir: Path) -> Path:  # noqa: C901
-    from .dataset_io import (
-        create_dataset_staging,
-        publish_build,
-        write_atomic_json,
-        write_atomic_parquet,
-    )
-    from .dataset_manifest import build_manifest
-    from .dataset_validation import validate_dataset
-
-    dataset_id = validate_dataset_id(dataset_dir.name)
-    descriptor = _load_v2_source(run_path)
-    source = descriptor["source"]
-    ensure_output_outside_input(dataset_dir, source.input_dir)
-    cycle_names = _assign_v2_cycle_names(descriptor["summary"], start_index=1)
-    staging_root, staging_dataset = create_dataset_staging(dataset_dir, kind="build")
-    published = False
-    try:
-        cycle_index, image_metadata, cycles, inventory_hash = _write_v2_source_assets(
-            descriptor,
-            cycle_names=cycle_names,
-            dataset_id=dataset_id,
-            staging_dataset=staging_dataset,
-        )
-        write_atomic_parquet(cycle_index, staging_dataset / "cycle_index.parquet")
-        write_atomic_parquet(image_metadata, staging_dataset / "image_metadata.parquet")
-        source_schema = descriptor["schema"]
-        source_record = _source_manifest_record(source, inventory_hash)
-        manifest = build_manifest(
-            dataset_id=dataset_id,
-            source_schema=source_schema,
-            source_runs=[source_record],
-            cycles=cycles,
-            cycle_index=cycle_index,
-            image_metadata=image_metadata,
-        )
-        _add_v2_file_info(manifest, staging_dataset)
-        write_atomic_json(manifest, staging_dataset / "dataset_manifest.json")
-        (staging_dataset / "README.md").write_text(_v2_readme(dataset_id), encoding="utf-8")
-        validate_dataset(staging_dataset)
-        publish_build(staging_root, staging_dataset, dataset_dir)
-        published = True
-        return dataset_dir
-    finally:
-        if not published:
-            import shutil
-
-            shutil.rmtree(staging_root, ignore_errors=True)
-
-
-def _append_v2_dataset(
-    run_path: Path,
-    dataset_dir: Path,
-    manifest: dict[str, Any],
-    old_cycle_index: pd.DataFrame,
-    old_image_metadata: pd.DataFrame,
-) -> Path:  # noqa: C901
-    from .dataset_io import (
-        backup_v2_metadata,
-        cleanup_append_staging,
-        commit_v2_append_files,
-        create_dataset_staging,
-        rollback_v2_append,
-        write_atomic_json,
-        write_atomic_parquet,
-    )
-    from .dataset_manifest import build_manifest
-    from .dataset_validation import (
-        _validate_v2_new_assets,
-        _validate_v2_structure,
-    )
-
-    descriptor = _load_v2_source(run_path)
-    source = descriptor["source"]
-    ensure_output_outside_input(dataset_dir, source.input_dir)
-    source_runs = manifest.get("source_runs")
-    if not isinstance(source_runs, list):
-        raise ValueError("dataset manifest is missing source_runs")
-    source_record = _source_manifest_record(
-        source,
-        _collect_v2_inventory_hash(descriptor),
-    )
-    existing_record = next(
-        (
-            item
-            for item in source_runs
-            if isinstance(item, dict) and item.get("experiment_id") == source.experiment_id
-        ),
-        None,
-    )
-    if existing_record is not None:
-        if str(existing_record.get("fingerprint")) == str(source_record["fingerprint"]):
-            return dataset_dir
-        changed = [
-            field
-            for field in (
-                "resolved_config_sha256",
-                "prepared_data_sha256",
-                "processed_data_sha256",
-                "cycle_summary_sha256",
-                "matched_image_inventory_sha256",
-            )
-            if str(existing_record.get(field)) != str(source_record.get(field))
-        ]
-        detail = ", ".join(changed) if changed else "fingerprint"
-        raise ValueError(f"fingerprint conflict for {source.experiment_id}; changed: {detail}")
-
-    existing_ids = set(old_cycle_index["experiment_id"].astype(str))
-    if source.experiment_id in existing_ids:
-        raise ValueError(f"dataset already contains experiment_id: {source.experiment_id}")
-    next_index = _next_v2_cycle_index(old_cycle_index)
-    cycle_names = _assign_v2_cycle_names(descriptor["summary"], start_index=next_index)
-    existing_keys = set(
-        zip(
-            old_cycle_index["experiment_id"].astype(str),
-            old_cycle_index["source_cycle_id"].astype(str),
-            strict=True,
-        )
-    )
-    if existing_keys and set(cycle_names).intersection(existing_keys):
-        raise ValueError("appended source cycle identity collides with existing Dataset")
-    merged_schema = logical_schema_compatible(
-        cast(list[dict[str, Any]], manifest.get("source_processed_schema", [])),
-        descriptor["schema"],
-    )
-
-    staging_root, staging_dataset = create_dataset_staging(dataset_dir, kind="append")
-    moved_files: list[Path] = []
-    backup_dir: Path | None = None
-    committed = False
-    try:
-        new_cycle_index, new_image_metadata, new_cycles, _ = _write_v2_source_assets(
-            descriptor,
-            cycle_names=cycle_names,
-            dataset_id=str(manifest["dataset_id"]),
-            staging_dataset=staging_dataset,
-        )
-        merged_cycle_index = pd.concat([old_cycle_index, new_cycle_index], ignore_index=True)
-        merged_image_metadata = pd.concat(
-            [old_image_metadata, new_image_metadata], ignore_index=True
-        )
-        write_atomic_parquet(merged_cycle_index, staging_dataset / "cycle_index.parquet")
-        write_atomic_parquet(
-            merged_image_metadata,
-            staging_dataset / "image_metadata.parquet",
-        )
-        existing_cycles = [item for item in manifest.get("cycles", []) if isinstance(item, dict)]
-        full_manifest = build_manifest(
-            dataset_id=str(manifest["dataset_id"]),
-            source_schema=merged_schema,
-            source_runs=[item for item in source_runs if isinstance(item, dict)] + [source_record],
-            cycles=existing_cycles + new_cycles,
-            cycle_index=merged_cycle_index,
-            image_metadata=merged_image_metadata,
-            created_at=str(manifest.get("created_at")),
-        )
-        _add_v2_file_info(full_manifest, staging_dataset)
-        write_atomic_json(full_manifest, staging_dataset / "dataset_manifest.json")
-        _write_v2_asset_readme(staging_dataset, str(manifest["dataset_id"]))
-        _validate_v2_new_assets(staging_dataset, new_cycle_index, new_image_metadata)
-        backup_dir = backup_v2_metadata(dataset_dir, staging_root)
-        relative_assets = _v2_asset_paths(new_cycle_index, new_image_metadata, staging_dataset)
-        moved_files = commit_v2_append_files(
-            staging_dataset,
-            dataset_dir,
-            relative_assets,
-            moved_files=moved_files,
-        )
-        committed = True
-        after_manifest, after_index, after_images = _validate_v2_structure(dataset_dir)
-        _validate_v2_new_assets(
-            dataset_dir,
-            after_index.loc[after_index["experiment_id"].eq(source.experiment_id)],
-            after_images.loc[after_images["cycle_name"].isin(new_image_metadata["cycle_name"])],
-        )
-        _ = after_manifest
-        return dataset_dir
-    except Exception as append_error:
-        if committed or moved_files or backup_dir is not None:
-            try:
-                rollback_v2_append(dataset_dir, backup_dir, moved_files)
-                _validate_v2_structure(dataset_dir)
-            except Exception as rollback_error:
-                raise RuntimeError(
-                    "append failed and rollback validation also failed: "
-                    f"{rollback_error}"
-                ) from append_error
-        raise
-    finally:
-        cleanup_append_staging(staging_root)
-
-
-def _load_v2_source(run_path: Path) -> dict[str, Any]:
-    from .validation import validate_prepared, validate_processed
-
-    source = load_source_run(run_path)
-    summary = _sort_summary(_read_cycle_summary(source.summary_path))
-    prepared = pd.read_parquet(source.prepared_path)
-    processed = pd.read_parquet(source.processed_path)
-    validate_prepared(prepared, summary)
-    validate_processed(processed, summary)
-    if _identity_mismatch(prepared, source) or _identity_mismatch(processed, source):
-        raise ValueError(f"source data identity disagrees with manifest: {source.path}")
-    return {
-        "source": source,
-        "project_root": find_project_root(source.path / "manifest.json"),
-        "summary": summary,
-        "prepared": prepared,
-        "processed": processed,
-        "schema": source_processed_schema(source.processed_path),
-    }
-
-
-def _assign_v2_cycle_names(summary: pd.DataFrame, *, start_index: int) -> dict[CycleKey, str]:
-    names: dict[CycleKey, str] = {}
-    for offset, row in enumerate(summary.to_dict(orient="records")):
-        key = (str(row["experiment_id"]), str(row["cycle_id"]))
-        if key in names:
-            raise ValueError(f"duplicate cycle identity: {key}")
-        names[key] = format_cycle_name(start_index + offset)
-    return names
-
-
-def _next_v2_cycle_index(index: pd.DataFrame) -> int:
-    values = [
-        parse_cycle_name(str(value))
-        for value in index.get("cycle_name", pd.Series(dtype="string")).dropna()
-    ]
-    return max(values) + 1 if values else 1
-
-
-def _write_v2_source_assets(
-    descriptor: Mapping[str, Any],
-    *,
-    cycle_names: Mapping[CycleKey, str],
-    dataset_id: str,
-    staging_dataset: Path,
-) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, object]], str]:  # noqa: C901
-    from .dataset_coverage import render_rgb_coverage_legacy
-    from .dataset_images import (
-        collect_cycle_images,
-        copy_dataset_image,
-        rewrite_processed_image_paths_v2,
-    )
-    from .dataset_io import write_atomic_parquet
-    from .visualization import render_cycle_publication
-
-    source = descriptor["source"]
-    summary = descriptor["summary"]
-    prepared = descriptor["prepared"]
-    processed = descriptor["processed"]
-    records, inventory_hash = collect_cycle_images(
-        prepared,
-        input_dir=source.input_dir,
-        cycle_names=cycle_names,
-    )
-    rewritten = rewrite_processed_image_paths_v2(processed, records)
-    for record in records:
-        copy_dataset_image(record, staging_dataset)
-    image_metadata = _v2_image_metadata_frame(records)
-    write_atomic_parquet(image_metadata, staging_dataset / "image_metadata.parquet")
-    cycle_rows: list[dict[str, object]] = []
-    cycle_records: list[dict[str, object]] = []
-    for row in summary.to_dict(orient="records"):
-        key = (str(row["experiment_id"]), str(row["cycle_id"]))
-        cycle_name = cycle_names[key]
-        cycle_uid = make_v2_cycle_uid(*key)
-        cycle_frame = rewritten.loc[
-            rewritten["experiment_id"].astype(str).eq(key[0])
-            & rewritten["cycle_id"].astype(str).eq(key[1])
-        ].copy()
-        if cycle_frame.empty:
-            cycle_frame = processed.iloc[0:0].copy()
-        parquet_path = staging_dataset / "cycles" / f"{cycle_name}.parquet"
-        csv_path = staging_dataset / "cycles" / f"{cycle_name}.csv"
-        write_atomic_parquet(cycle_frame, parquet_path)
-        cycle_frame.to_csv(csv_path, index=False)
-        cycle_images = _records_frame(
-            [record for record in records if str(record["cycle_uid"]) == cycle_uid]
-        )
-        prepared_cycle = prepared.loc[
-            prepared["experiment_id"].astype(str).eq(key[0])
-            & prepared["cycle_id"].astype(str).eq(key[1])
-        ]
-        record = _v2_cycle_record(
-            row,
-            cycle_name=cycle_name,
-            cycle_uid=cycle_uid,
-            cycle_frame=cycle_frame,
-            prepared_cycle=prepared_cycle,
-            cycle_images=cycle_images,
-            data_path=f"cycles/{cycle_name}.parquet",
-            csv_path=f"cycles/{cycle_name}.csv",
-        )
-        publication_path = staging_dataset / "cycles" / f"{cycle_name}.png"
-        coverage_path = staging_dataset / "cycles" / f"{cycle_name}_rgb_coverage.png"
-        render_cycle_publication(cycle_frame, record, publication_path)
-        render_rgb_coverage_legacy(
-            cycle_frame if not cycle_frame.empty else prepared_cycle,
-            cycle_images,
-            record,
-            coverage_path,
-        )
-        record["publication_path"] = f"cycles/{cycle_name}.png"
-        record["rgb_coverage_path"] = f"cycles/{cycle_name}_rgb_coverage.png"
-        record["asset_sha256"] = {
-            "parquet": sha256_file(parquet_path),
-            "csv": sha256_file(csv_path),
-            "publication": sha256_file(publication_path),
-            "rgb_coverage": sha256_file(coverage_path),
-        }
-        cycle_records.append(record)
-        cycle_rows.append(
-            {
-                "cycle_name": cycle_name,
-                "cycle_uid": cycle_uid,
-                "experiment_id": key[0],
-                "experiment_date": str(row["experiment_date"])[:10],
-                "source_cycle_id": key[1],
-                "start_time": record["start_time"],
-                "end_time": record["end_time"],
-                "duration_seconds": record["duration_seconds"],
-                "row_count": int(len(cycle_frame)),
-                "data_path": record["data_path"],
-                "csv_path": record["csv_path"],
-                "publication_path": record["publication_path"],
-                "rgb_coverage_path": record["rgb_coverage_path"],
-                "image_count": int(len(cycle_images)),
-                "cycle_status": row.get("cycle_status"),
-                "cycle_status_reason": row.get("cycle_status_reason"),
-                "baseline_status": row.get("baseline_status"),
-            }
-        )
-    return pd.DataFrame(cycle_rows), image_metadata, cycle_records, inventory_hash
-
-
-def _v2_cycle_record(
-    row: Mapping[str, object],
-    *,
-    cycle_name: str,
-    cycle_uid: str,
-    cycle_frame: pd.DataFrame,
-    prepared_cycle: pd.DataFrame,
-    cycle_images: pd.DataFrame,
-    data_path: str,
-    csv_path: str,
-) -> dict[str, object]:
-    from .dataset_coverage import image_summary
-    from .dataset_manifest import automatic_assessment
-
-    timestamp_values = cycle_frame.get(
-        "timestamp",
-        prepared_cycle.get("timestamp", pd.Series(dtype="datetime64[ns]")),
-    )
-    timestamps = pd.to_datetime(timestamp_values, errors="coerce").dropna()
-    if timestamps.empty:
-        timestamps = pd.to_datetime(
-            pd.Series(
-                [row.get("heating_start"), row.get("defrost_end")], dtype="object"
-            ),
-            errors="coerce",
-        ).dropna()
-    start_time = timestamps.min().isoformat() if not timestamps.empty else None
-    end_time = timestamps.max().isoformat() if not timestamps.empty else None
-    duration = (
-        float((timestamps.max() - timestamps.min()).total_seconds())
-        if len(timestamps) > 1
-        else 0.0
-    )
-    stages = set(cycle_frame.get("cycle_stage", pd.Series(dtype=str)).dropna().astype(str))
-    data_summary = {
-        "has_sensor_data": bool(len(cycle_frame)),
-        "has_heating_stage": bool({"recovery", "frost_development"} & stages),
-        "has_frosting_stage": "frost_development" in stages,
-        "has_defrost_stage": "defrost" in stages,
-        "has_recovery_stage": "recovery" in stages,
-        "long_gap_count": _long_gap_count(timestamps),
-        "maximum_gap_seconds": _maximum_gap(timestamps),
-    }
-    return {
-        "cycle_name": cycle_name,
-        "cycle_uid": cycle_uid,
-        "experiment_id": str(row["experiment_id"]),
-        "experiment_date": str(row["experiment_date"])[:10],
-        "source_cycle_id": str(row["cycle_id"]),
-        "heating_start": _summary_time(row.get("heating_start")),
-        "stable_heating_start": _summary_time(row.get("stable_heating_start")),
-        "defrost_start": _summary_time(row.get("defrost_start")),
-        "defrost_end": _summary_time(row.get("defrost_end")),
-        "baseline_start": _summary_time(row.get("baseline_start")),
-        "baseline_end": _summary_time(row.get("baseline_end")),
-        "start_time": start_time,
-        "end_time": end_time,
-        "duration_seconds": duration,
-        "row_count": int(len(cycle_frame)),
-        "data_summary": data_summary,
-        "image_summary": image_summary(
-            cycle_frame if not cycle_frame.empty else prepared_cycle,
-            cycle_images,
-        ),
-        "assessment": automatic_assessment(
-            row.get("cycle_status"), row.get("cycle_status_reason")
-        ),
-        "data_path": data_path,
-        "csv_path": csv_path,
-    }
-
-
-def _v2_image_metadata_frame(records: list[dict[str, object]]) -> pd.DataFrame:
-    columns = [
-        "image_id",
-        "cycle_name",
-        "cycle_uid",
-        "source_camera_id",
-        "initial_camera_slot",
-        "source_role",
-        "image_time",
-        "matched_timestamp",
-        "offset_seconds",
-        "cycle_stage",
-        "source_relative_path",
-        "sha256",
-        "file_size_bytes",
-    ]
-    if not records:
-        return pd.DataFrame(columns=columns)
-    return pd.DataFrame(
-        [{column: record[column] for column in columns} for record in records],
-        columns=columns,
-    )
-
-
-def _records_frame(records: list[dict[str, object]]) -> pd.DataFrame:
-    if not records:
-        return pd.DataFrame(columns=["image_id", "camera_role", "image_time"])
-    rows = []
-    for record in records:
-        rows.append({**record, "path": record["image_path"]})
-    return pd.DataFrame(rows)
-
-
-def _collect_v2_inventory_hash(descriptor: Mapping[str, Any]) -> str:
-    from .dataset_images import collect_cycle_images
-
-    records, inventory_hash = collect_cycle_images(
-        descriptor["prepared"],
-        input_dir=descriptor["source"].input_dir,
-        cycle_names=_assign_v2_cycle_names(descriptor["summary"], start_index=1),
-    )
-    _ = records
-    return inventory_hash
-
-
-def _v2_asset_paths(
-    cycle_index: pd.DataFrame,
-    image_metadata: pd.DataFrame,
-    staging_dataset: Path,
-) -> list[str]:
-    paths: list[str] = []
-    for row in cycle_index.to_dict(orient="records"):
-        for column in ("data_path", "csv_path", "publication_path", "rgb_coverage_path"):
-            paths.append(str(row[column]))
-    for cycle_name in image_metadata["cycle_name"].astype(str).unique():
-        image_root = staging_dataset / "images" / cycle_name
-        if image_root.is_dir():
-            paths.extend(
-                path.relative_to(staging_dataset).as_posix()
-                for path in image_root.rglob("*")
-                if path.is_file()
-            )
-    return paths
-
-
-def _add_v2_file_info(manifest: dict[str, object], dataset_dir: Path) -> None:
-    manifest["files"] = {
-        "cycle_index": {
-            "path": "cycle_index.parquet",
-            "sha256": sha256_file(dataset_dir / "cycle_index.parquet"),
-        },
-        "image_metadata": {
-            "path": "image_metadata.parquet",
-            "sha256": sha256_file(dataset_dir / "image_metadata.parquet"),
-        },
-    }
-
-
-def _long_gap_count(times: pd.Series) -> int:
-    if len(times) < 2:
-        return 0
-    gaps = times.sort_values().diff().dropna().dt.total_seconds()
-    return int((gaps > 30.0).sum())
-
-
-def _maximum_gap(times: pd.Series) -> float:
-    if len(times) < 2:
-        return 0.0
-    gaps = times.sort_values().diff().dropna().dt.total_seconds()
-    return float(gaps.max()) if not gaps.empty else 0.0
-
-
-def _summary_time(value: object) -> str | None:
-    if value is None:
-        return None
-    timestamp = pd.Timestamp(cast(Any, value))
-    return None if pd.isna(timestamp) else timestamp.isoformat()
-
-
-def _write_v2_asset_readme(staging_dataset: Path, dataset_id: str) -> None:
-    (staging_dataset / "README.md").write_text(_v2_readme(dataset_id), encoding="utf-8")
-
-
-def _v2_readme(dataset_id: str) -> str:
-    return (
-        f"# {dataset_id}\n\n"
-        "This self-contained Dataset stores every source cycle, its Processed values, "
-        "publication figures, RGB coverage figure, and matched image metadata.\n\n"
-        "Use frost_analysis.dataset_loader.DatasetLoader as the read-only downstream "
-        "entry point.\n"
-        "The current image parent directory is the camera role; image metadata records "
-        "source facts.\n"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Canonical Dataset v3 entry point
-# ---------------------------------------------------------------------------
-
-CANONICAL_DATASET_SCHEMA_VERSION = 3
-CANONICAL_DATASET_ID = "frost_cycle_dataset"
-CANONICAL_CYCLE_NAME_WIDTH = 6
-_CANONICAL_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-_CANONICAL_DATASET_FIELDS = (
-    "dataset_id",
-    "dataset_schema_version",
-    "dataset_cycle_index",
-    "cycle_name",
-    "cycle_uid",
-)
-
-
-def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  # noqa: C901
-    """Create or append the canonical self-contained Dataset.
-
-    A formal run path is accepted only as a private compatibility path for
-    existing migration tests.  The public data path is ``INPUT_DIR`` and is
-    resolved by the v3 source-run loader.
-    """
-    from .dataset_v3 import add_dataset as add_v3_dataset
-    from .dataset_v3 import load_v3_source_run
-
-    input_path = Path(input_dir).resolve()
-    if (input_path / "manifest.json").is_file():
-        if dataset_dir is None:
-            raise ValueError("private formal-run add requires --dataset")
-        return _add_legacy_dataset(input_path, Path(dataset_dir))
-
-    project_root = _resolve_canonical_project_root()
-    target = (Path(dataset_dir) if dataset_dir is not None else project_root / "dataset").resolve()
-    if target.exists() and not _is_canonical_dataset(target):
-        raise ValueError(
-            "dataset directory is an older trial Dataset; use a new directory for v3 "
-            "or archive the old directory explicitly"
-        )
-    if not target.exists():
-        result = add_v3_dataset(input_path, target)
-        source = load_v3_source_run(
-            project_root / "outputs" / "runs" / input_path.name
-        )
-        _canonicalize_v3_dataset(result, source)
-        return result
-    temporary_root = Path(tempfile.mkdtemp(prefix=f".{target.name}.source-", dir=target.parent))
-    temporary = temporary_root / target.name
-    try:
-        add_v3_dataset(input_path, temporary)
-        source = load_v3_source_run(
-            project_root / "outputs" / "runs" / input_path.name
-        )
-        _canonicalize_v3_dataset(temporary, source)
-        _append_canonical_dataset(target, temporary)
-        return target
-    finally:
-        shutil.rmtree(temporary_root, ignore_errors=True)
-
-
-def add_formal_run(source: Any, dataset_dir: Path) -> Path:
-    """Publish a verified formal run through the canonical v3 contract."""
-    from .dataset_v3 import load_v3_source_run
-
-    loaded = load_v3_source_run(source) if isinstance(source, Path) else source
-    return _canonical_add_formal_run(loaded, dataset_dir)
-
-
-def _canonical_add_formal_run(source: Any, dataset_dir: Path) -> Path:
-    from .dataset_v3 import add_formal_run as add_v3_formal_run
-
-    target = Path(dataset_dir).resolve()
-    if target.exists() and _is_canonical_dataset(target):
-        temporary_root = Path(tempfile.mkdtemp(prefix=f".{target.name}.source-", dir=target.parent))
-        temporary = temporary_root / target.name
-        try:
-            add_v3_formal_run(source, temporary)
-            _canonicalize_v3_dataset(temporary, source)
-            _append_canonical_dataset(target, temporary)
-            return target
-        finally:
-            shutil.rmtree(temporary_root, ignore_errors=True)
-    if target.exists():
-        raise ValueError(
-            "dataset directory is not a canonical schema-3 Dataset; use a new directory"
-        )
-    add_v3_formal_run(source, target)
-    _canonicalize_v3_dataset(target, source)
-    return target
-
-
-def _resolve_canonical_project_root() -> Path:
-    from .dataset_v3 import resolve_project_root
-
-    return resolve_project_root()
-
-
-def _is_canonical_dataset(dataset_dir: Path) -> bool:
-    manifest_path = dataset_dir / "dataset_manifest.json"
-    if not manifest_path.is_file():
-        return False
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    return (
-        isinstance(manifest, dict)
-        and manifest.get("dataset_schema_version") == CANONICAL_DATASET_SCHEMA_VERSION
-        and set(manifest) == {
-            "dataset_schema_version",
-            "dataset_id",
-            "created_at",
-            "updated_at",
-            "source_experiments",
-            "cycles",
-        }
-    )
-
-
-def _canonicalize_v3_dataset(dataset_dir: Path, source: Any) -> None:  # noqa: C901
-    """Convert the existing v3 materialization into the final file contract."""
-    from .dataset_coverage import render_rgb_coverage
-    from .dataset_io import write_atomic_json, write_atomic_parquet
-    from .dataset_registry import canonical_registry_hash
-    from .dataset_v3 import make_image_id, source_fingerprint
-    from .visualization import render_cycle_publication
-
-    manifest = _read_canonical_json(dataset_dir / "dataset_manifest.json")
-    old_index = pd.read_parquet(dataset_dir / "cycle_index.parquet")
-    old_images = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    old_registry = _read_canonical_json(dataset_dir / "channel_registry.json")
-    prepared = pd.read_parquet(source.prepared_path)
-    image_metadata = _canonicalize_image_tree(dataset_dir, old_images, make_image_id)
-    write_atomic_parquet(image_metadata, dataset_dir / "image_metadata.parquet")
-    registry = dict(old_registry)
-    image_coverage = registry.get("image_coverage")
-    if not isinstance(image_coverage, Mapping):
-        registry["image_coverage"] = {"max_image_gap_seconds": 40.0}
-    else:
-        registry["image_coverage"] = {
-            "max_image_gap_seconds": float(
-                image_coverage.get("max_image_gap_seconds", 40.0)
-            )
-        }
-    registry.pop("canonical_hash", None)
-    registry["canonical_hash"] = canonical_registry_hash(registry)
-    write_atomic_json(registry, dataset_dir / "channel_registry.json")
-
-    records: list[dict[str, Any]] = []
-    index_rows: list[dict[str, Any]] = []
-    original_root = dataset_dir / "cycles_original"
-    original_root.mkdir(parents=True, exist_ok=True)
-    for old_row in old_index.to_dict(orient="records"):
-        cycle_name = str(old_row["cycle_name"])
-        cycle_uid = str(old_row["cycle_uid"])
-        experiment_id = str(old_row["experiment_id"])
-        cycle_id = str(old_row["cycle_id"])
-        cycle_mask = prepared["experiment_id"].astype(str).eq(experiment_id) & prepared[
-            "cycle_id"
-        ].astype(str).eq(cycle_id)
-        original = _canonical_original_frame(prepared.loc[cycle_mask].copy())
-        if original.empty:
-            raise ValueError(f"cycle has no Prepared rows: {cycle_uid}")
-        original_path = original_root / f"{cycle_name}.csv"
-        original.to_csv(original_path, index=False)
-
-        processed_path = dataset_dir / "cycles" / f"{cycle_name}.parquet"
-        csv_path = dataset_dir / "cycles" / f"{cycle_name}.csv"
-        frame = pd.read_parquet(processed_path)
-        cycle_images = image_metadata.loc[image_metadata["cycle_name"].eq(cycle_name)].copy()
-        record = {
-            "cycle_name": cycle_name,
-            "cycle_uid": cycle_uid,
-            "experiment_id": experiment_id,
-            "experiment_date": str(old_row["experiment_date"])[:10],
-            "cycle_id": cycle_id,
-            "cycle_status": _json_safe(old_row.get("cycle_status")),
-            "original_data": _original_data_summary(original, original_path),
-            "image": {
-                "by_camera_role": _canonical_role_summary(
-                    frame,
-                    cycle_images,
-                    max_image_gap_seconds=_registry_image_gap_seconds(registry),
-                )
-            },
-        }
-        publication_path = dataset_dir / "cycles" / f"{cycle_name}.png"
-        coverage_path = dataset_dir / "cycles" / f"{cycle_name}_rgb_coverage.png"
-        render_cycle_publication(frame, record, publication_path)
-        render_rgb_coverage(
-            frame,
-            _scan_current_cycle_images(dataset_dir, cycle_name, image_metadata),
-            record,
-            coverage_path,
-            registry=registry,
-        )
-        records.append(record)
-        index_rows.append(
-            {
-                "cycle_name": cycle_name,
-                "cycle_uid": cycle_uid,
-                "experiment_id": experiment_id,
-                "experiment_date": str(old_row["experiment_date"])[:10],
-                "cycle_id": cycle_id,
-                "start_time": _json_safe(record["original_data"]["start_time"]),
-                "end_time": _json_safe(record["original_data"]["end_time"]),
-                "processed_row_count": int(len(frame)),
-                "original_row_count": int(len(original)),
-                "parquet_sha256": sha256_file(processed_path),
-                "csv_sha256": sha256_file(csv_path),
-                "publication_sha256": sha256_file(publication_path),
-                "rgb_coverage_sha256": sha256_file(coverage_path),
-            }
-        )
-    index = pd.DataFrame(index_rows)
-    write_atomic_parquet(index, dataset_dir / "cycle_index.parquet")
-    source_records = []
-    for item in manifest.get("source_experiments", []):
-        if isinstance(item, Mapping):
-            source_records.append(
-                {
-                    "experiment_id": str(item.get("experiment_id")),
-                    "experiment_date": str(item.get("experiment_date"))[:10],
-                    "source_fingerprint": str(item.get("source_fingerprint", "")),
-                }
-            )
-    registry_hash = str(registry["canonical_hash"])
-    if not source_records:
-        source_records.append(
-            {
-                "experiment_id": str(source.experiment_id),
-                "experiment_date": str(source.experiment_date)[:10],
-                "source_fingerprint": source_fingerprint(
-                    str(source.experiment_id),
-                    str(source.experiment_date)[:10],
-                    str(source.manifest_sha256),
-                    str(source.input_inventory_sha256),
-                    registry_hash,
-                ),
-            }
-        )
-    canonical_manifest = {
-        "dataset_schema_version": CANONICAL_DATASET_SCHEMA_VERSION,
-        "dataset_id": CANONICAL_DATASET_ID,
-        "created_at": str(manifest.get("created_at", datetime.now(UTC).isoformat())),
-        "updated_at": datetime.now(UTC).isoformat(),
-        "source_experiments": source_records,
-        "cycles": records,
-    }
-    write_atomic_json(canonical_manifest, dataset_dir / "dataset_manifest.json")
-    from .dataset_manifest import refresh_manifest
-
-    refresh_manifest(dataset_dir)
-
-
-def _append_canonical_dataset(dataset_dir: Path, incoming_dir: Path) -> None:  # noqa: C901
-    from .dataset_io import write_atomic_json, write_atomic_parquet
-    from .dataset_registry import merge_registries
-
-    _validate_canonical_dataset(dataset_dir)
-    old_manifest = _read_canonical_json(dataset_dir / "dataset_manifest.json")
-    incoming_manifest = _read_canonical_json(incoming_dir / "dataset_manifest.json")
-    old_sources = old_manifest["source_experiments"]
-    incoming_sources = incoming_manifest["source_experiments"]
-    if not isinstance(old_sources, list) or not isinstance(incoming_sources, list):
-        raise ValueError("Dataset source_experiments must be lists")
-    if len(incoming_sources) != 1:
-        raise ValueError("one source experiment is required per dataset add")
-    incoming_source = incoming_sources[0]
-    existing = next(
-        (
-            item
-            for item in old_sources
-            if item.get("experiment_id") == incoming_source.get("experiment_id")
-        ),
-        None,
-    )
-    if existing is not None:
-        if existing.get("source_fingerprint") == incoming_source.get("source_fingerprint"):
-            return
-        raise ValueError(f"source fingerprint conflict for {incoming_source.get('experiment_id')}")
-    old_index = pd.read_parquet(dataset_dir / "cycle_index.parquet")
-    incoming_index = pd.read_parquet(incoming_dir / "cycle_index.parquet")
-    incoming_date = str(incoming_source.get("experiment_date", ""))[:10]
-    last_date = str(old_index["experiment_date"].astype(str).max())[:10]
-    if not old_index.empty and incoming_date <= last_date:
-        raise ValueError(
-            "historical or same-date append is not supported; rebuild a new Dataset "
-            "with dataset add in date order"
-        )
-    old_registry = _read_canonical_json(dataset_dir / "channel_registry.json")
-    incoming_registry = _read_canonical_json(incoming_dir / "channel_registry.json")
-    merged_registry = merge_registries(old_registry, incoming_registry)
-    merged_registry["image_coverage"] = old_registry.get(
-        "image_coverage", {"max_image_gap_seconds": 40.0}
-    )
-    from .dataset_registry import canonical_registry_hash
-
-    merged_registry.pop("canonical_hash", None)
-    merged_registry["canonical_hash"] = canonical_registry_hash(merged_registry)
-    old_images = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    incoming_images = pd.read_parquet(incoming_dir / "image_metadata.parquet")
-    old_cycles = list(old_manifest["cycles"])
-    incoming_cycles = list(incoming_manifest["cycles"])
-    start = int(len(old_index)) + 1
-    rename = {
-        str(row["cycle_name"]): f"frost_cycle_{start + offset:06d}"
-        for offset, row in enumerate(incoming_index.to_dict(orient="records"))
-    }
-    staging = Path(tempfile.mkdtemp(prefix=f".{dataset_dir.name}.commit-", dir=dataset_dir.parent))
-    try:
-        shutil.copytree(dataset_dir, staging / dataset_dir.name)
-        work = staging / dataset_dir.name
-        for old_name, new_name in rename.items():
-            _rename_cycle_assets(incoming_dir, old_name, new_name, work)
-        incoming_index = _rename_index(incoming_index, rename)
-        incoming_images = incoming_images.copy()
-        incoming_images["cycle_name"] = incoming_images["cycle_name"].map(
-            lambda value: rename.get(str(value), value)
-        )
-        _rewrite_all_cycle_schemas(work, old_index, incoming_index, merged_registry)
-        merged_index = pd.concat([old_index, incoming_index], ignore_index=True)
-        merged_images = pd.concat([old_images, incoming_images], ignore_index=True)
-        all_cycles = old_cycles + [
-            _rename_cycle_record(record, rename) for record in incoming_cycles
-        ]
-        _refresh_canonical_assets(work, merged_index, all_cycles, merged_registry, merged_images)
-        write_atomic_parquet(merged_index, work / "cycle_index.parquet")
-        write_atomic_parquet(merged_images, work / "image_metadata.parquet")
-        write_atomic_json(merged_registry, work / "channel_registry.json")
-        merged_manifest = {
-            "dataset_schema_version": CANONICAL_DATASET_SCHEMA_VERSION,
-            "dataset_id": CANONICAL_DATASET_ID,
-            "created_at": old_manifest["created_at"],
-            "updated_at": datetime.now(UTC).isoformat(),
-            "source_experiments": old_sources + [incoming_source],
-            "cycles": all_cycles,
-        }
-        write_atomic_json(merged_manifest, work / "dataset_manifest.json")
-        _validate_canonical_dataset(work)
-        backup = dataset_dir.parent / f".{dataset_dir.name}.rollback"
-        if backup.exists():
-            shutil.rmtree(backup)
-        dataset_dir.rename(backup)
-        try:
-            (staging / dataset_dir.name).rename(dataset_dir)
-        except Exception:
-            backup.rename(dataset_dir)
-            raise
-        shutil.rmtree(backup, ignore_errors=True)
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-
-
-def _canonical_original_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _prepared_export_frame(frame: pd.DataFrame) -> pd.DataFrame:
     drop = {"cycle_elapsed_seconds", "cycle_progress"}
     image_pattern = re.compile(r"^image_.+_(?:path|time|offset_seconds)$")
     columns = [
@@ -1830,251 +64,1045 @@ def _canonical_original_frame(frame: pd.DataFrame) -> pd.DataFrame:
             str(column) not in drop
             and not image_pattern.fullmatch(str(column))
             and not str(column).endswith(SOURCE_QUALITY_SUFFIXES)
+            and not str(column).endswith("__baseline")
+            and not str(column).endswith("__baseline_residual")
         )
     ]
-    return frame.loc[:, columns].sort_values("timestamp", kind="stable").reset_index(drop=True)
+    if "timestamp" not in columns:
+        raise ValueError("Prepared data has no timestamp column")
+    return frame.loc[:, columns].sort_values("timestamp", kind="stable").reset_index(
+        drop=True
+    )
 
 
-def _original_data_summary(frame: pd.DataFrame, path: Path) -> dict[str, Any]:
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna()
-    intervals = timestamps.sort_values().diff().dropna().dt.total_seconds()
-    return {
-        "row_count": int(len(frame)),
-        "start_time": timestamps.min().isoformat() if not timestamps.empty else None,
-        "end_time": timestamps.max().isoformat() if not timestamps.empty else None,
-        "median_interval_seconds": float(intervals.median()) if not intervals.empty else None,
-        "sha256": sha256_file(path),
-    }
+@dataclass(frozen=True)
+class _DirectDatePipeline:
+    input_dir: Path
+    config: Any
+    channels: Mapping[str, Mapping[str, Any]]
+    prepared: pd.DataFrame
+    summary: pd.DataFrame
+    processed: pd.DataFrame
+    source_fingerprint: str
 
 
-def _canonicalize_image_tree(
-    dataset_dir: Path, old_images: pd.DataFrame, make_image_id_function: Any
-) -> pd.DataFrame:
-    metadata = old_images.copy()
-    columns = [
-        "image_id", "cycle_uid", "cycle_name", "frame_index", "source_camera_id",
-        "image_time", "matched_timestamp", "offset_seconds", "cycle_stage",
-        "source_relative_path", "file_size_bytes", "sha256",
-    ]
-    if metadata.empty:
-        return pd.DataFrame(columns=columns)
-    if "image_id" not in metadata or "source_camera_id" not in metadata:
-        raise ValueError("image metadata is missing stable source identity")
-    for row in metadata.to_dict(orient="records"):
-        image_id = str(row["image_id"])
-        source_camera = str(row["source_camera_id"])
-        source_relative = str(row["source_relative_path"])
-        if image_id != make_image_id_function(
-            str(row["cycle_uid"]), source_camera, source_relative
-        ):
-            raise ValueError(f"image_id does not match source identity: {image_id}")
-        matches = [
-            path
-            for path in (dataset_dir / "images" / str(row["cycle_name"])).rglob(f"{image_id}.*")
-            if path.is_file() and path.suffix.lower() in _CANONICAL_IMAGE_SUFFIXES
-        ]
-        if len(matches) != 1:
-            raise ValueError(f"Dataset image file is not uniquely materialized: {image_id}")
-        source = matches[0]
-        destination = (
-            dataset_dir
-            / "images"
-            / str(row["cycle_name"])
-            / source_camera
-            / source.name
-        )
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if source.resolve() != destination.resolve():
-            shutil.move(str(source), str(destination))
-    for role_root in (dataset_dir / "images").glob("*/unassigned_*"):
-        if role_root.is_dir() and not any(role_root.iterdir()):
-            role_root.rmdir()
-    return metadata.loc[:, [column for column in columns if column in metadata]].copy()
+def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
+    """Build or append one date directly from raw input."""
+    input_path = Path(input_dir).resolve()
+    project_root = _resolve_project_root()
+    target = (
+        Path(dataset_dir).resolve()
+        if dataset_dir is not None
+        else project_root / "dataset"
+    )
+    _validate_date_input(input_path, project_root)
 
+    from .dataset_io import mutate_dataset
+    from .dataset_metadata import read_manifest
+    from .dataset_validation import validate_staging_structure
 
-def _scan_current_cycle_images(
-    dataset_dir: Path, cycle_name: str, metadata: pd.DataFrame
-) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    scoped = metadata.loc[metadata["cycle_name"].astype(str).eq(cycle_name)]
-    by_id = scoped.set_index("image_id") if not scoped.empty else scoped
-    root = dataset_dir / "images" / cycle_name
-    if not root.is_dir():
-        return pd.DataFrame()
-    for role_root in sorted(path for path in root.iterdir() if path.is_dir()):
-        for path in sorted(role_root.iterdir()):
-            if not path.is_file() or path.suffix.lower() not in _CANONICAL_IMAGE_SUFFIXES:
-                continue
-            image_id = path.stem
-            if image_id not in by_id.index:
-                raise ValueError(f"image file has no metadata: {path}")
-            row = dict(by_id.loc[image_id])
-            row["camera_role"] = role_root.name
-            row["path"] = path
-            rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def _canonical_role_summary(
-    frame: pd.DataFrame,
-    images: pd.DataFrame,
-    *,
-    max_image_gap_seconds: float = 40.0,
-) -> dict[str, Any]:
-    from .dataset_coverage import coverage_ratio
-
-    result: dict[str, Any] = {}
-    if images.empty or "camera_role" not in images:
-        return result
-    for role, group in images.groupby("camera_role", sort=True):
-        result[str(role)] = {
-            "image_count": int(len(group)),
-            "coverage_ratio": float(
-                coverage_ratio(
-                    frame,
-                    group,
-                    max_image_gap_seconds=max_image_gap_seconds,
-                )
+    experiment_id, experiment_date, fingerprint = _input_source_identity(
+        input_path, project_root
+    )
+    if target.exists():
+        manifest = read_manifest(target)
+        experiments = manifest["experiments"]
+        existing = next(
+            (
+                item
+                for item in experiments
+                if isinstance(item, Mapping)
+                and str(item.get("experiment_id")) == experiment_id
             ),
+            None,
+        )
+        if existing is not None:
+            if str(existing.get("source_fingerprint", "")) == fingerprint:
+                return target
+            raise ValueError(f"source fingerprint conflict for {experiment_id}")
+        if experiments:
+            last_date = max(str(item["experiment_date"])[:10] for item in experiments)
+            if experiment_date <= last_date:
+                raise ValueError(
+                    "historical or same-date append is not supported; use dataset rebuild"
+                )
+
+        def operation(staging: Path) -> None:
+            pipeline = _run_direct_pipeline(input_path, project_root)
+            _append_direct_pipeline(staging, pipeline, fingerprint)
+
+        return mutate_dataset(target, operation, validate=validate_staging_structure)
+
+    def operation(staging: Path) -> None:
+        pipeline = _run_direct_pipeline(input_path, project_root)
+        _materialize_direct_pipelines(staging, [pipeline])
+
+    return mutate_dataset(
+        target,
+        operation,
+        validate=validate_staging_structure,
+        rebuild=True,
+    )
+
+
+def rebuild_dataset(
+    input_dirs: Sequence[Path], dataset_dir: Path | None = None
+) -> Path:
+    """Rebuild a Dataset from raw dates without reading the previous Dataset."""
+    if not input_dirs:
+        raise ValueError("dataset rebuild requires at least one INPUT_DIR")
+    project_root = _resolve_project_root()
+    inputs = sorted(
+        {Path(value).resolve() for value in input_dirs},
+        key=lambda path: path.name,
+    )
+    for input_path in inputs:
+        _validate_date_input(input_path, project_root)
+    target = (
+        Path(dataset_dir).resolve()
+        if dataset_dir is not None
+        else project_root / "dataset"
+    )
+
+    from .dataset_io import mutate_dataset
+    from .dataset_validation import validate_staging_structure
+
+    def operation(staging: Path) -> None:
+        pipelines = [_run_direct_pipeline(path, project_root) for path in inputs]
+        _materialize_direct_pipelines(staging, pipelines)
+
+    return mutate_dataset(
+        target,
+        operation,
+        validate=validate_staging_structure,
+        rebuild=True,
+    )
+
+
+def assign_final_cycle_names_by_time(
+    summary: pd.DataFrame,
+    *,
+    prepared: pd.DataFrame | None = None,
+    start_index: int = 1,
+) -> dict[CycleKey, str]:
+    """Assign names by segment start and retain only Prepared cycles."""
+    required = {"experiment_id", "experiment_date", "cycle_id"}
+    missing = sorted(required - set(summary.columns))
+    if missing:
+        raise ValueError(f"cycle summary missing columns: {missing}")
+
+    allowed: set[CycleKey] | None = None
+    if prepared is not None:
+        _require_columns(prepared, ["experiment_id", "cycle_id"], "Prepared")
+        allowed = {
+            (str(values[0]), str(values[1]))
+            for values in prepared[["experiment_id", "cycle_id"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
         }
-    return result
+
+    prepared_starts: dict[CycleKey, pd.Timestamp] = {}
+    if prepared is not None and "timestamp" in prepared:
+        prepared_times = prepared.copy()
+        prepared_times["timestamp"] = pd.to_datetime(
+            prepared_times["timestamp"], errors="coerce"
+        )
+        for key, group in prepared_times.groupby(
+            ["experiment_id", "cycle_id"], sort=False, dropna=False
+        ):
+            values = group["timestamp"].dropna()
+            if not values.empty:
+                prepared_starts[(str(key[0]), str(key[1]))] = pd.Timestamp(values.min())
+
+    rows: list[tuple[tuple[str, int, str], CycleKey]] = []
+    for values in summary.to_dict(orient="records"):
+        key = (str(values["experiment_id"]), str(values["cycle_id"]))
+        if allowed is not None and key not in allowed:
+            continue
+        raw_start = pd.to_datetime(values.get("segment_start"), errors="coerce")
+        start = (
+            pd.Timestamp(raw_start)
+            if not pd.isna(raw_start)
+            else prepared_starts.get(key)
+        )
+        start_value = int(start.value) if start is not None else pd.Timestamp.max.value
+        rows.append(
+            (
+                (
+                    str(values["experiment_date"])[:10],
+                    start_value,
+                    str(values["cycle_id"]),
+                ),
+                key,
+            )
+        )
+
+    rows.sort(key=lambda item: item[0])
+    names: dict[CycleKey, str] = {}
+    for offset, (_sort_key, key) in enumerate(rows, start=start_index):
+        if key in names:
+            raise ValueError(f"duplicate cycle identity in summary: {key}")
+        names[key] = format_cycle_name(offset)
+    return names
 
 
-def _registry_image_gap_seconds(registry: Mapping[str, Any]) -> float:
+def _require_columns(frame: pd.DataFrame, columns: list[str], name: str) -> None:
+    missing = sorted(set(columns) - set(frame.columns))
+    if missing:
+        raise ValueError(f"{name} is missing columns: {missing}")
+
+
+def _resolve_project_root() -> Path:
+    root = find_project_root(Path(__file__))
+    if root is None:
+        raise FileNotFoundError("could not find project root containing pyproject.toml")
+    return root
+
+
+def _validate_date_input(input_path: Path, project_root: Path) -> None:
+    if not input_path.is_dir():
+        raise FileNotFoundError(f"input directory does not exist: {input_path}")
+    if re.fullmatch(r"\d{4}", input_path.name) is None:
+        raise ValueError("dataset input basename must be a four-digit MMDD date")
+    config_path = project_root / "configs" / f"{input_path.name}.yaml"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"date configuration does not exist: {config_path}")
+
+
+def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
+    from .config import load_config
+
+    config = load_config(project_root / "configs" / f"{input_path.name}.yaml")
+    if not str(config.experiment_date).startswith("2026-"):
+        raise ValueError("Dataset currently accepts only 2026 experiment dates")
+    object.__setattr__(config, "input_dir", input_path.resolve())
+    return config
+
+
+def _input_source_identity(
+    input_path: Path, project_root: Path
+) -> tuple[str, str, str]:
+    """Build the add/no-op fingerprint without reading image contents."""
+    from .channels import load_channels
+    from .config import resolved_config_sha256
+    from .io import discover_inputs
+
+    config = _load_config_for_input(input_path, project_root)
+    channels = load_channels(config.channels_path)
+    inputs = discover_inputs(config)
+    inventory: list[tuple[str, int, int]] = []
+    for path in [*inputs.sensor_files, *inputs.image_files]:
+        relative = path.relative_to(input_path).as_posix()
+        stat = path.stat()
+        inventory.append((relative, int(stat.st_size), int(stat.st_mtime_ns)))
+    payload = {
+        "experiment_id": str(config.experiment_id),
+        "experiment_date": str(config.experiment_date)[:10],
+        "config": resolved_config_sha256(config),
+        "channels": sorted(str(name) for name in channels),
+        "inventory": sorted(inventory),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return (
+        str(config.experiment_id),
+        str(config.experiment_date)[:10],
+        hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def _run_direct_pipeline(input_path: Path, project_root: Path) -> _DirectDatePipeline:
+    from .channels import load_channels
+    from .prepare import prepare
+    from .process import process
+    from .validation import validate_prepared, validate_processed
+
+    config = _load_config_for_input(input_path, project_root)
+    channels = load_channels(config.channels_path)
+    prepared, initial_summary, prepare_summary = prepare(config, channels)
+    validate_prepared(prepared, initial_summary)
+    processed, final_summary = process(prepared, initial_summary, config, channels)
+    validate_processed(processed, final_summary)
+    _ = prepare_summary
+    _, _, fingerprint = _input_source_identity(input_path, project_root)
+    return _DirectDatePipeline(
+        input_dir=input_path.resolve(),
+        config=config,
+        channels=channels,
+        prepared=prepared,
+        summary=final_summary,
+        processed=processed,
+        source_fingerprint=fingerprint,
+    )
+
+
+def _settings_mapping(value: Any) -> Mapping[str, Any]:
+    if is_dataclass(value):
+        return cast(Mapping[str, Any], asdict(value))
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _build_direct_registry(
+    pipelines: Sequence[_DirectDatePipeline],
+) -> dict[str, Any]:
+    from .dataset_registry import (
+        canonical_registry_hash,
+        merge_registries,
+        registry_from_frame,
+    )
+
+    registry: dict[str, Any] | None = None
+    for pipeline in pipelines:
+        candidate = registry_from_frame(
+            pipeline.processed,
+            pipeline.channels,
+            analysis_settings=_settings_mapping(pipeline.config.analysis),
+            resample_interval_seconds=int(
+                pipeline.config.process.resample_interval_seconds
+            ),
+        )
+        registry = candidate if registry is None else merge_registries(registry, candidate)
+    if registry is None:
+        raise ValueError("Dataset requires at least one processed pipeline")
+    registry["image_coverage"] = {"max_image_gap_seconds": 40.0}
+    registry.pop("canonical_hash", None)
+    registry["canonical_hash"] = canonical_registry_hash(registry)
+    return registry
+
+
+def _canonical_original_columns(
+    pipelines: Sequence[_DirectDatePipeline],
+) -> list[str]:
+    ordered: list[str] = []
+    for pipeline in pipelines:
+        for column in _prepared_export_frame(pipeline.prepared).columns:
+            if str(column) not in ordered:
+                ordered.append(str(column))
+    if "timestamp" not in ordered:
+        raise ValueError("Prepared data has no timestamp column")
+    return ordered
+
+
+def _cycle_window(frame: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna().sort_values()
+    if timestamps.empty:
+        raise ValueError("cycle has no valid timestamp")
+    intervals = timestamps.diff().dropna().dt.total_seconds()
+    positive = intervals.loc[intervals > 0]
+    step = float(positive.median()) if not positive.empty else 1.0
+    return (
+        pd.Timestamp(timestamps.iloc[0]),
+        pd.Timestamp(timestamps.iloc[-1]) + pd.Timedelta(seconds=step),
+    )
+
+
+def _cycle_image_summary(
+    staging: Path,
+    cycle_name: str,
+    frame: pd.DataFrame,
+    image_metadata: pd.DataFrame,
+    registry: Mapping[str, Any],
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
+]:
+    from .dataset_images import (
+        build_rgb_coverage_intervals,
+        scan_final_cycle_images,
+        summarize_rgb_coverage,
+    )
+
+    start, end = _cycle_window(frame)
+    images = scan_final_cycle_images(staging, cycle_name, image_metadata)
     settings = registry.get("image_coverage", {})
-    value = (
+    max_gap = float(
         settings.get("max_image_gap_seconds", 40.0)
         if isinstance(settings, Mapping)
         else 40.0
     )
-    gap_seconds = float(value)
-    if gap_seconds <= 0:
-        raise ValueError("channel_registry max_image_gap_seconds must be positive")
-    return gap_seconds
+    by_role: dict[str, Any] = {}
+    intervals: dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] = {}
+    if not images.empty:
+        for role, group in images.groupby("camera_role", sort=True):
+            role_intervals = build_rgb_coverage_intervals(
+                start,
+                end,
+                group["image_time"],
+                max_image_gap_seconds=max_gap,
+            )
+            intervals[str(role)] = role_intervals
+            by_role[str(role)] = {
+                "image_count": int(len(group)),
+                "coverage_ratio": summarize_rgb_coverage(start, end, role_intervals),
+            }
+    return {"image_count": int(len(images)), "by_camera_role": by_role}, intervals
 
 
-def _rename_cycle_assets(
-    incoming_dir: Path, old_name: str, new_name: str, work_dir: Path
-) -> None:
-    for folder in ("cycles", "cycles_original"):
-        source_root = incoming_dir / folder
-        for source in sorted(source_root.glob(f"{old_name}*")):
-            if not source.is_file():
-                continue
-            suffix = source.name[len(old_name) :]
-            destination = work_dir / folder / f"{new_name}{suffix}"
-            if destination.exists():
-                raise FileExistsError(f"cycle asset already exists: {destination}")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-
-    image_source = incoming_dir / "images" / old_name
-    if image_source.is_dir():
-        image_destination = work_dir / "images" / new_name
-        if image_destination.exists():
-            raise FileExistsError(f"cycle asset already exists: {image_destination}")
-        shutil.copytree(image_source, image_destination)
-
-
-def _rename_index(index: pd.DataFrame, rename: Mapping[str, str]) -> pd.DataFrame:
-    result = index.copy()
-    result["cycle_name"] = result["cycle_name"].map(lambda value: rename[str(value)])
-    return result
-
-
-def _rename_cycle_record(record: Mapping[str, Any], rename: Mapping[str, str]) -> dict[str, Any]:
-    result = dict(record)
-    result["cycle_name"] = rename[str(record["cycle_name"])]
-    return result
-
-
-def _rewrite_all_cycle_schemas(
-    work: Path,
-    old_index: pd.DataFrame,
-    incoming_index: pd.DataFrame,
+def _sensor_coverage_intervals(  # noqa: C901
+    frame: pd.DataFrame,
     registry: Mapping[str, Any],
-) -> None:
+) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
+    """Build sensor availability from the same Processed rows used for drawing."""
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    valid = timestamps.notna()
+    ordered = timestamps.loc[valid].sort_values(kind="stable")
+    if ordered.empty:
+        return {"available": [], "missing": []}
+
+    diffs = ordered.diff().dropna().dt.total_seconds()
+    positive = diffs.loc[diffs > 0]
+    step = float(positive.median()) if not positive.empty else 10.0
+    channel_settings = registry.get("channels", {})
+    required_names = (
+        [
+            str(name)
+            for name, settings in channel_settings.items()
+            if isinstance(settings, Mapping)
+            and bool(settings.get("coverage_required", False))
+        ]
+        if isinstance(channel_settings, Mapping)
+        else []
+    )
+    observed_names = required_names
+    if not observed_names:
+        observed_names = [
+            str(field["name"])
+            for field in registry.get("fields", [])
+            if isinstance(field, Mapping)
+            and str(field.get("name")) in frame
+            and str(field.get("name")) not in {"timestamp", "cycle_stage"}
+            and not str(field.get("name")).endswith("__imputed")
+        ]
+
+    availability = pd.Series(True, index=frame.index, dtype=bool)
+    for name in observed_names:
+        if name not in frame:
+            availability &= False
+            continue
+        values = pd.to_numeric(frame[name], errors="coerce").notna()
+        imputed = frame.get(f"{name}__imputed")
+        if imputed is not None:
+            values &= ~imputed.fillna(False).astype(bool)
+        availability &= values
+
+    available_rows = frame.loc[valid & availability].sort_values(
+        "timestamp", kind="stable"
+    )
+    start = pd.Timestamp(ordered.iloc[0])
+    end = pd.Timestamp(ordered.iloc[-1]) + pd.Timedelta(seconds=step)
+    available: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    if not available_rows.empty:
+        current_start = pd.Timestamp(available_rows.iloc[0]["timestamp"])
+        previous = current_start
+        for raw in available_rows["timestamp"].iloc[1:]:
+            current = pd.Timestamp(raw)
+            if (current - previous).total_seconds() > step * 1.5:
+                available.append(
+                    (current_start, previous + pd.Timedelta(seconds=step))
+                )
+                current_start = current
+            previous = current
+        available.append((current_start, previous + pd.Timedelta(seconds=step)))
+
+    missing: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    cursor = start
+    for available_start, available_end in available:
+        if cursor < available_start:
+            missing.append((cursor, available_start))
+        cursor = max(cursor, available_end)
+    if cursor < end:
+        missing.append((cursor, end))
+    return {"available": available, "missing": missing}
+
+
+def _dataset_frame(
+    frame: pd.DataFrame,
+    registry: Mapping[str, Any],
+    *,
+    cycle_name: str,
+    cycle_uid: str,
+) -> pd.DataFrame:
     from .dataset_registry import canonical_frame
 
-    all_rows = pd.concat([old_index, incoming_index], ignore_index=True)
-    for row in all_rows.to_dict(orient="records"):
-        name = str(row["cycle_name"])
-        path = work / "cycles" / f"{name}.parquet"
-        frame = pd.read_parquet(path)
-        scientific = frame.drop(columns=list(_CANONICAL_DATASET_FIELDS), errors="ignore")
-        rewritten = canonical_frame(scientific, registry)
-        rewritten["dataset_id"] = CANONICAL_DATASET_ID
-        rewritten["dataset_schema_version"] = CANONICAL_DATASET_SCHEMA_VERSION
-        rewritten["dataset_cycle_index"] = int(name.split("_")[-1])
-        rewritten["cycle_name"] = name
-        rewritten["cycle_uid"] = str(row["cycle_uid"])
-        rewritten.to_parquet(path, index=False)
-        rewritten.to_csv(work / "cycles" / f"{name}.csv", index=False)
+    result = canonical_frame(frame, registry)
+    result.insert(0, "cycle_uid", cycle_uid)
+    result.insert(0, "cycle_name", cycle_name)
+    result.insert(0, "dataset_cycle_index", parse_cycle_name(cycle_name))
+    result.insert(0, "dataset_schema_version", DATASET_SCHEMA_VERSION)
+    result.insert(0, "dataset_id", DATASET_ID)
+    return result
 
 
-def _refresh_canonical_assets(
-    work: Path,
-    index: pd.DataFrame,
-    records: list[dict[str, Any]],
-    registry: Mapping[str, Any],
-    images: pd.DataFrame,
+def _cycle_assets(cycle_name: str) -> dict[str, str]:
+    return {
+        "parquet": f"cycles/{cycle_name}.parquet",
+        "csv": f"cycles/{cycle_name}.csv",
+        "original_csv": f"cycles_original/{cycle_name}.csv",
+        "publication": f"cycles/{cycle_name}.png",
+        "rgb_coverage": f"cycles/{cycle_name}_rgb_coverage.png",
+    }
+
+
+def _asset_hashes(root: Path, assets: Mapping[str, str]) -> dict[str, str]:
+    return {name: sha256_file(root / path) for name, path in assets.items()}
+
+
+def _materialize_direct_pipelines(
+    staging: Path,
+    pipelines: Sequence[_DirectDatePipeline],
 ) -> None:
-    from .dataset_coverage import render_rgb_coverage
-    from .visualization import render_cycle_publication
+    from .dataset_images import (
+        collect_final_images,
+        copy_final_image,
+        image_metadata_frame_final,
+    )
+    from .dataset_io import write_atomic_csv, write_atomic_json, write_atomic_parquet
+    from .dataset_metadata import build_cycle_record, experiment_record, now_iso
+    from .visualization import render_cycle_publication, render_rgb_coverage_intervals
 
-    by_name = {str(record["cycle_name"]): record for record in records}
-    for row_number in index.index:
-        name = str(index.at[row_number, "cycle_name"])
-        frame = pd.read_parquet(work / "cycles" / f"{name}.parquet")
-        record = by_name[name]
-        current_images = _scan_current_cycle_images(work, name, images)
-        record["image"] = {
-            "by_camera_role": _canonical_role_summary(
-                frame,
-                current_images,
-                max_image_gap_seconds=_registry_image_gap_seconds(registry),
+    if not pipelines:
+        raise ValueError("Dataset requires at least one date")
+    summary = pd.concat([pipeline.summary for pipeline in pipelines], ignore_index=True)
+    prepared = pd.concat([pipeline.prepared for pipeline in pipelines], ignore_index=True)
+    names = assign_final_cycle_names_by_time(summary, prepared=prepared)
+    if not names:
+        raise ValueError("Dataset contains no cycles with Prepared rows")
+
+    summary_keys = {
+        (str(row["experiment_id"]), str(row["cycle_id"]))
+        for row in summary.to_dict(orient="records")
+    }
+    prepared_keys = {
+        (str(row["experiment_id"]), str(row["cycle_id"]))
+        for row in prepared[["experiment_id", "cycle_id"]]
+        .drop_duplicates()
+        .to_dict(orient="records")
+    }
+    if not prepared_keys <= summary_keys:
+        raise ValueError("Prepared cycle is missing from cycle summary")
+
+    processed_counts = processed_counts_by_key(pipelines)
+    for key in names:
+        if processed_counts.get(key, 0) <= 0:
+            raise ValueError(f"cycle has Prepared rows but no Processed rows: {key}")
+
+    registry = _build_direct_registry(pipelines)
+    original_columns = _canonical_original_columns(pipelines)
+    all_images: list[dict[str, object]] = []
+    for pipeline in pipelines:
+        all_images.extend(
+            collect_final_images(
+                pipeline.prepared,
+                input_dir=pipeline.input_dir,
+                cycle_names=names,
             )
-        }
-        render_cycle_publication(frame, record, work / "cycles" / f"{name}.png")
-        render_rgb_coverage(
-            frame,
-            current_images,
-            record,
-            work / "cycles" / f"{name}_rgb_coverage.png",
-            registry=registry,
         )
-        index.at[row_number, "parquet_sha256"] = sha256_file(
-            work / "cycles" / f"{name}.parquet"
+    image_metadata = image_metadata_frame_final(all_images)
+    write_atomic_parquet(image_metadata, staging / "image_metadata.parquet")
+    for record in all_images:
+        copy_final_image(record, staging)
+
+    summary_lookup = {
+        (str(row["experiment_id"]), str(row["cycle_id"])): row
+        for row in summary.to_dict(orient="records")
+    }
+    records: list[dict[str, Any]] = []
+    for key, cycle_name in sorted(
+        names.items(), key=lambda item: parse_cycle_name(item[1])
+    ):
+        pipeline = next(
+            item for item in pipelines if str(item.config.experiment_id) == key[0]
         )
-        index.at[row_number, "csv_sha256"] = sha256_file(
-            work / "cycles" / f"{name}.csv"
+        original = _prepared_export_frame(
+            pipeline.prepared.loc[
+                pipeline.prepared["experiment_id"].astype(str).eq(key[0])
+                & pipeline.prepared["cycle_id"].astype(str).eq(key[1])
+            ]
+        ).reindex(columns=original_columns)
+        raw = pipeline.processed.loc[
+            pipeline.processed["experiment_id"].astype(str).eq(key[0])
+            & pipeline.processed["cycle_id"].astype(str).eq(key[1])
+        ].copy()
+        canonical = _dataset_frame(
+            raw,
+            registry,
+            cycle_name=cycle_name,
+            cycle_uid=make_cycle_uid(*key),
         )
-        index.at[row_number, "publication_sha256"] = sha256_file(
-            work / "cycles" / f"{name}.png"
+        assets = _cycle_assets(cycle_name)
+        write_atomic_parquet(canonical, staging / assets["parquet"])
+        write_atomic_csv(canonical, staging / assets["csv"])
+        write_atomic_csv(original, staging / assets["original_csv"])
+
+        image_summary, intervals = _cycle_image_summary(
+            staging, cycle_name, canonical, image_metadata, registry
         )
-        index.at[row_number, "rgb_coverage_sha256"] = sha256_file(
-            work / "cycles" / f"{name}_rgb_coverage.png"
+        record = build_cycle_record(
+            summary_lookup[key],
+            cycle_name=cycle_name,
+            cycle_uid=make_cycle_uid(*key),
+            processed=canonical,
+            original=original,
+            image_summary=image_summary,
+            assets=assets,
+            asset_sha256={},
+        )
+        render_cycle_publication(canonical, record, staging / assets["publication"])
+        start, end = _cycle_window(canonical)
+        render_rgb_coverage_intervals(
+            cycle_name,
+            start,
+            end,
+            intervals,
+            staging / assets["rgb_coverage"],
+            sensor_intervals=_sensor_coverage_intervals(canonical, registry),
+        )
+        record["asset_sha256"] = _asset_hashes(staging, assets)
+        records.append(record)
+
+    registry["canonical_hash"] = _registry_hash(registry)
+    write_atomic_json(registry, staging / "channel_registry.json")
+    experiments: list[dict[str, Any]] = []
+    for pipeline in sorted(pipelines, key=lambda item: str(item.config.experiment_date)):
+        provenance = experiment_record(
+            str(pipeline.config.experiment_id),
+            str(pipeline.config.experiment_date),
+            pipeline.input_dir,
+            pipeline.config.project_root,
+        )
+        provenance["source_fingerprint"] = pipeline.source_fingerprint
+        experiments.append(provenance)
+    now = now_iso()
+    write_atomic_json(
+        {
+            "dataset_schema_version": DATASET_SCHEMA_VERSION,
+            "dataset_id": DATASET_ID,
+            "created_at": now,
+            "updated_at": now,
+            "experiments": experiments,
+        },
+        staging / "dataset_manifest.json",
+    )
+    write_atomic_json({"cycles": records}, staging / "cycle_catalog.json")
+    (staging / "README.md").write_text(
+        "# frost_cycle_dataset\n\nSelf-contained Cycle Dataset schema 3.\n",
+        encoding="utf-8",
+    )
+
+
+def processed_counts_by_key(
+    pipelines: Sequence[_DirectDatePipeline],
+) -> dict[CycleKey, int]:
+    counts: dict[CycleKey, int] = {}
+    for pipeline in pipelines:
+        for values in pipeline.processed[["experiment_id", "cycle_id"]].itertuples(
+            index=False, name=None
+        ):
+            key = (str(values[0]), str(values[1]))
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _registry_hash(registry: Mapping[str, Any]) -> str:
+    from .dataset_registry import canonical_registry_hash
+
+    return canonical_registry_hash(registry)
+
+
+def _append_direct_pipeline(
+    staging: Path,
+    pipeline: _DirectDatePipeline,
+    fingerprint: str,
+) -> None:
+    from .dataset_images import (
+        collect_final_images,
+        copy_final_image,
+        image_metadata_frame_final,
+    )
+    from .dataset_io import write_atomic_csv, write_atomic_json, write_atomic_parquet
+    from .dataset_metadata import (
+        build_cycle_record,
+        experiment_record,
+        now_iso,
+        read_catalog,
+        read_manifest,
+    )
+    from .dataset_registry import merge_registries
+    from .visualization import render_cycle_publication, render_rgb_coverage_intervals
+
+    manifest = read_manifest(staging)
+    catalog = read_catalog(staging)
+    old_records = [record for record in catalog["cycles"] if isinstance(record, dict)]
+    names = assign_final_cycle_names_by_time(
+        pipeline.summary,
+        prepared=pipeline.prepared,
+        start_index=len(old_records) + 1,
+    )
+    old_registry = json.loads(
+        (staging / "channel_registry.json").read_text(encoding="utf-8")
+    )
+    candidate = _build_direct_registry([pipeline])
+    merged_registry = merge_registries(old_registry, candidate)
+    merged_registry["image_coverage"] = old_registry.get(
+        "image_coverage", {"max_image_gap_seconds": 40.0}
+    )
+
+    old_images = pd.read_parquet(staging / "image_metadata.parquet")
+    new_images = collect_final_images(
+        pipeline.prepared,
+        input_dir=pipeline.input_dir,
+        cycle_names=names,
+    )
+    for image in new_images:
+        copy_final_image(image, staging)
+    merged_images = pd.concat(
+        [old_images, image_metadata_frame_final(new_images)],
+        ignore_index=True,
+    )
+    write_atomic_parquet(merged_images, staging / "image_metadata.parquet")
+
+    original_columns: list[str] = []
+    for record in old_records:
+        old_path = staging / str(record["assets"]["original_csv"])
+        for column in pd.read_csv(old_path, nrows=0).columns:
+            if str(column) not in original_columns:
+                original_columns.append(str(column))
+    for column in _canonical_original_columns([pipeline]):
+        if column not in original_columns:
+            original_columns.append(column)
+
+    summary_lookup = {
+        (str(row["experiment_id"]), str(row["cycle_id"])): row
+        for row in pipeline.summary.to_dict(orient="records")
+    }
+    new_records: list[dict[str, Any]] = []
+    for key, cycle_name in sorted(
+        names.items(), key=lambda item: parse_cycle_name(item[1])
+    ):
+        original = _prepared_export_frame(
+            pipeline.prepared.loc[
+                pipeline.prepared["experiment_id"].astype(str).eq(key[0])
+                & pipeline.prepared["cycle_id"].astype(str).eq(key[1])
+            ]
+        ).reindex(columns=original_columns)
+        raw = pipeline.processed.loc[
+            pipeline.processed["experiment_id"].astype(str).eq(key[0])
+            & pipeline.processed["cycle_id"].astype(str).eq(key[1])
+        ]
+        canonical = _dataset_frame(
+            raw,
+            merged_registry,
+            cycle_name=cycle_name,
+            cycle_uid=make_cycle_uid(*key),
+        )
+        assets = _cycle_assets(cycle_name)
+        write_atomic_parquet(canonical, staging / assets["parquet"])
+        write_atomic_csv(canonical, staging / assets["csv"])
+        write_atomic_csv(original, staging / assets["original_csv"])
+        image_summary, intervals = _cycle_image_summary(
+            staging, cycle_name, canonical, merged_images, merged_registry
+        )
+        record = build_cycle_record(
+            summary_lookup[key],
+            cycle_name=cycle_name,
+            cycle_uid=make_cycle_uid(*key),
+            processed=canonical,
+            original=original,
+            image_summary=image_summary,
+            assets=assets,
+            asset_sha256={},
+        )
+        render_cycle_publication(canonical, record, staging / assets["publication"])
+        start, end = _cycle_window(canonical)
+        render_rgb_coverage_intervals(
+            cycle_name,
+            start,
+            end,
+            intervals,
+            staging / assets["rgb_coverage"],
+            sensor_intervals=_sensor_coverage_intervals(canonical, merged_registry),
+        )
+        record["asset_sha256"] = _asset_hashes(staging, assets)
+        new_records.append(record)
+
+    old_field_names = [
+        str(item["name"])
+        for item in old_registry.get("fields", [])
+        if isinstance(item, Mapping)
+    ]
+    merged_field_names = [
+        str(item["name"])
+        for item in merged_registry.get("fields", [])
+        if isinstance(item, Mapping)
+    ]
+    if merged_field_names != old_field_names:
+        from .dataset_registry import canonical_frame
+
+        for record in old_records:
+            name = str(record["cycle_name"])
+            assets = record["assets"]
+            old_frame = pd.read_parquet(staging / str(assets["parquet"]))
+            scientific = old_frame.drop(
+                columns=[
+                    "dataset_id",
+                    "dataset_schema_version",
+                    "dataset_cycle_index",
+                    "cycle_name",
+                    "cycle_uid",
+                ],
+                errors="ignore",
+            )
+            rewritten = _dataset_frame(
+                canonical_frame(scientific, merged_registry),
+                merged_registry,
+                cycle_name=name,
+                cycle_uid=str(record["cycle_uid"]),
+            )
+            write_atomic_parquet(rewritten, staging / str(assets["parquet"]))
+            write_atomic_csv(rewritten, staging / str(assets["csv"]))
+            record.setdefault("data", {})["processed_row_count"] = int(len(rewritten))
+            hashes = record.setdefault("asset_sha256", {})
+            hashes["parquet"] = sha256_file(staging / str(assets["parquet"]))
+            hashes["csv"] = sha256_file(staging / str(assets["csv"]))
+
+    merged_registry["canonical_hash"] = _registry_hash(merged_registry)
+    write_atomic_json(merged_registry, staging / "channel_registry.json")
+    manifest["experiments"] = [
+        *manifest["experiments"],
+        {
+            **experiment_record(
+                str(pipeline.config.experiment_id),
+                str(pipeline.config.experiment_date),
+                pipeline.input_dir,
+                pipeline.config.project_root,
+            ),
+            "source_fingerprint": fingerprint,
+        },
+    ]
+    manifest["experiments"].sort(key=lambda value: str(value["experiment_date"]))
+    manifest["updated_at"] = now_iso()
+    write_atomic_json(manifest, staging / "dataset_manifest.json")
+    catalog["cycles"] = [*old_records, *new_records]
+    write_atomic_json(catalog, staging / "cycle_catalog.json")
+
+
+def _refresh_cycles(
+    staging: Path,
+    cycle_names: Sequence[str] | None = None,
+    *,
+    render_publication: bool = True,
+    render_coverage: bool = True,
+) -> None:
+    """Synchronize image statistics and requested figures inside staging."""
+    from .dataset_io import write_atomic_json
+    from .dataset_metadata import now_iso, read_catalog, read_manifest
+    from .visualization import render_cycle_publication, render_rgb_coverage_intervals
+
+    catalog = read_catalog(staging)
+    registry = json.loads((staging / "channel_registry.json").read_text(encoding="utf-8"))
+    metadata = pd.read_parquet(staging / "image_metadata.parquet")
+    selected = set(cycle_names) if cycle_names is not None else None
+    for record in catalog["cycles"]:
+        if not isinstance(record, dict):
+            continue
+        cycle_name = str(record["cycle_name"])
+        if selected is not None and cycle_name not in selected:
+            continue
+        assets = record.get("assets")
+        if not isinstance(assets, Mapping):
+            raise ValueError(f"cycle assets are missing: {cycle_name}")
+        frame = pd.read_parquet(staging / str(assets["parquet"]))
+        image_summary, intervals = _cycle_image_summary(
+            staging, cycle_name, frame, metadata, registry
+        )
+        record["image"] = image_summary
+        record.setdefault("data", {})["processed_row_count"] = int(len(frame))
+        if render_publication:
+            render_cycle_publication(
+                frame, record, staging / str(assets["publication"])
+            )
+        if render_coverage:
+            start, end = _cycle_window(frame)
+            render_rgb_coverage_intervals(
+                cycle_name,
+                start,
+                end,
+                intervals,
+                staging / str(assets["rgb_coverage"]),
+                sensor_intervals=_sensor_coverage_intervals(frame, registry),
+            )
+        hashes = record.setdefault("asset_sha256", {})
+        if render_publication:
+            hashes["publication"] = sha256_file(
+                staging / str(assets["publication"])
+            )
+        if render_coverage:
+            hashes["rgb_coverage"] = sha256_file(
+                staging / str(assets["rgb_coverage"])
+            )
+        if render_publication or render_coverage:
+            hashes["parquet"] = sha256_file(staging / str(assets["parquet"]))
+            hashes["csv"] = sha256_file(staging / str(assets["csv"]))
+            hashes["original_csv"] = sha256_file(
+                staging / str(assets["original_csv"])
+            )
+    write_atomic_json(catalog, staging / "cycle_catalog.json")
+    manifest = read_manifest(staging)
+    manifest["updated_at"] = now_iso()
+    write_atomic_json(manifest, staging / "dataset_manifest.json")
+
+
+def review_cycle(
+    dataset_dir: Path,
+    cycle_name: str,
+    *,
+    status: str,
+    reason: str | None = None,
+) -> Path:
+    """Update the user-controlled Dataset status through one transaction."""
+    allowed = {"valid", "partial", "incomplete", "invalid"}
+    if status not in allowed:
+        raise ValueError(f"invalid Dataset status: {status}")
+
+    from .dataset_io import mutate_dataset, write_atomic_json
+    from .dataset_metadata import read_catalog
+    from .dataset_validation import validate_staging_structure
+
+    def operation(staging: Path) -> None:
+        catalog = read_catalog(staging)
+        for record in catalog["cycles"]:
+            if isinstance(record, dict) and record.get("cycle_name") == cycle_name:
+                record["status"] = status
+                record["status_reason"] = reason
+                write_atomic_json(catalog, staging / "cycle_catalog.json")
+                _refresh_cycles(
+                    staging,
+                    [cycle_name],
+                    render_publication=True,
+                    render_coverage=False,
+                )
+                return
+        raise KeyError(f"unknown cycle: {cycle_name}")
+
+    return mutate_dataset(dataset_dir, operation, validate=validate_staging_structure)
+
+
+def edit_dataset(
+    dataset_dir: Path,
+    *,
+    baseline_seconds: int | None = None,
+    recovery_seconds: int | None = None,
+    recovery_end_by: str | None = None,
+    camera_renames: Sequence[str] = (),
+) -> Path:
+    """Apply baseline, recovery, or camera-role edits atomically."""
+    if recovery_seconds is not None and recovery_end_by is not None:
+        raise ValueError("--recovery-seconds and --recovery-end-by are mutually exclusive")
+    if (
+        baseline_seconds is None
+        and recovery_seconds is None
+        and recovery_end_by is None
+        and not camera_renames
+    ):
+        raise ValueError("dataset edit requires at least one edit")
+
+    from .dataset_edit import apply_baseline_edit, apply_recovery_edit, rename_camera_role
+    from .dataset_io import mutate_dataset, write_atomic_json
+    from .dataset_metadata import read_catalog
+    from .dataset_registry import canonical_registry_hash
+    from .dataset_validation import validate_staging_structure
+
+    def operation(staging: Path) -> None:
+        catalog = read_catalog(staging)
+        registry = json.loads(
+            (staging / "channel_registry.json").read_text(encoding="utf-8")
+        )
+        render_publication = False
+        render_coverage = False
+        if baseline_seconds is not None:
+            apply_baseline_edit(
+                staging,
+                catalog,
+                baseline_seconds=baseline_seconds,
+                registry=registry,
+            )
+            render_publication = True
+        if recovery_seconds is not None or recovery_end_by is not None:
+            apply_recovery_edit(
+                staging,
+                catalog,
+                mode="seconds" if recovery_seconds is not None else "ts-minus",
+                recovery_seconds=recovery_seconds,
+            )
+            render_publication = True
+            render_coverage = True
+
+        renames: dict[str, str] = {}
+        for expression in camera_renames:
+            if "=" not in expression:
+                raise ValueError(f"camera rename must be OLD=NEW: {expression}")
+            old, new = expression.split("=", 1)
+            renames[old] = new
+        if renames:
+            rename_camera_role(staging, renames)
+            render_coverage = True
+
+        registry.pop("canonical_hash", None)
+        registry["canonical_hash"] = canonical_registry_hash(registry)
+        write_atomic_json(registry, staging / "channel_registry.json")
+        write_atomic_json(catalog, staging / "cycle_catalog.json")
+        _refresh_cycles(
+            staging,
+            render_publication=render_publication,
+            render_coverage=render_coverage,
         )
 
-
-def _read_canonical_json(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError(f"JSON object required: {path}")
-    return payload
+    return mutate_dataset(dataset_dir, operation, validate=validate_staging_structure)
 
 
-def _json_safe(value: Any) -> Any:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, (pd.Timestamp, datetime)):
-        return value.isoformat()
-    if hasattr(value, "item"):
-        return value.item()
-    return value
+def refresh_dataset(dataset_dir: Path) -> Path:
+    """Refresh current images, statistics, and both figure families atomically."""
+    from .dataset_io import mutate_dataset
+    from .dataset_validation import validate_staging_structure
+
+    return mutate_dataset(
+        dataset_dir,
+        lambda staging: _refresh_cycles(staging),
+        validate=validate_staging_structure,
+    )
 
 
-def _validate_canonical_dataset(dataset_dir: Path) -> None:
-    from .dataset_validation import validate_canonical_dataset
+def render_dataset(
+    dataset_dir: Path,
+    cycle_name: str,
+    *,
+    publication: bool = True,
+    coverage: bool = True,
+) -> Path:
+    """Render selected final assets without reading any source directory."""
+    from .dataset_io import mutate_dataset
+    from .dataset_metadata import read_catalog
+    from .dataset_validation import validate_staging_structure
 
-    validate_canonical_dataset(dataset_dir)
+    def operation(staging: Path) -> None:
+        catalog = read_catalog(staging)
+        if not any(
+            isinstance(record, Mapping)
+            and str(record.get("cycle_name")) == cycle_name
+            for record in catalog["cycles"]
+        ):
+            raise KeyError(f"unknown cycle: {cycle_name}")
+        _refresh_cycles(
+            staging,
+            [cycle_name],
+            render_publication=publication,
+            render_coverage=coverage,
+        )
+
+    return mutate_dataset(dataset_dir, operation, validate=validate_staging_structure)

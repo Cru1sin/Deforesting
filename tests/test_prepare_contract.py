@@ -459,7 +459,7 @@ def test_operating_mode_only_checks_heating_interval(
     assert cycle["cycle_status_reason"] == reason
 
 
-def test_single_defrost_event_creates_only_partial_cycles() -> None:
+def test_single_defrost_event_preserves_known_defrost_stage() -> None:
     frame = _cycle_frame_with_mode([False, False, True, True, False, False])
 
     labeled, summary = label_cycles(
@@ -472,7 +472,14 @@ def test_single_defrost_event_creates_only_partial_cycles() -> None:
 
     assert not summary["cycle_id"].eq("cycle_001").any()
     assert summary["cycle_id"].tolist() == ["partial_001"]
-    assert labeled["cycle_stage"].eq("partial").all()
+    assert labeled["cycle_stage"].tolist() == [
+        "partial",
+        "partial",
+        "defrost",
+        "defrost",
+        "partial",
+        "partial",
+    ]
 
 
 def test_partial_cycle_uses_water_setpoint_and_defrost_to_label_known_stages() -> None:

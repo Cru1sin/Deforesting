@@ -15,9 +15,7 @@ from frost_analysis.report import (
     _COP_INSET_BBOX,
     _PUBLICATION_AXIS_LABELS,
     _PUBLICATION_PANEL_CHANNELS,
-    _PUBLICATION_X_GRID_ALPHA,
     _add_cycle_title,
-    _add_freezing_reference,
     _add_qa_summary_line,
     _add_startup_annotation,
     _cop_inset_required,
@@ -26,8 +24,10 @@ from frost_analysis.report import (
     _humidity_columns,
     _infer_cycle_stage_boundaries,
     _observed_segments,
+    _plot_baseline,
     _plot_cycle_panels,
     _plot_defrost_state_strip,
+    _plot_one_cycle_publication,
     _plot_prepared_line,
     _plot_publication_stage_ribbon,
     _plot_stage_and_defrost,
@@ -599,6 +599,180 @@ def test_publication_infers_stage_intervals_from_canonical_cycle_frame() -> None
     ]
 
 
+def test_publication_merges_partial_cycle_boundaries_with_observed_stages() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=6, freq="10s"),
+            "cycle_stage": [
+                "recovery",
+                "recovery",
+                "frost_development",
+                "frost_development",
+                "defrost",
+                "defrost",
+            ],
+        }
+    )
+    cycle = pd.Series(
+        {
+            "heating_start": start,
+            "stable_heating_start": start + pd.Timedelta(seconds=20),
+            "defrost_start": pd.NaT,
+            "defrost_end": pd.NaT,
+        }
+    )
+
+    inferred = _infer_cycle_stage_boundaries(frame, cycle)
+
+    assert inferred["heating_start"] == cycle["heating_start"]
+    assert inferred["stable_heating_start"] == cycle["stable_heating_start"]
+    assert inferred["defrost_start"] == start + pd.Timedelta(seconds=40)
+    assert inferred["defrost_end"] == start + pd.Timedelta(seconds=60)
+    assert inferred["_stage_intervals"] == [
+        ("recovery", start, start + pd.Timedelta(seconds=20)),
+        (
+            "frost_development",
+            start + pd.Timedelta(seconds=20),
+            start + pd.Timedelta(seconds=40),
+        ),
+        ("defrost", start + pd.Timedelta(seconds=40), start + pd.Timedelta(seconds=60)),
+    ]
+    assert frame["cycle_stage"].tolist() == [
+        "recovery",
+        "recovery",
+        "frost_development",
+        "frost_development",
+        "defrost",
+        "defrost",
+    ]
+
+
+def test_stage_inference_clamps_observed_stage_to_known_boundary() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=4, freq="10s"),
+            "cycle_stage": [
+                "recovery",
+                "recovery",
+                "frost_development",
+                "frost_development",
+            ],
+        }
+    )
+    cycle = pd.Series(
+        {
+            "heating_start": start,
+            "stable_heating_start": start + pd.Timedelta(seconds=25),
+            "defrost_start": pd.NaT,
+            "defrost_end": pd.NaT,
+        }
+    )
+
+    inferred = _infer_cycle_stage_boundaries(frame, cycle)
+
+    assert inferred["_stage_intervals"] == [
+        ("recovery", start, start + pd.Timedelta(seconds=25)),
+        (
+            "frost_development",
+            start + pd.Timedelta(seconds=25),
+            start + pd.Timedelta(seconds=40),
+        ),
+    ]
+
+
+def test_stage_inference_does_not_create_missing_stage_from_render_bounds() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=2, freq="10s"),
+            "cycle_stage": ["frost_development", "frost_development"],
+        }
+    )
+
+    inferred = _infer_cycle_stage_boundaries(frame, pd.Series(dtype=object))
+
+    assert inferred["_stage_intervals"] == [
+        ("frost_development", start, start + pd.Timedelta(seconds=20)),
+    ]
+    assert pd.isna(inferred.get("defrost_start"))
+
+
+def test_publication_adds_humidity_panel_only_for_observed_humidity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    timestamps = pd.date_range(start, periods=3, freq="10s")
+    prepared = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "cycle_stage": ["recovery", "frost_development", "defrost"],
+        }
+    )
+    channels = {
+        "compressor_frequency": [1.0, 2.0, 3.0],
+        "compressor_frequency_setpoint": [1.0, 2.0, 3.0],
+        "heating_capacity": [3.0, 4.0, 5.0],
+        "cop": [2.0, 2.1, 2.2],
+        "water_in_temperature": [30.0, 31.0, 32.0],
+        "water_out_temperature": [35.0, 36.0, 37.0],
+        "water_temperature_setpoint": [40.0, 40.0, 40.0],
+        "ambient_temperature": [5.0, 6.0, 7.0],
+        "coil_temperature": [-2.0, -3.0, -4.0],
+        "evaporating_temperature": [-1.0, -2.0, -3.0],
+    }
+    processed = pd.DataFrame({"timestamp": timestamps, **channels})
+    for channel in channels:
+        processed[f"{channel}__imputed"] = False
+    cycle = pd.Series(
+        {
+            "cycle_id": "cycle_001",
+            "heating_start": start,
+            "stable_heating_start": start + pd.Timedelta(seconds=10),
+            "defrost_start": start + pd.Timedelta(seconds=20),
+            "defrost_end": start + pd.Timedelta(seconds=30),
+        }
+    )
+    captured: list[object] = []
+    monkeypatch.setattr(
+        "frost_analysis.report._save_figure",
+        lambda figure, path: captured.append(figure),
+    )
+
+    _plot_one_cycle_publication(
+        prepared,
+        processed,
+        cycle,
+        tmp_path / "no_humidity.png",
+        [],
+        processed_only=True,
+    )
+    no_humidity_figure = captured.pop()
+    assert len(no_humidity_figure.axes) == 6
+    assert "(f)" not in [text.get_text() for axis in no_humidity_figure.axes for text in axis.texts]
+    plt.close(no_humidity_figure)
+
+    processed["environment_relative_humidity"] = [80.0, 81.0, 82.0]
+    processed["environment_relative_humidity__imputed"] = False
+    _plot_one_cycle_publication(
+        prepared,
+        processed,
+        cycle,
+        tmp_path / "humidity.png",
+        [],
+        processed_only=True,
+    )
+    humidity_figure = captured.pop()
+    humidity_axis = humidity_figure.axes[-1]
+    humidity_figure.canvas.draw()
+    assert len(humidity_figure.axes) == 7
+    assert humidity_axis.get_ylabel() == "RH [%]"
+    assert "(f)" in [text.get_text() for text in humidity_axis.texts]
+    assert any("%" in label.get_text() for label in humidity_axis.get_yticklabels())
+    plt.close(humidity_figure)
+
+
 def test_stage_background_covers_cycle_when_all_stage_labels_are_missing() -> None:
     start = pd.Timestamp("2026-07-15 08:00:00")
     end = start + pd.Timedelta(minutes=10)
@@ -629,6 +803,8 @@ def test_stage_background_fills_missing_stage_gaps_without_hiding_known_stages()
     _shade_cycle_stages([axis], cycle, start)
 
     assert len(axis.patches) == 3
+    assert axis.patches[0].get_alpha() > axis.patches[1].get_alpha()
+    assert axis.patches[2].get_alpha() > axis.patches[1].get_alpha()
     assert _stage_intervals(cycle) == [
         ("recovery", start, start + pd.Timedelta(minutes=2)),
         ("defrost", start + pd.Timedelta(minutes=8), start + pd.Timedelta(minutes=10)),
@@ -644,6 +820,34 @@ def test_publication_ribbon_draws_neutral_background_for_unknown_stage_interval(
     _plot_publication_stage_ribbon(axis, cycle, [], start)
 
     assert len(axis.patches) == 1
+    plt.close(figure)
+
+
+def test_recovery_and_defrost_panel_backgrounds_are_darker_than_frost() -> None:
+    start = pd.Timestamp("2026-07-15 08:00:00")
+    cycle = pd.Series(
+        {
+            "_render_time_bounds": (start, start + pd.Timedelta(minutes=10)),
+            "_stage_intervals": [
+                ("recovery", start, start + pd.Timedelta(minutes=2)),
+                (
+                    "frost_development",
+                    start + pd.Timedelta(minutes=2),
+                    start + pd.Timedelta(minutes=8),
+                ),
+                (
+                    "defrost",
+                    start + pd.Timedelta(minutes=8),
+                    start + pd.Timedelta(minutes=10),
+                ),
+            ],
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _shade_cycle_stages([axis], cycle, start)
+
+    assert [patch.get_alpha() for patch in axis.patches] == [0.18, 0.14, 0.18]
     plt.close(figure)
 
 
@@ -746,20 +950,6 @@ def test_publication_title_omits_nan_reason() -> None:
     plt.close(figure)
 
 
-def test_freezing_reference_adds_zero_degree_line_and_label() -> None:
-    figure, axis = plt.subplots()
-
-    _add_freezing_reference(axis)
-
-    assert any(float(line.get_ydata()[0]) == 0.0 for line in axis.lines)
-    reference_text = next(
-        text for text in axis.texts if "0°C freezing threshold" in text.get_text()
-    )
-    assert reference_text.get_position()[1] > 0.70
-    assert _PUBLICATION_X_GRID_ALPHA <= 0.15
-    plt.close(figure)
-
-
 def test_publication_startup_annotation_is_in_the_top_margin() -> None:
     figure, axis = plt.subplots()
     start = pd.Timestamp("2026-07-15 08:00:00")
@@ -800,6 +990,39 @@ def test_report_records_baseline_unavailable_even_without_processed_rows(tmp_pat
         and warning["cycle_id"] == "cycle_001"
         for warning in report_summary["warnings"]
     )
+
+
+def test_baseline_unavailable_reason_is_not_rendered_as_annotation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = tmp_path / "run"
+    _write_run(run_dir)
+    processed = pd.read_parquet(run_dir / "processed_data.parquet")
+    summary = pd.DataFrame(
+        {
+            "cycle_id": ["cycle_001"],
+            "cycle_status": ["valid"],
+            "baseline_status": ["unavailable"],
+            "baseline_failure_reason": ["cycle_not_valid"],
+            "baseline_start": [pd.NaT],
+            "baseline_end": [pd.NaT],
+        }
+    )
+    captured: list[object] = []
+    monkeypatch.setattr(
+        "frost_analysis.report._save_figure",
+        lambda figure, path: captured.append(figure),
+    )
+
+    _plot_baseline(processed, summary, tmp_path / "qa", [])
+
+    figure = captured.pop()
+    assert all(
+        "Baseline unavailable" not in text.get_text()
+        for axis in figure.axes
+        for text in axis.texts
+    )
+    plt.close(figure)
 
 
 def test_report_rejects_incomplete_image_role_columns(tmp_path: Path) -> None:

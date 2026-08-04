@@ -507,7 +507,7 @@ def _plot_one_cycle_publication(
     warnings: list[dict[str, str]],
     *,
     processed_only: bool = False,
-    include_humidity: bool = False,
+    include_humidity: bool = True,
 ) -> None:
     cycle = _infer_cycle_stage_boundaries(prepared, cycle)
     humidity_channels = _humidity_columns(processed) if include_humidity else []
@@ -1085,7 +1085,6 @@ def _infer_cycle_stage_boundaries(  # noqa: C901
 
     stage_series = frame.loc[valid, "cycle_stage"].astype(str)
     stage_intervals: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
-    stage_times: dict[str, pd.Series] = {}
     for stage in ("recovery", "frost_development", "defrost"):
         # The index-aware selection keeps timestamps and stage labels aligned
         # even when a caller passes a non-default DataFrame index.
@@ -1093,7 +1092,6 @@ def _infer_cycle_stage_boundaries(  # noqa: C901
         values = values.dropna().sort_values(kind="stable")
         if values.empty:
             continue
-        stage_times[stage] = values
         stage_intervals.append(
             (
                 stage,
@@ -1102,25 +1100,82 @@ def _infer_cycle_stage_boundaries(  # noqa: C901
             )
         )
 
-    existing_intervals = _stage_intervals(result)
-    if existing_intervals:
-        result["_stage_intervals"] = existing_intervals
-        return result
+    existing_by_stage = {
+        stage: (start, end)
+        for stage, start, end in _stage_intervals(result)
+        if stage in ("recovery", "frost_development", "defrost")
+    }
+    inferred_by_stage = {
+        stage: (start, end)
+        for stage, start, end in stage_intervals
+    }
+    boundary_fields = {
+        "recovery": ("heating_start", "stable_heating_start"),
+        "frost_development": ("stable_heating_start", "defrost_start"),
+        "defrost": ("defrost_start", "defrost_end"),
+    }
+    known_stages = set(existing_by_stage) | set(inferred_by_stage)
+    for stage, (start_field, end_field) in boundary_fields.items():
+        start_value = cycle.get(start_field)
+        end_value = cycle.get(end_field)
+        if missing(start_value) or missing(end_value):
+            continue
+        if pd.Timestamp(start_value) < pd.Timestamp(end_value):
+            known_stages.add(stage)
 
-    if "frost_development" in stage_times and missing(result.get("stable_heating_start")):
-        result["stable_heating_start"] = pd.Timestamp(
-            stage_times["frost_development"].iloc[0]
+    if missing(result.get("heating_start")):
+        recovery_interval = existing_by_stage.get("recovery")
+        result["heating_start"] = (
+            recovery_interval[0] if recovery_interval is not None else first_timestamp
         )
-    if "defrost" in stage_times:
-        defrost_values = stage_times["defrost"]
-        if missing(result.get("defrost_start")):
-            result["defrost_start"] = pd.Timestamp(defrost_values.iloc[0])
-        if missing(result.get("defrost_end")):
-            result["defrost_end"] = pd.Timestamp(defrost_values.iloc[-1]) + pd.Timedelta(
-                seconds=step_seconds
-            )
-    if stage_intervals:
-        result["_stage_intervals"] = stage_intervals
+    if missing(result.get("stable_heating_start")):
+        frost_interval = existing_by_stage.get("frost_development")
+        inferred_frost = inferred_by_stage.get("frost_development")
+        if frost_interval is not None:
+            result["stable_heating_start"] = frost_interval[0]
+        elif inferred_frost is not None:
+            result["stable_heating_start"] = inferred_frost[0]
+    if missing(result.get("defrost_start")):
+        defrost_interval = existing_by_stage.get("defrost")
+        inferred_defrost = inferred_by_stage.get("defrost")
+        if defrost_interval is not None:
+            result["defrost_start"] = defrost_interval[0]
+        elif inferred_defrost is not None:
+            result["defrost_start"] = inferred_defrost[0]
+    if missing(result.get("defrost_end")):
+        defrost_interval = existing_by_stage.get("defrost")
+        inferred_defrost = inferred_by_stage.get("defrost")
+        if defrost_interval is not None:
+            result["defrost_end"] = defrost_interval[1]
+        elif inferred_defrost is not None:
+            result["defrost_end"] = inferred_defrost[1]
+
+    merged_intervals: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    for stage, (start_field, end_field) in boundary_fields.items():
+        if stage not in known_stages:
+            continue
+        existing_interval = existing_by_stage.get(stage)
+        inferred_interval = inferred_by_stage.get(stage)
+        start_value = result.get(start_field)
+        end_value = result.get(end_field)
+        fallback_interval = existing_interval or inferred_interval
+        if missing(start_value) and fallback_interval is not None:
+            start_value = fallback_interval[0]
+        if missing(end_value) and fallback_interval is not None:
+            end_value = fallback_interval[1]
+        if missing(start_value) or missing(end_value):
+            continue
+        start_timestamp = pd.Timestamp(start_value)
+        end_timestamp = pd.Timestamp(end_value)
+        if (
+            pd.notna(start_timestamp)
+            and pd.notna(end_timestamp)
+            and start_timestamp < end_timestamp
+        ):
+            merged_intervals.append((stage, start_timestamp, end_timestamp))
+
+    if merged_intervals:
+        result["_stage_intervals"] = merged_intervals
     return result
 
 
@@ -1211,14 +1266,24 @@ def _shade_cycle_stages(
                 left,
                 right,
                 color=_STAGE_COLORS[stage],
-                alpha=0.10 if stage == "partial" else 0.14,
+                alpha=(
+                    0.10
+                    if stage == "partial"
+                    else 0.18
+                    if stage in {"recovery", "defrost"}
+                    else 0.14
+                ),
                 linewidth=0,
                 zorder=0,
             )
 
 
 def _publication_stage_labels(cycle: pd.Series) -> tuple[str, ...]:
-    return tuple(_RIBBON_STAGE_LABELS[stage] for stage, _, _ in _stage_intervals(cycle))
+    return tuple(
+        _RIBBON_STAGE_LABELS[stage]
+        for stage, _, _ in _stage_intervals(cycle)
+        if stage in _RIBBON_STAGE_LABELS
+    )
 
 
 def _plot_publication_stage_ribbon(
@@ -1329,27 +1394,6 @@ def _plot_publication_stage_ribbon(
             color="#263238",
             clip_on=False,
         )
-
-
-def _add_freezing_reference(axis: Any) -> None:
-    axis.axhline(
-        0.0,
-        color="#6B7280",
-        linestyle=(0, (3, 2)),
-        linewidth=0.75,
-        zorder=1,
-    )
-    axis.text(
-        0.55,
-        0.86,
-        "0°C freezing threshold",
-        transform=axis.transAxes,
-        ha="center",
-        va="top",
-        fontsize=7.5,
-        color="#4D4D4D",
-        bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72, "pad": 1.0},
-    )
 
 
 def _defrost_state_gap_intervals(
@@ -1753,7 +1797,6 @@ def _plot_baseline(
     warnings: list[dict[str, str]],
 ) -> str:
     figure, axes = plt.subplots(4, 1, figsize=(15, 12), sharex=True)
-    unavailable_lines: list[str] = []
     for _, cycle in summary.iterrows():
         if cycle.get("cycle_status") == "valid" and cycle.get("baseline_status") == "unavailable":
             reason = str(cycle.get("baseline_failure_reason", "baseline unavailable"))
@@ -1765,15 +1808,6 @@ def _plot_baseline(
                 cycle_id,
                 message=reason,
             )
-            unavailable_lines.append(f"{cycle_id}: {reason}")
-    if unavailable_lines:
-        axes[0].text(
-            0.01,
-            0.05,
-            "Baseline unavailable\n" + "\n".join(unavailable_lines),
-            transform=axes[0].transAxes,
-            fontsize=8,
-        )
     for axis, channel in zip(axes, _BASELINE_DIAGNOSTIC_CHANNELS, strict=True):
         _plot_baseline_panel(axis, processed, channel, warnings)
         for _, cycle in summary.iterrows():
