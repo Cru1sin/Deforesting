@@ -8,7 +8,6 @@ from frost_analysis.dataset_images import stable_logical_image_id
 from frost_analysis.dataset_registry import (
     IMAGE_COLUMNS,
     canonical_frame,
-    canonical_registry_hash,
     drop_image_columns,
     merge_registries,
     registry_from_frame,
@@ -17,7 +16,6 @@ from frost_analysis.dataset_registry import (
 
 def _registry(*, signal_type: str = "double") -> dict[str, object]:
     return {
-        "registry_version": 1,
         "resample_interval_seconds": 10,
         "channels": {
             "signal": {
@@ -83,7 +81,6 @@ def test_registry_merge_allows_new_channel_and_preserves_old_order() -> None:
         "signal",
         "humidity",
     ]
-    assert canonical_registry_hash(merged) == canonical_registry_hash(dict(merged))
 
 
 def test_registry_allows_existing_channel_to_be_absent_in_new_date() -> None:

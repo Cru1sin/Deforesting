@@ -119,7 +119,7 @@ def _make_cycle_record(
         long_gaps,
         settings,
     )
-    stable_start = _stable_start(labeled, heating_start, defrost_start, settings)
+    stable_start = find_stable_heating_start(labeled, heating_start, defrost_start, settings)
     if stable_start is None and status == "valid":
         status, reason = "incomplete", "recovery_end_not_observed"
     if (
@@ -191,7 +191,7 @@ def _cycle_status(
     return "valid", ""
 
 
-def _stable_start(
+def find_stable_heating_start(
     frame: pd.DataFrame,
     heating_start: Any,
     defrost_start: Any,
@@ -570,7 +570,7 @@ def _partial_stage_context(  # noqa: C901
         observed = times.notna() & water_out.notna() & setpoint.notna()
         has_temperature_evidence = bool(observed.any())
         if has_temperature_evidence:
-            stable_start = _stable_start(
+            stable_start = find_stable_heating_start(
                 segment,
                 heating_start,
                 defrost_start,

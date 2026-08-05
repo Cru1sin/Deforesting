@@ -11,10 +11,20 @@ from typing import Any
 import pandas as pd
 
 from .dataset import DATASET_ID, DATASET_SCHEMA_VERSION
-from .dataset_io import write_atomic_json
+from .dataset_io import write_json
 
 CATALOG_FILENAME = "cycle_catalog.json"
 MANIFEST_FILENAME = "dataset_manifest.json"
+
+
+def cycle_assets(cycle_name: str) -> dict[str, str]:
+    return {
+        "parquet": f"cycles/{cycle_name}.parquet",
+        "csv": f"cycles/{cycle_name}.csv",
+        "original_csv": f"cycles_original/{cycle_name}.csv",
+        "publication": f"cycles/{cycle_name}.png",
+        "rgb_coverage": f"cycles/{cycle_name}_rgb_coverage.png",
+    }
 
 
 def read_manifest(dataset_dir: Path) -> dict[str, Any]:
@@ -50,7 +60,7 @@ def read_manifest(dataset_dir: Path) -> dict[str, Any]:
 
 def write_manifest(dataset_dir: Path, manifest: Mapping[str, Any]) -> None:
     """Write only the final Dataset-level manifest fields."""
-    write_atomic_json(dict(manifest), dataset_dir / MANIFEST_FILENAME)
+    write_json(dict(manifest), dataset_dir / MANIFEST_FILENAME)
 
 
 def read_catalog(dataset_dir: Path) -> dict[str, Any]:
@@ -62,10 +72,10 @@ def read_catalog(dataset_dir: Path) -> dict[str, Any]:
 
 
 def write_catalog(dataset_dir: Path, catalog: Mapping[str, Any]) -> None:
-    """Write the cycle catalog atomically."""
+    """Write the cycle catalog directly."""
     if set(catalog) != {"cycles"} or not isinstance(catalog["cycles"], list):
         raise ValueError("cycle catalog must contain only a cycles list")
-    write_atomic_json(dict(catalog), dataset_dir / CATALOG_FILENAME)
+    write_json(dict(catalog), dataset_dir / CATALOG_FILENAME)
 
 
 def experiment_record(
@@ -97,7 +107,6 @@ def build_cycle_record(
     original: pd.DataFrame,
     image_summary: Mapping[str, Any],
     assets: Mapping[str, str],
-    asset_sha256: Mapping[str, str],
 ) -> dict[str, Any]:
     """Build one complete, human-readable cycle record."""
     pipeline_status = _clean(summary_row.get("cycle_status")) or "invalid"
@@ -148,7 +157,6 @@ def build_cycle_record(
         },
         "image": dict(image_summary),
         "assets": dict(assets),
-        "asset_sha256": dict(asset_sha256),
     }
 
 

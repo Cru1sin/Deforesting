@@ -35,8 +35,6 @@ def collect_final_images(  # noqa: C901
     """Collect Prepared image matches without re-matching or hashing bytes."""
     roles = image_roles(prepared)
     candidates: dict[tuple[str, str, str], dict[str, object]] = {}
-    source_matches: dict[str, tuple[str, pd.Timestamp]] = {}
-    source_camera_roles: dict[str, str] = {}
     for values in prepared.to_dict(orient="records"):
         key = (str(values["experiment_id"]), str(values["cycle_id"]))
         cycle_name = cycle_names.get(key)
@@ -54,38 +52,12 @@ def collect_final_images(  # noqa: C901
                 continue
             if pd.isna(raw_time) or pd.isna(raw_offset):
                 raise ValueError(f"incomplete image match for {path_column}")
-            raw_relative = str(raw_path).replace("\\", "/")
-            relative_path = Path(raw_relative)
-            if (
-                relative_path.is_absolute()
-                or ".." in relative_path.parts
-                or "\\" in raw_relative
-            ):
-                raise ValueError(f"source image path must be safe and relative: {raw_path}")
-            relative = relative_path.as_posix()
-            lexical_source_path = input_dir / relative
-            try:
-                lexical_source_path.relative_to(input_dir)
-            except ValueError as error:
-                raise ValueError(f"source image path escapes input_dir: {raw_path}") from error
-            source_path = lexical_source_path.resolve()
+            relative = str(raw_path).replace("\\", "/")
+            source_path = input_dir / relative
             if not source_path.is_file():
                 raise FileNotFoundError(f"matched source image does not exist: {source_path}")
             source_camera_id = relative.split("/", 1)[0]
-            if not source_camera_id or "__" in source_camera_id:
-                raise ValueError(f"invalid source_camera_id: {source_camera_id!r}")
-            previous_role = source_camera_roles.get(source_camera_id)
-            if previous_role is not None and previous_role != role:
-                raise ValueError(
-                    "one source camera was matched to multiple roles: "
-                    f"{source_camera_id}: {previous_role!r}, {role!r}"
-                )
-            source_camera_roles[source_camera_id] = role
             image_time = pd.Timestamp(raw_time)
-            source_match = source_matches.get(relative)
-            if source_match is not None and source_match != (cycle_uid, image_time):
-                raise ValueError(f"source image is matched to multiple cycles: {relative}")
-            source_matches[relative] = (cycle_uid, image_time)
             record = {
                 "cycle_uid": cycle_uid,
                 "cycle_name": cycle_name,
@@ -94,23 +66,13 @@ def collect_final_images(  # noqa: C901
                 "matched_timestamp": pd.Timestamp(values["timestamp"]),
                 "offset_seconds": float(raw_offset),
                 "cycle_stage": str(values.get("cycle_stage", "")),
+                "current_role": role,
                 "source_relative_path": relative,
                 "file_name": Path(relative).name,
                 "source_path": source_path,
             }
             candidate_key = (cycle_uid, source_camera_id, relative)
-            previous = candidates.get(candidate_key)
-            if previous is not None:
-                for field in (
-                    "image_time",
-                    "matched_timestamp",
-                    "offset_seconds",
-                    "cycle_stage",
-                ):
-                    if previous[field] != record[field]:
-                        raise ValueError(f"inconsistent image match for {relative}")
-                continue
-            candidates[candidate_key] = record
+            candidates.setdefault(candidate_key, record)
 
     grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
     for record in candidates.values():
@@ -118,7 +80,6 @@ def collect_final_images(  # noqa: C901
         grouped.setdefault(key, []).append(record)
 
     records: list[dict[str, object]] = []
-    seen_ids: set[str] = set()
     seen_filenames: set[tuple[str, str, str]] = set()
     for group_key in sorted(grouped):
         group = sorted(
@@ -129,7 +90,6 @@ def collect_final_images(  # noqa: C901
             ),
         )
         cycle_name, source_camera_id = group_key
-        current_role = source_camera_roles[source_camera_id]
         for frame_index, record in enumerate(group, start=1):
             file_name = str(record["file_name"])
             filename_key = (cycle_name, source_camera_id, file_name)
@@ -142,17 +102,13 @@ def collect_final_images(  # noqa: C901
             image_id = stable_logical_image_id(
                 str(record["cycle_uid"]), source_camera_id, str(record["source_relative_path"])
             )
-            if image_id in seen_ids:
-                raise ValueError(f"duplicate generated image_id: {image_id}")
-            seen_ids.add(image_id)
             record.update(
                 {
                     "image_id": image_id,
                     "frame_index": frame_index,
-                    "initial_camera_slot": current_role,
-                    "current_role": current_role,
+                    "initial_camera_slot": str(record["current_role"]),
                     "image_path": (
-                        f"images/{cycle_name}/{source_camera_id}__{current_role}/"
+                        f"images/{cycle_name}/{source_camera_id}__{record['current_role']}/"
                         f"{file_name}"
                     ),
                     "file_size_bytes": Path(str(record["source_path"])).stat().st_size,
@@ -186,12 +142,12 @@ def image_metadata_frame_final(records: list[dict[str, object]]) -> pd.DataFrame
 
 
 def copy_final_image(record: Mapping[str, object], dataset_dir: Path) -> None:
-    """Copy a source image and perform only an immediate size/existence check."""
+    """Copy a source image and check that the target exists."""
     source = Path(str(record["source_path"]))
     target = dataset_dir / str(record["image_path"])
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
-    if not target.is_file() or target.stat().st_size != source.stat().st_size:
+    if not target.is_file():
         raise ValueError(f"copied image is incomplete: {target}")
 
 
@@ -285,7 +241,7 @@ def _cycle_window(frame: pd.DataFrame) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 def _cycle_image_summary(
-    staging: Path,
+    dataset_dir: Path,
     cycle_name: str,
     frame: pd.DataFrame,
     image_metadata: pd.DataFrame,
@@ -295,7 +251,7 @@ def _cycle_image_summary(
     dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
 ]:
     start, end = _cycle_window(frame)
-    images = scan_final_cycle_images(staging, cycle_name, image_metadata)
+    images = scan_final_cycle_images(dataset_dir, cycle_name, image_metadata)
     settings = registry.get("image_coverage", {})
     max_gap = float(
         settings.get("max_image_gap_seconds", 40.0)

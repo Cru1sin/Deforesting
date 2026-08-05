@@ -2,17 +2,96 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 import pyarrow as pa  # type: ignore[import-untyped]
 
 IMAGE_COLUMNS = ("path", "time", "offset_seconds")
 _IMAGE_COLUMN_RE = re.compile(r"^image_.+_(?:path|time|offset_seconds)$")
+_SOURCE_QUALITY_SUFFIXES = (
+    "__missing",
+    "__invalid",
+    "__duplicate",
+    "__conflict",
+)
+
+
+def export_original_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Project Prepared rows into the stable high-resolution Dataset export."""
+    image_pattern = re.compile(r"^image_.+_(?:path|time|offset_seconds)$")
+    columns = [
+        str(column)
+        for column in frame.columns
+        if (
+            str(column) not in {"cycle_elapsed_seconds", "cycle_progress"}
+            and not image_pattern.fullmatch(str(column))
+            and not str(column).endswith(_SOURCE_QUALITY_SUFFIXES)
+            and not str(column).endswith("__baseline")
+            and not str(column).endswith("__baseline_residual")
+        )
+    ]
+    if "timestamp" not in columns:
+        raise ValueError("Prepared data has no timestamp column")
+    return frame.loc[:, columns].sort_values("timestamp", kind="stable").reset_index(
+        drop=True
+    )
+
+
+def merge_original_columns(pipelines: Sequence[Any]) -> list[str]:
+    ordered: list[str] = []
+    for pipeline in pipelines:
+        for column in export_original_frame(pipeline.prepared).columns:
+            if str(column) not in ordered:
+                ordered.append(str(column))
+    if "timestamp" not in ordered:
+        raise ValueError("Prepared data has no timestamp column")
+    return ordered
+
+
+def build_processed_frame(
+    frame: pd.DataFrame,
+    registry: Mapping[str, Any],
+    *,
+    cycle_name: str,
+    cycle_uid: str,
+) -> pd.DataFrame:
+    from .dataset import DATASET_ID, DATASET_SCHEMA_VERSION, parse_cycle_name
+
+    result = canonical_frame(frame, registry)
+    result.insert(0, "cycle_uid", cycle_uid)
+    result.insert(0, "cycle_name", cycle_name)
+    result.insert(0, "dataset_cycle_index", parse_cycle_name(cycle_name))
+    result.insert(0, "dataset_schema_version", DATASET_SCHEMA_VERSION)
+    result.insert(0, "dataset_id", DATASET_ID)
+    return result
+
+
+def align_original_schema(
+    dataset_dir: Path,
+    records: Sequence[dict[str, Any]],
+    original_columns: Sequence[str],
+) -> None:
+    """Add null columns to historical Original exports when a channel is new."""
+    from .dataset_io import write_csv
+
+    expected = [str(column) for column in original_columns]
+    for record in records:
+        assets = record.get("assets")
+        if not isinstance(assets, Mapping):
+            raise ValueError(f"cycle assets are missing: {record.get('cycle_name')}")
+        relative = assets.get("original_csv")
+        if not isinstance(relative, str):
+            raise ValueError(f"original CSV asset is missing: {record.get('cycle_name')}")
+        path = dataset_dir / relative
+        columns = [str(column) for column in pd.read_csv(path, nrows=0).columns]
+        if columns != expected:
+            write_csv(pd.read_csv(path).reindex(columns=expected), path)
 
 
 def is_image_column(name: object) -> bool:
@@ -40,7 +119,6 @@ def registry_from_frame(
         for name, settings in channels.items()
     }
     return {
-        "registry_version": 1,
         "resample_interval_seconds": int(resample_interval_seconds),
         "channels": channel_specs,
         "fields": fields,
@@ -52,8 +130,6 @@ def merge_registries(
     existing: Mapping[str, Any], candidate: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Merge registries, rejecting semantic changes and allowing new fields."""
-    if int(existing.get("registry_version", 1)) != int(candidate.get("registry_version", 1)):
-        raise ValueError("channel registry version changed")
     if int(existing.get("resample_interval_seconds", 10)) != int(
         candidate.get("resample_interval_seconds", 10)
     ):
@@ -92,7 +168,6 @@ def merge_registries(
     if old_analysis != new_analysis:
         raise ValueError("channel registry analysis settings changed")
     return {
-        "registry_version": int(existing.get("registry_version", 1)),
         "resample_interval_seconds": int(existing.get("resample_interval_seconds", 10)),
         "channels": merged_channels,
         "fields": merged_fields,
@@ -100,10 +175,60 @@ def merge_registries(
     }
 
 
-def canonical_registry_hash(registry: Mapping[str, Any]) -> str:
-    """Hash only the scientific registry content, excluding a stored hash."""
-    payload = {str(key): value for key, value in registry.items() if key != "canonical_hash"}
-    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+def build_registry(pipelines: Sequence[Any]) -> dict[str, Any]:
+    """Build the scientific registry shared by one or more date pipelines."""
+    registry: dict[str, Any] | None = None
+    for pipeline in pipelines:
+        candidate = registry_from_frame(
+            pipeline.processed,
+            pipeline.channels,
+            analysis_settings=_settings_mapping(pipeline.config.analysis),
+            resample_interval_seconds=int(
+                pipeline.config.process.resample_interval_seconds
+            ),
+        )
+        registry = candidate if registry is None else merge_registries(registry, candidate)
+    if registry is None:
+        raise ValueError("Dataset requires at least one processed pipeline")
+    processing_settings = _processing_settings(pipelines[0])
+    for pipeline in pipelines[1:]:
+        if _processing_settings(pipeline) != processing_settings:
+            raise ValueError("Dataset processing settings changed across experiments")
+    registry["processing_settings"] = {
+        "feature_windows_minutes": processing_settings["feature_windows_minutes"],
+    }
+    registry["baseline_seconds"] = processing_settings["baseline_seconds"]
+    registry["baseline_managed"] = processing_settings["baseline_managed"]
+    registry["recovery_edit"] = processing_settings["recovery_edit"]
+    registry["image_coverage"] = {"max_image_gap_seconds": 40.0}
+    return registry
+
+
+def _settings_mapping(value: Any) -> Mapping[str, Any]:
+    if is_dataclass(value):
+        return cast(Mapping[str, Any], asdict(cast(Any, value)))
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _processing_settings(pipeline: Any) -> dict[str, Any]:
+    process = pipeline.config.process
+    baseline = getattr(process, "baseline", None)
+    windows = getattr(process, "feature_windows_minutes", ())
+    return {
+        "feature_windows_minutes": [int(value) for value in windows],
+        "baseline_seconds": int(getattr(baseline, "baseline_seconds", 60)),
+        "baseline_managed": False,
+        "recovery_edit": {
+            "mode": "ts-minus",
+            "seconds": None,
+            "fallback_seconds": float(
+                getattr(pipeline.config.cycles, "stable_heating_seconds", 180)
+            ),
+            "managed": False,
+        },
+    }
 
 
 def canonical_frame(frame: pd.DataFrame, registry: Mapping[str, Any]) -> pd.DataFrame:
@@ -245,4 +370,9 @@ def _jsonable(value: Any) -> Any:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        _jsonable(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )

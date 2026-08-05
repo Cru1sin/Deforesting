@@ -1,7 +1,7 @@
 # Cycle Dataset v3 数据合同
 
 Cycle Dataset 是自包含的科学数据发布层。构建链直接从日期原始目录执行
-`prepare → validate_prepared → process → validate_processed → Dataset staging`；Dataset
+`prepare → validate_prepared → process → validate_processed → Dataset`；Dataset
 操作不读取 Raw、Run、YAML 或任何旧版本 Dataset。
 
 ## 目录
@@ -57,7 +57,7 @@ dynamic features 或 10 秒聚合列。追加日期发现新标准通道时，�
 Run 路径或全局图片统计。
 
 `cycle_catalog.json` 保存每个 cycle 的身份、Pipeline 状态、当前人工状态、边界、数据摘要、
-图片摘要、固定资产路径和五类非图片/图形资产 SHA。`pipeline_status` 是上游事实；
+图片摘要和固定资产路径。`pipeline_status` 是上游事实；
 `status` 是当前唯一 Dataset 使用状态，只能通过 `review-cycle` 修改。Analysis 只按
 `status` 过滤。
 
@@ -103,13 +103,16 @@ baseline/recovery 规则，避免一个 Dataset 混用不同的管理设定。`-
 `--recovery-end-by ts-minus` 互斥。Recovery edit 会同步更新 Original、Processed、
 cycle coordinates、stage-partitioned dynamic features、图片 metadata stage 和相关图形。
 
-## 事务与校验
+## 写入与校验
 
-所有写操作都使用同一套 sibling staging、hardlink clone、结构检查和目录级 rollback。
-未修改文件只建立硬链接；修改文件使用临时文件后 atomic replace。构建期
-`validate_staging_structure()` 只检查身份、目录、资产存在性、metadata 主键和低成本
-合同；显式 `dataset validate` 才读取科学文件并核对 schema、时间、row count 和非图片
-资产 SHA。图片不参与内容 SHA 或闭包校验。
+Dataset 直接写入目标目录，不持久化 staging、hardlink、rollback 或事务状态。`add`、
+`rebuild`、`edit` 和 `refresh` 失败后，按当前文件状态修正问题并重新运行相应操作；需要
+从零恢复时使用 `dataset rebuild`。
+
+科学构建阶段由 `validate_prepared()` 和 `validate_processed()` 检查 Prepared/Processed
+数据。显式 `dataset validate` 才读取已发布 Dataset，检查非空数据、schema、时间顺序、
+cycle identity、row count 和 Original 的质量列合同。Dataset 不保存或核对资产 SHA，
+图片也不做内容哈希、闭包或 orphan 校验。
 
 Dataset 下游统一使用：
 

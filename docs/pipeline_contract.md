@@ -261,8 +261,8 @@ resampling、填补、派生量或候选证据分析；每个有 Prepared 行且
 Parquet、CSV、Original CSV、publication PNG 和 RGB coverage PNG。
 
 `dataset_manifest.json` 只保存 Dataset 身份和实验 provenance；`cycle_catalog.json` 保存
-cycle 边界、Pipeline 状态、当前唯一 Dataset 使用状态、数据/图片摘要、固定资产路径和资产
-SHA。图片 metadata 不保存图片内容 SHA，Dataset validator 也不做图片闭包或 orphan 校验。
+cycle 边界、Pipeline 状态、当前唯一 Dataset 使用状态、数据/图片摘要和固定资产路径。
+图片 metadata 不保存图片内容 SHA，Dataset validator 也不做图片闭包或 orphan 校验。
 Original CSV 保留标准化高分辨率传感器数据并删除逐通道质量审计列；追加新通道时历史
 Original CSV 补 null 以保持统一 schema。所有下游通过 `DatasetLoader` 读取，完整合同见
 [`docs/dataset_contract.md`](dataset_contract.md)。

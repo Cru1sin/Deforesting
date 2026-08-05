@@ -16,7 +16,7 @@ from frost_analysis.cycles import (
     _defrost_runs,
     _fill_short_state_gaps,
     _normalize_state,
-    _stable_start,
+    find_stable_heating_start,
     label_cycles,
 )
 from frost_analysis.images import match_images
@@ -783,7 +783,7 @@ def test_stable_start_uses_ts_minus_two_before_looser_thresholds() -> None:
         }
     )
 
-    stable = _stable_start(frame, start, start + pd.Timedelta(seconds=5), {})
+    stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=5), {})
 
     assert stable == start + pd.Timedelta(seconds=3)
 
@@ -798,7 +798,7 @@ def test_stable_start_falls_back_to_ts_minus_three_only_if_minus_two_is_absent()
         }
     )
 
-    stable = _stable_start(frame, start, start + pd.Timedelta(seconds=4), {})
+    stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=4), {})
 
     assert stable == start + pd.Timedelta(seconds=2)
 
@@ -813,7 +813,7 @@ def test_stable_start_is_missing_when_all_priority_thresholds_have_no_observatio
         }
     )
 
-    stable = _stable_start(frame, start, start + pd.Timedelta(seconds=3), {})
+    stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=3), {})
 
     assert stable is None
 

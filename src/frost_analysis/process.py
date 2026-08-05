@@ -10,7 +10,7 @@ import pandas as pd
 
 from .baseline import add_baseline_residuals
 from .config import Config
-from .features import add_dynamic_features, calculate_derived_features
+from .features import calculate_derived_features, recompute_dynamic_features
 from .images import image_columns, image_roles
 
 _PARTITION_KEYS = ["experiment_id", "cycle_id", "cycle_stage"]
@@ -51,7 +51,7 @@ def process(
         minimum_coverage=config.process.minimum_continuous_bucket_coverage,
         eligible_channels=eligible_channels,
     )
-    coordinated = _recompute_cycle_coordinates(resampled, initial_summary)
+    coordinated = recompute_cycle_coordinates(resampled, initial_summary)
     raw_cop = _calculate_unfilled_cop(coordinated, channels)
     filled = _fill_missing(coordinated, channels, config)
     derived = calculate_derived_features(filled, channels)
@@ -61,7 +61,7 @@ def process(
     baselined, baseline_summary = add_baseline_residuals(
         derived, initial_summary, channels, config.process.baseline
     )
-    featured = add_dynamic_features(
+    featured = recompute_dynamic_features(
         baselined,
         channels,
         interval_seconds=interval_seconds,
@@ -428,7 +428,7 @@ def _processed_columns(
     return columns
 
 
-def _recompute_cycle_coordinates(
+def recompute_cycle_coordinates(
     frame: pd.DataFrame, cycle_summary: pd.DataFrame
 ) -> pd.DataFrame:
     result = frame.copy()

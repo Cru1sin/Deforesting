@@ -57,7 +57,7 @@ def _dependency_imputed(frame: pd.DataFrame, dependencies: list[str]) -> pd.Seri
     return result
 
 
-def add_dynamic_features(
+def recompute_dynamic_features(
     frame: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
     *,
