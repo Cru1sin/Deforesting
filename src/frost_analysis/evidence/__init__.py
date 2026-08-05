@@ -1,7 +1,7 @@
 """Dataset-native Evidence public API."""
 
+from .contracts import EvidenceBundle
 from .core import build_evidence
-from .models import EvidenceBundle
 from .output import write_evidence
 from .settings import EvidenceSettings
 

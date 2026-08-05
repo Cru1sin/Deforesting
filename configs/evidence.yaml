@@ -1,4 +1,3 @@
-analysis_version: frost-cycle-evidence-v2.2
 targets:
   - heating_capacity
   - cop
@@ -12,7 +11,3 @@ minimum_feature_points: 12
 minimum_feature_coverage: 0.8
 minimum_valid_pairs: 30
 minimum_pair_coverage: 0.8
-onset_window_seconds: 60
-onset_mad_multiplier: 3.0
-onset_persistence_seconds: 60
-aggregation_method: date_balanced_median_of_cycle_medians_v1

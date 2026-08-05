@@ -1,6 +1,13 @@
-"""Stable Evidence table column contracts."""
+"""Stable public contracts for Dataset-native Evidence."""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pandas as pd
+
+ANALYSIS_VERSION = "frost-cycle-evidence-v2.2"
+AGGREGATION_METHOD = "date_balanced_median_of_cycle_medians_v1"
 
 CYCLE_ELIGIBILITY_COLUMNS = [
     "cycle_name",
@@ -21,7 +28,6 @@ FEATURE_CYCLE_METRIC_COLUMNS = [
     "spearman",
     "signed_effect",
     "trend_slope_per_min",
-    "onset_minutes",
     "metric_status",
     "exclusion_reason",
 ]
@@ -34,6 +40,7 @@ FUTURE_ASSOCIATION_COLUMNS = [
     "target",
     "horizon_minutes",
     "effect",
+    "degradation_support",
     "valid_pairs",
     "pair_coverage",
     "metric_status",
@@ -44,6 +51,7 @@ FUTURE_HORIZON_SUMMARY_COLUMNS = [
     "target",
     "horizon_minutes",
     "effect",
+    "degradation_support",
     "valid_cycle_count",
     "valid_date_count",
     "aggregation_method",
@@ -57,10 +65,9 @@ FEATURE_PROFILE_COLUMNS = [
     "signed_effect",
     "direction_consistency",
     "trend_slope_per_min",
-    "onset_minutes",
     "primary_target",
     "primary_horizon_minutes",
-    "primary_future_effect",
+    "primary_future_degradation_support",
     "primary_future_valid_cycle_count",
     "primary_future_valid_date_count",
 ]
@@ -73,3 +80,15 @@ FEATURE_PAIR_SIMILARITY_COLUMNS = [
     "metric_status",
     "exclusion_reason",
 ]
+
+
+@dataclass(frozen=True)
+class EvidenceBundle:
+    """The six tables produced by one Evidence analysis."""
+
+    cycle_eligibility: pd.DataFrame
+    feature_cycle_metrics: pd.DataFrame
+    future_association: pd.DataFrame
+    future_horizon_summary: pd.DataFrame
+    feature_profile: pd.DataFrame
+    feature_pair_similarity: pd.DataFrame

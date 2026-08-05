@@ -21,7 +21,6 @@ def settings(
     horizons: tuple[int, ...] = (1, 2),
 ) -> EvidenceSettings:
     return EvidenceSettings(
-        analysis_version="frost-cycle-evidence-v2.2",
         targets=targets,
         primary_target=targets[0],
         primary_horizon_minutes=horizons[0],
@@ -30,10 +29,6 @@ def settings(
         minimum_feature_coverage=minimum_feature_coverage,
         minimum_valid_pairs=minimum_valid_pairs,
         minimum_pair_coverage=minimum_pair_coverage,
-        onset_window_seconds=60.0,
-        onset_mad_multiplier=3.0,
-        onset_persistence_seconds=60.0,
-        aggregation_method="date_balanced_median_of_cycle_medians_v1",
     )
 
 

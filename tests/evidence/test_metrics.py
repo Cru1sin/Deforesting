@@ -3,8 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+import pytest
 
 from frost_analysis.evidence import build_evidence
+from frost_analysis.evidence.metrics import observed_mask
 
 from .conftest import frame_for, settings, write_dataset
 
@@ -102,3 +105,48 @@ def test_future_anchor_requires_exact_elapsed_value_in_same_stage(tmp_path: Path
     assert future["valid_pairs"] == 3
     assert future["pair_coverage"] == 1.0
     assert future["metric_status"] == "available"
+
+
+def test_observed_mask_requires_finite_non_imputed_values() -> None:
+    frame = pd.DataFrame(
+        {
+            "signal__baseline_residual": [1.0, np.nan, np.inf, -np.inf, 5.0],
+            "signal__imputed": [False, False, False, False, pd.NA],
+        }
+    )
+
+    assert observed_mask(frame, "signal__baseline_residual").tolist() == [
+        True,
+        False,
+        False,
+        False,
+        True,
+    ]
+
+
+def test_future_effect_and_degradation_support_use_exact_change_direction(
+    tmp_path: Path,
+) -> None:
+    frame = frame_for(
+        elapsed=(0, 60, 120, 180, 240, 300),
+        feature_a=(1, 2, 3, 4, 5, 6),
+        feature_b=(6, 5, 4, 3, 2, 1),
+        heating_capacity=(10, 9, 7, 4, 0, -5),
+    )
+    loader = write_dataset(tmp_path / "dataset", [("c1", "2026-07-01", "valid", frame)])
+
+    bundle = build_evidence(
+        loader,
+        settings(
+            targets=("heating_capacity",),
+            horizons=(1,),
+            minimum_valid_pairs=2,
+            minimum_pair_coverage=1.0,
+        ),
+    )
+
+    future = bundle.future_association.set_index("feature")
+    assert future.loc["feature_a", "effect"] == pytest.approx(-1.0)
+    assert future.loc["feature_a", "degradation_support"] == pytest.approx(1.0)
+    assert future.loc["feature_b", "effect"] == pytest.approx(1.0)
+    assert future.loc["feature_b", "degradation_support"] == pytest.approx(1.0)

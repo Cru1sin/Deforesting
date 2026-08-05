@@ -29,7 +29,7 @@ def observed_mask(frame: pd.DataFrame, value_column: str) -> pd.Series[Any]:
     return pd.Series(finite & ~imputed, index=frame.index, dtype=bool)
 
 
-def _feature_cycle_rows(
+def feature_cycle_rows(
     frame: pd.DataFrame,
     metadata: Mapping[str, object],
     features: FeatureSpec,
@@ -38,6 +38,7 @@ def _feature_cycle_rows(
     stage = _frost_frame(frame)
     rows: list[dict[str, object]] = []
     for feature, direction in features:
+        _validate_direction(feature, direction)
         row: dict[str, object] = {
             **metadata,
             "feature": feature,
@@ -45,7 +46,6 @@ def _feature_cycle_rows(
             "spearman": np.nan,
             "signed_effect": np.nan,
             "trend_slope_per_min": np.nan,
-            "onset_minutes": np.nan,
             "metric_status": "unavailable",
             "exclusion_reason": "",
         }
@@ -89,7 +89,7 @@ def _feature_cycle_rows(
             row["exclusion_reason"] = "constant_feature"
             rows.append(row)
             continue
-        correlation = _spearman(x_seconds / 60.0, values)
+        correlation = spearman(x_seconds / 60.0, values)
         slope = _theil_sen(x_seconds / 60.0, values)
         if not np.isfinite(correlation) or not np.isfinite(slope):
             row["exclusion_reason"] = "insufficient_points"
@@ -101,7 +101,6 @@ def _feature_cycle_rows(
                 "spearman": correlation,
                 "signed_effect": signed,
                 "trend_slope_per_min": slope,
-                "onset_minutes": _onset_minutes(x_seconds, values, settings),
                 "metric_status": "available",
             }
         )
@@ -109,7 +108,7 @@ def _feature_cycle_rows(
     return rows
 
 
-def _future_rows(
+def future_association_rows(
     frame: pd.DataFrame,
     metadata: Mapping[str, object],
     features: FeatureSpec,
@@ -117,7 +116,8 @@ def _future_rows(
 ) -> list[dict[str, object]]:
     stage = _frost_frame(frame)
     rows: list[dict[str, object]] = []
-    for feature, _ in features:
+    for feature, direction in features:
+        _validate_direction(feature, direction)
         for target in settings.targets:
             for horizon in settings.horizons_minutes:
                 row: dict[str, object] = {
@@ -126,6 +126,7 @@ def _future_rows(
                     "target": target,
                     "horizon_minutes": horizon,
                     "effect": np.nan,
+                    "degradation_support": np.nan,
                     "valid_pairs": 0,
                     "pair_coverage": 0.0,
                     "metric_status": "unavailable",
@@ -147,6 +148,7 @@ def _future_rows(
                 row.update(
                     {
                         "effect": effect,
+                        "degradation_support": _degradation_support(effect, direction),
                         "valid_pairs": valid_pairs,
                         "pair_coverage": coverage,
                         "exclusion_reason": reason,
@@ -214,7 +216,7 @@ def _future_metric(
         return np.nan, valid_pairs, coverage, "constant_feature"
     if _is_constant(change_values):
         return np.nan, valid_pairs, coverage, "constant_target_change"
-    effect = _spearman(x_values, change_values)
+    effect = spearman(x_values, change_values)
     if not np.isfinite(effect):
         return np.nan, valid_pairs, coverage, "constant_target_change"
     return effect, valid_pairs, coverage, ""
@@ -258,7 +260,9 @@ def _valid_future_pairs(
     return xs, changes
 
 
-def _pair_input(frame: pd.DataFrame, features: FeatureSpec) -> dict[str, dict[float, float]]:
+def pair_cycle_values(
+    frame: pd.DataFrame, features: FeatureSpec
+) -> dict[str, dict[float, float]]:
     stage = _frost_frame(frame)
     if stage is None or stage.empty or "cycle_elapsed_seconds" not in stage:
         return {}
@@ -292,7 +296,7 @@ def _numeric(series: pd.Series[Any]) -> FloatArray:
     return cast(FloatArray, values)
 
 
-def _spearman(first: FloatArray, second: FloatArray) -> float:
+def spearman(first: FloatArray, second: FloatArray) -> float:
     if len(first) < 2 or _is_constant(first) or _is_constant(second):
         return np.nan
     result = spearmanr(first, second, nan_policy="omit")
@@ -305,38 +309,20 @@ def _theil_sen(x_values: FloatArray, y_values: FloatArray) -> float:
     return float(theilslopes(y_values, x_values).slope)
 
 
-def _onset_minutes(
-    elapsed_seconds: FloatArray,
-    values: FloatArray,
-    settings: EvidenceSettings,
-) -> float:
-    """Compute initial_frost_window_mad_onset_v1, not the legacy onset contract."""
-    order = np.argsort(elapsed_seconds, kind="stable")
-    elapsed = elapsed_seconds[order]
-    ordered_values = values[order]
-    baseline = ordered_values[elapsed <= settings.onset_window_seconds]
-    if len(baseline) == 0:
+def _degradation_support(effect: float, direction: str) -> float:
+    if direction not in {"increase", "decrease"}:
+        raise ValueError(f"candidate channel has invalid expected_frost_direction: {direction}")
+    if not np.isfinite(effect):
         return np.nan
-    center = float(np.median(baseline))
-    mad = float(np.median(np.abs(baseline - center)))
-    threshold = settings.onset_mad_multiplier * mad
-    beyond = np.abs(ordered_values - center) > threshold
-    for index, start in enumerate(elapsed):
-        if start <= settings.onset_window_seconds or not beyond[index]:
-            continue
-        end = start + settings.onset_persistence_seconds
-        window = (elapsed >= start) & (elapsed <= end)
-        if (
-            window.any()
-            and elapsed[window].max() - start >= settings.onset_persistence_seconds
-            and bool(np.all(beyond[window]))
-        ):
-            return float(start / 60.0)
-    return np.nan
+    return float(-effect if direction == "increase" else effect)
+
+
+def _validate_direction(feature: str, direction: str) -> None:
+    if direction not in {"increase", "decrease"}:
+        raise ValueError(
+            f"candidate channel {feature} has invalid expected_frost_direction"
+        )
 
 
 def _is_constant(values: FloatArray) -> bool:
     return len(values) == 0 or len(np.unique(values)) <= 1
-
-
-__all__ = ["observed_mask"]

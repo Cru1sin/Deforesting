@@ -8,16 +8,17 @@ from itertools import combinations
 import numpy as np
 import pandas as pd
 
-from .metrics import _spearman
-from .schemas import (
+from .contracts import (
+    AGGREGATION_METHOD,
     FEATURE_PAIR_SIMILARITY_COLUMNS,
     FEATURE_PROFILE_COLUMNS,
     FUTURE_HORIZON_SUMMARY_COLUMNS,
 )
+from .metrics import spearman
 from .settings import EvidenceSettings
 
 
-def _future_horizon_summary(
+def future_horizon_summary(
     associations: pd.DataFrame,
     features: Sequence[tuple[str, str]],
     settings: EvidenceSettings,
@@ -31,7 +32,10 @@ def _future_horizon_summary(
                     & associations["target"].eq(target)
                     & associations["horizon_minutes"].eq(horizon)
                 ]
-                effect, cycle_count, date_count = _date_balanced(selected, "effect")
+                effect, cycle_count, date_count = date_balanced_median(selected, "effect")
+                degradation_support, _, _ = date_balanced_median(
+                    selected, "degradation_support"
+                )
                 available = date_count > 0
                 rows.append(
                     {
@@ -39,9 +43,10 @@ def _future_horizon_summary(
                         "target": target,
                         "horizon_minutes": horizon,
                         "effect": effect,
+                        "degradation_support": degradation_support,
                         "valid_cycle_count": cycle_count,
                         "valid_date_count": date_count,
-                        "aggregation_method": settings.aggregation_method,
+                        "aggregation_method": AGGREGATION_METHOD,
                         "metric_status": "available" if available else "unavailable",
                         "exclusion_reason": "" if available else "no_valid_dates",
                     }
@@ -49,7 +54,7 @@ def _future_horizon_summary(
     return _frame(rows, FUTURE_HORIZON_SUMMARY_COLUMNS)
 
 
-def _feature_profile(
+def feature_profile(
     metrics: pd.DataFrame,
     summary: pd.DataFrame,
     features: Sequence[tuple[str, str]],
@@ -60,9 +65,10 @@ def _feature_profile(
         selected = metrics.loc[
             metrics["feature"].eq(feature) & metrics["metric_status"].eq("available")
         ]
-        signed_effect, cycle_count, date_count = _date_balanced(selected, "signed_effect")
-        slope, _, _ = _date_balanced(selected, "trend_slope_per_min")
-        onset, _, _ = _date_balanced(selected, "onset_minutes")
+        signed_effect, cycle_count, date_count = date_balanced_median(
+            selected, "signed_effect"
+        )
+        slope, _, _ = date_balanced_median(selected, "trend_slope_per_min")
         direction_consistency = _direction_consistency(selected)
         future = summary.loc[
             summary["feature"].eq(feature)
@@ -70,12 +76,12 @@ def _feature_profile(
             & summary["horizon_minutes"].eq(settings.primary_horizon_minutes)
         ]
         if future.empty:
-            future_effect = np.nan
+            future_degradation_support = np.nan
             future_cycle_count = 0
             future_date_count = 0
         else:
             future_row = future.iloc[0]
-            future_effect = future_row["effect"]
+            future_degradation_support = future_row["degradation_support"]
             future_cycle_count = int(future_row["valid_cycle_count"])
             future_date_count = int(future_row["valid_date_count"])
         rows.append(
@@ -86,10 +92,9 @@ def _feature_profile(
                 "signed_effect": signed_effect,
                 "direction_consistency": direction_consistency,
                 "trend_slope_per_min": slope,
-                "onset_minutes": onset,
                 "primary_target": settings.primary_target,
                 "primary_horizon_minutes": settings.primary_horizon_minutes,
-                "primary_future_effect": future_effect,
+                "primary_future_degradation_support": future_degradation_support,
                 "primary_future_valid_cycle_count": future_cycle_count,
                 "primary_future_valid_date_count": future_date_count,
             }
@@ -97,11 +102,12 @@ def _feature_profile(
     return _frame(rows, FEATURE_PROFILE_COLUMNS)
 
 
-def _pair_similarity(
+def feature_pair_similarity(
     pair_inputs: Sequence[tuple[str, str, dict[str, dict[float, float]]]],
     features: Sequence[tuple[str, str]],
     settings: EvidenceSettings,
 ) -> pd.DataFrame:
+    """Return dynamic co-trend similarity, not a redundancy decision."""
     rows: list[dict[str, object]] = []
     feature_names = [name for name, _ in features]
     for feature_a, feature_b in combinations(feature_names, 2):
@@ -112,7 +118,7 @@ def _pair_similarity(
             common = sorted(set(first).intersection(second))
             if len(common) < settings.minimum_feature_points:
                 continue
-            correlation = _spearman(
+            correlation = spearman(
                 np.asarray([first[value] for value in common], dtype=float),
                 np.asarray([second[value] for value in common], dtype=float),
             )
@@ -125,7 +131,7 @@ def _pair_similarity(
                     }
                 )
         selected = pd.DataFrame(cycle_values)
-        effect, cycle_count, date_count = _date_balanced(selected, "value")
+        effect, cycle_count, date_count = date_balanced_median(selected, "value")
         available = date_count > 0
         rows.append(
             {
@@ -141,7 +147,7 @@ def _pair_similarity(
     return _frame(rows, FEATURE_PAIR_SIMILARITY_COLUMNS)
 
 
-def _date_balanced(frame: pd.DataFrame, value_column: str) -> tuple[float, int, int]:
+def date_balanced_median(frame: pd.DataFrame, value_column: str) -> tuple[float, int, int]:
     if frame.empty or value_column not in frame:
         return np.nan, 0, 0
     if "metric_status" in frame:
@@ -163,7 +169,7 @@ def _date_balanced(frame: pd.DataFrame, value_column: str) -> tuple[float, int, 
             .median()
             .reset_index()
         )
-        cycle_count = int(cycle_values["cycle_name"].nunique())
+        cycle_count = len(cycle_values)
     else:
         cycle_values = selected
         cycle_count = len(cycle_values)
@@ -195,11 +201,3 @@ def _direction_consistency(frame: pd.DataFrame) -> float:
 
 def _frame(rows: list[dict[str, object]], columns: Sequence[str]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=list(columns))
-
-
-__all__ = [
-    "_date_balanced",
-    "_feature_profile",
-    "_future_horizon_summary",
-    "_pair_similarity",
-]

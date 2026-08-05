@@ -1,8 +1,7 @@
-"""Evidence figures built from the new Evidence tables and Loader API."""
+"""Evidence figures built from the Dataset Loader and Evidence tables."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
@@ -13,8 +12,8 @@ from matplotlib.figure import Figure
 from numpy.typing import NDArray
 
 from ..dataset_loader import DatasetLoader
+from .contracts import EvidenceBundle
 from .metrics import observed_mask
-from .models import EvidenceBundle
 from .settings import EvidenceSettings
 
 FIGURE_NAMES = (
@@ -23,21 +22,22 @@ FIGURE_NAMES = (
     "figure_3_future_horizon",
     "figure_s2_availability",
 )
+_PROGRESS_BIN_COUNT = 100
 
 
 def plot_cycle_progress(loader: DatasetLoader, settings: EvidenceSettings) -> Figure:
-    """Plot fixed cycle-progress bins, preserving Dataset ``cycle_progress``."""
+    """Plot target baseline residuals on fixed 100-bin cycle progress axes."""
+    targets = settings.targets or ("Unavailable",)
     figure, axes = plt.subplots(
-        len(settings.targets),
+        len(targets),
         1,
-        figsize=(8, max(2.8, 2.8 * len(settings.targets))),
+        figsize=(8, max(2.8, 2.8 * len(targets))),
         squeeze=False,
         sharex=True,
     )
     flat_axes = list(axes[:, 0])
-    edges = np.linspace(0.0, 1.0, 101)
-    centers = (edges[:-1] + edges[1:]) / 2.0
-    for axis, target in zip(flat_axes, settings.targets, strict=True):
+    centers = (np.arange(_PROGRESS_BIN_COUNT, dtype=float) + 0.5) / _PROGRESS_BIN_COUNT
+    for axis, target in zip(flat_axes, targets, strict=True):
         target_column = f"{target}__baseline_residual"
         quality_column = f"{target}__imputed"
         cycle_rows: list[pd.DataFrame] = []
@@ -62,51 +62,65 @@ def plot_cycle_progress(loader: DatasetLoader, settings: EvidenceSettings) -> Fi
             )
             observed = observed_mask(frame, target_column).to_numpy(dtype=bool)
             valid = (
-                (progress >= 0.0)
+                np.isfinite(progress)
+                & (progress >= 0.0)
                 & (progress <= 1.0)
-                & np.isfinite(progress)
                 & np.isfinite(values)
                 & observed
             )
             if not valid.any():
                 continue
-            progress_subset = [float(value) for value in progress[valid]]
-            binned = pd.cut(
-                progress_subset,
-                bins=[float(value) for value in edges],
-                labels=False,
-                include_lowest=True,
-                right=True,
+            bins = np.minimum(
+                (progress[valid] * _PROGRESS_BIN_COUNT).astype(int),
+                _PROGRESS_BIN_COUNT - 1,
             )
-            grouped = (
-                pd.DataFrame({"bin": binned, "value": values[valid]})
-                .groupby("bin", sort=True)["value"]
-                .median()
-            )
-            if grouped.empty:
-                continue
-            date = str(record.get("experiment_date", ""))[:10]
+            binned = pd.DataFrame({"bin": bins, "value": values[valid]}).groupby(
+                "bin", sort=True
+            )["value"].median()
+            values_by_bin = np.full(_PROGRESS_BIN_COUNT, np.nan)
+            values_by_bin[binned.index.to_numpy(dtype=int)] = binned.to_numpy(dtype=float)
             cycle_rows.append(
                 pd.DataFrame(
                     {
-                        "experiment_date": date,
-                        "bin": grouped.index.astype(int),
-                        "value": grouped.to_numpy(dtype=float),
+                        "experiment_date": str(record.get("experiment_date", ""))[:10],
+                        "cycle_name": str(record.get("cycle_name", "")),
+                        "bin": np.arange(_PROGRESS_BIN_COUNT),
+                        "value": values_by_bin,
                     }
                 )
             )
         if not cycle_rows:
-            axis.text(0.5, 0.5, "Unavailable", ha="center", va="center")
-            axis.set_title(target)
-            axis.set_ylabel("residual")
+            _mark_unavailable(axis, target, "residual")
             continue
+
         cycles = pd.concat(cycle_rows, ignore_index=True)
-        by_date = cycles.groupby(["experiment_date", "bin"], sort=False)["value"].median()
-        plotted = by_date.groupby(level="bin", sort=True).median()
-        x = centers[plotted.index.to_numpy(dtype=int)]
-        axis.plot(x, plotted.to_numpy(dtype=float), linewidth=1.8)
+        date_cycle = (
+            cycles.groupby(["experiment_date", "cycle_name", "bin"], sort=False)["value"]
+            .median()
+            .reset_index()
+        )
+        date_medians = date_cycle.groupby(["experiment_date", "bin"], sort=False)[
+            "value"
+        ].median()
+        for experiment_date, values in date_medians.groupby(level="experiment_date"):
+            y_values = np.full(_PROGRESS_BIN_COUNT, np.nan)
+            bins = values.index.get_level_values("bin").to_numpy(dtype=int)
+            y_values[bins] = values.to_numpy(dtype=float)
+            axis.plot(
+                centers,
+                y_values,
+                color="0.70",
+                linewidth=0.8,
+                alpha=0.85,
+                label=str(experiment_date),
+            )
+        across_dates = date_medians.groupby(level="bin", sort=True).median()
+        y_values = np.full(_PROGRESS_BIN_COUNT, np.nan)
+        bins = across_dates.index.to_numpy(dtype=int)
+        y_values[bins] = across_dates.to_numpy(dtype=float)
+        axis.plot(centers, y_values, color="black", linewidth=2.0, label="date median")
         axis.set_title(target)
-        axis.set_ylabel("residual")
+        axis.set_ylabel("baseline residual")
         axis.set_xlim(0.0, 1.0)
         axis.grid(alpha=0.2)
     flat_axes[-1].set_xlabel("cycle_progress")
@@ -116,51 +130,61 @@ def plot_cycle_progress(loader: DatasetLoader, settings: EvidenceSettings) -> Fi
 
 def plot_feature_profiles(
     bundle: EvidenceBundle,
-    loader: DatasetLoader,
     settings: EvidenceSettings,
 ) -> Figure:
-    """Plot one feature row and four metric columns in registry order."""
-    features = _candidate_feature_names(loader)
+    """Plot date-level cycle medians and cross-date medians for three metrics."""
+    features = bundle.feature_profile["feature"].astype(str).tolist()
     rows = max(1, len(features))
     figure, axes = plt.subplots(
         rows,
-        4,
-        figsize=(12, max(2.5, rows * 1.35)),
+        3,
+        figsize=(10, max(2.5, rows * 1.45)),
         squeeze=False,
     )
     metric_columns = (
         "signed_effect",
         "trend_slope_per_min",
-        "onset_minutes",
-        "primary_future_effect",
+        "primary_future_degradation_support",
     )
     metrics = bundle.feature_cycle_metrics
-    profile = bundle.feature_profile
+    future = bundle.future_association
     for row_index, feature in enumerate(features):
-        metric_rows = metrics.loc[
-            metrics["feature"].eq(feature) & metrics["metric_status"].eq("available")
+        metric_rows = metrics.loc[metrics["feature"].eq(feature)]
+        future_rows = future.loc[
+            future["feature"].eq(feature)
+            & future["target"].eq(settings.primary_target)
+            & future["horizon_minutes"].eq(settings.primary_horizon_minutes)
         ]
-        profile_rows = profile.loc[profile["feature"].eq(feature)]
         for column_index, column in enumerate(metric_columns):
             axis = axes[row_index, column_index]
-            if column == "primary_future_effect":
-                values = (
-                    pd.to_numeric(profile_rows[column], errors="coerce")
-                    if not profile_rows.empty
-                    else pd.Series(dtype=float)
-                )
-            else:
-                values = (
-                    pd.to_numeric(metric_rows[column], errors="coerce")
-                    if not metric_rows.empty
-                    else pd.Series(dtype=float)
-                )
-            values = values.loc[np.isfinite(values.to_numpy(dtype=float, na_value=np.nan))]
+            source = (
+                future_rows
+                if column == "primary_future_degradation_support"
+                else metric_rows
+            )
+            values = _date_level_values(source, column)
             if values.empty:
                 axis.text(0.5, 0.5, "Unavailable", ha="center", va="center", fontsize=8)
             else:
-                axis.scatter(np.arange(len(values)), values.to_numpy(dtype=float), s=14)
-                axis.axhline(float(values.median()), color="black", linewidth=0.8)
+                x_values = np.arange(len(values), dtype=float)
+                y_values = values.to_numpy(dtype=float)
+                median = float(np.median(y_values))
+                axis.plot(
+                    x_values,
+                    y_values,
+                    color="0.70",
+                    marker="o",
+                    markersize=3,
+                    linewidth=0.8,
+                )
+                axis.plot(
+                    x_values,
+                    np.full(len(values), median),
+                    color="black",
+                    marker="o",
+                    markersize=3,
+                    linewidth=1.2,
+                )
             axis.set_xticks([])
             axis.grid(alpha=0.15)
             if row_index == 0:
@@ -176,17 +200,19 @@ def plot_feature_profiles(
 def plot_future_horizon_summary(
     summary: pd.DataFrame, settings: EvidenceSettings
 ) -> Figure:
-    """Plot only the already-aggregated future horizon summary."""
+    """Plot only degradation support already aggregated in the horizon summary."""
     features = list(dict.fromkeys(summary.get("feature", pd.Series(dtype=str)).astype(str)))
+    targets = settings.targets or ("Unavailable",)
     if not features:
         features = ["Unavailable"]
     figure, axes = plt.subplots(
-        len(settings.targets),
+        len(targets),
         1,
-        figsize=(8, max(2.8, len(settings.targets) * 2.8)),
+        figsize=(8, max(2.8, len(targets) * 2.8)),
         squeeze=False,
     )
-    for axis, target in zip(list(axes[:, 0]), settings.targets, strict=True):
+    image = None
+    for axis, target in zip(list(axes[:, 0]), targets, strict=True):
         matrix = np.full((len(features), len(settings.horizons_minutes)), np.nan)
         for row_index, feature in enumerate(features):
             if feature == "Unavailable":
@@ -197,42 +223,57 @@ def plot_future_horizon_summary(
                     & summary["target"].eq(target)
                     & summary["horizon_minutes"].eq(horizon)
                 ]
-                if not selected.empty:
-                    value = pd.to_numeric(selected.iloc[0]["effect"], errors="coerce")
-                    if pd.notna(value):
-                        matrix[row_index, col_index] = float(value)
-                        axis.text(
-                            col_index,
-                            row_index,
-                            f"{float(value):.2g}\n"
-                            f"cycle={int(selected.iloc[0]['valid_cycle_count'])}\n"
-                            f"date={int(selected.iloc[0]['valid_date_count'])}",
-                            ha="center",
-                            va="center",
-                            fontsize=7,
-                        )
-        if np.isfinite(matrix).any():
-            image = axis.imshow(matrix, aspect="auto", interpolation="nearest")
-            figure.colorbar(image, ax=axis, fraction=0.03, pad=0.02)
-            axis.set_yticks(np.arange(len(features)), labels=features)
-            axis.set_xticks(
-                np.arange(len(settings.horizons_minutes)),
-                labels=[f"{value} min" for value in settings.horizons_minutes],
-            )
-        else:
-            axis.text(0.5, 0.5, "Unavailable", ha="center", va="center")
+                if selected.empty:
+                    continue
+                selected_row = selected.iloc[0]
+                value = pd.to_numeric(
+                    selected_row.get("degradation_support"), errors="coerce"
+                )
+                cycle_count = int(selected_row.get("valid_cycle_count", 0))
+                date_count = int(selected_row.get("valid_date_count", 0))
+                label = f"cycle={cycle_count}\ndate={date_count}"
+                if pd.notna(value):
+                    matrix[row_index, col_index] = float(value)
+                    label = f"{float(value):.2g}\n{label}"
+                axis.text(
+                    col_index,
+                    row_index,
+                    label,
+                    ha="center",
+                    va="center",
+                    fontsize=7,
+                )
+        image = axis.imshow(
+            matrix,
+            aspect="auto",
+            interpolation="nearest",
+            cmap="RdBu_r",
+            vmin=-1,
+            vmax=1,
+        )
+        axis.set_yticks(np.arange(len(features)), labels=features)
+        axis.set_xticks(
+            np.arange(len(settings.horizons_minutes)),
+            labels=[f"{value} min" for value in settings.horizons_minutes],
+        )
         axis.set_title(target)
         axis.set_ylabel("feature")
-    figure.tight_layout()
+    if image is not None:
+        figure.colorbar(image, ax=list(axes[:, 0]), fraction=0.03, pad=0.02)
+    figure.subplots_adjust(left=0.12, right=0.88, bottom=0.12, top=0.92, hspace=0.3)
     return figure
 
 
-def plot_availability_audit(bundle: EvidenceBundle) -> Figure:
-    """Plot feature availability and future pair coverage on separate panels."""
+def plot_availability_audit(
+    bundle: EvidenceBundle, settings: EvidenceSettings | None = None
+) -> Figure:
+    """Plot valid-cycle feature availability and primary pair coverage."""
     figure, axes = plt.subplots(2, 1, figsize=(11, 7), squeeze=False)
     feature_axis, future_axis = axes[:, 0]
     eligibility = bundle.cycle_eligibility
-    valid_cycles = eligibility.loc[eligibility["status"].eq("valid"), "cycle_name"].astype(str)
+    valid_cycles = eligibility.loc[
+        eligibility["status"].eq("valid"), "cycle_name"
+    ].astype(str)
     metrics = bundle.feature_cycle_metrics
     features = list(dict.fromkeys(metrics.get("feature", pd.Series(dtype=str)).astype(str)))
     feature_matrix = np.zeros((len(valid_cycles), len(features)), dtype=float)
@@ -245,39 +286,43 @@ def plot_availability_audit(bundle: EvidenceBundle) -> Figure:
             ]
             feature_matrix[row_index, col_index] = float(not selected.empty)
     if feature_matrix.size:
-        feature_axis.imshow(feature_matrix, aspect="auto", interpolation="nearest", vmin=0, vmax=1)
-        feature_axis.set_xticks(np.arange(len(features)), labels=features, rotation=45, ha="right")
+        feature_axis.imshow(
+            feature_matrix,
+            aspect="auto",
+            interpolation="nearest",
+            vmin=0,
+            vmax=1,
+        )
+        feature_axis.set_xticks(
+            np.arange(len(features)), labels=features, rotation=45, ha="right"
+        )
         feature_axis.set_yticks(np.arange(len(valid_cycles)), labels=valid_cycles)
     else:
         feature_axis.text(0.5, 0.5, "Unavailable", ha="center", va="center")
-    feature_axis.set_title("S2 Dataset valid cycle audit — feature availability")
+    feature_axis.set_title("S2 valid cycle × feature — availability")
     feature_axis.set_ylabel("cycle")
 
     future = bundle.future_association
-    future_columns = [
-        f"{feature}|{target}|{horizon}min"
-        for feature in dict.fromkeys(future.get("feature", pd.Series(dtype=str)).astype(str))
-        for target in dict.fromkeys(future.get("target", pd.Series(dtype=str)).astype(str))
-        for horizon in sorted(future.get("horizon_minutes", pd.Series(dtype=int)).dropna().unique())
+    if settings is None:
+        target = str(future["target"].iloc[0]) if not future.empty else ""
+        horizon = int(future["horizon_minutes"].iloc[0]) if not future.empty else 0
+    else:
+        target = settings.primary_target
+        horizon = settings.primary_horizon_minutes
+    future_matrix = np.full((len(valid_cycles), len(features)), np.nan)
+    selected_future = future.loc[
+        future["target"].eq(target) & future["horizon_minutes"].eq(horizon)
     ]
-    future_matrix = np.full((len(valid_cycles), len(future_columns)), np.nan)
-    for col_index, label in enumerate(future_columns):
-        feature, target, horizon_text = label.split("|")
-        horizon = int(horizon_text.removesuffix("min"))
-        selected = future.loc[
-            future["feature"].eq(feature)
-            & future["target"].eq(target)
-            & future["horizon_minutes"].eq(horizon)
-            & future["cycle_name"].isin(valid_cycles)
-        ]
-        values = (
-            selected.set_index("cycle_name")["pair_coverage"]
-            if not selected.empty
-            else pd.Series(dtype=float)
-        )
-        for row_index, cycle_name in enumerate(valid_cycles):
-            if cycle_name in values.index:
-                future_matrix[row_index, col_index] = float(values.loc[cycle_name])
+    for row_index, cycle_name in enumerate(valid_cycles):
+        for col_index, feature in enumerate(features):
+            selected = selected_future.loc[
+                selected_future["cycle_name"].eq(cycle_name)
+                & selected_future["feature"].eq(feature)
+            ]
+            if not selected.empty:
+                value = pd.to_numeric(selected.iloc[0]["pair_coverage"], errors="coerce")
+                if pd.notna(value):
+                    future_matrix[row_index, col_index] = float(value)
     if future_matrix.size:
         future_axis.imshow(
             future_matrix,
@@ -287,12 +332,14 @@ def plot_availability_audit(bundle: EvidenceBundle) -> Figure:
             vmax=1,
         )
         future_axis.set_xticks(
-            np.arange(len(future_columns)), labels=future_columns, rotation=45, ha="right"
+            np.arange(len(features)), labels=features, rotation=45, ha="right"
         )
         future_axis.set_yticks(np.arange(len(valid_cycles)), labels=valid_cycles)
     else:
         future_axis.text(0.5, 0.5, "Unavailable", ha="center", va="center")
-    future_axis.set_title("S2 Dataset valid cycle audit — future pair coverage")
+    future_axis.set_title(
+        f"S2 valid cycle × feature — pair coverage ({target}, {horizon} min)"
+    )
     future_axis.set_ylabel("cycle")
     figure.tight_layout()
     return figure
@@ -307,9 +354,9 @@ def write_figures(
     """Write the four required figures as PNG and PDF files."""
     figures = (
         plot_cycle_progress(loader, settings),
-        plot_feature_profiles(bundle, loader, settings),
+        plot_feature_profiles(bundle, settings),
         plot_future_horizon_summary(bundle.future_horizon_summary, settings),
-        plot_availability_audit(bundle),
+        plot_availability_audit(bundle, settings),
     )
     files: list[str] = []
     for name, figure in zip(FIGURE_NAMES, figures, strict=True):
@@ -319,24 +366,21 @@ def write_figures(
             files.append(filename)
         plt.close(figure)
     return tuple(files)
+def _date_level_values(frame: pd.DataFrame, value_column: str) -> pd.Series:
+    if frame.empty or value_column not in frame or "experiment_date" not in frame:
+        return pd.Series(dtype=float)
+    selected = frame.loc[:, ["experiment_date", value_column]].copy()
+    if "metric_status" in frame:
+        selected = selected.loc[frame["metric_status"].eq("available")]
+    values = pd.to_numeric(selected[value_column], errors="coerce")
+    selected = selected.loc[np.isfinite(values.to_numpy(dtype=float, na_value=np.nan))]
+    if selected.empty:
+        return pd.Series(dtype=float)
+    selected[value_column] = pd.to_numeric(selected[value_column], errors="coerce")
+    return selected.groupby("experiment_date", sort=True)[value_column].median()
 
 
-def _candidate_feature_names(loader: DatasetLoader) -> list[str]:
-    channels = loader.registry.get("channels")
-    if not isinstance(channels, Mapping):
-        return []
-    return [
-        str(name)
-        for name, value in channels.items()
-        if isinstance(value, Mapping) and bool(value.get("analysis_candidate", False))
-    ]
-
-
-__all__ = [
-    "FIGURE_NAMES",
-    "plot_availability_audit",
-    "plot_cycle_progress",
-    "plot_feature_profiles",
-    "plot_future_horizon_summary",
-    "write_figures",
-]
+def _mark_unavailable(axis: plt.Axes, title: str, ylabel: str) -> None:
+    axis.text(0.5, 0.5, "Unavailable", ha="center", va="center")
+    axis.set_title(title)
+    axis.set_ylabel(ylabel)
