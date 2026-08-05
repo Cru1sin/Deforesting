@@ -2,21 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ..dataset_loader import DatasetLoader
-from .figures import write_figures
-from .models import EvidenceBundle
-from .schemas import (
+from .contracts import (
+    ANALYSIS_VERSION,
     CYCLE_ELIGIBILITY_COLUMNS,
     FEATURE_CYCLE_METRIC_COLUMNS,
     FEATURE_PAIR_SIMILARITY_COLUMNS,
     FEATURE_PROFILE_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
     FUTURE_HORIZON_SUMMARY_COLUMNS,
+    EvidenceBundle,
 )
+from .figures import write_figures
 from .settings import EvidenceSettings
 
 
@@ -28,13 +30,11 @@ def write_evidence(
     settings: EvidenceSettings,
 ) -> Path:
     """Write six CSV tables, figures, and the compact Evidence manifest."""
-    if not isinstance(loader, DatasetLoader):
-        raise TypeError("write_evidence requires DatasetLoader")
     dataset_root = loader.dataset_root.resolve()
     resolved_output = output_dir.resolve()
     if resolved_output == dataset_root or dataset_root in resolved_output.parents:
         raise ValueError("Evidence output directory must be outside the Dataset")
-    resolved_output.mkdir(parents=True, exist_ok=True)
+    resolved_output.mkdir(parents=True, exist_ok=False)
 
     tables = {
         "cycle_eligibility.csv": (bundle.cycle_eligibility, CYCLE_ELIGIBILITY_COLUMNS),
@@ -54,17 +54,15 @@ def write_evidence(
         ),
     }
     for filename, (table, columns) in tables.items():
-        missing = [column for column in columns if column not in table]
-        if missing:
-            raise ValueError(f"Evidence table {filename} is missing columns: {missing}")
         table.loc[:, columns].to_csv(resolved_output / filename, index=False)
 
     figure_files = write_figures(resolved_output, bundle, loader, settings)
     output_files = [*tables, *figure_files, "analysis_manifest.json"]
     manifest = {
-        "analysis_version": settings.analysis_version,
+        "analysis_version": ANALYSIS_VERSION,
         "dataset_id": loader.manifest["dataset_id"],
         "dataset_schema_version": loader.manifest["dataset_schema_version"],
+        "dataset_manifest_sha256": _dataset_manifest_sha256(loader),
         "channel_registry_hash": loader.registry["canonical_hash"],
         "settings_sha256": settings.sha256,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -78,4 +76,6 @@ def write_evidence(
     return resolved_output
 
 
-__all__ = ["write_evidence"]
+def _dataset_manifest_sha256(loader: DatasetLoader) -> str:
+    manifest_path = loader.dataset_root / "dataset_manifest.json"
+    return hashlib.sha256(manifest_path.read_bytes()).hexdigest()

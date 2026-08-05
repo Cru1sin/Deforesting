@@ -10,7 +10,6 @@ from pathlib import Path
 import pandas as pd
 
 from frost_analysis import run_pipeline
-from frost_analysis.analysis import run_analysis
 from frost_analysis.channels import load_channels
 from frost_analysis.config import find_project_root, load_config
 from frost_analysis.dataset import (
@@ -48,8 +47,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     process_parser = subparsers.add_parser("process")
     _add_config_input_cycles_output(process_parser)
     process_parser.add_argument("--overwrite", action="store_true")
-    analysis_parser = subparsers.add_parser("analysis")
-    _add_dataset_analysis_arguments(analysis_parser)
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("--dataset", type=Path)
     evidence_parser.add_argument("--config", required=True, type=Path)
@@ -61,22 +58,6 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     arguments = parser.parse_args(argv)
     if arguments.command == "dataset":
         return _run_dataset_command(arguments)
-    if arguments.command == "analysis":
-        dataset_path = arguments.dataset or (_project_root() / "dataset")
-        loader = DatasetLoader(dataset_path)
-        statuses = set(arguments.status) if arguments.status else None
-        experiments = set(arguments.experiment) if arguments.experiment else None
-        cycle_names = set(arguments.cycle) if arguments.cycle else None
-        print(
-            run_analysis(
-                loader,
-                statuses=statuses,
-                experiment_ids=experiments,
-                cycle_names=cycle_names,
-                output_dir=arguments.output,
-            )
-        )
-        return 0
     if arguments.command == "evidence":
         dataset_path = arguments.dataset or (_project_root() / "dataset")
         loader = DatasetLoader(dataset_path)
@@ -154,18 +135,6 @@ def _add_config_input_cycles_output(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--cycles", required=True, type=Path)
-    parser.add_argument("--output", required=True, type=Path)
-
-
-def _add_dataset_analysis_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--dataset", type=Path)
-    parser.add_argument(
-        "--status",
-        action="append",
-        choices=["valid", "partial", "incomplete", "invalid"],
-    )
-    parser.add_argument("--experiment", action="append", default=[])
-    parser.add_argument("--cycle", action="append", default=[])
     parser.add_argument("--output", required=True, type=Path)
 
 

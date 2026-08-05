@@ -8,51 +8,44 @@ import numpy as np
 import pandas as pd
 
 from ..dataset_loader import DatasetLoader
-from .metrics import _feature_cycle_rows, _future_rows, _pair_input
-from .models import EvidenceBundle
-from .schemas import (
+from .contracts import (
     CYCLE_ELIGIBILITY_COLUMNS,
     FEATURE_CYCLE_METRIC_COLUMNS,
-    FEATURE_PAIR_SIMILARITY_COLUMNS,
-    FEATURE_PROFILE_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
-    FUTURE_HORIZON_SUMMARY_COLUMNS,
+    EvidenceBundle,
 )
+from .metrics import feature_cycle_rows, future_association_rows, pair_cycle_values
 from .settings import EvidenceSettings
-from .summary import _feature_profile, _future_horizon_summary, _pair_similarity
+from .summary import feature_pair_similarity, feature_profile, future_horizon_summary
 
 
 def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> EvidenceBundle:
     """Build Evidence tables by streaming valid cycles from ``loader``."""
-    if not isinstance(loader, DatasetLoader):
-        raise TypeError("build_evidence requires DatasetLoader")
-    features = _candidate_features(loader.registry, settings)
+    features = candidate_features(loader.registry, settings)
     cycles = loader.list_cycles()
     cycle_rows = _cycle_metadata_rows(cycles)
     eligibility = _eligibility_table(cycle_rows)
-    cycle_lookup = {str(row["cycle_name"]): row for row in cycle_rows}
 
     feature_rows: list[dict[str, object]] = []
     future_rows: list[dict[str, object]] = []
     pair_inputs: list[tuple[str, str, dict[str, dict[float, float]]]] = []
     for record, frame in loader.iter_cycle_frames(statuses={"valid"}):
-        cycle_name = str(record.get("cycle_name", ""))
-        metadata = dict(cycle_lookup.get(cycle_name, _record_metadata(record)))
-        feature_rows.extend(_feature_cycle_rows(frame, metadata, features, settings))
-        future_rows.extend(_future_rows(frame, metadata, features, settings))
+        metadata = _record_metadata(record)
+        feature_rows.extend(feature_cycle_rows(frame, metadata, features, settings))
+        future_rows.extend(future_association_rows(frame, metadata, features, settings))
         pair_inputs.append(
             (
                 str(metadata["cycle_name"]),
                 str(metadata["experiment_date"]),
-                _pair_input(frame, features),
+                pair_cycle_values(frame, features),
             )
         )
 
     feature_metrics = _frame(feature_rows, FEATURE_CYCLE_METRIC_COLUMNS)
     future_association = _frame(future_rows, FUTURE_ASSOCIATION_COLUMNS)
-    future_summary = _future_horizon_summary(future_association, features, settings)
-    profile = _feature_profile(feature_metrics, future_summary, features, settings)
-    pair_similarity = _pair_similarity(pair_inputs, features, settings)
+    future_summary = future_horizon_summary(future_association, features, settings)
+    profile = feature_profile(feature_metrics, future_summary, features, settings)
+    pair_similarity = feature_pair_similarity(pair_inputs, features, settings)
     return EvidenceBundle(
         cycle_eligibility=eligibility,
         feature_cycle_metrics=feature_metrics,
@@ -63,7 +56,7 @@ def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> Evidenc
     )
 
 
-def _candidate_features(
+def candidate_features(
     registry: Mapping[str, object], settings: EvidenceSettings
 ) -> list[tuple[str, str]]:
     raw_channels = registry.get("channels")
@@ -132,14 +125,3 @@ def _text(value: object) -> str:
 
 def _date_text(value: object) -> str:
     return _text(value)[:10]
-
-
-__all__ = [
-    "build_evidence",
-    "CYCLE_ELIGIBILITY_COLUMNS",
-    "FEATURE_CYCLE_METRIC_COLUMNS",
-    "FUTURE_ASSOCIATION_COLUMNS",
-    "FUTURE_HORIZON_SUMMARY_COLUMNS",
-    "FEATURE_PROFILE_COLUMNS",
-    "FEATURE_PAIR_SIMILARITY_COLUMNS",
-]

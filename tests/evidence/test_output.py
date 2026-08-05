@@ -52,6 +52,7 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "analysis_version",
         "dataset_id",
         "dataset_schema_version",
+        "dataset_manifest_sha256",
         "channel_registry_hash",
         "settings_sha256",
         "generated_at",
@@ -66,3 +67,15 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         if path.is_file()
     }
     assert before == after
+
+
+def test_writer_rejects_existing_output_directory(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    loader = write_dataset(dataset, [("c1", "2026-07-01", "valid", frame_for())])
+    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    bundle = build_evidence(loader, evidence_settings)
+    output = tmp_path / "existing"
+    output.mkdir()
+
+    with pytest.raises(FileExistsError):
+        write_evidence(bundle, output, loader=loader, settings=evidence_settings)

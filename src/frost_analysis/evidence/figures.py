@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
 
@@ -99,13 +100,17 @@ def plot_cycle_progress(loader: DatasetLoader, settings: EvidenceSettings) -> Fi
             .median()
             .reset_index()
         )
-        date_medians = date_cycle.groupby(["experiment_date", "bin"], sort=False)[
-            "value"
-        ].median()
-        for experiment_date, values in date_medians.groupby(level="experiment_date"):
+        date_medians: pd.DataFrame = date_cycle.groupby(
+            ["experiment_date", "bin"], sort=False, as_index=False
+        ).agg(value=("value", "median"))
+        for experiment_date, date_values in date_medians.groupby(
+            "experiment_date", sort=False
+        ):
             y_values = np.full(_PROGRESS_BIN_COUNT, np.nan)
-            bins = values.index.get_level_values("bin").to_numpy(dtype=int)
-            y_values[bins] = values.to_numpy(dtype=float)
+            bins = pd.to_numeric(date_values["bin"], errors="coerce").to_numpy(dtype=int)
+            y_values[bins] = pd.to_numeric(
+                date_values["value"], errors="coerce"
+            ).to_numpy(dtype=float)
             axis.plot(
                 centers,
                 y_values,
@@ -114,7 +119,7 @@ def plot_cycle_progress(loader: DatasetLoader, settings: EvidenceSettings) -> Fi
                 alpha=0.85,
                 label=str(experiment_date),
             )
-        across_dates = date_medians.groupby(level="bin", sort=True).median()
+        across_dates = date_medians.groupby("bin", sort=True)["value"].median()
         y_values = np.full(_PROGRESS_BIN_COUNT, np.nan)
         bins = across_dates.index.to_numpy(dtype=int)
         y_values[bins] = across_dates.to_numpy(dtype=float)
@@ -226,9 +231,10 @@ def plot_future_horizon_summary(
                 if selected.empty:
                     continue
                 selected_row = selected.iloc[0]
+                value_raw: object = selected_row.get("degradation_support")
                 value = pd.to_numeric(
-                    selected_row.get("degradation_support"), errors="coerce"
-                )
+                    pd.Series([value_raw]), errors="coerce"
+                ).iloc[0]
                 cycle_count = int(selected_row.get("valid_cycle_count", 0))
                 date_count = int(selected_row.get("valid_date_count", 0))
                 label = f"cycle={cycle_count}\ndate={date_count}"
@@ -366,7 +372,7 @@ def write_figures(
             files.append(filename)
         plt.close(figure)
     return tuple(files)
-def _date_level_values(frame: pd.DataFrame, value_column: str) -> pd.Series:
+def _date_level_values(frame: pd.DataFrame, value_column: str) -> pd.Series[Any]:
     if frame.empty or value_column not in frame or "experiment_date" not in frame:
         return pd.Series(dtype=float)
     selected = frame.loc[:, ["experiment_date", value_column]].copy()
@@ -380,7 +386,7 @@ def _date_level_values(frame: pd.DataFrame, value_column: str) -> pd.Series:
     return selected.groupby("experiment_date", sort=True)[value_column].median()
 
 
-def _mark_unavailable(axis: plt.Axes, title: str, ylabel: str) -> None:
+def _mark_unavailable(axis: Axes, title: str, ylabel: str) -> None:
     axis.text(0.5, 0.5, "Unavailable", ha="center", va="center")
     axis.set_title(title)
     axis.set_ylabel(ylabel)
