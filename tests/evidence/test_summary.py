@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+
+from frost_analysis.evidence import build_evidence
+
+from .conftest import frame_for, settings, write_dataset
+
+
+def test_future_summary_is_date_balanced_median_of_cycle_medians(tmp_path: Path) -> None:
+    positive = frame_for(
+        elapsed=(0, 60, 120, 180, 240),
+        heating_capacity=(0, 1, 3, 6, 10),
+    )
+    negative = frame_for(
+        elapsed=(0, 60, 120, 180, 240),
+        heating_capacity=(0, 4, 7, 9, 10),
+    )
+    loader = write_dataset(
+        tmp_path / "dataset",
+        [
+            ("c1", "2026-07-01", "valid", positive),
+            ("c2", "2026-07-01", "valid", negative),
+            ("c3", "2026-07-02", "valid", positive),
+        ],
+    )
+
+    bundle = build_evidence(
+        loader,
+        settings(
+            targets=("heating_capacity",),
+            horizons=(1,),
+            minimum_valid_pairs=2,
+            minimum_pair_coverage=1.0,
+        ),
+    )
+
+    summary = bundle.future_horizon_summary.iloc[0]
+    assert summary["effect"] == 0.5
+    assert summary["valid_cycle_count"] == 3
+    assert summary["valid_date_count"] == 2
+    assert summary["aggregation_method"] == "date_balanced_median_of_cycle_medians_v1"
+    profile = bundle.feature_profile.iloc[0]
+    assert profile["primary_future_effect"] == 0.5
+    assert profile["primary_future_valid_cycle_count"] == 3
+    assert profile["primary_future_valid_date_count"] == 2
+
+
+def test_summary_has_explicit_zero_valid_dates_status(tmp_path: Path) -> None:
+    frame = frame_for(
+        elapsed=(0, 60, 120, 180),
+        heating_capacity=(np.nan, np.nan, np.nan, np.nan),
+    )
+    loader = write_dataset(tmp_path / "dataset", [("c1", "2026-07-01", "valid", frame)])
+
+    bundle = build_evidence(
+        loader,
+        settings(
+            targets=("heating_capacity",),
+            horizons=(1,),
+            minimum_valid_pairs=2,
+            minimum_pair_coverage=1.0,
+        ),
+    )
+
+    summary = bundle.future_horizon_summary.iloc[0]
+    assert summary["metric_status"] == "unavailable"
+    assert summary["exclusion_reason"] == "no_valid_dates"
+    assert summary["valid_cycle_count"] == 0
+    assert summary["valid_date_count"] == 0

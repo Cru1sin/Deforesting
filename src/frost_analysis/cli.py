@@ -23,6 +23,7 @@ from frost_analysis.dataset import (
 )
 from frost_analysis.dataset_loader import DatasetLoader
 from frost_analysis.dataset_validation import validate_dataset
+from frost_analysis.evidence import EvidenceSettings, build_evidence, write_evidence
 from frost_analysis.io import (
     ensure_output_outside_input,
     write_prepare_outputs,
@@ -49,6 +50,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     process_parser.add_argument("--overwrite", action="store_true")
     analysis_parser = subparsers.add_parser("analysis")
     _add_dataset_analysis_arguments(analysis_parser)
+    evidence_parser = subparsers.add_parser("evidence")
+    evidence_parser.add_argument("--dataset", type=Path)
+    evidence_parser.add_argument("--config", required=True, type=Path)
+    evidence_parser.add_argument("--output", required=True, type=Path)
     report_parser = subparsers.add_parser("report")
     _add_report_input_output(report_parser)
     report_parser.add_argument("--overwrite", action="store_true")
@@ -69,6 +74,20 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
                 experiment_ids=experiments,
                 cycle_names=cycle_names,
                 output_dir=arguments.output,
+            )
+        )
+        return 0
+    if arguments.command == "evidence":
+        dataset_path = arguments.dataset or (_project_root() / "dataset")
+        loader = DatasetLoader(dataset_path)
+        settings = EvidenceSettings.from_yaml(arguments.config)
+        bundle = build_evidence(loader, settings)
+        print(
+            write_evidence(
+                bundle,
+                arguments.output,
+                loader=loader,
+                settings=settings,
             )
         )
         return 0
