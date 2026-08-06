@@ -124,6 +124,25 @@ def test_observed_mask_requires_finite_non_imputed_values() -> None:
     ]
 
 
+def test_metric_rows_do_not_revalidate_candidate_direction() -> None:
+    from frost_analysis.evidence.metrics import feature_cycle_rows
+
+    rows = feature_cycle_rows(
+        frame_for(),
+        {
+            "cycle_name": "c1",
+            "cycle_uid": "exp::c1",
+            "experiment_id": "exp",
+            "experiment_date": "2026-07-01",
+            "status": "valid",
+        },
+        (("feature_a", "invalid"),),
+        settings(),
+    )
+
+    assert rows[0]["feature"] == "feature_a"
+
+
 def test_future_effect_and_degradation_support_use_exact_change_direction(
     tmp_path: Path,
 ) -> None:
@@ -150,3 +169,38 @@ def test_future_effect_and_degradation_support_use_exact_change_direction(
     assert future.loc["feature_a", "degradation_support"] == pytest.approx(1.0)
     assert future.loc["feature_b", "effect"] == pytest.approx(1.0)
     assert future.loc["feature_b", "degradation_support"] == pytest.approx(1.0)
+
+
+def test_degradation_support_uses_explicit_target_direction() -> None:
+    from frost_analysis.evidence.metrics import _degradation_support
+
+    assert _degradation_support(-0.5, "increase", "decrease") == pytest.approx(0.5)
+    assert _degradation_support(-0.5, "increase", "increase") == pytest.approx(-0.5)
+
+
+def test_future_degradation_support_reads_target_direction_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frost_analysis.evidence.contracts import TARGET_DEGRADATION_DIRECTION
+
+    frame = frame_for(
+        elapsed=(0, 60, 120, 180, 240, 300),
+        feature_a=(1, 2, 3, 4, 5, 6),
+        heating_capacity=(10, 9, 7, 4, 0, -5),
+    )
+    loader = write_dataset(tmp_path / "dataset", [("c1", "2026-07-01", "valid", frame)])
+    monkeypatch.setitem(TARGET_DEGRADATION_DIRECTION, "heating_capacity", "increase")
+
+    bundle = build_evidence(
+        loader,
+        settings(
+            targets=("heating_capacity",),
+            horizons=(1,),
+            minimum_valid_pairs=2,
+            minimum_pair_coverage=1.0,
+        ),
+    )
+
+    future = bundle.future_association.iloc[0]
+    assert future["effect"] == pytest.approx(-1.0)
+    assert future["degradation_support"] == pytest.approx(-1.0)

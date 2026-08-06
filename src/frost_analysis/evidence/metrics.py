@@ -10,6 +10,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import spearmanr, theilslopes
 
+from .contracts import TARGET_DEGRADATION_DIRECTION
 from .settings import EvidenceSettings
 
 FloatArray = NDArray[np.float64]
@@ -38,7 +39,6 @@ def feature_cycle_rows(
     stage = _frost_frame(frame)
     rows: list[dict[str, object]] = []
     for feature, direction in features:
-        _validate_direction(feature, direction)
         row: dict[str, object] = {
             **metadata,
             "feature": feature,
@@ -117,7 +117,6 @@ def future_association_rows(
     stage = _frost_frame(frame)
     rows: list[dict[str, object]] = []
     for feature, direction in features:
-        _validate_direction(feature, direction)
         for target in settings.targets:
             for horizon in settings.horizons_minutes:
                 row: dict[str, object] = {
@@ -148,7 +147,9 @@ def future_association_rows(
                 row.update(
                     {
                         "effect": effect,
-                        "degradation_support": _degradation_support(effect, direction),
+                        "degradation_support": _degradation_support(
+                            effect, direction, TARGET_DEGRADATION_DIRECTION[target]
+                        ),
                         "valid_pairs": valid_pairs,
                         "pair_coverage": coverage,
                         "exclusion_reason": reason,
@@ -309,19 +310,12 @@ def _theil_sen(x_values: FloatArray, y_values: FloatArray) -> float:
     return float(theilslopes(y_values, x_values).slope)
 
 
-def _degradation_support(effect: float, direction: str) -> float:
-    if direction not in {"increase", "decrease"}:
-        raise ValueError(f"candidate channel has invalid expected_frost_direction: {direction}")
+def _degradation_support(
+    effect: float, feature_direction: str, target_direction: str
+) -> float:
     if not np.isfinite(effect):
         return np.nan
-    return float(-effect if direction == "increase" else effect)
-
-
-def _validate_direction(feature: str, direction: str) -> None:
-    if direction not in {"increase", "decrease"}:
-        raise ValueError(
-            f"candidate channel {feature} has invalid expected_frost_direction"
-        )
+    return float(effect if feature_direction == target_direction else -effect)
 
 
 def _is_constant(values: FloatArray) -> bool:

@@ -52,7 +52,7 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "analysis_version",
         "dataset_id",
         "dataset_schema_version",
-        "dataset_manifest_sha256",
+        "dataset_updated_at",
         "channel_registry_hash",
         "settings_sha256",
         "generated_at",
@@ -60,6 +60,7 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "row_counts",
         "recovery_effect",
     }
+    assert manifest["dataset_updated_at"] == "2026-01-01T00:00:00+00:00"
     assert manifest["recovery_effect"] == "not_evaluated"
     after = {
         path.relative_to(dataset): path.read_bytes()
@@ -67,6 +68,26 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         if path.is_file()
     }
     assert before == after
+
+
+def test_writer_uses_loader_manifest_without_reading_dataset_manifest(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    loader = write_dataset(dataset, [("c1", "2026-07-01", "valid", frame_for())])
+    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    bundle = build_evidence(loader, evidence_settings)
+    (dataset / "dataset_manifest.json").unlink()
+
+    output = write_evidence(
+        bundle,
+        tmp_path / "evidence",
+        loader=loader,
+        settings=evidence_settings,
+    )
+
+    manifest = json.loads((output / "analysis_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["dataset_updated_at"] == "2026-01-01T00:00:00+00:00"
 
 
 def test_writer_rejects_existing_output_directory(tmp_path: Path) -> None:

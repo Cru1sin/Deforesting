@@ -8,6 +8,10 @@ import pandas as pd
 
 ANALYSIS_VERSION = "frost-cycle-evidence-v2.2"
 AGGREGATION_METHOD = "date_balanced_median_of_cycle_medians_v1"
+TARGET_DEGRADATION_DIRECTION = {
+    "heating_capacity": "decrease",
+    "cop": "decrease",
+}
 
 CYCLE_ELIGIBILITY_COLUMNS = [
     "cycle_name",

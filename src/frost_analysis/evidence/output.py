@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,7 +61,7 @@ def write_evidence(
         "analysis_version": ANALYSIS_VERSION,
         "dataset_id": loader.manifest["dataset_id"],
         "dataset_schema_version": loader.manifest["dataset_schema_version"],
-        "dataset_manifest_sha256": _dataset_manifest_sha256(loader),
+        "dataset_updated_at": loader.manifest["updated_at"],
         "channel_registry_hash": loader.registry["canonical_hash"],
         "settings_sha256": settings.sha256,
         "generated_at": datetime.now(UTC).isoformat(),
@@ -74,8 +73,3 @@ def write_evidence(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return resolved_output
-
-
-def _dataset_manifest_sha256(loader: DatasetLoader) -> str:
-    manifest_path = loader.dataset_root / "dataset_manifest.json"
-    return hashlib.sha256(manifest_path.read_bytes()).hexdigest()

@@ -45,6 +45,25 @@ def test_candidate_feature_rejects_target_or_performance_candidate(
         )
 
 
+def test_candidate_feature_rejects_unknown_target() -> None:
+    from frost_analysis.evidence.core import candidate_features
+
+    with pytest.raises(ValueError, match="unknown target"):
+        candidate_features(
+            {"channels": {}},
+            settings(targets=("unknown_target",), horizons=(1,)),
+        )
+
+
+def test_target_degradation_direction_contract_is_explicit() -> None:
+    from frost_analysis.evidence.contracts import TARGET_DEGRADATION_DIRECTION
+
+    assert TARGET_DEGRADATION_DIRECTION == {
+        "heating_capacity": "decrease",
+        "cop": "decrease",
+    }
+
+
 def test_evidence_entry_points_accept_loader_contract_without_runtime_type_guard(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

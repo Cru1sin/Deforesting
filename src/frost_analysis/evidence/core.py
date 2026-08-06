@@ -12,6 +12,7 @@ from .contracts import (
     CYCLE_ELIGIBILITY_COLUMNS,
     FEATURE_CYCLE_METRIC_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
+    TARGET_DEGRADATION_DIRECTION,
     EvidenceBundle,
 )
 from .metrics import feature_cycle_rows, future_association_rows, pair_cycle_values
@@ -59,6 +60,11 @@ def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> Evidenc
 def candidate_features(
     registry: Mapping[str, object], settings: EvidenceSettings
 ) -> list[tuple[str, str]]:
+    unknown_targets = [
+        target for target in settings.targets if target not in TARGET_DEGRADATION_DIRECTION
+    ]
+    if unknown_targets:
+        raise ValueError(f"unknown target: {unknown_targets[0]}")
     raw_channels = registry.get("channels")
     if not isinstance(raw_channels, Mapping):
         raise ValueError("Dataset registry channels must be a mapping")

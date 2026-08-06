@@ -143,7 +143,7 @@ def plot_feature_profiles(
     figure, axes = plt.subplots(
         rows,
         3,
-        figsize=(10, max(2.5, rows * 1.45)),
+        figsize=(12, max(4.0, rows * 2.4)),
         squeeze=False,
     )
     metric_columns = (
@@ -167,29 +167,34 @@ def plot_feature_profiles(
                 if column == "primary_future_degradation_support"
                 else metric_rows
             )
-            values = _date_level_values(source, column)
+            value_column = (
+                "degradation_support"
+                if column == "primary_future_degradation_support"
+                else column
+            )
+            values = _date_level_values(source, value_column)
             if values.empty:
                 axis.text(0.5, 0.5, "Unavailable", ha="center", va="center", fontsize=8)
             else:
                 x_values = np.arange(len(values), dtype=float)
                 y_values = values.to_numpy(dtype=float)
                 median = float(np.median(y_values))
-                axis.plot(
+                axis.scatter(
                     x_values,
                     y_values,
                     color="0.70",
                     marker="o",
-                    markersize=3,
-                    linewidth=0.8,
+                    s=20,
                 )
-                axis.plot(
-                    x_values,
-                    np.full(len(values), median),
+                axis.scatter(
+                    [float(np.median(x_values))],
+                    [median],
                     color="black",
-                    marker="o",
-                    markersize=3,
-                    linewidth=1.2,
+                    marker="D",
                 )
+            if column in {"signed_effect", "primary_future_degradation_support"}:
+                axis.axhline(0.0, color="black", linewidth=0.7, alpha=0.6)
+                axis.set_ylim(-1.0, 1.0)
             axis.set_xticks([])
             axis.grid(alpha=0.15)
             if row_index == 0:
@@ -213,7 +218,7 @@ def plot_future_horizon_summary(
     figure, axes = plt.subplots(
         len(targets),
         1,
-        figsize=(8, max(2.8, len(targets) * 2.8)),
+        figsize=(10, max(2.8, len(targets) * 2.8)),
         squeeze=False,
     )
     image = None
@@ -266,12 +271,12 @@ def plot_future_horizon_summary(
         axis.set_ylabel("feature")
     if image is not None:
         figure.colorbar(image, ax=list(axes[:, 0]), fraction=0.03, pad=0.02)
-    figure.subplots_adjust(left=0.12, right=0.88, bottom=0.12, top=0.92, hspace=0.3)
+    figure.subplots_adjust(left=0.30, right=0.86, bottom=0.12, top=0.92, hspace=0.3)
     return figure
 
 
 def plot_availability_audit(
-    bundle: EvidenceBundle, settings: EvidenceSettings | None = None
+    bundle: EvidenceBundle, settings: EvidenceSettings
 ) -> Figure:
     """Plot valid-cycle feature availability and primary pair coverage."""
     figure, axes = plt.subplots(2, 1, figsize=(11, 7), squeeze=False)
@@ -309,12 +314,8 @@ def plot_availability_audit(
     feature_axis.set_ylabel("cycle")
 
     future = bundle.future_association
-    if settings is None:
-        target = str(future["target"].iloc[0]) if not future.empty else ""
-        horizon = int(future["horizon_minutes"].iloc[0]) if not future.empty else 0
-    else:
-        target = settings.primary_target
-        horizon = settings.primary_horizon_minutes
+    target = settings.primary_target
+    horizon = settings.primary_horizon_minutes
     future_matrix = np.full((len(valid_cycles), len(features)), np.nan)
     selected_future = future.loc[
         future["target"].eq(target) & future["horizon_minutes"].eq(horizon)
@@ -372,6 +373,8 @@ def write_figures(
             files.append(filename)
         plt.close(figure)
     return tuple(files)
+
+
 def _date_level_values(frame: pd.DataFrame, value_column: str) -> pd.Series[Any]:
     if frame.empty or value_column not in frame or "experiment_date" not in frame:
         return pd.Series(dtype=float)
