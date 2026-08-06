@@ -332,17 +332,8 @@ def _materialize_cycle(
     image_summary, intervals = _cycle_image_summary(
         dataset_dir, cycle_name, canonical, metadata_result, registry
     )
-    final_record = build_cycle_record(
-        summary_row,
-        cycle_name=cycle_name,
-        cycle_uid=make_cycle_uid(*key),
-        processed=canonical,
-        original=original,
-        image_summary=image_summary,
-        assets=assets,
-    )
-    final_record["boundaries"] = record["boundaries"]
-    render_cycle_publication(canonical, final_record, dataset_dir / assets["publication"])
+    record["image"] = image_summary
+    render_cycle_publication(canonical, record, dataset_dir / assets["publication"])
     start, end = _cycle_window(canonical)
     render_rgb_coverage_intervals(
         cycle_name,
@@ -352,7 +343,7 @@ def _materialize_cycle(
         dataset_dir / assets["rgb_coverage"],
         sensor_intervals=_sensor_coverage_intervals(canonical, registry),
     )
-    return final_record, metadata_result
+    return record, metadata_result
 
 
 def _materialize_direct_pipelines(
@@ -613,62 +604,154 @@ def _append_direct_pipeline(  # noqa: C901
     write_json(catalog, dataset_dir / "cycle_catalog.json")
 
 
-def _refresh_cycles(
+def _render_publication(dataset_dir: Path, record: Mapping[str, Any]) -> None:
+    from .visualization import render_cycle_publication
+
+    cycle_name = str(record["cycle_name"])
+    assets = record.get("assets")
+    if not isinstance(assets, Mapping):
+        raise ValueError(f"cycle assets are missing: {cycle_name}")
+    frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+    render_cycle_publication(
+        frame,
+        record,
+        dataset_dir / str(assets["publication"]),
+    )
+
+
+def _render_coverage(
     dataset_dir: Path,
-    cycle_names: Sequence[str] | None = None,
-    *,
-    render_publication: bool = True,
-    render_coverage: bool = True,
+    record: Mapping[str, Any],
+    metadata: pd.DataFrame,
+    registry: Mapping[str, Any],
 ) -> None:
-    """Refresh only the selected cycle summaries and figures."""
     from .dataset_images import (
         _cycle_image_summary,
         _cycle_window,
         _sensor_coverage_intervals,
     )
-    from .dataset_io import read_json, write_json
-    from .dataset_metadata import now_iso, read_catalog, read_manifest
+    from .visualization import render_rgb_coverage_intervals
+
+    cycle_name = str(record["cycle_name"])
+    assets = record.get("assets")
+    if not isinstance(assets, Mapping):
+        raise ValueError(f"cycle assets are missing: {cycle_name}")
+    frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+    _, intervals = _cycle_image_summary(
+        dataset_dir, cycle_name, frame, metadata, registry
+    )
+    start, end = _cycle_window(frame)
+    render_rgb_coverage_intervals(
+        cycle_name,
+        start,
+        end,
+        intervals,
+        dataset_dir / str(assets["rgb_coverage"]),
+        sensor_intervals=_sensor_coverage_intervals(frame, registry),
+    )
+
+
+def _refresh_cycle_record(
+    dataset_dir: Path,
+    record: dict[str, Any],
+    metadata: pd.DataFrame,
+    registry: Mapping[str, Any],
+) -> None:
+    from .dataset_images import (
+        _cycle_image_summary,
+        _cycle_window,
+        _sensor_coverage_intervals,
+    )
     from .visualization import render_cycle_publication, render_rgb_coverage_intervals
+
+    cycle_name = str(record["cycle_name"])
+    assets = record.get("assets")
+    if not isinstance(assets, Mapping):
+        raise ValueError(f"cycle assets are missing: {cycle_name}")
+    frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+    image_summary, intervals = _cycle_image_summary(
+        dataset_dir, cycle_name, frame, metadata, registry
+    )
+    record["image"] = image_summary
+    record.setdefault("data", {})["processed_row_count"] = int(len(frame))
+    render_cycle_publication(
+        frame,
+        record,
+        dataset_dir / str(assets["publication"]),
+    )
+    start, end = _cycle_window(frame)
+    render_rgb_coverage_intervals(
+        cycle_name,
+        start,
+        end,
+        intervals,
+        dataset_dir / str(assets["rgb_coverage"]),
+        sensor_intervals=_sensor_coverage_intervals(frame, registry),
+    )
+
+
+def _refresh_edited_cycles(
+    dataset_dir: Path, cycle_names: Sequence[str]
+) -> None:
+    """Refresh image facts after an edit without re-running Prepare/Process."""
+    from .dataset_images import _cycle_image_summary
+    from .dataset_io import read_json
+    from .dataset_metadata import (
+        now_iso,
+        read_catalog,
+        read_manifest,
+        write_catalog,
+        write_manifest,
+    )
 
     catalog = read_catalog(dataset_dir)
     registry = read_json(dataset_dir / "channel_registry.json")
     if not isinstance(registry, dict):
         raise ValueError("channel_registry.json must contain an object")
     metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    selected = set(cycle_names) if cycle_names is not None else None
+    selected = set(cycle_names)
     for record in catalog["cycles"]:
-        if not isinstance(record, dict):
+        if not isinstance(record, dict) or str(record.get("cycle_name")) not in selected:
             continue
         cycle_name = str(record["cycle_name"])
-        if selected is not None and cycle_name not in selected:
-            continue
         assets = record.get("assets")
         if not isinstance(assets, Mapping):
             raise ValueError(f"cycle assets are missing: {cycle_name}")
         frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
-        image_summary, intervals = _cycle_image_summary(
+        image_summary, _ = _cycle_image_summary(
             dataset_dir, cycle_name, frame, metadata, registry
         )
         record["image"] = image_summary
         record.setdefault("data", {})["processed_row_count"] = int(len(frame))
-        if render_publication:
-            render_cycle_publication(
-                frame, record, dataset_dir / str(assets["publication"])
-            )
-        if render_coverage:
-            start, end = _cycle_window(frame)
-            render_rgb_coverage_intervals(
-                cycle_name,
-                start,
-                end,
-                intervals,
-                dataset_dir / str(assets["rgb_coverage"]),
-                sensor_intervals=_sensor_coverage_intervals(frame, registry),
-            )
-    write_json(catalog, dataset_dir / "cycle_catalog.json")
+    write_catalog(dataset_dir, catalog)
     manifest = read_manifest(dataset_dir)
     manifest["updated_at"] = now_iso()
-    write_json(manifest, dataset_dir / "dataset_manifest.json")
+    write_manifest(dataset_dir, manifest)
+
+
+def _refresh_all_cycles(dataset_dir: Path) -> None:
+    """Refresh image facts, coverage, publication, and Dataset timestamps."""
+    from .dataset_io import read_json
+    from .dataset_metadata import (
+        now_iso,
+        read_catalog,
+        read_manifest,
+        write_catalog,
+        write_manifest,
+    )
+
+    catalog = read_catalog(dataset_dir)
+    registry = read_json(dataset_dir / "channel_registry.json")
+    if not isinstance(registry, dict):
+        raise ValueError("channel_registry.json must contain an object")
+    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    for record in catalog["cycles"]:
+        if isinstance(record, dict):
+            _refresh_cycle_record(dataset_dir, record, metadata, registry)
+    write_catalog(dataset_dir, catalog)
+    manifest = read_manifest(dataset_dir)
+    manifest["updated_at"] = now_iso()
+    write_manifest(dataset_dir, manifest)
 
 
 def review_cycle(
@@ -678,27 +761,56 @@ def review_cycle(
     status: str,
     reason: str | None = None,
 ) -> Path:
-    """Update one user-controlled Dataset status and redraw that cycle."""
+    """Update only the user-controlled status and its publication title."""
     allowed = {"valid", "partial", "incomplete", "invalid"}
     if status not in allowed:
         raise ValueError(f"invalid Dataset status: {status}")
-    from .dataset_io import write_json
-    from .dataset_metadata import read_catalog
+    from .dataset_metadata import read_catalog, write_catalog
 
     catalog = read_catalog(dataset_dir)
     for record in catalog["cycles"]:
         if isinstance(record, dict) and record.get("cycle_name") == cycle_name:
             record["status"] = status
             record["status_reason"] = reason
-            write_json(catalog, dataset_dir / "cycle_catalog.json")
-            _refresh_cycles(
-                dataset_dir,
-                [cycle_name],
-                render_publication=True,
-                render_coverage=False,
-            )
+            _render_publication(dataset_dir, record)
+            write_catalog(dataset_dir, catalog)
             return dataset_dir
     raise KeyError(f"unknown cycle: {cycle_name}")
+
+
+def _selected_cycle_records(
+    dataset_dir: Path, cycle_names: Sequence[str]
+) -> list[dict[str, Any]]:
+    from .dataset_metadata import read_catalog
+
+    selected = set(cycle_names)
+    catalog = read_catalog(dataset_dir)
+    return [
+        record
+        for record in catalog["cycles"]
+        if isinstance(record, dict)
+        and str(record.get("cycle_name")) in selected
+    ]
+
+
+def _render_edited_publications(
+    dataset_dir: Path, cycle_names: Sequence[str]
+) -> None:
+    for record in _selected_cycle_records(dataset_dir, cycle_names):
+        _render_publication(dataset_dir, record)
+
+
+def _render_edited_coverages(
+    dataset_dir: Path, cycle_names: Sequence[str]
+) -> None:
+    from .dataset_io import read_json
+
+    registry = read_json(dataset_dir / "channel_registry.json")
+    if not isinstance(registry, dict):
+        raise ValueError("channel_registry.json must contain an object")
+    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    for record in _selected_cycle_records(dataset_dir, cycle_names):
+        _render_coverage(dataset_dir, record, metadata, registry)
 
 
 def edit_dataset(
@@ -743,12 +855,12 @@ def edit_dataset(
         render_coverage = True
 
     if changed_cycles:
-        _refresh_cycles(
-            dataset_dir,
-            sorted(changed_cycles),
-            render_publication=render_publication,
-            render_coverage=render_coverage,
-        )
+        selected = sorted(changed_cycles)
+        _refresh_edited_cycles(dataset_dir, selected)
+        if render_publication:
+            _render_edited_publications(dataset_dir, selected)
+        if render_coverage:
+            _render_edited_coverages(dataset_dir, selected)
     return dataset_dir
 
 
@@ -871,7 +983,7 @@ def _apply_scientific_edit_to_cycle(
 
 def refresh_dataset(dataset_dir: Path) -> Path:
     """Refresh current images, statistics, and both figure families."""
-    _refresh_cycles(dataset_dir)
+    _refresh_all_cycles(dataset_dir)
     return dataset_dir
 
 
@@ -883,6 +995,7 @@ def render_dataset(
     coverage: bool = True,
 ) -> Path:
     """Render selected final assets without reading any source directory."""
+    from .dataset_io import read_json
     from .dataset_metadata import read_catalog
 
     catalog = read_catalog(dataset_dir)
@@ -892,10 +1005,18 @@ def render_dataset(
         for record in catalog["cycles"]
     ):
         raise KeyError(f"unknown cycle: {cycle_name}")
-    _refresh_cycles(
-        dataset_dir,
-        [cycle_name],
-        render_publication=publication,
-        render_coverage=coverage,
+    record = next(
+        record
+        for record in catalog["cycles"]
+        if isinstance(record, Mapping)
+        and str(record.get("cycle_name")) == cycle_name
     )
+    if publication:
+        _render_publication(dataset_dir, record)
+    if coverage:
+        registry = read_json(dataset_dir / "channel_registry.json")
+        if not isinstance(registry, dict):
+            raise ValueError("channel_registry.json must contain an object")
+        metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+        _render_coverage(dataset_dir, record, metadata, registry)
     return dataset_dir

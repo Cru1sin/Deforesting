@@ -37,7 +37,9 @@ class DatasetLoader:
 
     @property
     def catalog(self) -> dict[str, object]:
-        return {"cycles": [dict(record) for record in self._catalog["cycles"]]}
+        result = dict(self._catalog)
+        result["cycles"] = [dict(record) for record in self._catalog["cycles"]]
+        return result
 
     def list_cycles(
         self,

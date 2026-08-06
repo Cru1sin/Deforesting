@@ -37,10 +37,11 @@ def read_manifest(dataset_dir: Path) -> dict[str, Any]:
         "updated_at",
         "experiments",
     }
-    if set(payload) != expected:
+    missing = expected - set(payload)
+    if missing:
         raise ValueError(
-            "dataset_manifest.json must contain exactly: "
-            f"{sorted(expected)}"
+            "dataset_manifest.json is missing required fields: "
+            f"{sorted(missing)}"
         )
     if payload.get("dataset_schema_version") != DATASET_SCHEMA_VERSION:
         raise ValueError("Dataset manifest is not schema version 3")
@@ -50,10 +51,10 @@ def read_manifest(dataset_dir: Path) -> dict[str, Any]:
         raise ValueError("Dataset manifest experiments must be a list")
     expected_experiment = {"experiment_id", "experiment_date", "source_directory"}
     for item in payload["experiments"]:
-        if not isinstance(item, Mapping) or set(item) != expected_experiment:
+        if not isinstance(item, Mapping) or not expected_experiment <= set(item):
             raise ValueError(
-                "Dataset experiment records must contain only identity and "
-                "informational source_directory"
+                "Dataset experiment records are missing required identity or "
+                "source_directory fields"
             )
     return payload
 
@@ -66,15 +67,15 @@ def write_manifest(dataset_dir: Path, manifest: Mapping[str, Any]) -> None:
 def read_catalog(dataset_dir: Path) -> dict[str, Any]:
     """Read the human-readable cycle catalog."""
     payload = _read_object(dataset_dir / CATALOG_FILENAME)
-    if set(payload) != {"cycles"} or not isinstance(payload["cycles"], list):
-        raise ValueError("cycle_catalog.json must contain only a cycles list")
+    if "cycles" not in payload or not isinstance(payload["cycles"], list):
+        raise ValueError("cycle_catalog.json must contain a cycles list")
     return payload
 
 
 def write_catalog(dataset_dir: Path, catalog: Mapping[str, Any]) -> None:
     """Write the cycle catalog directly."""
-    if set(catalog) != {"cycles"} or not isinstance(catalog["cycles"], list):
-        raise ValueError("cycle catalog must contain only a cycles list")
+    if "cycles" not in catalog or not isinstance(catalog["cycles"], list):
+        raise ValueError("cycle catalog must contain a cycles list")
     write_json(dict(catalog), dataset_dir / CATALOG_FILENAME)
 
 

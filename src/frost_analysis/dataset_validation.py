@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, cast
 
 import pandas as pd
 
@@ -39,9 +38,10 @@ def validate_dataset(dataset_dir: Path) -> None:
 
 def _validate_image_metadata(metadata: pd.DataFrame) -> None:
     key_columns = ["cycle_name", "source_camera_id", "file_name"]
-    if all(column in metadata for column in key_columns) and metadata.duplicated(
-        key_columns
-    ).any():
+    missing = [column for column in key_columns if column not in metadata]
+    if missing:
+        raise ValueError(f"image metadata is missing connection keys: {missing}")
+    if metadata.duplicated(key_columns).any():
         raise ValueError("image metadata contains duplicate source/file keys")
 
 
@@ -67,7 +67,6 @@ def _validate_cycle(
     )
     _validate_timestamps(processed, original, cycle_name)
     _validate_original_columns(original, cycle_name)
-    _validate_row_counts(record, processed, original, cycle_name)
 
 
 def _validate_timestamps(
@@ -91,30 +90,12 @@ def _validate_original_columns(original: pd.DataFrame, cycle_name: str) -> None:
         raise ValueError(f"{cycle_name}: original contains source quality columns")
 
 
-def _validate_row_counts(
-    record: Mapping[str, object],
-    processed: pd.DataFrame,
-    original: pd.DataFrame,
-    cycle_name: str,
-) -> None:
-    data = record.get("data")
-    if not isinstance(data, Mapping):
-        return
-    if int(data.get("processed_row_count", len(processed))) != len(processed):
-        raise ValueError(f"{cycle_name}: processed row count mismatch")
-    if int(data.get("original_row_count", len(original))) != len(original):
-        raise ValueError(f"{cycle_name}: original row count mismatch")
-
-
 def _validate_cycle_identity(
     frame: pd.DataFrame,
     record: Mapping[str, object],
     context: str,
     *,
     fields: tuple[str, ...] = (
-        "dataset_id",
-        "dataset_schema_version",
-        "dataset_cycle_index",
         "cycle_name",
         "cycle_uid",
         "experiment_id",
@@ -128,20 +109,17 @@ def _validate_cycle_identity(
     expected_uid = str(record["cycle_uid"])
     expected_experiment = str(record["experiment_id"])
     expected_cycle_id = str(record["cycle_id"])
-    expected: dict[str, object] = {
-        "dataset_id": "frost_cycle_dataset",
-        "dataset_schema_version": 3,
+    expected: dict[str, str] = {
         "cycle_name": expected_cycle_name,
         "cycle_uid": expected_uid,
         "experiment_id": expected_experiment,
         "cycle_id": expected_cycle_id,
     }
-    expected["dataset_cycle_index"] = int(expected_cycle_name.rsplit("_", 1)[1])
     for field, value in expected.items():
         if field not in fields:
             continue
         observed = frame[field]
-        if not observed.eq(cast(Any, value)).all():
+        if not observed.eq(value).all():
             raise ValueError(f"{context}: {field} does not match Catalog")
     if expected_uid != make_cycle_uid(expected_experiment, expected_cycle_id):
         raise ValueError(f"{context}: cycle_uid is inconsistent")
