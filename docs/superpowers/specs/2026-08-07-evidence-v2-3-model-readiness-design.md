@@ -87,10 +87,10 @@ context_features:
 
 These fields are included in the normalized settings hash. Existing
 `minimum_valid_pairs` and `minimum_pair_coverage` govern readiness anchors; no
-new sample threshold is introduced. v2.3 validates that `event_thresholds` is
-exactly `[0.05, 0.10, 0.15]`, `primary_event_threshold` is `0.10`, and
-`horizons_minutes` is exactly `[5, 10, 20]`, because the fixed audit schema
-names those thresholds and horizons explicitly.
+new sample threshold is introduced. The production configuration fixes the
+event thresholds and horizons shown above. `EvidenceSettings` still accepts
+smaller horizon values for focused synthetic analysis and tests; the audit's
+named 5/10/20-minute counts remain the fixed scientific reporting windows.
 
 ## Target Audit
 

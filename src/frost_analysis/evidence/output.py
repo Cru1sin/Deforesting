@@ -15,6 +15,9 @@ from .contracts import (
     FEATURE_PROFILE_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
     FUTURE_HORIZON_SUMMARY_COLUMNS,
+    READINESS_SPLIT_COLUMNS,
+    READINESS_SUMMARY_COLUMNS,
+    TARGET_AUDIT_COLUMNS,
     EvidenceBundle,
 )
 from .figures import write_figures
@@ -28,7 +31,7 @@ def write_evidence(
     loader: DatasetLoader,
     settings: EvidenceSettings,
 ) -> Path:
-    """Write six CSV tables, figures, and the compact Evidence manifest."""
+    """Write nine CSV tables, figures, and the compact Evidence manifest."""
     dataset_root = loader.dataset_root.resolve()
     resolved_output = output_dir.resolve()
     if resolved_output == dataset_root or dataset_root in resolved_output.parents:
@@ -51,6 +54,9 @@ def write_evidence(
             bundle.feature_pair_similarity,
             FEATURE_PAIR_SIMILARITY_COLUMNS,
         ),
+        "target_audit.csv": (bundle.target_audit, TARGET_AUDIT_COLUMNS),
+        "readiness_split.csv": (bundle.readiness_split, READINESS_SPLIT_COLUMNS),
+        "readiness_summary.csv": (bundle.readiness_summary, READINESS_SUMMARY_COLUMNS),
     }
     for filename, (table, columns) in tables.items():
         table.loc[:, columns].to_csv(resolved_output / filename, index=False)

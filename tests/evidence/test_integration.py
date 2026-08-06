@@ -92,3 +92,35 @@ def test_future_effect_uses_exact_same_stage_elapsed_anchors(tmp_path: Path) -> 
     assert future["pair_coverage"] == 1.0
     assert future["metric_status"] == "available"
     assert future["effect"] > 0
+
+
+def test_one_valid_cycle_builds_readiness_without_model_admission(tmp_path: Path) -> None:
+    frame = frame_for(
+        elapsed=range(0, 901, 10),
+        feature_a=np.linspace(-1.0, 5.0, 91),
+        feature_b=np.linspace(2.0, -3.0, 91),
+        heating_capacity=np.linspace(10.0, 7.0, 91),
+        cop=np.linspace(4.0, 2.5, 91),
+    )
+    loader = write_dataset(
+        tmp_path / "dataset", [("cycle", "2026-07-01", "valid", frame)]
+    )
+
+    bundle = build_evidence(
+        loader,
+        settings(
+            targets=("heating_capacity",),
+            horizons=(5,),
+            minimum_valid_pairs=10,
+            minimum_pair_coverage=0.5,
+        ),
+    )
+
+    assert len(bundle.target_audit) == 1
+    assert len(bundle.readiness_split) == 2
+    assert set(bundle.readiness_split["exclusion_reason"]) == {
+        "no_training_cycles_after_holdout"
+    }
+    assert set(bundle.readiness_summary["readiness_status"]) == {
+        "insufficient_validation_data"
+    }

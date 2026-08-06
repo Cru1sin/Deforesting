@@ -65,6 +65,9 @@ def frame_for(
         else np.linspace(4.0, 2.0, count)
     )
     progress = np.full(count, np.nan)
+    timestamps = pd.Timestamp("2026-07-01T00:00:00") + pd.to_timedelta(
+        elapsed_values, unit="s"
+    )
     frost = np.asarray(stage_values, dtype=object) == "frost_development"
     if frost.any() and np.nanmax(elapsed_values[frost]) > np.nanmin(elapsed_values[frost]):
         progress[frost] = (
@@ -73,6 +76,7 @@ def frame_for(
     return pd.DataFrame(
         {
             "cycle_stage": stage_values,
+            "timestamp": timestamps,
             "cycle_elapsed_seconds": elapsed_values,
             "cycle_progress": progress,
             "feature_a__baseline_residual": values_a,
@@ -80,9 +84,23 @@ def frame_for(
             "feature_b__baseline_residual": values_b,
             "feature_b__imputed": False,
             "heating_capacity__baseline_residual": target_values,
+            "heating_capacity": target_values,
+            "heating_capacity__baseline": float(target_values[0]),
             "heating_capacity__imputed": False,
             "cop__baseline_residual": cop_values,
+            "cop": cop_values,
+            "cop__baseline": float(cop_values[0]),
             "cop__imputed": False,
+            "ambient_temperature": 5.0,
+            "ambient_temperature__imputed": False,
+            "environment_relative_humidity": 80.0,
+            "environment_relative_humidity__imputed": False,
+            "water_in_temperature": 35.0,
+            "water_in_temperature__imputed": False,
+            "water_flow": 1.0,
+            "water_flow__imputed": False,
+            "compressor_frequency": 50.0,
+            "compressor_frequency__imputed": False,
         }
     )
 
@@ -128,6 +146,11 @@ def write_dataset(
                 "experiment_id": "exp",
                 "experiment_date": experiment_date,
                 "status": status,
+                "boundaries": {
+                    "defrost_start": (
+                        pd.to_datetime(frame["timestamp"]).max() + pd.Timedelta(seconds=10)
+                    ).isoformat()
+                },
                 "assets": {
                     "parquet": f"cycles/{cycle_name}.parquet",
                     "csv": f"cycles/{cycle_name}.csv",

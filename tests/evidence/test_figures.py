@@ -160,6 +160,9 @@ def test_figure_two_uses_feature_profile_order(tmp_path: Path) -> None:
         future_horizon_summary=bundle.future_horizon_summary,
         feature_profile=bundle.feature_profile.iloc[::-1].reset_index(drop=True),
         feature_pair_similarity=bundle.feature_pair_similarity,
+        target_audit=bundle.target_audit,
+        readiness_split=bundle.readiness_split,
+        readiness_summary=bundle.readiness_summary,
     )
 
     figure = plot_feature_profiles(reordered, evidence_settings)
@@ -215,6 +218,9 @@ def test_figure_two_keeps_long_labels_inside_figure(tmp_path: Path) -> None:
         future_horizon_summary=bundle.future_horizon_summary,
         feature_profile=pd.concat(profile_rows, ignore_index=True),
         feature_pair_similarity=bundle.feature_pair_similarity,
+        target_audit=bundle.target_audit,
+        readiness_split=bundle.readiness_split,
+        readiness_summary=bundle.readiness_summary,
     )
 
     figure = plot_feature_profiles(long_bundle, evidence_settings)

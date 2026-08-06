@@ -12,10 +12,16 @@ from .contracts import (
     CYCLE_ELIGIBILITY_COLUMNS,
     FEATURE_CYCLE_METRIC_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
+    TARGET_AUDIT_COLUMNS,
     TARGET_DEGRADATION_DIRECTION,
     EvidenceBundle,
 )
 from .metrics import feature_cycle_rows, future_association_rows, pair_cycle_values
+from .readiness import (
+    audit_performance_target,
+    compare_incremental_models,
+    summarize_readiness,
+)
 from .settings import EvidenceSettings
 from .summary import feature_pair_similarity, feature_profile, future_horizon_summary
 
@@ -30,7 +36,9 @@ def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> Evidenc
     feature_rows: list[dict[str, object]] = []
     future_rows: list[dict[str, object]] = []
     pair_inputs: list[tuple[str, str, dict[str, dict[float, float]]]] = []
+    readiness_inputs: list[tuple[Mapping[str, object], pd.DataFrame]] = []
     for record, frame in loader.iter_cycle_frames(statuses={"valid"}):
+        readiness_inputs.append((record, frame))
         metadata = _record_metadata(record)
         feature_rows.extend(feature_cycle_rows(frame, metadata, features, settings))
         future_rows.extend(future_association_rows(frame, metadata, features, settings))
@@ -47,6 +55,20 @@ def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> Evidenc
     future_summary = future_horizon_summary(future_association, features, settings)
     profile = feature_profile(feature_metrics, future_summary, features, settings)
     pair_similarity = feature_pair_similarity(pair_inputs, features, settings)
+    target_audit = _frame(
+        [
+            audit_performance_target(record, frame, target, settings)
+            for record, frame in readiness_inputs
+            for target in settings.targets
+        ],
+        TARGET_AUDIT_COLUMNS,
+    )
+    readiness_split = compare_incremental_models(
+        readiness_inputs, features, target_audit, settings
+    )
+    readiness_summary = summarize_readiness(
+        readiness_split, target_audit, feature_metrics, features, settings
+    )
     return EvidenceBundle(
         cycle_eligibility=eligibility,
         feature_cycle_metrics=feature_metrics,
@@ -54,6 +76,9 @@ def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> Evidenc
         future_horizon_summary=future_summary,
         feature_profile=profile,
         feature_pair_similarity=pair_similarity,
+        target_audit=target_audit,
+        readiness_split=readiness_split,
+        readiness_summary=readiness_summary,
     )
 
 

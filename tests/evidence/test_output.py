@@ -43,6 +43,9 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "future_horizon_summary.csv",
         "feature_profile.csv",
         "feature_pair_similarity.csv",
+        "target_audit.csv",
+        "readiness_split.csv",
+        "readiness_summary.csv",
     }
     assert expected_tables <= {path.name for path in output.iterdir()}
     assert len(list(output.glob("*.png"))) == 4

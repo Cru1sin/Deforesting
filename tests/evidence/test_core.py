@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,9 @@ from frost_analysis.evidence import EvidenceBundle, build_evidence, write_eviden
 from frost_analysis.evidence.contracts import (
     FEATURE_CYCLE_METRIC_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
+    READINESS_SPLIT_COLUMNS,
+    READINESS_SUMMARY_COLUMNS,
+    TARGET_AUDIT_COLUMNS,
 )
 
 from .conftest import settings
@@ -15,6 +19,17 @@ from .conftest import settings
 
 def test_new_evidence_public_api_is_defined() -> None:
     assert EvidenceBundle.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(EvidenceBundle)] == [
+        "cycle_eligibility",
+        "feature_cycle_metrics",
+        "future_association",
+        "future_horizon_summary",
+        "feature_profile",
+        "feature_pair_similarity",
+        "target_audit",
+        "readiness_split",
+        "readiness_summary",
+    ]
     assert callable(build_evidence)
     assert callable(write_evidence)
 
@@ -101,3 +116,6 @@ def test_evidence_entry_points_accept_loader_contract_without_runtime_type_guard
 def test_contract_columns_end_with_status_and_include_degradation_support() -> None:
     assert FEATURE_CYCLE_METRIC_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
     assert "degradation_support" in FUTURE_ASSOCIATION_COLUMNS
+    assert TARGET_AUDIT_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
+    assert READINESS_SPLIT_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
+    assert READINESS_SUMMARY_COLUMNS[-2:] == ["readiness_status", "readiness_reason"]
