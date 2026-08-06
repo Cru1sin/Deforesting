@@ -22,12 +22,6 @@ CYCLE_NAME_WIDTH = 6
 CycleKey = tuple[str, str]
 
 
-def validate_dataset_id(value: str) -> str:
-    if value != DATASET_ID:
-        raise ValueError(f"invalid dataset_id: {value!r}")
-    return value
-
-
 def make_cycle_uid(experiment_id: str, cycle_id: str) -> str:
     return f"{experiment_id}::{cycle_id}"
 
@@ -59,11 +53,7 @@ def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
     """Build or append one date directly from raw input."""
     input_path = Path(input_dir).resolve()
     project_root = _resolve_project_root()
-    target = (
-        Path(dataset_dir).resolve()
-        if dataset_dir is not None
-        else project_root / "dataset"
-    )
+    target = Path(dataset_dir).resolve() if dataset_dir is not None else project_root / "dataset"
     _validate_date_input(input_path)
     config = _load_config_for_input(input_path, project_root)
 
@@ -78,8 +68,7 @@ def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
             (
                 item
                 for item in experiments
-                if isinstance(item, Mapping)
-                and str(item.get("experiment_id")) == experiment_id
+                if isinstance(item, Mapping) and str(item.get("experiment_id")) == experiment_id
             ),
             None,
         )
@@ -101,9 +90,7 @@ def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
     return target
 
 
-def rebuild_dataset(
-    input_dirs: Sequence[Path], dataset_dir: Path | None = None
-) -> Path:
+def rebuild_dataset(input_dirs: Sequence[Path], dataset_dir: Path | None = None) -> Path:
     """Rebuild a Dataset from raw dates without reading the previous Dataset."""
     if not input_dirs:
         raise ValueError("dataset rebuild requires at least one INPUT_DIR")
@@ -114,19 +101,14 @@ def rebuild_dataset(
     )
     for input_path in inputs:
         _validate_date_input(input_path)
-    target = (
-        Path(dataset_dir).resolve()
-        if dataset_dir is not None
-        else project_root / "dataset"
-    )
+    target = Path(dataset_dir).resolve() if dataset_dir is not None else project_root / "dataset"
 
     if target.exists():
         import shutil
 
         shutil.rmtree(target)
     pipelines = [
-        _run_direct_pipeline(path, _load_config_for_input(path, project_root))
-        for path in inputs
+        _run_direct_pipeline(path, _load_config_for_input(path, project_root)) for path in inputs
     ]
     _materialize_direct_pipelines(target, pipelines)
     return target
@@ -157,9 +139,7 @@ def assign_final_cycle_names_by_time(
     prepared_starts: dict[CycleKey, pd.Timestamp] = {}
     if prepared is not None and "timestamp" in prepared:
         prepared_times = prepared.copy()
-        prepared_times["timestamp"] = pd.to_datetime(
-            prepared_times["timestamp"], errors="coerce"
-        )
+        prepared_times["timestamp"] = pd.to_datetime(prepared_times["timestamp"], errors="coerce")
         for key, group in prepared_times.groupby(
             ["experiment_id", "cycle_id"], sort=False, dropna=False
         ):
@@ -172,14 +152,8 @@ def assign_final_cycle_names_by_time(
         key = (str(row["experiment_id"]), str(row["cycle_id"]))
         if allowed is not None and key not in allowed:
             continue
-        raw_start = pd.to_datetime(
-            cast(Any, row.get("segment_start")), errors="coerce"
-        )
-        start = (
-            pd.Timestamp(raw_start)
-            if not pd.isna(raw_start)
-            else prepared_starts.get(key)
-        )
+        raw_start = pd.to_datetime(cast(Any, row.get("segment_start")), errors="coerce")
+        start = pd.Timestamp(raw_start) if not pd.isna(raw_start) else prepared_starts.get(key)
         start_value = int(start.value) if start is not None else pd.Timestamp.max.value
         rows.append(
             (
@@ -219,6 +193,8 @@ def _validate_date_input(input_path: Path) -> None:
         raise FileNotFoundError(f"input directory does not exist: {input_path}")
     if re.fullmatch(r"\d{4}", input_path.name) is None:
         raise ValueError("dataset input basename must be a four-digit MMDD date")
+
+
 def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
     from .config import load_config
 
@@ -270,7 +246,7 @@ def _materialize_cycle(
     )
     from .dataset_io import write_csv, write_parquet
     from .dataset_metadata import build_cycle_record
-    from .dataset_registry import build_processed_frame, export_original_frame
+    from .dataset_schema import build_processed_frame, export_original_frame
     from .visualization import render_cycle_publication, render_rgb_coverage_intervals
 
     original = export_original_frame(
@@ -350,10 +326,10 @@ def _materialize_direct_pipelines(
     dataset_dir: Path,
     pipelines: Sequence[_DirectDatePipeline],
 ) -> None:
-    from .dataset_images import collect_final_images, copy_final_image, image_metadata_frame_final
+    from .dataset_images import collect_images, copy_image, image_metadata_frame
     from .dataset_io import write_json, write_parquet
-    from .dataset_metadata import experiment_record, now_iso
-    from .dataset_registry import build_registry, merge_original_columns
+    from .dataset_metadata import experiment_record
+    from .dataset_schema import build_registry, merge_original_columns
 
     if not pipelines:
         raise ValueError("Dataset requires at least one date")
@@ -386,15 +362,15 @@ def _materialize_direct_pipelines(
     all_images: list[dict[str, object]] = []
     for pipeline in pipelines:
         all_images.extend(
-            collect_final_images(
+            collect_images(
                 pipeline.prepared,
                 input_dir=pipeline.input_dir,
                 cycle_names=names,
             )
         )
-    image_metadata = image_metadata_frame_final(all_images)
+    image_metadata = image_metadata_frame(all_images)
     for image in all_images:
-        copy_final_image(image, dataset_dir)
+        copy_image(image, dataset_dir)
 
     summary_lookup: dict[CycleKey, dict[str, Any]] = {
         (str(row["experiment_id"]), str(row["cycle_id"])): {
@@ -406,9 +382,7 @@ def _materialize_direct_pipelines(
         str(pipeline.config.experiment_id): pipeline for pipeline in pipelines
     }
     records: list[dict[str, Any]] = []
-    for key, cycle_name in sorted(
-        names.items(), key=lambda item: parse_cycle_name(item[1])
-    ):
+    for key, cycle_name in sorted(names.items(), key=lambda item: parse_cycle_name(item[1])):
         record, image_metadata = _materialize_cycle(
             dataset_dir,
             pipelines_by_experiment[key[0]],
@@ -433,13 +407,10 @@ def _materialize_direct_pipelines(
         )
         for pipeline in sorted(pipelines, key=lambda item: str(item.config.experiment_date))
     ]
-    now = now_iso()
     write_json(
         {
             "dataset_schema_version": DATASET_SCHEMA_VERSION,
             "dataset_id": DATASET_ID,
-            "created_at": now,
-            "updated_at": now,
             "experiments": experiments,
         },
         dataset_dir / "dataset_manifest.json",
@@ -468,10 +439,10 @@ def _append_direct_pipeline(  # noqa: C901
     dataset_dir: Path,
     pipeline: _DirectDatePipeline,
 ) -> None:
-    from .dataset_images import collect_final_images, copy_final_image, image_metadata_frame_final
+    from .dataset_images import collect_images, copy_image, image_metadata_frame
     from .dataset_io import read_json, write_csv, write_json, write_parquet
-    from .dataset_metadata import experiment_record, now_iso, read_catalog, read_manifest
-    from .dataset_registry import (
+    from .dataset_metadata import experiment_record, read_catalog, read_manifest
+    from .dataset_schema import (
         align_original_schema,
         build_processed_frame,
         build_registry,
@@ -503,15 +474,15 @@ def _append_direct_pipeline(  # noqa: C901
             merged_registry[setting_name] = candidate[setting_name]
 
     old_images = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    new_images = collect_final_images(
+    new_images = collect_images(
         pipeline.prepared,
         input_dir=pipeline.input_dir,
         cycle_names=names,
     )
     for image in new_images:
-        copy_final_image(image, dataset_dir)
+        copy_image(image, dataset_dir)
     merged_images = pd.concat(
-        [old_images, image_metadata_frame_final(new_images)],
+        [old_images, image_metadata_frame(new_images)],
         ignore_index=True,
     )
     original_columns: list[str] = []
@@ -531,9 +502,7 @@ def _append_direct_pipeline(  # noqa: C901
         for row in pipeline.summary.to_dict(orient="records")
     }
     new_records: list[dict[str, Any]] = []
-    for key, cycle_name in sorted(
-        names.items(), key=lambda item: parse_cycle_name(item[1])
-    ):
+    for key, cycle_name in sorted(names.items(), key=lambda item: parse_cycle_name(item[1])):
         record, merged_images = _materialize_cycle(
             dataset_dir,
             pipeline,
@@ -546,26 +515,15 @@ def _append_direct_pipeline(  # noqa: C901
         )
         new_records.append(record)
 
-    old_field_names = [
-        str(item["name"])
-        for item in old_registry.get("fields", [])
-        if isinstance(item, Mapping)
-    ]
-    merged_field_names = [
-        str(item["name"])
-        for item in merged_registry.get("fields", [])
-        if isinstance(item, Mapping)
-    ]
-    if merged_field_names != old_field_names:
+    old_columns = [str(name) for name in old_registry.get("columns", [])]
+    merged_columns = [str(name) for name in merged_registry.get("columns", [])]
+    if merged_columns != old_columns:
         for record in old_records:
             name = str(record["cycle_name"])
             assets = record["assets"]
             old_frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
             scientific = old_frame.drop(
                 columns=[
-                    "dataset_id",
-                    "dataset_schema_version",
-                    "dataset_cycle_index",
                     "cycle_name",
                     "cycle_uid",
                 ],
@@ -599,7 +557,6 @@ def _append_direct_pipeline(  # noqa: C901
         },
     ]
     manifest["experiments"].sort(key=lambda value: str(value["experiment_date"]))
-    manifest["updated_at"] = now_iso()
     write_json(manifest, dataset_dir / "dataset_manifest.json")
     write_json(catalog, dataset_dir / "cycle_catalog.json")
 
@@ -637,9 +594,7 @@ def _render_coverage(
     if not isinstance(assets, Mapping):
         raise ValueError(f"cycle assets are missing: {cycle_name}")
     frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
-    _, intervals = _cycle_image_summary(
-        dataset_dir, cycle_name, frame, metadata, registry
-    )
+    _, intervals = _cycle_image_summary(dataset_dir, cycle_name, frame, metadata, registry)
     start, end = _cycle_window(frame)
     render_rgb_coverage_intervals(
         cycle_name,
@@ -690,55 +645,10 @@ def _refresh_cycle_record(
     )
 
 
-def _refresh_edited_cycles(
-    dataset_dir: Path, cycle_names: Sequence[str]
-) -> None:
-    """Refresh image facts after an edit without re-running Prepare/Process."""
-    from .dataset_images import _cycle_image_summary
-    from .dataset_io import read_json
-    from .dataset_metadata import (
-        now_iso,
-        read_catalog,
-        read_manifest,
-        write_catalog,
-        write_manifest,
-    )
-
-    catalog = read_catalog(dataset_dir)
-    registry = read_json(dataset_dir / "channel_registry.json")
-    if not isinstance(registry, dict):
-        raise ValueError("channel_registry.json must contain an object")
-    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    selected = set(cycle_names)
-    for record in catalog["cycles"]:
-        if not isinstance(record, dict) or str(record.get("cycle_name")) not in selected:
-            continue
-        cycle_name = str(record["cycle_name"])
-        assets = record.get("assets")
-        if not isinstance(assets, Mapping):
-            raise ValueError(f"cycle assets are missing: {cycle_name}")
-        frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
-        image_summary, _ = _cycle_image_summary(
-            dataset_dir, cycle_name, frame, metadata, registry
-        )
-        record["image"] = image_summary
-        record.setdefault("data", {})["processed_row_count"] = int(len(frame))
-    write_catalog(dataset_dir, catalog)
-    manifest = read_manifest(dataset_dir)
-    manifest["updated_at"] = now_iso()
-    write_manifest(dataset_dir, manifest)
-
-
 def _refresh_all_cycles(dataset_dir: Path) -> None:
     """Refresh image facts, coverage, publication, and Dataset timestamps."""
     from .dataset_io import read_json
-    from .dataset_metadata import (
-        now_iso,
-        read_catalog,
-        read_manifest,
-        write_catalog,
-        write_manifest,
-    )
+    from .dataset_metadata import read_catalog, write_catalog
 
     catalog = read_catalog(dataset_dir)
     registry = read_json(dataset_dir / "channel_registry.json")
@@ -749,9 +659,6 @@ def _refresh_all_cycles(dataset_dir: Path) -> None:
         if isinstance(record, dict):
             _refresh_cycle_record(dataset_dir, record, metadata, registry)
     write_catalog(dataset_dir, catalog)
-    manifest = read_manifest(dataset_dir)
-    manifest["updated_at"] = now_iso()
-    write_manifest(dataset_dir, manifest)
 
 
 def review_cycle(
@@ -778,42 +685,7 @@ def review_cycle(
     raise KeyError(f"unknown cycle: {cycle_name}")
 
 
-def _selected_cycle_records(
-    dataset_dir: Path, cycle_names: Sequence[str]
-) -> list[dict[str, Any]]:
-    from .dataset_metadata import read_catalog
-
-    selected = set(cycle_names)
-    catalog = read_catalog(dataset_dir)
-    return [
-        record
-        for record in catalog["cycles"]
-        if isinstance(record, dict)
-        and str(record.get("cycle_name")) in selected
-    ]
-
-
-def _render_edited_publications(
-    dataset_dir: Path, cycle_names: Sequence[str]
-) -> None:
-    for record in _selected_cycle_records(dataset_dir, cycle_names):
-        _render_publication(dataset_dir, record)
-
-
-def _render_edited_coverages(
-    dataset_dir: Path, cycle_names: Sequence[str]
-) -> None:
-    from .dataset_io import read_json
-
-    registry = read_json(dataset_dir / "channel_registry.json")
-    if not isinstance(registry, dict):
-        raise ValueError("channel_registry.json must contain an object")
-    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    for record in _selected_cycle_records(dataset_dir, cycle_names):
-        _render_coverage(dataset_dir, record, metadata, registry)
-
-
-def edit_dataset(
+def edit_dataset(  # noqa: C901
     dataset_dir: Path,
     *,
     baseline_seconds: int | None = None,
@@ -832,35 +704,77 @@ def edit_dataset(
     ):
         raise ValueError("dataset edit requires at least one edit")
 
-    from .dataset_edit import rename_camera_role
-    from .dataset_metadata import read_catalog
+    from .dataset_edit import apply_baseline, apply_recovery, rename_camera_role
+    from .dataset_images import _cycle_image_summary
+    from .dataset_io import read_json, write_csv, write_json, write_parquet
+    from .dataset_metadata import read_catalog, write_catalog
 
     renames = _camera_rename_mapping(camera_renames)
     catalog = read_catalog(dataset_dir)
-    changed_cycles: set[str] = set()
-    render_publication = False
-    render_coverage = False
-    if _has_scientific_edit(baseline_seconds, recovery_seconds, recovery_end_by):
-        changed_cycles, render_publication, render_coverage = _apply_scientific_edits(
-            dataset_dir,
-            catalog,
-            baseline_seconds=baseline_seconds,
-            recovery_seconds=recovery_seconds,
-            recovery_end_by=recovery_end_by,
-        )
+    registry = read_json(dataset_dir / "channel_registry.json")
+    if not isinstance(registry, dict):
+        raise ValueError("channel_registry.json must contain an object")
+    recovery_edit = recovery_seconds is not None or recovery_end_by is not None
+    scientific_edit = baseline_seconds is not None or recovery_edit
+    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet") if recovery_edit else None
+    publication_cycles: set[str] = set()
+    coverage_cycles: set[str] = set()
+
+    if scientific_edit:
+        for record in catalog["cycles"]:
+            if not isinstance(record, dict):
+                continue
+            cycle_name = str(record["cycle_name"])
+            assets = record["assets"]
+            processed = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+            if recovery_edit:
+                assert metadata is not None
+                original = pd.read_csv(dataset_dir / str(assets["original_csv"]))
+                mask = metadata["cycle_name"].astype(str).eq(cycle_name)
+                original, processed, cycle_metadata = apply_recovery(
+                    original,
+                    processed,
+                    metadata.loc[mask].copy(),
+                    record,
+                    registry,
+                    mode="seconds" if recovery_seconds is not None else "ts-minus",
+                    seconds=recovery_seconds,
+                )
+                if mask.any():
+                    metadata.loc[mask, "cycle_stage"] = cycle_metadata["cycle_stage"].to_numpy()
+                write_csv(original, dataset_dir / str(assets["original_csv"]))
+                coverage_cycles.add(cycle_name)
+            if baseline_seconds is not None:
+                processed = apply_baseline(processed, record, registry, seconds=baseline_seconds)
+            write_parquet(processed, dataset_dir / str(assets["parquet"]))
+            write_csv(processed, dataset_dir / str(assets["csv"]))
+            publication_cycles.add(cycle_name)
 
     if renames:
-        camera_changed = rename_camera_role(dataset_dir, renames)
-        changed_cycles.update(camera_changed)
-        render_coverage = True
+        coverage_cycles.update(rename_camera_role(dataset_dir, renames))
 
-    if changed_cycles:
-        selected = sorted(changed_cycles)
-        _refresh_edited_cycles(dataset_dir, selected)
-        if render_publication:
-            _render_edited_publications(dataset_dir, selected)
-        if render_coverage:
-            _render_edited_coverages(dataset_dir, selected)
+    if metadata is None and coverage_cycles:
+        metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    records = {
+        str(record["cycle_name"]): record
+        for record in catalog["cycles"]
+        if isinstance(record, dict)
+    }
+    for cycle_name in sorted(publication_cycles):
+        _render_publication(dataset_dir, records[cycle_name])
+    for cycle_name in sorted(coverage_cycles):
+        assert metadata is not None
+        record = records[cycle_name]
+        frame = pd.read_parquet(dataset_dir / str(record["assets"]["parquet"]))
+        image_summary, _ = _cycle_image_summary(dataset_dir, cycle_name, frame, metadata, registry)
+        record["image"] = image_summary
+        _render_coverage(dataset_dir, record, metadata, registry)
+
+    if metadata is not None and recovery_edit:
+        write_parquet(metadata, dataset_dir / "image_metadata.parquet")
+    if scientific_edit:
+        write_json(registry, dataset_dir / "channel_registry.json")
+    write_catalog(dataset_dir, catalog)
     return dataset_dir
 
 
@@ -872,113 +786,6 @@ def _camera_rename_mapping(expressions: Sequence[str]) -> dict[str, str]:
         old, new = expression.split("=", 1)
         renames[old] = new
     return renames
-
-
-def _has_scientific_edit(
-    baseline_seconds: int | None,
-    recovery_seconds: int | None,
-    recovery_end_by: str | None,
-) -> bool:
-    return (
-        baseline_seconds is not None
-        or recovery_seconds is not None
-        or recovery_end_by is not None
-    )
-
-
-def _apply_scientific_edits(
-    dataset_dir: Path,
-    catalog: dict[str, Any],
-    *,
-    baseline_seconds: int | None,
-    recovery_seconds: int | None,
-    recovery_end_by: str | None,
-) -> tuple[set[str], bool, bool]:
-    from .dataset_io import read_json, write_json, write_parquet
-
-    registry_value = read_json(dataset_dir / "channel_registry.json")
-    if not isinstance(registry_value, dict):
-        raise ValueError("channel_registry.json must contain an object")
-    registry = registry_value
-    recovery_edit = recovery_seconds is not None or recovery_end_by is not None
-    metadata = (
-        pd.read_parquet(dataset_dir / "image_metadata.parquet")
-        if recovery_edit
-        else None
-    )
-    changed_cycles: set[str] = set()
-    for record in catalog["cycles"]:
-        if not isinstance(record, dict):
-            continue
-        cycle_name = str(record["cycle_name"])
-        _apply_scientific_edit_to_cycle(
-            dataset_dir,
-            record,
-            registry,
-            metadata,
-            baseline_seconds=baseline_seconds,
-            recovery_seconds=recovery_seconds,
-            recovery_edit=recovery_edit,
-        )
-        changed_cycles.add(cycle_name)
-
-    if metadata is not None:
-        write_parquet(metadata, dataset_dir / "image_metadata.parquet")
-    write_json(registry, dataset_dir / "channel_registry.json")
-    write_json(catalog, dataset_dir / "cycle_catalog.json")
-    return changed_cycles, True, recovery_edit
-
-
-def _apply_scientific_edit_to_cycle(
-    dataset_dir: Path,
-    record: dict[str, Any],
-    registry: dict[str, Any],
-    metadata: pd.DataFrame | None,
-    *,
-    baseline_seconds: int | None,
-    recovery_seconds: int | None,
-    recovery_edit: bool,
-) -> None:
-    from .dataset_edit import apply_baseline, apply_recovery
-    from .dataset_io import write_csv, write_parquet
-
-    cycle_name = str(record["cycle_name"])
-    assets = record.get("assets")
-    if not isinstance(assets, Mapping):
-        raise ValueError(f"cycle assets are missing: {cycle_name}")
-    processed = pd.read_parquet(dataset_dir / str(assets["parquet"]))
-    if recovery_edit:
-        if metadata is None:
-            raise ValueError("recovery edit requires image metadata")
-        original = pd.read_csv(dataset_dir / str(assets["original_csv"]))
-        metadata_cycle = metadata.loc[
-            metadata["cycle_name"].astype(str).eq(cycle_name)
-        ].copy()
-        original, processed, metadata_cycle = apply_recovery(
-            original,
-            processed,
-            metadata_cycle,
-            record,
-            registry,
-            mode="seconds" if recovery_seconds is not None else "ts-minus",
-            seconds=recovery_seconds,
-        )
-        mask = metadata["cycle_name"].astype(str).eq(cycle_name)
-        metadata.loc[mask, :] = metadata_cycle.reindex(
-            columns=metadata.columns
-        ).to_numpy()
-        write_csv(original, dataset_dir / str(assets["original_csv"]))
-
-    if baseline_seconds is not None:
-        processed = apply_baseline(
-            processed,
-            record,
-            registry,
-            seconds=baseline_seconds,
-        )
-
-    write_parquet(processed, dataset_dir / str(assets["parquet"]))
-    write_csv(processed, dataset_dir / str(assets["csv"]))
 
 
 def refresh_dataset(dataset_dir: Path) -> Path:
@@ -1000,16 +807,14 @@ def render_dataset(
 
     catalog = read_catalog(dataset_dir)
     if not any(
-        isinstance(record, Mapping)
-        and str(record.get("cycle_name")) == cycle_name
+        isinstance(record, Mapping) and str(record.get("cycle_name")) == cycle_name
         for record in catalog["cycles"]
     ):
         raise KeyError(f"unknown cycle: {cycle_name}")
     record = next(
         record
         for record in catalog["cycles"]
-        if isinstance(record, Mapping)
-        and str(record.get("cycle_name")) == cycle_name
+        if isinstance(record, Mapping) and str(record.get("cycle_name")) == cycle_name
     )
     if publication:
         _render_publication(dataset_dir, record)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
@@ -13,20 +12,8 @@ import pandas as pd
 from .dataset import make_cycle_uid
 from .images import image_columns, image_roles
 
-_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
-
-def stable_logical_image_id(
-    cycle_uid: str, source_camera_id: str, source_relative_path: str
-) -> str:
-    """Return an identity hash for source metadata, never for image bytes."""
-    payload = (
-        f"{cycle_uid}\0{source_camera_id}\0{source_relative_path}"
-    ).encode()
-    return hashlib.sha256(payload).hexdigest()[:16]
-
-
-def collect_final_images(  # noqa: C901
+def collect_images(  # noqa: C901
     prepared: pd.DataFrame,
     *,
     input_dir: Path,
@@ -99,29 +86,23 @@ def collect_final_images(  # noqa: C901
                     f"{cycle_name}/{source_camera_id}/{file_name}"
                 )
             seen_filenames.add(filename_key)
-            image_id = stable_logical_image_id(
-                str(record["cycle_uid"]), source_camera_id, str(record["source_relative_path"])
-            )
             record.update(
                 {
-                    "image_id": image_id,
                     "frame_index": frame_index,
                     "initial_camera_slot": str(record["current_role"]),
                     "image_path": (
                         f"images/{cycle_name}/{source_camera_id}__{record['current_role']}/"
                         f"{file_name}"
                     ),
-                    "file_size_bytes": Path(str(record["source_path"])).stat().st_size,
                 }
             )
             records.append(record)
     return records
 
 
-def image_metadata_frame_final(records: list[dict[str, object]]) -> pd.DataFrame:
+def image_metadata_frame(records: list[dict[str, object]]) -> pd.DataFrame:
     """Build the final metadata table without current role or image SHA."""
     columns = [
-        "image_id",
         "cycle_uid",
         "cycle_name",
         "source_camera_id",
@@ -133,7 +114,6 @@ def image_metadata_frame_final(records: list[dict[str, object]]) -> pd.DataFrame
         "offset_seconds",
         "cycle_stage",
         "source_relative_path",
-        "file_size_bytes",
     ]
     return pd.DataFrame(
         [{column: record[column] for column in columns} for record in records],
@@ -141,36 +121,30 @@ def image_metadata_frame_final(records: list[dict[str, object]]) -> pd.DataFrame
     )
 
 
-def copy_final_image(record: Mapping[str, object], dataset_dir: Path) -> None:
-    """Copy a source image and check that the target exists."""
+def copy_image(record: Mapping[str, object], dataset_dir: Path) -> None:
+    """Copy one matched source image into its cycle/camera directory."""
     source = Path(str(record["source_path"]))
     target = dataset_dir / str(record["image_path"])
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
-    if not target.is_file():
-        raise ValueError(f"copied image is incomplete: {target}")
 
 
 def _parse_role_directory(name: str) -> tuple[str, str]:
     parts = name.split("__")
     if len(parts) != 2 or not all(parts):
-        raise ValueError(
-            "camera directory must be <source_camera_id>__<current_role>: "
-            f"{name!r}"
-        )
+        raise ValueError(f"camera directory must be <source_camera_id>__<current_role>: {name!r}")
     if any(separator in part for part in parts for separator in ("/", "\\")):
         raise ValueError(f"camera directory contains a path separator: {name!r}")
     return parts[0], parts[1]
 
 
-def scan_final_cycle_images(
+def scan_cycle_images(
     dataset_root: Path,
     cycle_name: str,
     image_metadata: pd.DataFrame,
 ) -> pd.DataFrame:
     """Scan current role folders and join only currently available metadata."""
     columns = [
-        "image_id",
         "cycle_name",
         "camera_role",
         "source_camera_id",
@@ -183,14 +157,11 @@ def scan_final_cycle_images(
         "offset_seconds",
         "cycle_stage",
         "source_relative_path",
-        "file_size_bytes",
     ]
     root = dataset_root / "images" / cycle_name
     if not root.is_dir():
         return pd.DataFrame(columns=columns)
-    scoped = image_metadata.loc[
-        image_metadata["cycle_name"].astype(str).eq(cycle_name)
-    ].copy()
+    scoped = image_metadata.loc[image_metadata["cycle_name"].astype(str).eq(cycle_name)].copy()
     key_columns = ["cycle_name", "source_camera_id", "file_name"]
     if scoped.duplicated(key_columns).any():
         raise ValueError(f"image metadata has duplicate source/file key: {cycle_name}")
@@ -210,8 +181,6 @@ def scan_final_cycle_images(
             )
         source_roles[source_camera_id] = current_role
         for image_path in sorted(path for path in role_dir.iterdir() if path.is_file()):
-            if image_path.suffix.lower() not in _IMAGE_SUFFIXES:
-                continue
             key = (cycle_name, source_camera_id, image_path.name)
             metadata = lookup.get(key)
             if metadata is None:
@@ -251,12 +220,10 @@ def _cycle_image_summary(
     dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
 ]:
     start, end = _cycle_window(frame)
-    images = scan_final_cycle_images(dataset_dir, cycle_name, image_metadata)
+    images = scan_cycle_images(dataset_dir, cycle_name, image_metadata)
     settings = registry.get("image_coverage", {})
     max_gap = float(
-        settings.get("max_image_gap_seconds", 40.0)
-        if isinstance(settings, Mapping)
-        else 40.0
+        settings.get("max_image_gap_seconds", 40.0) if isinstance(settings, Mapping) else 40.0
     )
     by_role: dict[str, Any] = {}
     intervals: dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] = {}
@@ -295,8 +262,7 @@ def _sensor_coverage_intervals(  # noqa: C901
         [
             str(name)
             for name, settings in channel_settings.items()
-            if isinstance(settings, Mapping)
-            and bool(settings.get("coverage_required", False))
+            if isinstance(settings, Mapping) and bool(settings.get("coverage_required", False))
         ]
         if isinstance(channel_settings, Mapping)
         else []
@@ -304,12 +270,11 @@ def _sensor_coverage_intervals(  # noqa: C901
     observed_names = required_names
     if not observed_names:
         observed_names = [
-            str(field["name"])
-            for field in registry.get("fields", [])
-            if isinstance(field, Mapping)
-            and str(field.get("name")) in frame
-            and str(field.get("name")) not in {"timestamp", "cycle_stage"}
-            and not str(field.get("name")).endswith("__imputed")
+            str(name)
+            for name in registry.get("columns", [])
+            if str(name) in frame
+            and str(name) not in {"timestamp", "cycle_stage"}
+            and not str(name).endswith("__imputed")
         ]
 
     availability = pd.Series(True, index=frame.index, dtype=bool)
@@ -323,9 +288,7 @@ def _sensor_coverage_intervals(  # noqa: C901
             values &= ~imputed.fillna(False).astype(bool)
         availability &= values
 
-    available_rows = frame.loc[valid & availability].sort_values(
-        "timestamp", kind="stable"
-    )
+    available_rows = frame.loc[valid & availability].sort_values("timestamp", kind="stable")
     start = pd.Timestamp(ordered.iloc[0])
     end = pd.Timestamp(ordered.iloc[-1]) + pd.Timedelta(seconds=step)
     available: list[tuple[pd.Timestamp, pd.Timestamp]] = []
@@ -335,9 +298,7 @@ def _sensor_coverage_intervals(  # noqa: C901
         for raw in available_rows["timestamp"].iloc[1:]:
             current = pd.Timestamp(raw)
             if (current - previous).total_seconds() > step * 1.5:
-                available.append(
-                    (current_start, previous + pd.Timedelta(seconds=step))
-                )
+                available.append((current_start, previous + pd.Timedelta(seconds=step)))
                 current_start = current
             previous = current
         available.append((current_start, previous + pd.Timedelta(seconds=step)))
@@ -393,8 +354,7 @@ def summarize_rgb_coverage(
     """Return the ratio represented by the exact intervals used for drawing."""
     total = (pd.Timestamp(cycle_end) - pd.Timestamp(cycle_start)).total_seconds()
     available = sum(
-        max(0.0, (end - start).total_seconds())
-        for start, end in intervals.get("available", [])
+        max(0.0, (end - start).total_seconds()) for start, end in intervals.get("available", [])
     )
     return 0.0 if total <= 0 else min(1.0, max(0.0, available / total))
 
@@ -403,9 +363,7 @@ def _merge_intervals(
     intervals: list[tuple[pd.Timestamp, pd.Timestamp]],
 ) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     ordered = sorted(
-        (pd.Timestamp(start), pd.Timestamp(end))
-        for start, end in intervals
-        if end > start
+        (pd.Timestamp(start), pd.Timestamp(end)) for start, end in intervals if end > start
     )
     if not ordered:
         return []
@@ -417,7 +375,3 @@ def _merge_intervals(
         else:
             merged.append((start, end))
     return merged
-
-
-# The final contract deliberately replaces the legacy image-id/stem join.
-scan_cycle_images = scan_final_cycle_images

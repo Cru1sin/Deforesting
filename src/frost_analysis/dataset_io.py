@@ -27,10 +27,5 @@ def write_parquet(frame: pd.DataFrame, path: Path) -> None:
     frame.to_parquet(path, index=False)
 
 
-def write_text(data: str, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(data, encoding="utf-8")
-
-
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))

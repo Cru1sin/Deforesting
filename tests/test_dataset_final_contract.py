@@ -181,6 +181,29 @@ def test_materialize_cycle_builds_one_catalog_record(
     add_dataset(input_dir, tmp_path / "dataset")
 
     assert call_count == 1
+    dataset_dir = tmp_path / "dataset"
+    manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
+    assert set(manifest) == {"dataset_schema_version", "dataset_id", "experiments"}
+    processed = pd.read_parquet(dataset_dir / "cycles/frost_cycle_000001.parquet")
+    assert not {
+        "dataset_id",
+        "dataset_schema_version",
+        "dataset_cycle_index",
+    } & set(processed)
+    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    assert metadata.columns.tolist() == [
+        "cycle_uid",
+        "cycle_name",
+        "source_camera_id",
+        "file_name",
+        "frame_index",
+        "initial_camera_slot",
+        "image_time",
+        "matched_timestamp",
+        "offset_seconds",
+        "cycle_stage",
+        "source_relative_path",
+    ]
 
 
 def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
@@ -234,7 +257,7 @@ def test_review_cycle_does_not_scan_images_or_update_manifest(
     def fail_scan(*args: object, **kwargs: object) -> pd.DataFrame:
         pytest.fail("review-cycle must not scan current image directories")
 
-    monkeypatch.setattr(dataset_images, "scan_final_cycle_images", fail_scan)
+    monkeypatch.setattr(dataset_images, "scan_cycle_images", fail_scan)
     monkeypatch.setattr(
         visualization,
         "render_cycle_publication",
@@ -276,9 +299,7 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     monkeypatch.setattr(
         visualization,
         "render_rgb_coverage_intervals",
-        lambda _name, _start, _end, _intervals, _path, **_kwargs: coverage_calls.append(
-            cycle_name
-        ),
+        lambda _name, _start, _end, _intervals, _path, **_kwargs: coverage_calls.append(cycle_name),
     )
 
     render_dataset(tmp_path, cycle_name, publication=True, coverage=True)
@@ -290,7 +311,7 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     assert (tmp_path / "dataset_manifest.json").read_bytes() == manifest_before
 
 
-def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
+def test_validate_scientific_schema_ignores_catalog_counts(
     tmp_path: Path,
 ) -> None:
     from frost_analysis.dataset import make_cycle_uid
@@ -301,9 +322,6 @@ def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
     cycle_uid = make_cycle_uid("exp", "cycle_001")
     processed = pd.DataFrame(
         {
-            "dataset_id": ["wrong"] * 2,
-            "dataset_schema_version": [999] * 2,
-            "dataset_cycle_index": [42] * 2,
             "cycle_name": [cycle_name] * 2,
             "cycle_uid": [cycle_uid] * 2,
             "experiment_id": ["exp"] * 2,
@@ -312,9 +330,7 @@ def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
             "signal": [1.0, 2.0],
         }
     )
-    original = processed[
-        ["experiment_id", "cycle_id", "timestamp", "signal"]
-    ].copy()
+    original = processed[["experiment_id", "cycle_id", "timestamp", "signal"]].copy()
     (tmp_path / "cycles").mkdir()
     (tmp_path / "cycles_original").mkdir()
     (tmp_path / "images").mkdir()
@@ -324,7 +340,6 @@ def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
     for filename in (f"{cycle_name}.png", f"{cycle_name}_rgb_coverage.png"):
         (tmp_path / "cycles" / filename).write_bytes(b"figure")
     metadata_columns = [
-        "image_id",
         "cycle_uid",
         "cycle_name",
         "source_camera_id",
@@ -336,7 +351,6 @@ def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
         "offset_seconds",
         "cycle_stage",
         "source_relative_path",
-        "file_size_bytes",
     ]
     pd.DataFrame(columns=metadata_columns).to_parquet(
         tmp_path / "image_metadata.parquet", index=False
@@ -345,8 +359,6 @@ def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
             "experiments": [],
         },
         tmp_path / "dataset_manifest.json",
@@ -377,10 +389,7 @@ def test_validate_ignores_repeated_dataset_metadata_and_catalog_counts(
     )
     write_json(
         {
-            "fields": [
-                {"name": column, "logical_type": "string"}
-                for column in ("experiment_id", "cycle_id", "timestamp", "signal")
-            ],
+            "columns": ["experiment_id", "cycle_id", "timestamp", "signal"],
             "channels": {},
         },
         tmp_path / "channel_registry.json",
@@ -422,9 +431,7 @@ def test_final_cycle_names_skip_summary_only_cycles() -> None:
             "experiment_id": ["exp_20260714", "exp_20260714"],
             "experiment_date": ["2026-07-14", "2026-07-14"],
             "cycle_id": ["cycle_001", "cycle_002"],
-            "segment_start": pd.to_datetime(
-                ["2026-07-14 17:41:16", "2026-07-14 18:01:04"]
-            ),
+            "segment_start": pd.to_datetime(["2026-07-14 17:41:16", "2026-07-14 18:01:04"]),
         }
     )
     prepared = pd.DataFrame(
@@ -453,11 +460,15 @@ def test_cli_default_dataset_paths_use_project_root(monkeypatch: object, tmp_pat
     monkeypatch.setattr(
         cli,
         "DatasetLoader",
-        lambda path: type("Loader", (), {
-            "dataset_root": Path(path),
-            "list_cycles": lambda self: pd.DataFrame(),
-            "load_image_metadata": lambda self: pd.DataFrame(),
-        })(),
+        lambda path: type(
+            "Loader",
+            (),
+            {
+                "dataset_root": Path(path),
+                "list_cycles": lambda self: pd.DataFrame(),
+                "load_image_metadata": lambda self: pd.DataFrame(),
+            },
+        )(),
     )
     monkeypatch.setattr(
         cli,
@@ -550,8 +561,8 @@ def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence(
         }
     )
 
-    stages, heating_start, stable_start, defrost_start, defrost_end = (
-        _partial_stage_context(segment, "defrost_active", {})
+    stages, heating_start, stable_start, defrost_start, defrost_end = _partial_stage_context(
+        segment, "defrost_active", {}
     )
 
     assert heating_start == timestamps[0]
@@ -589,11 +600,9 @@ def test_sensor_coverage_keeps_required_channels_in_the_mask() -> None:
     ]
 
 
-def test_refresh_dataset_updates_manifest_timestamp(
+def test_refresh_dataset_does_not_modify_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import json
-
     from frost_analysis import visualization
     from frost_analysis.dataset import refresh_dataset
     from frost_analysis.dataset_io import write_json
@@ -672,10 +681,10 @@ def test_refresh_dataset_updates_manifest_timestamp(
         lambda *_args, **_kwargs: None,
     )
 
+    manifest_before = (tmp_path / "dataset_manifest.json").read_bytes()
     refresh_dataset(tmp_path)
 
-    manifest = json.loads((tmp_path / "dataset_manifest.json").read_text())
-    assert manifest["updated_at"] != "2026-01-01T00:00:00+00:00"
+    assert (tmp_path / "dataset_manifest.json").read_bytes() == manifest_before
 
 
 def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
@@ -792,12 +801,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     dataset_dir = tmp_path / "dataset"
 
     add_dataset(first_input, dataset_dir)
-    initial_registry = json.loads(
-        (dataset_dir / "channel_registry.json").read_text()
-    )
-    initial_catalog = json.loads(
-        (dataset_dir / "cycle_catalog.json").read_text()
-    )
+    initial_registry = json.loads((dataset_dir / "channel_registry.json").read_text())
+    initial_catalog = json.loads((dataset_dir / "cycle_catalog.json").read_text())
     assert initial_registry["baseline_managed"] is False
     assert initial_registry["recovery_edit"]["managed"] is False
     assert "canonical_hash" not in initial_registry
@@ -809,9 +814,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     from frost_analysis.dataset import edit_dataset, refresh_dataset
 
     edit_dataset(dataset_dir, baseline_seconds=30, recovery_seconds=30)
-    edited_registry = json.loads(
-        (dataset_dir / "channel_registry.json").read_text()
-    )
+    edited_registry = json.loads((dataset_dir / "channel_registry.json").read_text())
     assert edited_registry["baseline_managed"] is True
     assert edited_registry["recovery_edit"]["managed"] is True
     third_input = tmp_path / "0716"
@@ -883,6 +886,7 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
                     "assets": {
                         "parquet": f"cycles/{cycle_name}.parquet",
                         "csv": f"cycles/{cycle_name}.csv",
+                        "publication": f"cycles/{cycle_name}.png",
                     },
                 }
             ]
@@ -892,24 +896,20 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
     write_json(
         {
             "channels": {},
-            "fields": [],
+            "columns": ["timestamp", "cycle_stage"],
             "processing_settings": {"feature_windows_minutes": []},
         },
         tmp_path / "channel_registry.json",
     )
     monkeypatch.setattr(
-        "frost_analysis.dataset._refresh_edited_cycles",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        "frost_analysis.dataset._render_edited_publications",
+        "frost_analysis.visualization.render_cycle_publication",
         lambda *_args, **_kwargs: None,
     )
 
     edit_dataset(tmp_path, baseline_seconds=60)
 
 
-def test_camera_rename_does_not_read_scientific_cycle_files(
+def test_camera_rename_does_not_rewrite_scientific_cycle_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from frost_analysis.dataset import edit_dataset
@@ -919,6 +919,17 @@ def test_camera_rename_does_not_read_scientific_cycle_files(
     role_dir = tmp_path / "images" / cycle_name / "camera01__unassigned_01"
     role_dir.mkdir(parents=True)
     (role_dir / "frame_0001.jpg").write_bytes(b"image")
+    cycles_dir = tmp_path / "cycles"
+    cycles_dir.mkdir()
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s"),
+            "cycle_stage": ["frost_development", "frost_development"],
+        }
+    )
+    parquet_path = cycles_dir / f"{cycle_name}.parquet"
+    frame.to_parquet(parquet_path, index=False)
+    before = parquet_path.read_bytes()
     write_json(
         {
             "dataset_schema_version": 3,
@@ -934,42 +945,50 @@ def test_camera_rename_does_not_read_scientific_cycle_files(
             "cycles": [
                 {
                     "cycle_name": cycle_name,
-                    "assets": {},
+                    "image": {},
+                    "assets": {
+                        "parquet": f"cycles/{cycle_name}.parquet",
+                        "rgb_coverage": f"cycles/{cycle_name}_rgb_coverage.png",
+                    },
                 }
             ]
         },
         tmp_path / "cycle_catalog.json",
     )
-    write_json({"channels": {}, "fields": []}, tmp_path / "channel_registry.json")
+    write_json(
+        {
+            "channels": {},
+            "columns": ["timestamp", "cycle_stage"],
+            "image_coverage": {"max_image_gap_seconds": 40},
+        },
+        tmp_path / "channel_registry.json",
+    )
     pd.DataFrame(
-        columns=[
-            "image_id",
-            "cycle_uid",
-            "cycle_name",
-            "source_camera_id",
-            "file_name",
-            "frame_index",
-            "initial_camera_slot",
-            "image_time",
-            "matched_timestamp",
-            "offset_seconds",
-            "cycle_stage",
-            "source_relative_path",
-            "file_size_bytes",
+        [
+            {
+                "cycle_uid": "exp::cycle_001",
+                "cycle_name": cycle_name,
+                "source_camera_id": "camera01",
+                "file_name": "frame_0001.jpg",
+                "frame_index": 1,
+                "initial_camera_slot": "unassigned_01",
+                "image_time": frame["timestamp"].iloc[0],
+                "matched_timestamp": frame["timestamp"].iloc[0],
+                "offset_seconds": 0.0,
+                "cycle_stage": "frost_development",
+                "source_relative_path": "camera01/frame_0001.jpg",
+            }
         ]
     ).to_parquet(tmp_path / "image_metadata.parquet", index=False)
     monkeypatch.setattr(
-        "frost_analysis.dataset._refresh_edited_cycles",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        "frost_analysis.dataset._render_edited_coverages",
+        "frost_analysis.visualization.render_rgb_coverage_intervals",
         lambda *_args, **_kwargs: None,
     )
 
     edit_dataset(tmp_path, camera_renames=["unassigned_01=front"])
 
     assert (tmp_path / "images" / cycle_name / "camera01__front").is_dir()
+    assert parquet_path.read_bytes() == before
 
 
 def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(

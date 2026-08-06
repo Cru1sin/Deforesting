@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,8 +32,6 @@ def read_manifest(dataset_dir: Path) -> dict[str, Any]:
     expected = {
         "dataset_schema_version",
         "dataset_id",
-        "created_at",
-        "updated_at",
         "experiments",
     }
     missing = expected - set(payload)
@@ -159,25 +156,6 @@ def build_cycle_record(
         "image": dict(image_summary),
         "assets": dict(assets),
     }
-
-
-def update_cycle_record(
-    catalog: dict[str, Any], cycle_name: str, updates: Mapping[str, Any]
-) -> dict[str, Any]:
-    """Update one catalog record without changing unrelated cycles."""
-    cycles = catalog.get("cycles")
-    if not isinstance(cycles, list):
-        raise ValueError("cycle catalog cycles must be a list")
-    for record in cycles:
-        if isinstance(record, dict) and record.get("cycle_name") == cycle_name:
-            record.update(dict(updates))
-            return record
-    raise KeyError(f"unknown cycle: {cycle_name}")
-
-
-def now_iso() -> str:
-    """Return the UTC timestamp used by metadata writes."""
-    return datetime.now(UTC).isoformat()
 
 
 def _read_object(path: Path) -> dict[str, Any]:
