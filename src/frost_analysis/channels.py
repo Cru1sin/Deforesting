@@ -10,7 +10,13 @@ import yaml
 _KINDS = {"continuous", "step", "event", "categorical", "protected", "derived"}
 _CANDIDATE_KINDS = {"continuous", "step", "derived"}
 _DIRECTIONS = {"increase", "decrease"}
-_FORMULAS = {"cop", "pressure_ratio", "water_delta_temperature", "superheat_calculated"}
+_FORMULAS = {
+    "cop",
+    "evaporator_capacity",
+    "pressure_ratio",
+    "water_delta_temperature",
+    "superheat_calculated",
+}
 _REQUIRED_KEYS = {"unit", "kind", "role", "resample", "missing", "analysis_candidate"}
 
 

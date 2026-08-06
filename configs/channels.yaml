@@ -204,6 +204,16 @@ channels:
     analysis_candidate: false
     valid_range: [0, 200]
 
+  compressor_power:
+    source_names: ["p5__压机功率"]
+    unit: kW
+    kind: continuous
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+    scale: 0.001
+
   compressor_speed:
     source_names: ["p2__压缩机转速"]
     unit: rpm
@@ -300,6 +310,16 @@ channels:
     analysis_candidate: false
     formula: cop
     dependencies: [heating_capacity, power_total]
+
+  evaporator_capacity:
+    unit: kW
+    kind: derived
+    role: performance
+    resample: mean
+    missing: none
+    analysis_candidate: false
+    formula: evaporator_capacity
+    dependencies: [heating_capacity, compressor_power]
 
   pressure_ratio:
     unit: dimensionless

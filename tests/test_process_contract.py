@@ -103,6 +103,13 @@ def _channels() -> dict[str, dict[str, object]]:
             "missing": "none",
             "analysis_candidate": False,
         },
+        "compressor_power": {
+            "kind": "continuous",
+            "role": "performance",
+            "resample": "mean",
+            "missing": "none",
+            "analysis_candidate": False,
+        },
         "cop": {
             "kind": "derived",
             "role": "performance",
@@ -111,6 +118,15 @@ def _channels() -> dict[str, dict[str, object]]:
             "analysis_candidate": False,
             "formula": "cop",
             "dependencies": ["heating_capacity", "power_total"],
+        },
+        "evaporator_capacity": {
+            "kind": "derived",
+            "role": "performance",
+            "resample": "mean",
+            "missing": "none",
+            "analysis_candidate": False,
+            "formula": "evaporator_capacity",
+            "dependencies": ["heating_capacity", "compressor_power"],
         },
     }
 
@@ -327,6 +343,28 @@ def test_cop_preserves_dependency_gaps_instead_of_using_filled_values(
     assert by_time.loc[timestamps[1], "cop"] == 5.0
     assert pd.isna(by_time.loc[timestamps[2], "cop"])
     assert by_time.loc[timestamps[3], "cop"] == 5.0
+
+
+def test_evaporator_capacity_subtracts_compressor_power(tmp_path: Path) -> None:
+    timestamps = pd.date_range("2026-07-15", periods=4, freq="10s")
+    frame = _frame(
+        timestamps,
+        temperature=[10.0] * len(timestamps),
+        stage="partial",
+    )
+    frame["cycle_status"] = "incomplete"
+    frame["heating_capacity"] = 10.0
+    frame["compressor_power"] = [2.428, np.nan, 2.0, 2.0]
+
+    processed, _ = process(
+        frame,
+        _summary(status="incomplete"),
+        _config(tmp_path),
+        _channels(),
+    )
+
+    assert processed.loc[0, "evaporator_capacity"] == pytest.approx(7.572)
+    assert pd.isna(processed.loc[1, "evaporator_capacity"])
 
 
 def test_stage_boundary_buckets_are_excluded_only_when_boundary_is_inside_bucket(

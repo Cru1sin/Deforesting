@@ -52,12 +52,13 @@ def process(
         eligible_channels=eligible_channels,
     )
     coordinated = recompute_cycle_coordinates(resampled, initial_summary)
-    raw_cop = _calculate_unfilled_cop(coordinated, channels)
+    raw_system_quantities = _calculate_unfilled_system_quantities(coordinated, channels)
     filled = _fill_missing(coordinated, channels, config)
     derived = calculate_derived_features(filled, channels)
-    if raw_cop is not None:
-        derived["cop"] = raw_cop
-        derived["cop__imputed"] = False
+    for column in raw_system_quantities:
+        name = str(column)
+        derived[name] = raw_system_quantities[name]
+        derived[f"{name}__imputed"] = False
     baselined, baseline_summary = add_baseline_residuals(
         derived, initial_summary, channels, config.process.baseline
     )
@@ -276,10 +277,11 @@ def _resample_fallback(
     result = pd.DataFrame(rows).sort_values(
         ["experiment_id", "timestamp"], kind="stable"
     ).reset_index(drop=True)
-    raw_cop = _calculate_unfilled_cop(result, channels)
-    if raw_cop is not None:
-        result["cop"] = raw_cop.to_numpy()
-        result["cop__imputed"] = False
+    raw_system_quantities = _calculate_unfilled_system_quantities(result, channels)
+    for column in raw_system_quantities:
+        name = str(column)
+        result[name] = raw_system_quantities[name].to_numpy()
+        result[f"{name}__imputed"] = False
     return result
 
 
@@ -649,17 +651,16 @@ def _has_process_boundaries(summary: pd.Series, observed_end: pd.Timestamp) -> b
     return _has_open_boundaries(summary) and _observed_defrost_onset(summary, observed_end)
 
 
-def _calculate_unfilled_cop(
+def _calculate_unfilled_system_quantities(
     frame: pd.DataFrame, channels: Mapping[str, Mapping[str, Any]]
-) -> pd.Series | None:
+) -> pd.DataFrame:
     settings = {
         name: value
         for name, value in channels.items()
-        if name == "cop" and str(value.get("kind")) == "derived"
+        if name in {"cop", "evaporator_capacity"}
+        and str(value.get("kind")) == "derived"
     }
-    if not settings:
-        return None
-    return calculate_derived_features(frame, settings)["cop"]
+    return calculate_derived_features(frame, settings).loc[:, list(settings)]
 
 
 def _cycle_grid(

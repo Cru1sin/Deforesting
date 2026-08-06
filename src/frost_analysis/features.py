@@ -10,6 +10,7 @@ import pandas as pd
 
 _FORMULAS = {
     "cop",
+    "evaporator_capacity",
     "pressure_ratio",
     "water_delta_temperature",
     "superheat_calculated",
@@ -39,6 +40,8 @@ def _calculate_formula(frame: pd.DataFrame, formula: str, dependencies: list[str
     values = [pd.to_numeric(frame[dependency], errors="coerce") for dependency in dependencies]
     if formula == "cop":
         return values[0].div(values[1]).where(values[1].gt(0))
+    if formula == "evaporator_capacity":
+        return values[0] - values[1]
     if formula == "pressure_ratio":
         return values[0].div(values[1]).where(values[1].gt(0))
     if formula == "water_delta_temperature":
