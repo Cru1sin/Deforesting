@@ -113,8 +113,22 @@ class DatasetLoader:
         return result.reset_index(drop=True)
 
     def load_cycle_images(self, cycle_name: str) -> pd.DataFrame:
-        self.get_cycle_record(cycle_name)
-        return scan_cycle_images(self.dataset_root, cycle_name, self._image_metadata)
+        record = self.get_cycle_record(cycle_name)
+        experiment_id = str(record["experiment_id"])
+        experiment = next(
+            item
+            for item in self._manifest["experiments"]
+            if str(item["experiment_id"]) == experiment_id
+        )
+        roles = experiment.get("camera_roles", {})
+        if not isinstance(roles, Mapping):
+            raise ValueError(f"camera_roles must be an object: {experiment_id}")
+        return scan_cycle_images(
+            self.dataset_root,
+            cycle_name,
+            self._image_metadata,
+            {str(key): str(value) for key, value in roles.items()},
+        )
 
     @property
     def registry(self) -> dict[str, object]:

@@ -36,19 +36,16 @@ def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
     (dataset_dir / assets["publication"]).write_bytes(b"publication")
     (dataset_dir / assets["rgb_coverage"]).write_bytes(b"coverage")
     metadata_columns = [
-        "image_id",
         "cycle_uid",
         "cycle_name",
         "source_camera_id",
         "file_name",
         "frame_index",
-        "initial_camera_slot",
         "image_time",
         "matched_timestamp",
         "offset_seconds",
         "cycle_stage",
         "source_relative_path",
-        "file_size_bytes",
     ]
     pd.DataFrame(columns=metadata_columns).to_parquet(
         dataset_dir / "image_metadata.parquet", index=False
@@ -59,7 +56,14 @@ def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
             "dataset_id": "frost_cycle_dataset",
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
-            "experiments": [],
+            "experiments": [
+                {
+                    "experiment_id": "exp",
+                    "experiment_date": "2026-07-14",
+                    "source_directory": "data/0714",
+                    "camera_roles": {},
+                }
+            ],
         },
         dataset_dir / "dataset_manifest.json",
     )
@@ -197,7 +201,6 @@ def test_materialize_cycle_builds_one_catalog_record(
         "source_camera_id",
         "file_name",
         "frame_index",
-        "initial_camera_slot",
         "image_time",
         "matched_timestamp",
         "offset_seconds",
@@ -345,7 +348,6 @@ def test_validate_scientific_schema_ignores_catalog_counts(
         "source_camera_id",
         "file_name",
         "frame_index",
-        "initial_camera_slot",
         "image_time",
         "matched_timestamp",
         "offset_seconds",
@@ -359,7 +361,14 @@ def test_validate_scientific_schema_ignores_catalog_counts(
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "experiments": [],
+            "experiments": [
+                {
+                    "experiment_id": "exp",
+                    "experiment_date": "2026-07-14",
+                    "source_directory": "data/0714",
+                    "camera_roles": {},
+                }
+            ],
         },
         tmp_path / "dataset_manifest.json",
     )
@@ -628,15 +637,23 @@ def test_refresh_dataset_does_not_modify_manifest(
             "dataset_id": "frost_cycle_dataset",
             "created_at": "2026-01-01T00:00:00+00:00",
             "updated_at": "2026-01-01T00:00:00+00:00",
-            "experiments": [],
+            "experiments": [
+                {
+                    "experiment_id": "exp",
+                    "experiment_date": "2026-07-14",
+                    "source_directory": "data/0714",
+                    "camera_roles": {},
+                }
+            ],
         },
         tmp_path / "dataset_manifest.json",
     )
     write_json(
         {
             "cycles": [
-                {
+                    {
                     "cycle_name": "frost_cycle_000001",
+                    "experiment_id": "exp",
                     "assets": {
                         "parquet": "cycles/frost_cycle_000001.parquet",
                         "csv": "cycles/frost_cycle_000001.csv",
@@ -654,19 +671,16 @@ def test_refresh_dataset_does_not_modify_manifest(
     write_json({"fields": [], "channels": []}, tmp_path / "channel_registry.json")
     pd.DataFrame(
         columns=[
-            "image_id",
             "cycle_uid",
             "cycle_name",
             "source_camera_id",
             "file_name",
             "frame_index",
-            "initial_camera_slot",
             "image_time",
             "matched_timestamp",
             "offset_seconds",
             "cycle_stage",
             "source_relative_path",
-            "file_size_bytes",
         ]
     ).to_parquet(tmp_path / "image_metadata.parquet", index=False)
 
@@ -909,18 +923,19 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
     edit_dataset(tmp_path, baseline_seconds=60)
 
 
-def test_camera_rename_does_not_rewrite_scientific_cycle_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_loader_resolves_camera_role_from_manifest_without_renaming_directory(
+    tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset import edit_dataset
     from frost_analysis.dataset_io import write_json
+    from frost_analysis.dataset_loader import DatasetLoader
 
     cycle_name = "frost_cycle_000001"
-    role_dir = tmp_path / "images" / cycle_name / "camera01__unassigned_01"
-    role_dir.mkdir(parents=True)
-    (role_dir / "frame_0001.jpg").write_bytes(b"image")
+    camera_dir = tmp_path / "images" / cycle_name / "camera01"
+    camera_dir.mkdir(parents=True)
+    (camera_dir / "frame_0001.jpg").write_bytes(b"image")
     cycles_dir = tmp_path / "cycles"
     cycles_dir.mkdir()
+    (tmp_path / "cycles_original").mkdir()
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s"),
@@ -929,14 +944,22 @@ def test_camera_rename_does_not_rewrite_scientific_cycle_files(
     )
     parquet_path = cycles_dir / f"{cycle_name}.parquet"
     frame.to_parquet(parquet_path, index=False)
-    before = parquet_path.read_bytes()
+    frame.to_csv(cycles_dir / f"{cycle_name}.csv", index=False)
+    frame.to_csv(tmp_path / "cycles_original" / f"{cycle_name}.csv", index=False)
+    (cycles_dir / f"{cycle_name}.png").write_bytes(b"publication")
+    (cycles_dir / f"{cycle_name}_rgb_coverage.png").write_bytes(b"coverage")
     write_json(
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-            "experiments": [],
+            "experiments": [
+                {
+                    "experiment_id": "exp",
+                    "experiment_date": "2026-07-14",
+                    "source_directory": "data/0714",
+                    "camera_roles": {"camera01": "front"},
+                }
+            ],
         },
         tmp_path / "dataset_manifest.json",
     )
@@ -945,9 +968,15 @@ def test_camera_rename_does_not_rewrite_scientific_cycle_files(
             "cycles": [
                 {
                     "cycle_name": cycle_name,
+                    "cycle_uid": "exp::cycle_001",
+                    "experiment_id": "exp",
+                    "cycle_id": "cycle_001",
                     "image": {},
                     "assets": {
                         "parquet": f"cycles/{cycle_name}.parquet",
+                        "csv": f"cycles/{cycle_name}.csv",
+                        "original_csv": f"cycles_original/{cycle_name}.csv",
+                        "publication": f"cycles/{cycle_name}.png",
                         "rgb_coverage": f"cycles/{cycle_name}_rgb_coverage.png",
                     },
                 }
@@ -971,7 +1000,6 @@ def test_camera_rename_does_not_rewrite_scientific_cycle_files(
                 "source_camera_id": "camera01",
                 "file_name": "frame_0001.jpg",
                 "frame_index": 1,
-                "initial_camera_slot": "unassigned_01",
                 "image_time": frame["timestamp"].iloc[0],
                 "matched_timestamp": frame["timestamp"].iloc[0],
                 "offset_seconds": 0.0,
@@ -980,15 +1008,70 @@ def test_camera_rename_does_not_rewrite_scientific_cycle_files(
             }
         ]
     ).to_parquet(tmp_path / "image_metadata.parquet", index=False)
-    monkeypatch.setattr(
-        "frost_analysis.visualization.render_rgb_coverage_intervals",
-        lambda *_args, **_kwargs: None,
+
+    images = DatasetLoader(tmp_path).load_cycle_images(cycle_name)
+
+    assert images["camera_role"].tolist() == ["front"]
+    assert images["path"].tolist() == [camera_dir / "frame_0001.jpg"]
+
+    manifest = json.loads((tmp_path / "dataset_manifest.json").read_text())
+    manifest["experiments"][0]["camera_roles"]["camera01"] = "top"
+    write_json(manifest, tmp_path / "dataset_manifest.json")
+
+    renamed = DatasetLoader(tmp_path).load_cycle_images(cycle_name)
+    assert renamed["camera_role"].tolist() == ["top"]
+    assert camera_dir.is_dir()
+
+
+def test_dataset_edit_cli_rejects_removed_camera_rename_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import frost_analysis.cli as cli
+
+    monkeypatch.setattr(cli, "edit_dataset", lambda *_args, **_kwargs: Path("dataset"))
+
+    with pytest.raises(SystemExit):
+        cli.main(["dataset", "edit", "--rename-camera", "old=new"])
+
+
+def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path) -> None:
+    from frost_analysis.dataset import update_cycle_columns
+
+    cycle_name = "frost_cycle_000001"
+    cycles = tmp_path / "cycles"
+    cycles.mkdir()
+    timestamps = pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s")
+    frame = pd.DataFrame({"timestamp": timestamps, "heating_capacity": [10.0, 12.0]})
+    frame.to_parquet(cycles / f"{cycle_name}.parquet", index=False)
+    frame.to_csv(cycles / f"{cycle_name}.csv", index=False)
+
+    update_cycle_columns(
+        tmp_path,
+        {
+            cycle_name: pd.DataFrame(
+                {
+                    "timestamp": timestamps[::-1],
+                    "compressor_power": [2.0, 1.0],
+                    "evaporator_capacity": [10.0, 9.0],
+                }
+            )
+        },
     )
 
-    edit_dataset(tmp_path, camera_renames=["unassigned_01=front"])
-
-    assert (tmp_path / "images" / cycle_name / "camera01__front").is_dir()
-    assert parquet_path.read_bytes() == before
+    expected = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "heating_capacity": [10.0, 12.0],
+            "compressor_power": [1.0, 2.0],
+            "evaporator_capacity": [9.0, 10.0],
+        }
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(cycles / f"{cycle_name}.parquet"), expected
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_csv(cycles / f"{cycle_name}.csv", parse_dates=["timestamp"]), expected
+    )
 
 
 def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(

@@ -81,7 +81,8 @@ def experiment_record(
     experiment_date: str,
     source_directory: Path,
     project_root: Path,
-) -> dict[str, str]:
+    camera_roles: Mapping[str, str],
+) -> dict[str, object]:
     """Build the informational experiment entry without runtime dependencies."""
     source = source_directory.resolve()
     root = project_root.resolve()
@@ -93,6 +94,7 @@ def experiment_record(
         "experiment_id": str(experiment_id),
         "experiment_date": str(experiment_date)[:10],
         "source_directory": value,
+        "camera_roles": dict(camera_roles),
     }
 
 

@@ -114,6 +114,24 @@ def rebuild_dataset(input_dirs: Sequence[Path], dataset_dir: Path | None = None)
     return target
 
 
+def update_cycle_columns(
+    dataset_dir: Path, updates: Mapping[str, pd.DataFrame]
+) -> None:
+    """Add or replace timestamp-aligned columns in existing Processed cycles."""
+    from .dataset_io import write_csv, write_parquet
+
+    for cycle_name, update in updates.items():
+        parquet_path = dataset_dir / "cycles" / f"{cycle_name}.parquet"
+        csv_path = parquet_path.with_suffix(".csv")
+        frame = pd.read_parquet(parquet_path).set_index("timestamp")
+        aligned = update.set_index("timestamp")
+        for column in aligned:
+            frame[column] = aligned[column]
+        result = frame.reset_index()
+        write_parquet(result, parquet_path)
+        write_csv(result, csv_path)
+
+
 def assign_final_cycle_names_by_time(
     summary: pd.DataFrame,
     *,
@@ -306,7 +324,12 @@ def _materialize_cycle(
     write_csv(canonical, dataset_dir / assets["csv"])
     write_csv(original, dataset_dir / assets["original_csv"])
     image_summary, intervals = _cycle_image_summary(
-        dataset_dir, cycle_name, canonical, metadata_result, registry
+        dataset_dir,
+        cycle_name,
+        canonical,
+        metadata_result,
+        registry,
+        getattr(pipeline.config, "camera_roles", {}),
     )
     record["image"] = image_summary
     render_cycle_publication(canonical, record, dataset_dir / assets["publication"])
@@ -404,6 +427,7 @@ def _materialize_direct_pipelines(
             str(pipeline.config.experiment_date),
             pipeline.input_dir,
             pipeline.config.project_root,
+            getattr(pipeline.config, "camera_roles", {}),
         )
         for pipeline in sorted(pipelines, key=lambda item: str(item.config.experiment_date))
     ]
@@ -553,6 +577,7 @@ def _append_direct_pipeline(  # noqa: C901
                 str(pipeline.config.experiment_date),
                 pipeline.input_dir,
                 pipeline.config.project_root,
+                getattr(pipeline.config, "camera_roles", {}),
             ),
         },
     ]
@@ -581,6 +606,7 @@ def _render_coverage(
     record: Mapping[str, Any],
     metadata: pd.DataFrame,
     registry: Mapping[str, Any],
+    camera_roles: Mapping[str, str],
 ) -> None:
     from .dataset_images import (
         _cycle_image_summary,
@@ -594,7 +620,9 @@ def _render_coverage(
     if not isinstance(assets, Mapping):
         raise ValueError(f"cycle assets are missing: {cycle_name}")
     frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
-    _, intervals = _cycle_image_summary(dataset_dir, cycle_name, frame, metadata, registry)
+    _, intervals = _cycle_image_summary(
+        dataset_dir, cycle_name, frame, metadata, registry, camera_roles
+    )
     start, end = _cycle_window(frame)
     render_rgb_coverage_intervals(
         cycle_name,
@@ -611,6 +639,7 @@ def _refresh_cycle_record(
     record: dict[str, Any],
     metadata: pd.DataFrame,
     registry: Mapping[str, Any],
+    camera_roles: Mapping[str, str],
 ) -> None:
     from .dataset_images import (
         _cycle_image_summary,
@@ -625,7 +654,7 @@ def _refresh_cycle_record(
         raise ValueError(f"cycle assets are missing: {cycle_name}")
     frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
     image_summary, intervals = _cycle_image_summary(
-        dataset_dir, cycle_name, frame, metadata, registry
+        dataset_dir, cycle_name, frame, metadata, registry, camera_roles
     )
     record["image"] = image_summary
     record.setdefault("data", {})["processed_row_count"] = int(len(frame))
@@ -648,16 +677,23 @@ def _refresh_cycle_record(
 def _refresh_all_cycles(dataset_dir: Path) -> None:
     """Refresh image facts, coverage, publication, and Dataset timestamps."""
     from .dataset_io import read_json
-    from .dataset_metadata import read_catalog, write_catalog
+    from .dataset_metadata import read_catalog, read_manifest, write_catalog
 
     catalog = read_catalog(dataset_dir)
     registry = read_json(dataset_dir / "channel_registry.json")
     if not isinstance(registry, dict):
         raise ValueError("channel_registry.json must contain an object")
     metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    manifest = read_manifest(dataset_dir)
     for record in catalog["cycles"]:
         if isinstance(record, dict):
-            _refresh_cycle_record(dataset_dir, record, metadata, registry)
+            _refresh_cycle_record(
+                dataset_dir,
+                record,
+                metadata,
+                registry,
+                _experiment_camera_roles(manifest, str(record["experiment_id"])),
+            )
     write_catalog(dataset_dir, catalog)
 
 
@@ -691,25 +727,22 @@ def edit_dataset(  # noqa: C901
     baseline_seconds: int | None = None,
     recovery_seconds: int | None = None,
     recovery_end_by: str | None = None,
-    camera_renames: Sequence[str] = (),
 ) -> Path:
-    """Apply scientific or camera-role edits directly to the Dataset."""
+    """Apply baseline or recovery edits directly to the Dataset."""
     if recovery_seconds is not None and recovery_end_by is not None:
         raise ValueError("--recovery-seconds and --recovery-end-by are mutually exclusive")
     if (
         baseline_seconds is None
         and recovery_seconds is None
         and recovery_end_by is None
-        and not camera_renames
     ):
         raise ValueError("dataset edit requires at least one edit")
 
-    from .dataset_edit import apply_baseline, apply_recovery, rename_camera_role
+    from .dataset_edit import apply_baseline, apply_recovery
     from .dataset_images import _cycle_image_summary
     from .dataset_io import read_json, write_csv, write_json, write_parquet
     from .dataset_metadata import read_catalog, write_catalog
 
-    renames = _camera_rename_mapping(camera_renames)
     catalog = read_catalog(dataset_dir)
     registry = read_json(dataset_dir / "channel_registry.json")
     if not isinstance(registry, dict):
@@ -750,9 +783,6 @@ def edit_dataset(  # noqa: C901
             write_csv(processed, dataset_dir / str(assets["csv"]))
             publication_cycles.add(cycle_name)
 
-    if renames:
-        coverage_cycles.update(rename_camera_role(dataset_dir, renames))
-
     if metadata is None and coverage_cycles:
         metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
     records = {
@@ -766,9 +796,16 @@ def edit_dataset(  # noqa: C901
         assert metadata is not None
         record = records[cycle_name]
         frame = pd.read_parquet(dataset_dir / str(record["assets"]["parquet"]))
-        image_summary, _ = _cycle_image_summary(dataset_dir, cycle_name, frame, metadata, registry)
+        from .dataset_metadata import read_manifest
+
+        roles = _experiment_camera_roles(
+            read_manifest(dataset_dir), str(record["experiment_id"])
+        )
+        image_summary, _ = _cycle_image_summary(
+            dataset_dir, cycle_name, frame, metadata, registry, roles
+        )
         record["image"] = image_summary
-        _render_coverage(dataset_dir, record, metadata, registry)
+        _render_coverage(dataset_dir, record, metadata, registry, roles)
 
     if metadata is not None and recovery_edit:
         write_parquet(metadata, dataset_dir / "image_metadata.parquet")
@@ -776,16 +813,6 @@ def edit_dataset(  # noqa: C901
         write_json(registry, dataset_dir / "channel_registry.json")
     write_catalog(dataset_dir, catalog)
     return dataset_dir
-
-
-def _camera_rename_mapping(expressions: Sequence[str]) -> dict[str, str]:
-    renames: dict[str, str] = {}
-    for expression in expressions:
-        if "=" not in expression:
-            raise ValueError(f"camera rename must be OLD=NEW: {expression}")
-        old, new = expression.split("=", 1)
-        renames[old] = new
-    return renames
 
 
 def refresh_dataset(dataset_dir: Path) -> Path:
@@ -803,7 +830,7 @@ def render_dataset(
 ) -> Path:
     """Render selected final assets without reading any source directory."""
     from .dataset_io import read_json
-    from .dataset_metadata import read_catalog
+    from .dataset_metadata import read_catalog, read_manifest
 
     catalog = read_catalog(dataset_dir)
     if not any(
@@ -823,5 +850,22 @@ def render_dataset(
         if not isinstance(registry, dict):
             raise ValueError("channel_registry.json must contain an object")
         metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-        _render_coverage(dataset_dir, record, metadata, registry)
+        roles = _experiment_camera_roles(
+            read_manifest(dataset_dir), str(record["experiment_id"])
+        )
+        _render_coverage(dataset_dir, record, metadata, registry, roles)
     return dataset_dir
+
+
+def _experiment_camera_roles(
+    manifest: Mapping[str, Any], experiment_id: str
+) -> dict[str, str]:
+    experiment = next(
+        item
+        for item in manifest["experiments"]
+        if isinstance(item, Mapping) and str(item.get("experiment_id")) == experiment_id
+    )
+    roles = experiment.get("camera_roles", {})
+    if not isinstance(roles, Mapping):
+        raise ValueError(f"camera_roles must be an object: {experiment_id}")
+    return {str(key): str(value) for key, value in roles.items()}

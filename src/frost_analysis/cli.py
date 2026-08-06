@@ -189,7 +189,6 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     recovery_group = edit_parser.add_mutually_exclusive_group()
     recovery_group.add_argument("--recovery-seconds", type=int)
     recovery_group.add_argument("--recovery-end-by", choices=["ts-minus"])
-    edit_parser.add_argument("--rename-camera", action="append", default=[])
 
     render_parser = dataset_commands.add_parser("render")
     render_parser.add_argument("--dataset", type=Path)
@@ -227,7 +226,6 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
                 baseline_seconds=arguments.baseline_seconds,
                 recovery_seconds=arguments.recovery_seconds,
                 recovery_end_by=arguments.recovery_end_by,
-                camera_renames=arguments.rename_camera,
             )
         )
         return 0

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -159,31 +158,6 @@ def apply_baseline(
     registry["baseline_seconds"] = int(seconds)
     registry["baseline_managed"] = True
     return result
-
-
-def rename_camera_role(dataset_dir: Path, renames: Mapping[str, str]) -> set[str]:
-    """Rename only the mutable role suffix of source/role image directories."""
-    changed: set[str] = set()
-    images_root = dataset_dir / "images"
-    if not images_root.is_dir():
-        return changed
-    for cycle_root in sorted(path for path in images_root.iterdir() if path.is_dir()):
-        existing = {path.name for path in cycle_root.iterdir() if path.is_dir()}
-        for old, new in renames.items():
-            if not old or not new or "__" in old or "__" in new:
-                raise ValueError("camera roles must be non-empty and cannot contain __")
-            for role_dir in sorted(path for path in cycle_root.iterdir() if path.is_dir()):
-                parts = role_dir.name.split("__")
-                if len(parts) != 2 or parts[1] != old:
-                    continue
-                target = role_dir.with_name(f"{parts[0]}__{new}")
-                if target.name in existing and target != role_dir:
-                    raise ValueError(f"camera role target already exists: {target}")
-                role_dir.rename(target)
-                existing.discard(role_dir.name)
-                existing.add(target.name)
-                changed.add(cycle_root.name)
-    return changed
 
 
 def _rewrite_stage_column(

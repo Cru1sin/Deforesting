@@ -53,7 +53,6 @@ def collect_images(  # noqa: C901
                 "matched_timestamp": pd.Timestamp(values["timestamp"]),
                 "offset_seconds": float(raw_offset),
                 "cycle_stage": str(values.get("cycle_stage", "")),
-                "current_role": role,
                 "source_relative_path": relative,
                 "file_name": Path(relative).name,
                 "source_path": source_path,
@@ -89,11 +88,7 @@ def collect_images(  # noqa: C901
             record.update(
                 {
                     "frame_index": frame_index,
-                    "initial_camera_slot": str(record["current_role"]),
-                    "image_path": (
-                        f"images/{cycle_name}/{source_camera_id}__{record['current_role']}/"
-                        f"{file_name}"
-                    ),
+                    "image_path": f"images/{cycle_name}/{source_camera_id}/{file_name}",
                 }
             )
             records.append(record)
@@ -108,7 +103,6 @@ def image_metadata_frame(records: list[dict[str, object]]) -> pd.DataFrame:
         "source_camera_id",
         "file_name",
         "frame_index",
-        "initial_camera_slot",
         "image_time",
         "matched_timestamp",
         "offset_seconds",
@@ -129,21 +123,13 @@ def copy_image(record: Mapping[str, object], dataset_dir: Path) -> None:
     shutil.copy2(source, target)
 
 
-def _parse_role_directory(name: str) -> tuple[str, str]:
-    parts = name.split("__")
-    if len(parts) != 2 or not all(parts):
-        raise ValueError(f"camera directory must be <source_camera_id>__<current_role>: {name!r}")
-    if any(separator in part for part in parts for separator in ("/", "\\")):
-        raise ValueError(f"camera directory contains a path separator: {name!r}")
-    return parts[0], parts[1]
-
-
 def scan_cycle_images(
     dataset_root: Path,
     cycle_name: str,
     image_metadata: pd.DataFrame,
+    camera_roles: Mapping[str, str],
 ) -> pd.DataFrame:
-    """Scan current role folders and join only currently available metadata."""
+    """Join available source-camera files to metadata and Manifest roles."""
     columns = [
         "cycle_name",
         "camera_role",
@@ -151,7 +137,6 @@ def scan_cycle_images(
         "file_name",
         "path",
         "frame_index",
-        "initial_camera_slot",
         "image_time",
         "matched_timestamp",
         "offset_seconds",
@@ -170,17 +155,10 @@ def scan_cycle_images(
         for row in scoped.to_dict(orient="records")
     }
     rows: list[dict[str, object]] = []
-    source_roles: dict[str, str] = {}
-    for role_dir in sorted(path for path in root.iterdir() if path.is_dir()):
-        source_camera_id, current_role = _parse_role_directory(role_dir.name)
-        previous_role = source_roles.get(source_camera_id)
-        if previous_role is not None and previous_role != current_role:
-            raise ValueError(
-                "source camera is assigned to multiple current roles: "
-                f"{cycle_name}/{source_camera_id}"
-            )
-        source_roles[source_camera_id] = current_role
-        for image_path in sorted(path for path in role_dir.iterdir() if path.is_file()):
+    for camera_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        source_camera_id = camera_dir.name
+        camera_role = camera_roles.get(source_camera_id, source_camera_id)
+        for image_path in sorted(path for path in camera_dir.iterdir() if path.is_file()):
             key = (cycle_name, source_camera_id, image_path.name)
             metadata = lookup.get(key)
             if metadata is None:
@@ -188,7 +166,7 @@ def scan_cycle_images(
             row = {str(key): value for key, value in metadata.items()}
             row.update(
                 {
-                    "camera_role": current_role,
+                    "camera_role": camera_role,
                     "path": image_path,
                 }
             )
@@ -215,12 +193,13 @@ def _cycle_image_summary(
     frame: pd.DataFrame,
     image_metadata: pd.DataFrame,
     registry: Mapping[str, Any],
+    camera_roles: Mapping[str, str],
 ) -> tuple[
     dict[str, Any],
     dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
 ]:
     start, end = _cycle_window(frame)
-    images = scan_cycle_images(dataset_dir, cycle_name, image_metadata)
+    images = scan_cycle_images(dataset_dir, cycle_name, image_metadata, camera_roles)
     settings = registry.get("image_coverage", {})
     max_gap = float(
         settings.get("max_image_gap_seconds", 40.0) if isinstance(settings, Mapping) else 40.0
