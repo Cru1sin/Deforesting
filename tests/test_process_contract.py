@@ -46,7 +46,6 @@ def _config(
             },
             "features": {"windows_minutes": [1]},
         },
-        analysis={},
         camera_roles={},
     )
 

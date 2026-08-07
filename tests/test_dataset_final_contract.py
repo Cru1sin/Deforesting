@@ -150,7 +150,6 @@ def test_materialize_cycle_builds_one_catalog_record(
                 baseline=SimpleNamespace(baseline_seconds=60),
                 feature_windows_minutes=(),
             ),
-            analysis=SimpleNamespace(feature_windows_minutes=[]),
         ),
         channels={
             "signal": {
@@ -765,7 +764,6 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
                 baseline=SimpleNamespace(baseline_seconds=60),
                 feature_windows_minutes=(1,),
             ),
-            analysis=SimpleNamespace(feature_windows_minutes=[1]),
         )
         channels = {
             "signal": {

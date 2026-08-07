@@ -1,40 +1,18 @@
-"""科研分析 Pipeline 的轻量、强类型配置合同。
-
-本模块只负责：
-1. 从 schema 的日期配置和共享 defaults 中读取配置；
-2. 将 YAML 数据转换为不可变的类型化对象；
-3. 在 Pipeline 启动前拒绝未知字段、非法数值和不一致配置；
-4. 生成与配置文件位置无关的“最终生效配置”及其稳定哈希。
-
-本模块不负责：
-- 读取实验传感器数据；
-- 切分结霜/除霜循环；
-- 重采样、插值、Baseline 或候选通道分析。
-
-真正使用这些参数的模块主要是：
-- cycles.py：使用 CycleSettings；
-- process.py / baseline.py / features.py：使用 ProcessSettings；
-- analysis.py：使用 AnalysisSettings。
-"""
+"""Dataset construction configuration."""
 
 from __future__ import annotations
 
 # copy 用于深拷贝 defaults 和 overrides，避免合并时修改原始字典。
 import copy
-
-# hashlib 和 json 用于生成最终生效配置的稳定 SHA-256。
-import hashlib
-import json
 import math
 
 # Mapping 表示“字典式对象”，兼容普通 dict 和其他 Mapping 实现。
 from collections.abc import Mapping
 
-# asdict：将 dataclass 递归转为普通字典。
 # dataclass：声明不可变的类型化配置对象。
 # field：为可变字段提供安全的 default_factory。
 # fields：读取 dataclass 的字段名，用于拒绝未知配置键。
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import dataclass, field, fields
 
 # date 用于严格检查 experiment_date 是否为 ISO YYYY-MM-DD。
 from datetime import date
@@ -582,335 +560,12 @@ class ProcessSettings:
 
 
 # =============================================================================
-# 4. Analyze 配置
+# 4. Dataset construction config
 # =============================================================================
-
-
-@dataclass(frozen=True)
-class AnalysisSettings:
-    """定义候选通道证据分析使用的目标、样本量和阈值。
-
-    本类不训练机器学习模型。
-    当前 analysis.py 生成透明的循环级趋势、未来性能关联和工况关联证据；
-    最终 decision 目前只使用趋势循环数、趋势强度和方向一致性。
-    """
-
-    # 用于计算 future association 的性能目标列。
-    # 默认目标是制热量相对本循环 Baseline 的残差。
-    # 当前候选 decision 不直接使用该未来关联值。
-    performance_target: str = (
-        "heating_capacity__baseline_residual"
-    )
-
-    # future association 的预测时间跨度（分钟）。
-    # analysis.py 使用同一循环和阶段内 timestamp + horizon 的精确匹配。
-    future_horizon_minutes: int = 10
-
-    # 一个候选通道获得正式趋势判断所需的最少有效循环数。
-    minimum_valid_cycles: int = 3
-
-    # 方向对齐后的循环趋势 Spearman 中位数阈值。
-    # 正值表示符合该通道配置的 expected_frost_direction。
-    minimum_trend_effect: float = 0.3
-
-    # 出现正向对齐趋势的循环比例阈值。
-    # 0.7 表示至少 70% 的有效循环方向符合预期。
-    minimum_direction_consistency: float = 0.7
-
-    # 单个循环内计算 Spearman 相关所需的最少有限数据点数。
-    minimum_points_per_cycle: int = 6
-    evidence: EvidencePolicy = field(default_factory=lambda: EvidencePolicy())
-
-    @classmethod
-    def from_mapping(
-        cls,
-        values: Mapping[str, Any],
-    ) -> AnalysisSettings:
-        """将 YAML analysis mapping 转成经过校验的 AnalysisSettings。"""
-
-        mapping = _mapping(values, "analysis")
-
-        # AnalysisSettings 的 YAML 键与 dataclass 字段一一对应。
-        _validate_dataclass_keys(mapping, cls, "analysis")
-
-        result = cls(
-            performance_target=str(
-                mapping.get(
-                    "performance_target",
-                    cls.performance_target,
-                )
-            ),
-            future_horizon_minutes=int(
-                mapping.get(
-                    "future_horizon_minutes",
-                    cls.future_horizon_minutes,
-                )
-            ),
-            minimum_valid_cycles=int(
-                mapping.get(
-                    "minimum_valid_cycles",
-                    cls.minimum_valid_cycles,
-                )
-            ),
-            minimum_trend_effect=float(
-                mapping.get(
-                    "minimum_trend_effect",
-                    cls.minimum_trend_effect,
-                )
-            ),
-            minimum_direction_consistency=float(
-                mapping.get(
-                    "minimum_direction_consistency",
-                    cls.minimum_direction_consistency,
-                )
-            ),
-            minimum_points_per_cycle=int(
-                mapping.get(
-                    "minimum_points_per_cycle",
-                    cls.minimum_points_per_cycle,
-                )
-            ),
-            evidence=EvidencePolicy.from_mapping(mapping.get("evidence", {})),
-        )
-
-        # future horizon 必须严格大于 0。
-        if result.future_horizon_minutes <= 0:
-            raise ValueError(
-                "future_horizon_minutes must be positive"
-            )
-
-        # 至少需要一个有效循环；相关性至少需要两个点才有定义。
-        if (
-            result.minimum_valid_cycles <= 0
-            or result.minimum_points_per_cycle < 2
-        ):
-            raise ValueError(
-                "analysis minimum counts are too small"
-            )
-
-        # 方向一致性是比例，必须位于 [0, 1]。
-        _validate_fraction(
-            "minimum_direction_consistency",
-            result.minimum_direction_consistency,
-        )
-
-        # Spearman 绝对范围是 [-1, 1]。
-        # 这里使用方向对齐后的正阈值，因此限制在 [0, 1]。
-        if (
-            result.minimum_trend_effect < 0
-            or result.minimum_trend_effect > 1
-        ):
-            raise ValueError(
-                "minimum_trend_effect must be within [0, 1]"
-            )
-
-        return result
-
-
-# =============================================================================
-# 5. Pipeline 最终配置对象
-# =============================================================================
-
-
-@dataclass(frozen=True)
-class EvidencePolicy:
-    """Date-independent rules for the cycle evidence analysis."""
-
-    min_segment_coverage: float = 0.8
-    min_segment_points: int = 12
-    min_pair_coverage: float = 0.8
-    min_valid_pairs: int = 30
-    min_valid_cycles: int = 3
-    horizons_minutes: tuple[int, ...] = (5, 10, 20)
-    targets: tuple[str, ...] = ("heating_capacity", "cop")
-    primary_target: str = "heating_capacity"
-    primary_target_type: str = "future_change"
-    primary_horizon_minutes: int = 10
-    primary_feature_variant: str = "residual_level"
-    lead_target: str = "heating_capacity"
-    auto_reference_window_minutes: int = 5
-    auto_reference_min_observed_fraction: float = 0.8
-    auto_reference_max_gap_seconds: float = 60.0
-    onset_window_seconds: int = 60
-    onset_mad_multiplier: float = 3.0
-    onset_persistence_seconds: int = 60
-    similarity_threshold: float = 0.85
-
-    @classmethod
-    def from_mapping(cls, values: Mapping[str, Any]) -> EvidencePolicy:
-        mapping = _mapping(values, "analysis.evidence")
-        _validate_dataclass_keys(mapping, cls, "analysis.evidence")
-        horizons = tuple(
-            int(value) for value in mapping.get("horizons_minutes", cls.horizons_minutes)
-        )
-        targets = tuple(str(value) for value in mapping.get("targets", cls.targets))
-        result = cls(
-            min_segment_coverage=float(
-                mapping.get("min_segment_coverage", cls.min_segment_coverage)
-            ),
-            min_segment_points=int(mapping.get("min_segment_points", cls.min_segment_points)),
-            min_pair_coverage=float(mapping.get("min_pair_coverage", cls.min_pair_coverage)),
-            min_valid_pairs=int(mapping.get("min_valid_pairs", cls.min_valid_pairs)),
-            min_valid_cycles=int(mapping.get("min_valid_cycles", cls.min_valid_cycles)),
-            horizons_minutes=horizons,
-            targets=targets,
-            primary_target=str(mapping.get("primary_target", cls.primary_target)),
-            primary_target_type=str(mapping.get("primary_target_type", cls.primary_target_type)),
-            primary_horizon_minutes=int(
-                mapping.get("primary_horizon_minutes", cls.primary_horizon_minutes)
-            ),
-            primary_feature_variant=str(
-                mapping.get("primary_feature_variant", cls.primary_feature_variant)
-            ),
-            lead_target=str(mapping.get("lead_target", cls.lead_target)),
-            auto_reference_window_minutes=int(
-                mapping.get(
-                    "auto_reference_window_minutes",
-                    cls.auto_reference_window_minutes,
-                )
-            ),
-            auto_reference_min_observed_fraction=float(
-                mapping.get(
-                    "auto_reference_min_observed_fraction",
-                    cls.auto_reference_min_observed_fraction,
-                )
-            ),
-            auto_reference_max_gap_seconds=float(
-                mapping.get(
-                    "auto_reference_max_gap_seconds",
-                    cls.auto_reference_max_gap_seconds,
-                )
-            ),
-            onset_window_seconds=int(mapping.get("onset_window_seconds", cls.onset_window_seconds)),
-            onset_mad_multiplier=float(
-                mapping.get("onset_mad_multiplier", cls.onset_mad_multiplier)
-            ),
-            onset_persistence_seconds=int(
-                mapping.get("onset_persistence_seconds", cls.onset_persistence_seconds)
-            ),
-            similarity_threshold=float(
-                mapping.get("similarity_threshold", cls.similarity_threshold)
-            ),
-        )
-        _validate_evidence_policy(result, horizons, targets)
-        return result
-
-
-def _validate_evidence_policy(
-    result: EvidencePolicy, horizons: tuple[int, ...], targets: tuple[str, ...]
-) -> None:
-    _validate_evidence_thresholds(result)
-    _validate_evidence_targets(result, horizons, targets)
-    _validate_evidence_windows(result)
-
-
-def _validate_evidence_thresholds(result: EvidencePolicy) -> None:
-    _validate_fraction("analysis.evidence.min_segment_coverage", result.min_segment_coverage)
-    _validate_fraction("analysis.evidence.min_pair_coverage", result.min_pair_coverage)
-    _validate_fraction(
-        "analysis.evidence.auto_reference_min_observed_fraction",
-        result.auto_reference_min_observed_fraction,
-    )
-    _validate_fraction("analysis.evidence.similarity_threshold", result.similarity_threshold)
-    if result.min_segment_points < 2 or result.min_valid_pairs < 1:
-        raise ValueError("analysis.evidence minimum counts are too small")
-    if result.min_valid_cycles < 1:
-        raise ValueError("analysis.evidence.min_valid_cycles must be positive")
-
-
-def _validate_evidence_targets(
-    result: EvidencePolicy, horizons: tuple[int, ...], targets: tuple[str, ...]
-) -> None:
-    if not horizons or any(value <= 0 for value in horizons):
-        raise ValueError("analysis.evidence horizons must be positive")
-    if len(set(horizons)) != len(horizons):
-        raise ValueError("analysis.evidence horizons must be unique")
-    if not targets or any(not value for value in targets):
-        raise ValueError("analysis.evidence targets must not be empty")
-    if result.primary_target not in targets:
-        raise ValueError("analysis.evidence.primary_target must be a configured target")
-    if result.lead_target not in targets:
-        raise ValueError("analysis.evidence.lead_target must be a configured target")
-    if result.primary_horizon_minutes not in horizons:
-        raise ValueError("analysis.evidence.primary_horizon_minutes must be configured")
-
-
-def _validate_evidence_windows(result: EvidencePolicy) -> None:
-    if result.auto_reference_window_minutes <= 0:
-        raise ValueError("analysis.evidence auto reference window must be positive")
-    if result.auto_reference_max_gap_seconds < 0:
-        raise ValueError("analysis.evidence auto reference gap must be nonnegative")
-    if result.onset_window_seconds <= 0 or result.onset_persistence_seconds <= 0:
-        raise ValueError("analysis.evidence onset windows must be positive")
-    if result.onset_mad_multiplier <= 0:
-        raise ValueError("analysis.evidence onset MAD multiplier must be positive")
-
-
-@dataclass(frozen=True)
-class EvidenceSettings:
-    """Evidence policy plus the candidate registry path used by Analyze."""
-
-    channels_path: Path
-    policy: EvidencePolicy
-
-
-def validate_evidence_timing(policy: EvidencePolicy, grid_interval_seconds: int) -> None:
-    """Validate every Evidence duration against the run's actual grid."""
-    from .evidence_cycle import duration_buckets
-
-    durations = [
-        policy.auto_reference_window_minutes * 60,
-        5 * 60,
-        policy.onset_window_seconds,
-        policy.onset_persistence_seconds,
-        *(horizon * 60 for horizon in policy.horizons_minutes),
-    ]
-    for duration in durations:
-        duration_buckets(duration, grid_interval_seconds)
-
-
-def load_evidence_settings(path: Path, *, allow_date_config: bool) -> EvidenceSettings:
-    """Load date-independent evidence settings or project them from one date config."""
-    config_path = path.resolve()
-    loaded = _load_yaml_mapping(config_path, "evidence config")
-    date_keys = {
-        "experiment_id",
-        "experiment_date",
-        "input_dir",
-        "camera_roles",
-        "overrides",
-    }
-    if not allow_date_config and date_keys.intersection(loaded):
-        raise ValueError("date-specific facts are not allowed in batch evidence config")
-    if "schema_version" in loaded:
-        if not allow_date_config:
-            raise ValueError("date-specific config is not allowed in batch evidence config")
-        config = load_config(config_path)
-        return EvidenceSettings(config.channels_path, config.analysis.evidence)
-
-    channels_value = loaded.get("channels_path")
-    analysis_value = _mapping(loaded.get("analysis", {}), "analysis")
-    policy = EvidencePolicy.from_mapping(analysis_value.get("evidence", {}))
-    if channels_value is None:
-        raise ValueError("evidence config requires channels_path")
-    channels_path = _resolve_path(config_path.parent, channels_value)
-    return EvidenceSettings(channels_path, policy)
-
 
 @dataclass(frozen=True)
 class Config:
-    """一次 Pipeline 运行最终使用的完整、不可变配置。
-
-    字段来源分为四类：
-    1. 日期实验事实：experiment_id、experiment_date、input_dir、
-       expected_sensor_interval_seconds、camera_roles；
-    2. 共享输入格式与通道事实：channels_path、sensor_globs、
-       image_extensions、timestamp_column；
-    3. 科学处理规则：cycles、process、analysis；
-    4. 配置来源追踪：config_path、defaults_path。
-
-    load_config() 是正式构造入口。
-    """
+    """One experiment's Raw-to-Dataset settings."""
 
     # 仓库根目录，用于解析仓库相对路径和记录运行来源。
     project_root: Path
@@ -951,15 +606,6 @@ class Config:
     # 重采样、缺失处理、Baseline 和动态特征规则。
     process: ProcessSettings
 
-    # 候选通道证据分析规则。
-    analysis: AnalysisSettings
-
-    # 当前日期配置文件的绝对路径，用于 provenance 和 hash。
-    config_path: Path | None = None
-
-    # 当前共享 defaults.yaml 的绝对路径，用于 provenance 和 hash。
-    defaults_path: Path | None = None
-
     # 原始相机目录 ID 到物理角色的映射。
     # 例如 {"camera_01": "front"}。
     camera_roles: dict[str, str] = field(default_factory=dict)
@@ -967,14 +613,13 @@ class Config:
     def __post_init__(self) -> None:
         """兼容测试或内部代码直接传入 Mapping，并检查跨字段约束。
 
-        正式 load_config() 通常已经生成三个 Settings 对象；
+        正式 load_config() 通常已经生成两个 Settings 对象；
         这里仍接受 Mapping，便于测试构造和保持 Config 自身边界稳定。
         """
 
         # 先保留原始类型，便于 mypy 理解后续 Mapping 分支。
         raw_cycles: Any = self.cycles
         raw_process: Any = self.process
-        raw_analysis: Any = self.analysis
 
         # frozen dataclass 不能普通赋值。
         # object.__setattr__ 是 __post_init__ 中完成类型规范化的受控方式。
@@ -990,13 +635,6 @@ class Config:
                 self,
                 "process",
                 ProcessSettings.from_mapping(raw_process),
-            )
-
-        if isinstance(raw_analysis, Mapping):
-            object.__setattr__(
-                self,
-                "analysis",
-                AnalysisSettings.from_mapping(raw_analysis),
             )
 
         # 公共重采样间隔必须是原生采样间隔的整数倍，
@@ -1110,7 +748,6 @@ def load_config(path: Path) -> Config:
             "image_match_tolerance_seconds",
             "cycles",
             "process",
-            "analysis",
         },
         "defaults",
     )
@@ -1180,26 +817,6 @@ def load_config(path: Path) -> Config:
             "process",
         )
     )
-
-    # 将 analysis 规则转换为类型化对象。
-    analysis = AnalysisSettings.from_mapping(
-        _mapping(
-            resolved["analysis"],
-            "analysis",
-        )
-    )
-
-    # future horizon 必须恰好落在 Processed 时间网格上。
-    # 例如 10 分钟 horizon 和 10 秒网格可精确对齐。
-    if (
-        analysis.future_horizon_minutes * 60
-        % process.resample_interval_seconds
-        != 0
-    ):
-        raise ValueError(
-            "future_horizon_minutes must align with "
-            "the resample interval"
-        )
 
     # 原始采样间隔是日期实验事实，因此从日期 YAML 读取。
     expected_interval = int(
@@ -1296,131 +913,12 @@ def load_config(path: Path) -> Config:
             )
         ),
         process=process,
-        analysis=analysis,
-
-        # 保留两份源配置文件路径，用于 provenance 和 manifest。
-        config_path=config_path,
-        defaults_path=defaults_path,
         camera_roles=camera_roles,
     )
 
 
 # =============================================================================
-# 7. 最终生效配置的规范化表示与哈希
-# =============================================================================
-
-
-def resolved_config_mapping(
-    config: Config,
-) -> dict[str, Any]:
-    """返回真正影响运行结果的最终生效配置。
-
-    该表示主动排除 config_path、defaults_path 等“来源位置”信息，
-    使配置哈希只反映有效参数，而不因仓库被移动到不同绝对路径而变化。
-
-    input_dir 会尽量写成仓库相对路径；若它位于仓库外，则保留绝对路径。
-    """
-
-    return {
-        # 日期实验身份。
-        "experiment_id": config.experiment_id,
-        "experiment_date": config.experiment_date,
-
-        # 尽可能使用仓库相对路径，避免机器绝对路径影响配置哈希。
-        "input_dir": _relative_path(
-            config.input_dir,
-            config.project_root,
-        ),
-
-        # 日期事实。
-        "expected_sensor_interval_seconds": (
-            config.expected_sensor_interval_seconds
-        ),
-        "camera_roles": dict(config.camera_roles),
-
-        # 将内部扁平字段恢复为 YAML 对外结构。
-        "input_format": {
-            "sensor_globs": list(config.sensor_globs),
-            "image_extensions": list(
-                config.image_extensions
-            ),
-            "timestamp_column": config.timestamp_column,
-            "edf": {
-                "pair_tolerance_seconds": config.edf_pair_tolerance_seconds,
-            },
-        },
-
-        # 共享但可能被日期 overrides 覆盖的规则。
-        "image_match_tolerance_seconds": (
-            config.image_match_tolerance_seconds
-        ),
-
-        # asdict() 递归将 dataclass 转为普通字典。
-        "cycles": asdict(config.cycles),
-
-        # ProcessSettings 内部字段 feature_windows_minutes
-        # 在有效配置表示中恢复为 features.windows_minutes。
-        "process": {
-            "resample_interval_seconds": (
-                config.process.resample_interval_seconds
-            ),
-            "minimum_continuous_bucket_coverage": (
-                config.process.minimum_continuous_bucket_coverage
-            ),
-            "continuous_max_gap_seconds": (
-                config.process.continuous_max_gap_seconds
-            ),
-            "control_max_gap_seconds": (
-                config.process.control_max_gap_seconds
-            ),
-            "baseline": asdict(
-                config.process.baseline
-            ),
-            "features": {
-                "windows_minutes": list(
-                    config.process.feature_windows_minutes
-                )
-            },
-        },
-
-        # AnalysisSettings 可直接递归转换。
-        "analysis": asdict(config.analysis),
-    }
-
-
-def resolved_config_sha256(config: Config) -> str:
-    """对最终生效配置生成稳定 SHA-256。
-
-    只要有效参数相同，即使：
-    - YAML 键顺序不同；
-    - 配置文件位于不同绝对目录；
-    - JSON 默认空格格式不同；
-    也应得到相同哈希。
-    """
-
-    # 将最终配置以稳定 JSON 规则序列化。
-    payload = json.dumps(
-        resolved_config_mapping(config),
-
-        # 对所有 mapping key 排序，消除 YAML/字典插入顺序影响。
-        sort_keys=True,
-
-        # 使用紧凑分隔符，消除无意义空格差异。
-        separators=(",", ":"),
-
-        # 保留中文字符本身，不转义为 \uXXXX。
-        ensure_ascii=False,
-
-        # 配置中不允许 NaN/Infinity，避免生成非标准 JSON。
-        allow_nan=False,
-    ).encode("utf-8")
-
-    # 返回十六进制 SHA-256 字符串。
-    return hashlib.sha256(payload).hexdigest()
-
-
-# =============================================================================
-# 8. 路径、YAML、键名和合并辅助函数
+# 6. 路径、YAML、键名和合并辅助函数
 # =============================================================================
 
 

@@ -51,7 +51,6 @@ def _config(root: Path, raw: Path, *, sensor_globs: tuple[str, ...] = ("*.xls",)
             "stable_heating_seconds": 2,
         },
         process={"resample_interval_seconds": 10},
-        analysis={},
         camera_roles={},
     )
 
@@ -1138,7 +1137,6 @@ input_format:
 image_match_tolerance_seconds: 2
 cycles: {}
 process: {}
-analysis: {}
 """,
         encoding="utf-8",
     )

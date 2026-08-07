@@ -30,7 +30,6 @@ def _registry() -> dict[str, object]:
             }
         },
         "columns": ["timestamp", "experiment_id", "cycle_id", "signal"],
-        "analysis_settings": {},
     }
 
 
@@ -58,6 +57,7 @@ def test_registry_is_explicit_and_merge_adds_new_columns() -> None:
             }
         },
     )
+    assert "analysis_settings" not in candidate
     merged = merge_registries(_registry(), candidate)
     assert list(merged["channels"]) == ["signal", "humidity"]
     assert merged["columns"] == [

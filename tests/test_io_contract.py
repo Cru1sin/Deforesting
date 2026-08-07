@@ -28,7 +28,6 @@ def test_discover_inputs_reads_root_sensors_and_one_level_images(tmp_path: Path)
         edf_pair_tolerance_seconds=1.0,
         cycles={},
         process={},
-        analysis={},
         camera_roles={},
     )
 

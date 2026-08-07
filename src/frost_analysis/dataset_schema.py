@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pandas as pd
 
@@ -69,7 +68,6 @@ def registry_from_frame(
     frame: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
     *,
-    analysis_settings: Mapping[str, Any] | None = None,
     resample_interval_seconds: int = 10,
 ) -> dict[str, Any]:
     scientific = drop_image_columns(frame)
@@ -80,7 +78,6 @@ def registry_from_frame(
             for name, settings in channels.items()
         },
         "columns": [str(name) for name in scientific.columns],
-        "analysis_settings": dict(analysis_settings or {}),
     }
 
 
@@ -99,19 +96,15 @@ def merge_registries(existing: Mapping[str, Any], candidate: Mapping[str, Any]) 
         "resample_interval_seconds": int(existing.get("resample_interval_seconds", 10)),
         "channels": {**old_channels, **new_channels},
         "columns": columns,
-        "analysis_settings": existing.get("analysis_settings", {}),
     }
 
 
 def build_registry(pipelines: Sequence[Any]) -> dict[str, Any]:
     registry: dict[str, Any] | None = None
     for pipeline in pipelines:
-        analysis = pipeline.config.analysis
-        settings = asdict(cast(Any, analysis)) if is_dataclass(analysis) else {}
         candidate = registry_from_frame(
             pipeline.processed,
             pipeline.channels,
-            analysis_settings=settings,
             resample_interval_seconds=int(pipeline.config.process.resample_interval_seconds),
         )
         registry = candidate if registry is None else merge_registries(registry, candidate)

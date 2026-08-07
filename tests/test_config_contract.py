@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-import frost_analysis.config as config_module
 from frost_analysis.channels import load_channels
 from frost_analysis.config import load_config
 
@@ -71,14 +70,6 @@ def _write_v2_config(
             },
             "features": {"windows_minutes": [5, 10, 30]},
         },
-        "analysis": {
-            "performance_target": "heating_capacity__baseline_residual",
-            "future_horizon_minutes": 10,
-            "minimum_valid_cycles": 3,
-            "minimum_trend_effect": 0.3,
-            "minimum_direction_consistency": 0.7,
-            "minimum_points_per_cycle": 6,
-        },
     }
     if defaults:
         defaults_mapping.update(defaults)
@@ -115,7 +106,7 @@ def test_formal_config_uses_v2_contract_and_ten_second_resampling() -> None:
     assert config.process.resample_interval_seconds == 10
     assert config.cycles.maximum_state_gap_seconds == 5
     assert config.timestamp_column == "时间"
-    assert config.defaults_path == ROOT / "configs" / "defaults.yaml"
+    assert not hasattr(config, "analysis")
 
 
 def test_all_formal_date_configs_allow_short_defrost_state_gaps() -> None:
@@ -144,25 +135,11 @@ def test_v2_config_loads_defaults_and_inline_camera_roles(tmp_path: Path) -> Non
 
     config = load_config(path)
 
-    assert config.defaults_path == tmp_path / "configs" / "defaults.yaml"
     assert config.channels_path == tmp_path / "configs" / "channels.yaml"
     assert config.camera_roles == {"camera_01": "front"}
     assert config.process.baseline.stage == "frost_development"
     assert config.process.feature_windows_minutes == (5, 10, 30)
     assert config.edf_pair_tolerance_seconds == 1.0
-
-
-def test_edf_pair_tolerance_override_is_flattened_and_resolved_nested(tmp_path: Path) -> None:
-    path = _write_v2_config(
-        tmp_path,
-        overrides={"input_format": {"edf": {"pair_tolerance_seconds": 0.25}}},
-    )
-
-    config = load_config(path)
-    resolved = config_module.resolved_config_mapping(config)
-
-    assert config.edf_pair_tolerance_seconds == 0.25
-    assert resolved["input_format"]["edf"] == {"pair_tolerance_seconds": 0.25}
 
 
 @pytest.mark.parametrize("value", [0, -0.1, float("nan"), float("inf"), float("-inf")])
@@ -257,18 +234,6 @@ def test_v2_loader_accepts_sensor_only_camera_roles(tmp_path: Path) -> None:
     path = _write_v2_config(tmp_path, camera_roles={})
 
     assert load_config(path).camera_roles == {}
-
-
-def test_resolved_config_hash_is_stable_for_equivalent_mappings(tmp_path: Path) -> None:
-    first_path = _write_v2_config(tmp_path / "first", camera_roles={"a": "front", "b": "side"})
-    second_path = _write_v2_config(tmp_path / "second", camera_roles={"b": "side", "a": "front"})
-
-    first = load_config(first_path)
-    second = load_config(second_path)
-
-    hash_function = getattr(config_module, "resolved_config_sha256", None)
-    assert hash_function is not None
-    assert hash_function(first) == hash_function(second)
 
 
 def test_new_config_loads_relative_paths_and_10_second_process_settings(
