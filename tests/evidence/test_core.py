@@ -1,0 +1,121 @@
+from __future__ import annotations
+
+from dataclasses import fields
+from pathlib import Path
+
+import pytest
+
+from frost_analysis.evidence import EvidenceBundle, build_evidence, write_evidence
+from frost_analysis.evidence.contracts import (
+    FEATURE_CYCLE_METRIC_COLUMNS,
+    FUTURE_ASSOCIATION_COLUMNS,
+    READINESS_SPLIT_COLUMNS,
+    READINESS_SUMMARY_COLUMNS,
+    TARGET_AUDIT_COLUMNS,
+)
+
+from .conftest import settings
+
+
+def test_new_evidence_public_api_is_defined() -> None:
+    assert EvidenceBundle.__dataclass_params__.frozen is True
+    assert [field.name for field in fields(EvidenceBundle)] == [
+        "cycle_eligibility",
+        "feature_cycle_metrics",
+        "future_association",
+        "future_horizon_summary",
+        "feature_profile",
+        "feature_pair_similarity",
+        "target_audit",
+        "readiness_split",
+        "readiness_summary",
+    ]
+    assert callable(build_evidence)
+    assert callable(write_evidence)
+
+
+@pytest.mark.parametrize(
+    "channel",
+    [
+        {
+            "analysis_candidate": True,
+            "expected_frost_direction": "increase",
+        },
+        {
+            "analysis_candidate": True,
+            "expected_frost_direction": "decrease",
+            "role": "performance",
+        },
+    ],
+)
+def test_candidate_feature_rejects_target_or_performance_candidate(
+    channel: dict[str, object],
+) -> None:
+    from frost_analysis.evidence.core import candidate_features
+
+    with pytest.raises(ValueError, match="candidate"):
+        candidate_features(
+            {"channels": {"heating_capacity": channel}},
+            settings(targets=("heating_capacity",)),
+        )
+
+
+def test_candidate_feature_rejects_unknown_target() -> None:
+    from frost_analysis.evidence.core import candidate_features
+
+    with pytest.raises(ValueError, match="unknown target"):
+        candidate_features(
+            {"channels": {}},
+            settings(targets=("unknown_target",)),
+        )
+
+
+def test_target_degradation_direction_contract_is_explicit() -> None:
+    from frost_analysis.evidence.contracts import TARGET_DEGRADATION_DIRECTION
+
+    assert TARGET_DEGRADATION_DIRECTION == {
+        "heating_capacity": "decrease",
+        "cop": "decrease",
+    }
+
+
+def test_evidence_entry_points_accept_loader_contract_without_runtime_type_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from .conftest import frame_for, settings, write_dataset
+
+    real_loader = write_dataset(
+        tmp_path / "dataset", [("c1", "2026-07-01", "valid", frame_for())]
+    )
+
+    class LoaderContract:
+        def __init__(self, loader: object) -> None:
+            self._loader = loader
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._loader, name)
+
+    loader = LoaderContract(real_loader)
+    evidence_settings = settings(targets=("heating_capacity",))
+    bundle = build_evidence(loader, evidence_settings)
+    monkeypatch.setattr(
+        "frost_analysis.evidence.output.write_figures",
+        lambda *_args: (),
+    )
+
+    output = write_evidence(
+        bundle,
+        tmp_path / "evidence",
+        loader=loader,
+        settings=evidence_settings,
+    )
+
+    assert output.is_dir()
+
+
+def test_contract_columns_end_with_status_and_include_degradation_support() -> None:
+    assert FEATURE_CYCLE_METRIC_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
+    assert "degradation_support" in FUTURE_ASSOCIATION_COLUMNS
+    assert TARGET_AUDIT_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
+    assert READINESS_SPLIT_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
+    assert READINESS_SUMMARY_COLUMNS[-2:] == ["readiness_status", "readiness_reason"]

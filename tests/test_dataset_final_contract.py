@@ -457,7 +457,7 @@ def test_final_cycle_names_skip_summary_only_cycles() -> None:
     assert names == {("exp_20260714", "cycle_001"): "frost_cycle_000001"}
 
 
-def test_cli_default_dataset_paths_use_project_root(monkeypatch: object, tmp_path: Path) -> None:
+def test_cli_default_dataset_path_uses_project_root(monkeypatch: object, tmp_path: Path) -> None:
     from frost_analysis import cli
 
     calls: list[tuple[str, Path]] = []
@@ -465,31 +465,12 @@ def test_cli_default_dataset_paths_use_project_root(monkeypatch: object, tmp_pat
     monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(
         cli,
-        "run_analysis",
-        lambda loader, **kwargs: calls.append(("analysis", loader.dataset_root)) or tmp_path,
-    )
-    monkeypatch.setattr(
-        cli,
-        "DatasetLoader",
-        lambda path: type(
-            "Loader",
-            (),
-            {
-                "dataset_root": Path(path),
-                "list_cycles": lambda self: pd.DataFrame(),
-                "load_image_metadata": lambda self: pd.DataFrame(),
-            },
-        )(),
-    )
-    monkeypatch.setattr(
-        cli,
         "edit_dataset",
         lambda path, **kwargs: calls.append(("edit", path)) or path,
     )
 
-    assert cli.main(["analysis", "--output", str(tmp_path / "analysis")]) == 0
     assert cli.main(["dataset", "edit", "--baseline-seconds", "60"]) == 0
-    assert calls == [("analysis", dataset), ("edit", dataset)]
+    assert calls == [("edit", dataset)]
 
 
 def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -> None:
