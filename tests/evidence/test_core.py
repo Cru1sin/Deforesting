@@ -56,7 +56,7 @@ def test_candidate_feature_rejects_target_or_performance_candidate(
     with pytest.raises(ValueError, match="candidate"):
         candidate_features(
             {"channels": {"heating_capacity": channel}},
-            settings(targets=("heating_capacity",), horizons=(1,)),
+            settings(targets=("heating_capacity",)),
         )
 
 
@@ -66,7 +66,7 @@ def test_candidate_feature_rejects_unknown_target() -> None:
     with pytest.raises(ValueError, match="unknown target"):
         candidate_features(
             {"channels": {}},
-            settings(targets=("unknown_target",), horizons=(1,)),
+            settings(targets=("unknown_target",)),
         )
 
 
@@ -96,7 +96,7 @@ def test_evidence_entry_points_accept_loader_contract_without_runtime_type_guard
             return getattr(self._loader, name)
 
     loader = LoaderContract(real_loader)
-    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity",))
     bundle = build_evidence(loader, evidence_settings)
     monkeypatch.setattr(
         "frost_analysis.evidence.output.write_figures",

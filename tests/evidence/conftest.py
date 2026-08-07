@@ -18,7 +18,7 @@ def settings(
     minimum_valid_pairs: int = 2,
     minimum_pair_coverage: float = 0.8,
     targets: tuple[str, ...] = ("heating_capacity", "cop"),
-    horizons: tuple[int, ...] = (1, 2),
+    horizons: tuple[int, ...] = (5, 10, 20),
 ) -> EvidenceSettings:
     return EvidenceSettings(
         targets=targets,
@@ -147,6 +147,10 @@ def write_dataset(
                 "experiment_date": experiment_date,
                 "status": status,
                 "boundaries": {
+                    "baseline_end": (
+                        pd.to_datetime(frame["timestamp"]).min()
+                        + pd.Timedelta(seconds=60)
+                    ).isoformat(),
                     "defrost_start": (
                         pd.to_datetime(frame["timestamp"]).max() + pd.Timedelta(seconds=10)
                     ).isoformat()

@@ -51,16 +51,20 @@ def audit_performance_target(
     timestamps = pd.to_datetime(stage["timestamp"], errors="coerce")
     frost_start = timestamps.min()
     censor = _defrost_start(record)
-    if pd.isna(frost_start) or pd.isna(censor):
+    analysis_start = _baseline_end(record)
+    if pd.isna(frost_start) or pd.isna(censor) or pd.isna(analysis_start):
         return _unavailable(row, "target_unavailable")
-    before_censor = timestamps.lt(censor)
-    stage = stage.loc[before_censor].reset_index(drop=True)
-    timestamps = timestamps.loc[before_censor].reset_index(drop=True)
+    analysis_period = timestamps.ge(analysis_start) & timestamps.lt(censor)
+    stage = stage.loc[analysis_period].reset_index(drop=True)
+    timestamps = timestamps.loc[analysis_period].reset_index(drop=True)
     observed = observed_mask(stage, target).to_numpy(dtype=bool)
     values = _numeric(stage[target])
     row["baseline_value"] = baseline
     row["target_observed_fraction"] = float(observed.sum() / len(stage)) if len(stage) else 0.0
     row["censor_elapsed_minutes"] = float((censor - frost_start).total_seconds() / 60.0)
+    if observed.sum() == 0:
+        row["primary_event_status"] = "target_unavailable"
+        return _unavailable(row, "target_unavailable")
 
     degradation = (baseline - values) / abs(baseline)
     events: dict[float, float] = {}
@@ -211,7 +215,9 @@ def _compare_held_cycle(
                 settings,
             )
             for horizon in settings.horizons_minutes:
-                test_data = _model_data(held_frame, feature, target, horizon, settings)
+                test_data = _model_data(
+                    held_record, held_frame, feature, target, horizon, settings
+                )
                 row = _split_row(
                     split_id,
                     cycle_name,
@@ -252,7 +258,9 @@ def _fit_split_models(
     train_parts: list[_ModelData] = []
     train_dates: set[str] = set()
     for train_record, train_frame in training:
-        part = _model_data(train_frame, feature, target, horizon, settings)
+        part = _model_data(
+            train_record, train_frame, feature, target, horizon, settings
+        )
         if not _sample_reason(part, settings):
             train_parts.append(part)
             train_dates.add(str(train_record.get("experiment_date", ""))[:10])
@@ -412,8 +420,16 @@ def _cycle_baseline(series: pd.Series[Any]) -> tuple[float, str]:
 
 
 def _defrost_start(record: Mapping[str, object]) -> pd.Timestamp:
+    return _boundary(record, "defrost_start")
+
+
+def _baseline_end(record: Mapping[str, object]) -> pd.Timestamp:
+    return _boundary(record, "baseline_end")
+
+
+def _boundary(record: Mapping[str, object], name: str) -> pd.Timestamp:
     boundaries = record.get("boundaries")
-    value = boundaries.get("defrost_start") if isinstance(boundaries, Mapping) else None
+    value = boundaries.get(name) if isinstance(boundaries, Mapping) else None
     parsed = pd.to_datetime(str(value), errors="coerce") if value is not None else pd.NaT
     return cast(pd.Timestamp, parsed)
 
@@ -511,6 +527,7 @@ def _audit_row(table: pd.DataFrame, cycle: str, target: str) -> dict[str, object
 
 
 def _model_data(
+    record: Mapping[str, object],
     frame: pd.DataFrame,
     feature: str,
     target: str,
@@ -522,6 +539,13 @@ def _model_data(
     if stage.empty or "timestamp" not in stage:
         return _ModelData(0, empty, np.empty(0, dtype=float))
     timestamps = pd.to_datetime(stage["timestamp"], errors="coerce")
+    frost_start = timestamps.min()
+    analysis_start = _baseline_end(record)
+    if pd.isna(frost_start) or pd.isna(analysis_start):
+        return _ModelData(0, empty, np.empty(0, dtype=float))
+    analysis_period = timestamps.ge(analysis_start)
+    stage = stage.loc[analysis_period].reset_index(drop=True)
+    timestamps = timestamps.loc[analysis_period].reset_index(drop=True)
     positions = {
         timestamp: index
         for index, timestamp in enumerate(timestamps)
@@ -548,7 +572,7 @@ def _model_data(
     baseline, reason = _cycle_baseline(stage[f"{target}__baseline"])
     if reason:
         return _ModelData(len(anchors), empty, np.empty(0, dtype=float))
-    elapsed = (timestamps - timestamps.min()).dt.total_seconds().to_numpy(dtype=float) / 60.0
+    elapsed = (timestamps - frost_start).dt.total_seconds().to_numpy(dtype=float) / 60.0
     target_raw = _numeric(stage[target])
     target_residual = _numeric(stage[f"{target}__baseline_residual"])
     target_observed = observed_mask(stage, target).to_numpy(dtype=bool)

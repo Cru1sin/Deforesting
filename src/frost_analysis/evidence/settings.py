@@ -10,6 +10,15 @@ from pathlib import Path
 import yaml
 
 
+def _validate_fixed_csv_contract(
+    horizons: tuple[int, ...], thresholds: tuple[float, ...]
+) -> None:
+    if horizons != (5, 10, 20):
+        raise ValueError("horizons_minutes must be exactly (5, 10, 20)")
+    if thresholds != (0.05, 0.10, 0.15):
+        raise ValueError("event_thresholds must be exactly (0.05, 0.10, 0.15)")
+
+
 @dataclass(frozen=True)
 class EvidenceSettings:
     """Immutable, date-independent scientific parameters for Evidence."""
@@ -40,6 +49,7 @@ class EvidenceSettings:
     )
 
     def __post_init__(self) -> None:
+        _validate_fixed_csv_contract(self.horizons_minutes, self.event_thresholds)
         if self.primary_target not in self.targets:
             raise ValueError("primary_target must be one of targets")
         if self.primary_horizon_minutes not in self.horizons_minutes:

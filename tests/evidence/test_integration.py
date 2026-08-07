@@ -70,7 +70,7 @@ def test_registry_order_direction_and_finite_quality_mask_are_applied(
 
 def test_future_effect_uses_exact_same_stage_elapsed_anchors(tmp_path: Path) -> None:
     frame = frame_for(
-        elapsed=(0, 30, 60, 120, 180, 240),
+        elapsed=(0, 150, 300, 600, 900, 1200),
         feature_a=(1, 2, 3, 4, 5, 6),
         feature_b=(6, 5, 4, 3, 2, 1),
         heating_capacity=(0, 0, 1, 3, 6, 10),
@@ -81,7 +81,6 @@ def test_future_effect_uses_exact_same_stage_elapsed_anchors(tmp_path: Path) -> 
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(1,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=1.0,
         ),
@@ -110,17 +109,22 @@ def test_one_valid_cycle_builds_readiness_without_model_admission(tmp_path: Path
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(5,),
             minimum_valid_pairs=10,
             minimum_pair_coverage=0.5,
         ),
     )
 
     assert len(bundle.target_audit) == 1
-    assert len(bundle.readiness_split) == 2
-    assert set(bundle.readiness_split["exclusion_reason"]) == {
+    five_minute = bundle.readiness_split.loc[
+        bundle.readiness_split["horizon_minutes"].eq(5)
+    ]
+    assert len(five_minute) == 2
+    assert set(five_minute["exclusion_reason"]) == {
         "no_training_cycles_after_holdout"
     }
-    assert set(bundle.readiness_summary["readiness_status"]) == {
+    five_minute_summary = bundle.readiness_summary.loc[
+        bundle.readiness_summary["horizon_minutes"].eq(5)
+    ]
+    assert set(five_minute_summary["readiness_status"]) == {
         "insufficient_validation_data"
     }

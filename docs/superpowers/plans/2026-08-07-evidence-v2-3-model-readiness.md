@@ -42,8 +42,8 @@ Expected: failures for missing settings and readiness contracts.
 Add flat dataclass fields with direct validation for positive durations,
 positive Ridge alpha, primary threshold membership, and non-empty contexts.
 Define the three column constants and extend the frozen bundle. Extend the test
-fixture factory with production defaults while preserving its short synthetic
-horizons.
+fixture factory with the fixed production horizons and scale synthetic timestamps
+where exact horizon anchors are required.
 
 - [ ] **Step 4: Run GREEN tests**
 

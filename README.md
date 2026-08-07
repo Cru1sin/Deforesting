@@ -201,13 +201,18 @@ python -m frost_analysis dataset validate --dataset dataset
 python -m frost_analysis dataset refresh --dataset dataset
 python -m frost_analysis dataset review-cycle frost_cycle_000001 \
   --status valid --reason manual_review_confirmed
-python -m frost_analysis analysis --dataset dataset --status valid \
-  --output outputs/analysis/frost_dataset
+python -m frost_analysis evidence \
+  --dataset dataset \
+  --config configs/evidence.yaml \
+  --output outputs/evidence/frost_cycle_evidence_v2_3
 ```
 
 Dataset 的目录、Manifest、Catalog、图片角色、Loader、追加、科学 edit、refresh 和验证
 合同见 [`docs/dataset_contract.md`](docs/dataset_contract.md)。`source_directory` 只用于
 人工 provenance；Dataset 下游不会重新读取 Raw 或配置。
+
+`evidence` 是通过 `DatasetLoader` 读取 schema v3 Dataset 的科研证据入口。`run` 仍调用
+`analysis.py` 执行日期级旧分析；两者是不同的数据入口和输出合同。
 
 ## 科学边界
 

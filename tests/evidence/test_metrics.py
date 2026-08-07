@@ -48,7 +48,7 @@ def test_missing_quality_column_is_local_to_feature_and_target(tmp_path: Path) -
 
     bundle = build_evidence(
         loader,
-        settings(targets=("heating_capacity",), horizons=(1,)),
+        settings(targets=("heating_capacity",)),
     )
 
     feature = bundle.feature_cycle_metrics.loc[
@@ -67,7 +67,7 @@ def test_missing_quality_column_is_local_to_feature_and_target(tmp_path: Path) -
     )
     target_bundle = build_evidence(
         target_loader,
-        settings(targets=("heating_capacity",), horizons=(1,)),
+        settings(targets=("heating_capacity",)),
     )
     target_future = target_bundle.future_association.iloc[0]
     assert target_future["exclusion_reason"] == "missing_target_quality"
@@ -75,7 +75,7 @@ def test_missing_quality_column_is_local_to_feature_and_target(tmp_path: Path) -
 
 def test_future_anchor_requires_exact_elapsed_value_in_same_stage(tmp_path: Path) -> None:
     frame = frame_for(
-        elapsed=(0, 60, 120, 180, 240, 300),
+        elapsed=(0, 300, 600, 900, 1200, 1500),
         stage=(
             "frost_development",
             "frost_development",
@@ -93,7 +93,6 @@ def test_future_anchor_requires_exact_elapsed_value_in_same_stage(tmp_path: Path
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(1,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=0.5,
         ),
@@ -147,7 +146,7 @@ def test_future_effect_and_degradation_support_use_exact_change_direction(
     tmp_path: Path,
 ) -> None:
     frame = frame_for(
-        elapsed=(0, 60, 120, 180, 240, 300),
+        elapsed=(0, 300, 600, 900, 1200, 1500),
         feature_a=(1, 2, 3, 4, 5, 6),
         feature_b=(6, 5, 4, 3, 2, 1),
         heating_capacity=(10, 9, 7, 4, 0, -5),
@@ -158,13 +157,14 @@ def test_future_effect_and_degradation_support_use_exact_change_direction(
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(1,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=1.0,
         ),
     )
 
-    future = bundle.future_association.set_index("feature")
+    future = bundle.future_association.loc[
+        bundle.future_association["horizon_minutes"].eq(5)
+    ].set_index("feature")
     assert future.loc["feature_a", "effect"] == pytest.approx(-1.0)
     assert future.loc["feature_a", "degradation_support"] == pytest.approx(1.0)
     assert future.loc["feature_b", "effect"] == pytest.approx(1.0)
@@ -184,7 +184,7 @@ def test_future_degradation_support_reads_target_direction_contract(
     from frost_analysis.evidence.contracts import TARGET_DEGRADATION_DIRECTION
 
     frame = frame_for(
-        elapsed=(0, 60, 120, 180, 240, 300),
+        elapsed=(0, 300, 600, 900, 1200, 1500),
         feature_a=(1, 2, 3, 4, 5, 6),
         heating_capacity=(10, 9, 7, 4, 0, -5),
     )
@@ -195,12 +195,13 @@ def test_future_degradation_support_reads_target_direction_contract(
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(1,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=1.0,
         ),
     )
 
-    future = bundle.future_association.iloc[0]
+    future = bundle.future_association.loc[
+        bundle.future_association["horizon_minutes"].eq(5)
+    ].iloc[0]
     assert future["effect"] == pytest.approx(-1.0)
     assert future["degradation_support"] == pytest.approx(-1.0)

@@ -72,7 +72,7 @@ def test_settings_post_init_checks_only_required_relationships() -> None:
             targets=("heating_capacity",),
             primary_target="cop",
             primary_horizon_minutes=10,
-            horizons_minutes=(10,),
+            horizons_minutes=(5, 10, 20),
             minimum_feature_points=1,
             minimum_feature_coverage=0.8,
             minimum_valid_pairs=1,
@@ -82,8 +82,8 @@ def test_settings_post_init_checks_only_required_relationships() -> None:
         EvidenceSettings(
             targets=("heating_capacity",),
             primary_target="heating_capacity",
-            primary_horizon_minutes=20,
-            horizons_minutes=(10,),
+            primary_horizon_minutes=15,
+            horizons_minutes=(5, 10, 20),
             minimum_feature_points=1,
             minimum_feature_coverage=0.8,
             minimum_valid_pairs=1,
@@ -94,7 +94,7 @@ def test_settings_post_init_checks_only_required_relationships() -> None:
             targets=("heating_capacity",),
             primary_target="heating_capacity",
             primary_horizon_minutes=10,
-            horizons_minutes=(10,),
+            horizons_minutes=(5, 10, 20),
             minimum_feature_points=1,
             minimum_feature_coverage=1.1,
             minimum_valid_pairs=1,
@@ -116,3 +116,24 @@ def test_settings_constructor_contains_only_scientific_parameters() -> None:
 
     assert evidence_settings.primary_target == "heating_capacity"
     assert not hasattr(evidence_settings, "analysis_version")
+
+
+def test_settings_rejects_thresholds_or_horizons_that_disagree_with_csv_schema() -> None:
+    common = {
+        "targets": ("heating_capacity", "cop"),
+        "primary_target": "heating_capacity",
+        "primary_horizon_minutes": 5,
+        "minimum_feature_points": 12,
+        "minimum_feature_coverage": 0.8,
+        "minimum_valid_pairs": 30,
+        "minimum_pair_coverage": 0.8,
+    }
+    with pytest.raises(ValueError, match="horizons_minutes"):
+        EvidenceSettings(horizons_minutes=(5, 15, 30), **common)
+    with pytest.raises(ValueError, match="event_thresholds"):
+        EvidenceSettings(
+            horizons_minutes=(5, 10, 20),
+            event_thresholds=(0.08, 0.12),
+            primary_event_threshold=0.08,
+            **common,
+        )

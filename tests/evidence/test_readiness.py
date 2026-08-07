@@ -45,10 +45,12 @@ def _readiness_frame(seconds: int = 600) -> pd.DataFrame:
 
 
 def _record(frame: pd.DataFrame) -> dict[str, object]:
+    start = pd.to_datetime(frame["timestamp"]).min()
     return {
         "cycle_name": "cycle_001",
         "experiment_date": "2026-07-01",
         "boundaries": {
+            "baseline_end": (start + pd.Timedelta(seconds=60)).isoformat(),
             "defrost_start": (
                 pd.to_datetime(frame["timestamp"]).max() + pd.Timedelta(seconds=10)
             ).isoformat()
@@ -61,7 +63,7 @@ def test_target_event_uses_current_degradation_and_elapsed_persistence() -> None
     frame.loc[frame["cycle_elapsed_seconds"] >= 60, "heating_capacity"] = 89.0
 
     row = audit_performance_target(
-        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10))
+        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
     )
 
     assert row["event_5_elapsed_minutes"] == pytest.approx(1.0)
@@ -82,7 +84,9 @@ def test_target_audit_rejects_invalid_baseline(baseline: float, reason: str) -> 
     frame = _readiness_frame()
     frame["heating_capacity__baseline"] = baseline
 
-    row = audit_performance_target(_record(frame), frame, "heating_capacity", settings())
+    row = audit_performance_target(
+        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+    )
 
     assert row["metric_status"] == "unavailable"
     assert row["exclusion_reason"] == reason
@@ -92,7 +96,9 @@ def test_target_audit_rejects_inconsistent_baseline() -> None:
     frame = _readiness_frame()
     frame.loc[1, "heating_capacity__baseline"] = 101.0
 
-    row = audit_performance_target(_record(frame), frame, "heating_capacity", settings())
+    row = audit_performance_target(
+        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+    )
 
     assert row["exclusion_reason"] == "baseline_inconsistent"
 
@@ -102,10 +108,50 @@ def test_target_event_is_right_censored_and_missing_breaks_persistence() -> None
     frame.loc[frame["cycle_elapsed_seconds"] >= 60, "heating_capacity"] = 89.0
     frame.loc[frame["cycle_elapsed_seconds"] == 120, "heating_capacity__imputed"] = True
 
-    row = audit_performance_target(_record(frame), frame, "heating_capacity", settings())
+    row = audit_performance_target(
+        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+    )
 
     assert row["primary_event_status"] == "right_censored_at_legacy_defrost"
     assert np.isnan(row["primary_event_elapsed_minutes"])
+
+
+@pytest.mark.parametrize("mode", ["nan", "imputed"])
+def test_target_without_observations_is_unavailable(mode: str) -> None:
+    frame = _readiness_frame()
+    if mode == "nan":
+        frame["heating_capacity"] = np.nan
+    else:
+        frame["heating_capacity__imputed"] = True
+
+    row = audit_performance_target(
+        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+    )
+
+    assert row["primary_event_status"] == "target_unavailable"
+    assert row["metric_status"] == "unavailable"
+    assert row["exclusion_reason"] == "target_unavailable"
+
+
+def test_baseline_window_cannot_trigger_event_or_supply_model_anchor() -> None:
+    frame = _readiness_frame(seconds=1200)
+    frame.loc[frame["cycle_elapsed_seconds"] < 60, "heating_capacity"] = 80.0
+    record = _record(frame)
+
+    audit = audit_performance_target(
+        record, frame, "heating_capacity", settings(horizons=(5, 10, 20))
+    )
+    rows = compare_incremental_models(
+        [(record, frame)],
+        [("feature_a", "increase")],
+        pd.DataFrame([audit]),
+        settings(targets=("heating_capacity",), horizons=(5, 10, 20)),
+    )
+
+    assert audit["primary_event_status"] == "right_censored_at_legacy_defrost"
+    assert audit["valid_pairs_5min"] == 85
+    five_minute = rows.loc[rows["horizon_minutes"].eq(5)].iloc[0]
+    assert five_minute["expected_anchor_count"] == 85
 
 
 def test_signal_onset_aligns_direction_and_excludes_reference_window() -> None:
@@ -156,11 +202,10 @@ def test_one_cycle_keeps_descriptive_lead_but_models_are_unavailable() -> None:
         [(record, frame)],
         [("feature_a", "increase")],
         audits,
-        settings(targets=("heating_capacity",), horizons=(5,)),
+        settings(targets=("heating_capacity",)),
     )
 
-    assert len(rows) == 1
-    row = rows.iloc[0]
+    row = rows.loc[rows["horizon_minutes"].eq(5)].iloc[0]
     assert row["expected_anchor_count"] > 0
     assert row["exclusion_reason"] == "no_training_cycles_after_holdout"
     assert row["metric_status"] == "unavailable"
@@ -184,7 +229,6 @@ def test_missing_context_removes_only_its_complete_case_anchor() -> None:
         audits,
         settings(
             targets=("heating_capacity",),
-            horizons=(5,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=0.5,
         ),
@@ -207,7 +251,7 @@ def test_missing_context_column_preserves_theoretical_anchor_denominator() -> No
         [(record, frame)],
         [("feature_a", "increase")],
         audits,
-        settings(targets=("heating_capacity",), horizons=(5,)),
+        settings(targets=("heating_capacity",)),
     ).iloc[0]
 
     assert row["expected_anchor_count"] > 0
@@ -247,13 +291,14 @@ def test_model_skills_use_m1_for_level_and_m2_for_dynamic() -> None:
         audits,
         settings(
             targets=("heating_capacity",),
-            horizons=(5,),
             minimum_valid_pairs=20,
             minimum_pair_coverage=0.5,
         ),
     )
 
-    available = rows.loc[rows["metric_status"].eq("available")]
+    available = rows.loc[
+        rows["metric_status"].eq("available") & rows["horizon_minutes"].eq(5)
+    ]
     assert len(available) == 3
     assert np.allclose(
         available["skill_level_vs_context"],
@@ -336,7 +381,7 @@ def test_readiness_summary_uses_date_units_and_dynamic_increment() -> None:
         audits,
         trends,
         [("feature_a", "increase")],
-        settings(targets=("heating_capacity",), horizons=(5,)),
+        settings(targets=("heating_capacity",)),
     ).iloc[0]
 
     assert summary["lead_median_minutes"] == pytest.approx(3.5)

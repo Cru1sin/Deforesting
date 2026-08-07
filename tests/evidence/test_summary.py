@@ -13,11 +13,11 @@ from .conftest import frame_for, settings, write_dataset
 
 def test_future_summary_is_date_balanced_median_of_cycle_medians(tmp_path: Path) -> None:
     positive = frame_for(
-        elapsed=(0, 60, 120, 180, 240),
+        elapsed=(0, 300, 600, 900, 1200),
         heating_capacity=(0, 1, 3, 6, 10),
     )
     negative = frame_for(
-        elapsed=(0, 60, 120, 180, 240),
+        elapsed=(0, 300, 600, 900, 1200),
         heating_capacity=(0, 4, 7, 9, 10),
     )
     loader = write_dataset(
@@ -33,13 +33,14 @@ def test_future_summary_is_date_balanced_median_of_cycle_medians(tmp_path: Path)
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(1,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=1.0,
         ),
     )
 
-    summary = bundle.future_horizon_summary.iloc[0]
+    summary = bundle.future_horizon_summary.loc[
+        bundle.future_horizon_summary["horizon_minutes"].eq(5)
+    ].iloc[0]
     assert summary["effect"] == 0.5
     assert summary["degradation_support"] == -0.5
     assert summary["valid_cycle_count"] == 3
@@ -62,13 +63,14 @@ def test_summary_has_explicit_zero_valid_dates_status(tmp_path: Path) -> None:
         loader,
         settings(
             targets=("heating_capacity",),
-            horizons=(1,),
             minimum_valid_pairs=2,
             minimum_pair_coverage=1.0,
         ),
     )
 
-    summary = bundle.future_horizon_summary.iloc[0]
+    summary = bundle.future_horizon_summary.loc[
+        bundle.future_horizon_summary["horizon_minutes"].eq(5)
+    ].iloc[0]
     assert summary["metric_status"] == "unavailable"
     assert summary["exclusion_reason"] == "no_valid_dates"
     assert summary["valid_cycle_count"] == 0

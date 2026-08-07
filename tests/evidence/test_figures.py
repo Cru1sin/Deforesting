@@ -22,7 +22,7 @@ def test_figure_one_keeps_unavailable_target_panel(tmp_path: Path) -> None:
     frame = frame_for()
     frame = frame.drop(columns=["cop__baseline_residual"])
     loader = write_dataset(tmp_path / "dataset", [("c1", "2026-07-01", "valid", frame)])
-    evidence_settings = settings(targets=("heating_capacity", "cop"), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity", "cop"))
 
     figure = plot_cycle_progress(loader, evidence_settings)
 
@@ -36,7 +36,7 @@ def test_figure_three_consumes_only_horizon_summary(tmp_path: Path) -> None:
         tmp_path / "dataset",
         [("c1", "2026-07-01", "valid", frame_for())],
     )
-    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity",))
     bundle = build_evidence(loader, evidence_settings)
 
     figure = plot_future_horizon_summary(bundle.future_horizon_summary, evidence_settings)
@@ -51,7 +51,7 @@ def test_s2_requires_settings(tmp_path: Path) -> None:
         tmp_path / "dataset",
         [("c1", "2026-07-01", "valid", frame_for())],
     )
-    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity",))
     bundle = build_evidence(loader, evidence_settings)
 
     with pytest.raises(TypeError, match="settings"):
@@ -65,7 +65,6 @@ def test_s2_pair_panel_uses_only_primary_target_and_horizon(tmp_path: Path) -> N
     )
     evidence_settings = settings(
         targets=("heating_capacity", "cop"),
-        horizons=(1, 2),
     )
     bundle = build_evidence(loader, evidence_settings)
 
@@ -85,7 +84,7 @@ def test_figure_one_uses_fixed_bins_and_excludes_imputed_nonfinite_values(
 
     figure = plot_cycle_progress(
         loader,
-        settings(targets=("heating_capacity",), horizons=(1,)),
+        settings(targets=("heating_capacity",)),
     )
 
     assert len(figure.axes[0].lines) == 2
@@ -103,20 +102,24 @@ def test_figure_two_has_three_metrics_and_unconnected_date_values(
                 "c1",
                 "2026-07-01",
                 "valid",
-                frame_for(heating_capacity=(10, 9, 7, 4, 0, -5)),
+                frame_for(
+                    elapsed=(0, 300, 600, 900, 1200, 1500),
+                    heating_capacity=(10, 9, 7, 4, 0, -5),
+                ),
             ),
             (
                 "c2",
                 "2026-07-02",
                 "valid",
                 frame_for(
+                    elapsed=(0, 300, 600, 900, 1200, 1500),
                     feature_a=(2, 3, 4, 5, 6, 7),
                     heating_capacity=(10, 9, 7, 4, 0, -5),
                 ),
             ),
         ],
     )
-    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity",))
     bundle = build_evidence(loader, evidence_settings)
 
     figure = plot_feature_profiles(bundle, evidence_settings)
@@ -151,7 +154,7 @@ def test_figure_two_uses_feature_profile_order(tmp_path: Path) -> None:
         tmp_path / "dataset",
         [("c1", "2026-07-01", "valid", frame_for())],
     )
-    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity",))
     bundle = build_evidence(loader, evidence_settings)
     reordered = EvidenceBundle(
         cycle_eligibility=bundle.cycle_eligibility,
@@ -183,7 +186,7 @@ def test_figure_two_keeps_long_labels_inside_figure(tmp_path: Path) -> None:
             )
         ],
     )
-    evidence_settings = settings(targets=("heating_capacity",), horizons=(1,))
+    evidence_settings = settings(targets=("heating_capacity",))
     bundle = build_evidence(loader, evidence_settings)
     feature_names = (
         "temperature_operating_pressure",
@@ -254,7 +257,7 @@ def test_figure_three_keeps_long_feature_labels_inside_figure() -> None:
         {
             "feature": feature_names,
             "target": ["heating_capacity"] * len(feature_names),
-            "horizon_minutes": [1] * len(feature_names),
+            "horizon_minutes": [5] * len(feature_names),
             "effect": [-0.4] * len(feature_names),
             "degradation_support": [0.4] * len(feature_names),
             "valid_cycle_count": [3] * len(feature_names),
@@ -270,7 +273,7 @@ def test_figure_three_keeps_long_feature_labels_inside_figure() -> None:
 
     figure = plot_future_horizon_summary(
         summary,
-        settings(targets=("heating_capacity",), horizons=(1,)),
+        settings(targets=("heating_capacity",)),
     )
     figure.canvas.draw()
     renderer = figure.canvas.get_renderer()
@@ -287,7 +290,7 @@ def test_figure_three_labels_summary_counts_and_support() -> None:
         {
             "feature": ["feature_a"],
             "target": ["heating_capacity"],
-            "horizon_minutes": [1],
+            "horizon_minutes": [5],
             "effect": [-0.4],
             "degradation_support": [0.4],
             "valid_cycle_count": [3],
@@ -300,7 +303,7 @@ def test_figure_three_labels_summary_counts_and_support() -> None:
 
     figure = plot_future_horizon_summary(
         summary,
-        settings(targets=("heating_capacity",), horizons=(1,)),
+        settings(targets=("heating_capacity",)),
     )
 
     labels = " ".join(text.get_text() for text in figure.axes[0].texts)
