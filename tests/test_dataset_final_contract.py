@@ -54,13 +54,10 @@ def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
             "experiments": [
                 {
                     "experiment_id": "exp",
                     "experiment_date": "2026-07-14",
-                    "source_directory": "data/0714",
                     "camera_roles": {},
                 }
             ],
@@ -107,7 +104,7 @@ def test_materialize_cycle_builds_one_catalog_record(
 
     import frost_analysis.dataset as dataset_module
     from frost_analysis import dataset_metadata
-    from frost_analysis.dataset import _DirectDatePipeline, add_dataset
+    from frost_analysis.dataset import _DateBuild, add_dataset
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -138,7 +135,7 @@ def test_materialize_cycle_builds_one_catalog_record(
             }
         ]
     )
-    pipeline = _DirectDatePipeline(
+    build = _DateBuild(
         input_dir=input_dir,
         config=SimpleNamespace(
             experiment_id="exp_0714",
@@ -168,9 +165,9 @@ def test_materialize_cycle_builds_one_catalog_record(
     monkeypatch.setattr(
         dataset_module,
         "_load_config_for_input",
-        lambda *_args: pipeline.config,
+        lambda *_args: build.config,
     )
-    monkeypatch.setattr(dataset_module, "_run_direct_pipeline", lambda *_args: pipeline)
+    monkeypatch.setattr(dataset_module, "_build_date", lambda *_args: build)
     original_builder = dataset_metadata.build_cycle_record
     call_count = 0
 
@@ -187,6 +184,11 @@ def test_materialize_cycle_builds_one_catalog_record(
     dataset_dir = tmp_path / "dataset"
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
     assert set(manifest) == {"dataset_schema_version", "dataset_id", "experiments"}
+    assert set(manifest["experiments"][0]) == {
+        "experiment_id",
+        "experiment_date",
+        "camera_roles",
+    }
     processed = pd.read_parquet(dataset_dir / "cycles/frost_cycle_000001.parquet")
     assert not {
         "dataset_id",
@@ -218,13 +220,10 @@ def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
             "experiments": [
                 {
                     "experiment_id": "exp",
                     "experiment_date": "2026-07-14",
-                    "source_directory": "data/0714",
                     "experiment_note": "manual note",
                 }
             ],
@@ -366,7 +365,6 @@ def test_validate_scientific_schema_ignores_catalog_counts(
                 {
                     "experiment_id": "exp",
                     "experiment_date": "2026-07-14",
-                    "source_directory": "data/0714",
                     "camera_roles": {},
                 }
             ],
@@ -617,13 +615,10 @@ def test_refresh_dataset_does_not_modify_manifest(
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
             "experiments": [
                 {
                     "experiment_id": "exp",
                     "experiment_date": "2026-07-14",
-                    "source_directory": "data/0714",
                     "camera_roles": {},
                 }
             ],
@@ -689,11 +684,11 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     from types import SimpleNamespace
 
     import frost_analysis.dataset as dataset_module
-    from frost_analysis.dataset import _DirectDatePipeline, add_dataset
+    from frost_analysis.dataset import _DateBuild, add_dataset
     from frost_analysis.dataset_loader import DatasetLoader
     from frost_analysis.dataset_validation import validate_dataset
 
-    def make_pipeline(input_dir: Path) -> _DirectDatePipeline:
+    def make_build(input_dir: Path) -> _DateBuild:
         date = {
             "0714": "2026-07-14",
             "0715": "2026-07-15",
@@ -774,7 +769,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
                 "unit": "1",
             }
         }
-        return _DirectDatePipeline(
+        return _DateBuild(
             input_dir=input_dir,
             config=config,
             channels=channels,
@@ -790,8 +785,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     monkeypatch.setattr(dataset_module, "_validate_date_input", lambda *_args: None)
     monkeypatch.setattr(
         dataset_module,
-        "_run_direct_pipeline",
-        lambda input_dir, _project_root: make_pipeline(input_dir),
+        "_build_date",
+        lambda input_dir, _project_root: make_build(input_dir),
     )
     dataset_dir = tmp_path / "dataset"
 
@@ -800,7 +795,6 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     initial_catalog = json.loads((dataset_dir / "cycle_catalog.json").read_text())
     assert initial_registry["baseline_managed"] is False
     assert initial_registry["recovery_edit"]["managed"] is False
-    assert "canonical_hash" not in initial_registry
     assert all("asset_sha256" not in record for record in initial_catalog["cycles"])
     add_dataset(second_input, dataset_dir)
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
@@ -883,8 +877,6 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
             "experiments": [],
         },
         tmp_path / "dataset_manifest.json",
@@ -959,7 +951,6 @@ def test_loader_resolves_camera_role_from_manifest_without_renaming_directory(
                 {
                     "experiment_id": "exp",
                     "experiment_date": "2026-07-14",
-                    "source_directory": "data/0714",
                     "camera_roles": {"camera01": "front"},
                 }
             ],
@@ -1026,17 +1017,6 @@ def test_loader_resolves_camera_role_from_manifest_without_renaming_directory(
     assert camera_dir.is_dir()
 
 
-def test_dataset_edit_cli_rejects_removed_camera_rename_option(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import frost_analysis.cli as cli
-
-    monkeypatch.setattr(cli, "edit_dataset", lambda *_args, **_kwargs: Path("dataset"))
-
-    with pytest.raises(SystemExit):
-        cli.main(["dataset", "edit", "--rename-camera", "old=new"])
-
-
 def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path) -> None:
     from frost_analysis.dataset import update_cycle_columns
 
@@ -1092,13 +1072,10 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
         {
             "dataset_schema_version": 3,
             "dataset_id": "frost_cycle_dataset",
-            "created_at": "2026-01-01T00:00:00+00:00",
-            "updated_at": "2026-01-01T00:00:00+00:00",
             "experiments": [
                 {
                     "experiment_id": "exp_0714",
                     "experiment_date": "2026-07-14",
-                    "source_directory": "data/0714",
                 }
             ],
         },
@@ -1116,7 +1093,7 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     )
     monkeypatch.setattr(
         dataset_module,
-        "_run_direct_pipeline",
+        "_build_date",
         lambda *_args: pytest.fail("same experiment must not rerun Prepare/Process"),
     )
 

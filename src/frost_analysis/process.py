@@ -23,7 +23,7 @@ def process(
     config: Config,
     channels: Mapping[str, Mapping[str, Any]],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Run the fixed Process order without modifying either input frame."""
+    """Apply the fixed Process order without modifying either input frame."""
     _require_keys(
         prepared,
         ["experiment_id", "timestamp", "cycle_id", "cycle_stage", "cycle_status"],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import matplotlib
 import numpy as np
@@ -79,11 +79,11 @@ def render_cycle_publication(
 
     boundaries = cycle_record.get("boundaries")
     baseline = boundaries if isinstance(boundaries, Mapping) else cycle_record
-    baseline_start = pd.to_datetime(baseline.get("baseline_start"), errors="coerce")
-    baseline_end = pd.to_datetime(baseline.get("baseline_end"), errors="coerce")
+    baseline_start = pd.to_datetime(str(baseline.get("baseline_start")), errors="coerce")
+    baseline_end = pd.to_datetime(str(baseline.get("baseline_end")), errors="coerce")
     if not pd.isna(baseline_start) and not pd.isna(baseline_end):
-        left = (pd.Timestamp(baseline_start) - origin).total_seconds() / 60.0
-        right = (pd.Timestamp(baseline_end) - origin).total_seconds() / 60.0
+        left = (cast(pd.Timestamp, baseline_start) - origin).total_seconds() / 60.0
+        right = (cast(pd.Timestamp, baseline_end) - origin).total_seconds() / 60.0
     else:
         left = right = np.nan
 
@@ -132,7 +132,7 @@ def _plot_stage_ribbon(axis: Any, spans: list[tuple[str, float, float]]) -> None
 def _plot_cycle_panel(
     axis: Any,
     frame: pd.DataFrame,
-    minutes: pd.Series,
+    minutes: pd.Series[Any],
     channels: tuple[str, ...],
     label: str,
     stage_spans: list[tuple[str, float, float]],
@@ -160,7 +160,7 @@ def _plot_cycle_panel(
         axis.legend(frameon=False, fontsize=7, loc="lower left", bbox_to_anchor=(0, 1.01))
 
 
-def _observed_values(frame: pd.DataFrame, channel: str) -> pd.Series:
+def _observed_values(frame: pd.DataFrame, channel: str) -> pd.Series[Any]:
     if channel not in frame:
         return pd.Series(np.nan, index=frame.index, dtype=float)
     values = pd.to_numeric(frame[channel], errors="coerce")
@@ -171,7 +171,7 @@ def _observed_values(frame: pd.DataFrame, channel: str) -> pd.Series:
 
 
 def _stage_spans(
-    frame: pd.DataFrame, minutes: pd.Series
+    frame: pd.DataFrame, minutes: pd.Series[Any]
 ) -> list[tuple[str, float, float]]:
     if "cycle_stage" not in frame or frame.empty:
         return []

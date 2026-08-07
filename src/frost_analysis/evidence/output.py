@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,8 +68,14 @@ def write_evidence(
         "analysis_version": ANALYSIS_VERSION,
         "dataset_id": loader.manifest["dataset_id"],
         "dataset_schema_version": loader.manifest["dataset_schema_version"],
-        "dataset_updated_at": loader.manifest["updated_at"],
-        "channel_registry_hash": loader.registry["canonical_hash"],
+        "channel_registry_hash": hashlib.sha256(
+            json.dumps(
+                loader.registry,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest(),
         "settings_sha256": settings.sha256,
         "generated_at": datetime.now(UTC).isoformat(),
         "output_files": output_files,

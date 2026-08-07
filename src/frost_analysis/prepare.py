@@ -312,7 +312,7 @@ def _load_prepare_channel_frames(
     if not edf_paths:
         return channel_frames
 
-    environment, _ = read_edf_environment(
+    environment = read_edf_environment(
         edf_paths,
         pd.Timestamp(main_timestamps.min()),
         pd.Timestamp(main_timestamps.max()),

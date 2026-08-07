@@ -576,7 +576,7 @@ class Config:
     # 实验日期，正式格式必须为 ISO YYYY-MM-DD。
     experiment_date: str
 
-    # 原始实验数据目录；Pipeline 将其视为只读输入。
+    # 原始实验数据目录；Dataset construction 将其视为只读输入。
     input_dir: Path
 
     # 共享 channels.yaml 的绝对路径。

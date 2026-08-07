@@ -40,7 +40,7 @@ def parse_cycle_name(name: str) -> int:
 
 
 @dataclass(frozen=True)
-class _DirectDatePipeline:
+class _DateBuild:
     input_dir: Path
     config: Any
     channels: Mapping[str, Mapping[str, Any]]
@@ -81,12 +81,12 @@ def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
                     "historical or same-date append is not supported; use dataset rebuild"
                 )
 
-        pipeline = _run_direct_pipeline(input_path, config)
-        _append_direct_pipeline(target, pipeline)
+        build = _build_date(input_path, config)
+        _append_build(target, build)
         return target
 
-    pipeline = _run_direct_pipeline(input_path, config)
-    _materialize_direct_pipelines(target, [pipeline])
+    build = _build_date(input_path, config)
+    _materialize_builds(target, [build])
     return target
 
 
@@ -107,10 +107,10 @@ def rebuild_dataset(input_dirs: Sequence[Path], dataset_dir: Path | None = None)
         import shutil
 
         shutil.rmtree(target)
-    pipelines = [
-        _run_direct_pipeline(path, _load_config_for_input(path, project_root)) for path in inputs
+    builds = [
+        _build_date(path, _load_config_for_input(path, project_root)) for path in inputs
     ]
-    _materialize_direct_pipelines(target, pipelines)
+    _materialize_builds(target, builds)
     return target
 
 
@@ -227,7 +227,7 @@ def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
     return config
 
 
-def _run_direct_pipeline(input_path: Path, config: Any) -> _DirectDatePipeline:
+def _build_date(input_path: Path, config: Any) -> _DateBuild:
     from .channels import load_channels
     from .prepare import prepare
     from .process import process
@@ -238,7 +238,7 @@ def _run_direct_pipeline(input_path: Path, config: Any) -> _DirectDatePipeline:
     validate_prepared(prepared, initial_summary)
     processed, final_summary = process(prepared, initial_summary, config, channels)
     validate_processed(processed, final_summary)
-    return _DirectDatePipeline(
+    return _DateBuild(
         input_dir=input_path.resolve(),
         config=config,
         channels=channels,
@@ -250,7 +250,7 @@ def _run_direct_pipeline(input_path: Path, config: Any) -> _DirectDatePipeline:
 
 def _materialize_cycle(
     dataset_dir: Path,
-    pipeline: _DirectDatePipeline,
+    build: _DateBuild,
     key: CycleKey,
     cycle_name: str,
     registry: Mapping[str, Any],
@@ -271,14 +271,14 @@ def _materialize_cycle(
     from .visualization import render_cycle_publication, render_rgb_coverage_intervals
 
     original = export_original_frame(
-        pipeline.prepared.loc[
-            pipeline.prepared["experiment_id"].astype(str).eq(key[0])
-            & pipeline.prepared["cycle_id"].astype(str).eq(key[1])
+        build.prepared.loc[
+            build.prepared["experiment_id"].astype(str).eq(key[0])
+            & build.prepared["cycle_id"].astype(str).eq(key[1])
         ]
     ).reindex(columns=list(original_columns))
-    raw = pipeline.processed.loc[
-        pipeline.processed["experiment_id"].astype(str).eq(key[0])
-        & pipeline.processed["cycle_id"].astype(str).eq(key[1])
+    raw = build.processed.loc[
+        build.processed["experiment_id"].astype(str).eq(key[0])
+        & build.processed["cycle_id"].astype(str).eq(key[1])
     ].copy()
     canonical = build_processed_frame(
         raw,
@@ -332,7 +332,7 @@ def _materialize_cycle(
         canonical,
         metadata_result,
         registry,
-        getattr(pipeline.config, "camera_roles", {}),
+        getattr(build.config, "camera_roles", {}),
     )
     record["image"] = image_summary
     render_cycle_publication(canonical, record, dataset_dir / assets["publication"])
@@ -348,21 +348,21 @@ def _materialize_cycle(
     return record, metadata_result
 
 
-def _materialize_direct_pipelines(
+def _materialize_builds(
     dataset_dir: Path,
-    pipelines: Sequence[_DirectDatePipeline],
+    builds: Sequence[_DateBuild],
 ) -> None:
     from .dataset_images import collect_images, copy_image, image_metadata_frame
     from .dataset_io import write_json, write_parquet
     from .dataset_metadata import experiment_record
     from .dataset_schema import build_registry, merge_original_columns
 
-    if not pipelines:
+    if not builds:
         raise ValueError("Dataset requires at least one date")
     for directory in ("cycles", "cycles_original", "images"):
         (dataset_dir / directory).mkdir(parents=True, exist_ok=True)
-    summary = pd.concat([pipeline.summary for pipeline in pipelines], ignore_index=True)
-    prepared = pd.concat([pipeline.prepared for pipeline in pipelines], ignore_index=True)
+    summary = pd.concat([build.summary for build in builds], ignore_index=True)
+    prepared = pd.concat([build.prepared for build in builds], ignore_index=True)
     names = assign_final_cycle_names_by_time(summary, prepared=prepared)
     if not names:
         raise ValueError("Dataset contains no cycles with Prepared rows")
@@ -378,19 +378,19 @@ def _materialize_direct_pipelines(
     }
     if not prepared_keys <= summary_keys:
         raise ValueError("Prepared cycle is missing from cycle summary")
-    processed_counts = processed_counts_by_key(pipelines)
+    processed_counts = processed_counts_by_key(builds)
     for key in names:
         if processed_counts.get(key, 0) <= 0:
             raise ValueError(f"cycle has Prepared rows but no Processed rows: {key}")
 
-    registry = build_registry(pipelines)
-    original_columns = merge_original_columns(pipelines)
+    registry = build_registry(builds)
+    original_columns = merge_original_columns(builds)
     all_images: list[dict[str, object]] = []
-    for pipeline in pipelines:
+    for build in builds:
         all_images.extend(
             collect_images(
-                pipeline.prepared,
-                input_dir=pipeline.input_dir,
+                build.prepared,
+                input_dir=build.input_dir,
                 cycle_names=names,
             )
         )
@@ -404,14 +404,14 @@ def _materialize_direct_pipelines(
         }
         for row in summary.to_dict(orient="records")
     }
-    pipelines_by_experiment = {
-        str(pipeline.config.experiment_id): pipeline for pipeline in pipelines
+    builds_by_experiment = {
+        str(build.config.experiment_id): build for build in builds
     }
     records: list[dict[str, Any]] = []
     for key, cycle_name in sorted(names.items(), key=lambda item: parse_cycle_name(item[1])):
         record, image_metadata = _materialize_cycle(
             dataset_dir,
-            pipelines_by_experiment[key[0]],
+            builds_by_experiment[key[0]],
             key,
             cycle_name,
             registry,
@@ -426,13 +426,11 @@ def _materialize_direct_pipelines(
     write_json(registry, dataset_dir / "channel_registry.json")
     experiments = [
         experiment_record(
-            str(pipeline.config.experiment_id),
-            str(pipeline.config.experiment_date),
-            pipeline.input_dir,
-            pipeline.config.project_root,
-            getattr(pipeline.config, "camera_roles", {}),
+            str(build.config.experiment_id),
+            str(build.config.experiment_date),
+            getattr(build.config, "camera_roles", {}),
         )
-        for pipeline in sorted(pipelines, key=lambda item: str(item.config.experiment_date))
+        for build in sorted(builds, key=lambda item: str(item.config.experiment_date))
     ]
     write_json(
         {
@@ -450,11 +448,11 @@ def _materialize_direct_pipelines(
 
 
 def processed_counts_by_key(
-    pipelines: Sequence[_DirectDatePipeline],
+    builds: Sequence[_DateBuild],
 ) -> dict[CycleKey, int]:
     counts: dict[CycleKey, int] = {}
-    for pipeline in pipelines:
-        for values in pipeline.processed[["experiment_id", "cycle_id"]].itertuples(
+    for build in builds:
+        for values in build.processed[["experiment_id", "cycle_id"]].itertuples(
             index=False, name=None
         ):
             key = (str(values[0]), str(values[1]))
@@ -462,9 +460,9 @@ def processed_counts_by_key(
     return counts
 
 
-def _append_direct_pipeline(  # noqa: C901
+def _append_build(  # noqa: C901
     dataset_dir: Path,
-    pipeline: _DirectDatePipeline,
+    build: _DateBuild,
 ) -> None:
     from .dataset_images import collect_images, copy_image, image_metadata_frame
     from .dataset_io import read_json, write_csv, write_json, write_parquet
@@ -481,12 +479,12 @@ def _append_direct_pipeline(  # noqa: C901
     catalog = read_catalog(dataset_dir)
     old_records = [record for record in catalog["cycles"] if isinstance(record, dict)]
     names = assign_final_cycle_names_by_time(
-        pipeline.summary,
-        prepared=pipeline.prepared,
+        build.summary,
+        prepared=build.prepared,
         start_index=len(old_records) + 1,
     )
     old_registry = read_json(dataset_dir / "channel_registry.json")
-    candidate = build_registry([pipeline])
+    candidate = build_registry([build])
     merged_registry = merge_registries(old_registry, candidate)
     for setting_name in (
         "image_coverage",
@@ -502,8 +500,8 @@ def _append_direct_pipeline(  # noqa: C901
 
     old_images = pd.read_parquet(dataset_dir / "image_metadata.parquet")
     new_images = collect_images(
-        pipeline.prepared,
-        input_dir=pipeline.input_dir,
+        build.prepared,
+        input_dir=build.input_dir,
         cycle_names=names,
     )
     for image in new_images:
@@ -518,7 +516,7 @@ def _append_direct_pipeline(  # noqa: C901
         for column in pd.read_csv(old_path, nrows=0).columns:
             if str(column) not in original_columns:
                 original_columns.append(str(column))
-    for column in merge_original_columns([pipeline]):
+    for column in merge_original_columns([build]):
         if column not in original_columns:
             original_columns.append(column)
 
@@ -526,13 +524,13 @@ def _append_direct_pipeline(  # noqa: C901
         (str(row["experiment_id"]), str(row["cycle_id"])): {
             str(key): value for key, value in row.items()
         }
-        for row in pipeline.summary.to_dict(orient="records")
+        for row in build.summary.to_dict(orient="records")
     }
     new_records: list[dict[str, Any]] = []
     for key, cycle_name in sorted(names.items(), key=lambda item: parse_cycle_name(item[1])):
         record, merged_images = _materialize_cycle(
             dataset_dir,
-            pipeline,
+            build,
             key,
             cycle_name,
             merged_registry,
@@ -576,11 +574,9 @@ def _append_direct_pipeline(  # noqa: C901
         *manifest["experiments"],
         {
             **experiment_record(
-                str(pipeline.config.experiment_id),
-                str(pipeline.config.experiment_date),
-                pipeline.input_dir,
-                pipeline.config.project_root,
-                getattr(pipeline.config, "camera_roles", {}),
+                str(build.config.experiment_id),
+                str(build.config.experiment_date),
+                getattr(build.config, "camera_roles", {}),
             ),
         },
     ]

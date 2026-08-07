@@ -2,7 +2,7 @@
 
 Cycle Dataset 是自包含的科学数据发布层。构建链直接从日期原始目录执行
 `prepare → validate_prepared → process → validate_processed → Dataset`；Dataset
-操作不读取 Raw、Run、YAML 或任何旧版本 Dataset。
+操作不读取 Raw、YAML 或任何旧版本 Dataset。
 
 ## 目录
 
@@ -28,7 +28,7 @@ dataset/
 
 `cycles/` 保存 10 秒 Processed 科学数据；`cycles_original/` 保存按 cycle 切分的
 Prepared 分辨率标准化数据。Original CSV 保留真实 timestamp、标准通道、identity、
-Pipeline 状态和 cycle stage，但不保存逐通道质量审计列、图片字段、baseline、residual、
+构建状态和 cycle stage，但不保存逐通道质量审计列、图片字段、baseline、residual、
 dynamic features 或 10 秒聚合列。追加日期发现新标准通道时，历史 Original CSV 会补充
 该列并写入空值，保持跨日期 schema 一致。
 
@@ -40,25 +40,19 @@ dynamic features 或 10 秒聚合列。追加日期发现新标准通道时，�
 {
   "dataset_schema_version": 3,
   "dataset_id": "frost_cycle_dataset",
-  "created_at": "...",
-  "updated_at": "...",
   "experiments": [
     {
       "experiment_id": "exp_20260714",
       "experiment_date": "2026-07-14",
-      "source_directory": "data/0714"
+      "camera_roles": {}
     }
   ]
 }
 ```
 
-`source_directory` 只是人工 provenance，任何 Loader、validator、edit、refresh、render
-或 analysis 都不会解析或重新读取它。Manifest 不保存 source fingerprint、配置 hash、
-Run 路径或全局图片统计。
-
-`cycle_catalog.json` 保存每个 cycle 的身份、Pipeline 状态、当前人工状态、边界、数据摘要、
+`cycle_catalog.json` 保存每个 cycle 的身份、构建状态、当前人工状态、边界、数据摘要、
 图片摘要和固定资产路径。`pipeline_status` 是上游事实；
-`status` 是当前唯一 Dataset 使用状态，只能通过 `review-cycle` 修改。Analysis 只按
+`status` 是当前唯一 Dataset 使用状态，只能通过 `review-cycle` 修改。Evidence 只按
 `status` 过滤。
 
 ## 图片与 coverage
@@ -89,7 +83,6 @@ python -m frost_analysis dataset review-cycle frost_cycle_000001 \
   --status valid --reason manual_review_confirmed
 python -m frost_analysis dataset edit --dataset dataset --baseline-seconds 60
 python -m frost_analysis dataset edit --dataset dataset --recovery-seconds 180
-python -m frost_analysis dataset edit --dataset dataset --rename-camera camera01=front
 python -m frost_analysis dataset render --dataset dataset frost_cycle_000001 \
   --publication --coverage
 ```

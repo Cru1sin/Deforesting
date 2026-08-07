@@ -46,13 +46,10 @@ def read_manifest(dataset_dir: Path) -> dict[str, Any]:
         raise ValueError("Dataset manifest has an invalid dataset_id")
     if not isinstance(payload.get("experiments"), list):
         raise ValueError("Dataset manifest experiments must be a list")
-    expected_experiment = {"experiment_id", "experiment_date", "source_directory"}
+    expected_experiment = {"experiment_id", "experiment_date"}
     for item in payload["experiments"]:
         if not isinstance(item, Mapping) or not expected_experiment <= set(item):
-            raise ValueError(
-                "Dataset experiment records are missing required identity or "
-                "source_directory fields"
-            )
+            raise ValueError("Dataset experiment records are missing identity fields")
     return payload
 
 
@@ -79,21 +76,11 @@ def write_catalog(dataset_dir: Path, catalog: Mapping[str, Any]) -> None:
 def experiment_record(
     experiment_id: str,
     experiment_date: str,
-    source_directory: Path,
-    project_root: Path,
     camera_roles: Mapping[str, str],
 ) -> dict[str, object]:
-    """Build the informational experiment entry without runtime dependencies."""
-    source = source_directory.resolve()
-    root = project_root.resolve()
-    try:
-        value = source.relative_to(root).as_posix()
-    except ValueError:
-        value = source.as_posix()
     return {
         "experiment_id": str(experiment_id),
         "experiment_date": str(experiment_date)[:10],
-        "source_directory": value,
         "camera_roles": dict(camera_roles),
     }
 

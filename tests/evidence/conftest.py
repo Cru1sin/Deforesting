@@ -130,7 +130,6 @@ def write_dataset(
             "cop": {"analysis_candidate": False},
         },
         "fields": [],
-        "canonical_hash": "registry-test-hash",
     }
     for cycle_name, experiment_date, status, frame in cycles:
         cycle_uid = f"exp::{cycle_name}"
@@ -173,10 +172,8 @@ def write_dataset(
             {
                 "dataset_schema_version": 3,
                 "dataset_id": "frost_cycle_dataset",
-                "created_at": "2026-01-01T00:00:00+00:00",
-                "updated_at": "2026-01-01T00:00:00+00:00",
                 "experiments": [
-                    {"experiment_id": exp, "experiment_date": date, "source_directory": "test"}
+                    {"experiment_id": exp, "experiment_date": date}
                     for exp, date in sorted(experiment_rows)
                 ],
             }

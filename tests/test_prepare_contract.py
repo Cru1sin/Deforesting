@@ -95,7 +95,7 @@ def test_read_edf_environment_preserves_local_clock_pairs_once_and_clips(tmp_pat
         ],
     )
 
-    result, summary = read_edf_environment(
+    result = read_edf_environment(
         [first, second],
         pd.Timestamp("2026-07-20 09:00:00"),
         pd.Timestamp("2026-07-20 09:00:02"),
@@ -109,13 +109,6 @@ def test_read_edf_environment_preserves_local_clock_pairs_once_and_clips(tmp_pat
     assert result["environment_temperature"].tolist() == [21.0, 25.0]
     assert result["environment_relative_humidity"].tolist() == [102.0, 103.0]
     assert result["timestamp"].dt.tz is None
-    assert summary["duplicate_rows_removed"] == 2
-    assert summary["paired_rows"] == 4
-    assert summary["unmatched_sensor_1_rows"] == 2
-    assert summary["unmatched_sensor_2_rows"] == 1
-    assert summary["pair_delta_median_ms"] == pytest.approx(200.0)
-    assert summary["pair_delta_max_ms"] == pytest.approx(200.0)
-    assert summary["rows_after_time_clip"] == 2
 
 
 def test_read_edf_environment_chooses_nearest_pair_without_reuse(tmp_path: Path) -> None:
@@ -128,7 +121,7 @@ def test_read_edf_environment_chooses_nearest_pair_without_reuse(tmp_path: Path)
         ],
     )
 
-    result, summary = read_edf_environment(
+    result = read_edf_environment(
         [path],
         pd.Timestamp("2026-07-20 09:00:00"),
         pd.Timestamp("2026-07-20 09:00:02"),
@@ -140,8 +133,6 @@ def test_read_edf_environment_chooses_nearest_pair_without_reuse(tmp_path: Path)
     ]
     assert result["environment_temperature"].tolist() == [23.0]
     assert result["environment_relative_humidity"].tolist() == [104.0]
-    assert summary["unmatched_sensor_1_rows"] == 1
-    assert summary["unmatched_sensor_2_rows"] == 0
 
 
 def test_read_edf_environment_rejects_nat_pair_tolerance(tmp_path: Path) -> None:

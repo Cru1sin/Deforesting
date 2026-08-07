@@ -55,7 +55,6 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "analysis_version",
         "dataset_id",
         "dataset_schema_version",
-        "dataset_updated_at",
         "channel_registry_hash",
         "settings_sha256",
         "generated_at",
@@ -63,7 +62,7 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "row_counts",
         "recovery_effect",
     }
-    assert manifest["dataset_updated_at"] == "2026-01-01T00:00:00+00:00"
+    assert len(manifest["channel_registry_hash"]) == 64
     assert manifest["recovery_effect"] == "not_evaluated"
     after = {
         path.relative_to(dataset): path.read_bytes()
@@ -90,7 +89,7 @@ def test_writer_uses_loader_manifest_without_reading_dataset_manifest(
     )
 
     manifest = json.loads((output / "analysis_manifest.json").read_text(encoding="utf-8"))
-    assert manifest["dataset_updated_at"] == "2026-01-01T00:00:00+00:00"
+    assert manifest["dataset_id"] == "frost_cycle_dataset"
 
 
 def test_writer_rejects_existing_output_directory(tmp_path: Path) -> None:

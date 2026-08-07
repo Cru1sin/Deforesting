@@ -55,10 +55,10 @@ def export_original_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[:, columns].sort_values("timestamp", kind="stable").reset_index(drop=True)
 
 
-def merge_original_columns(pipelines: Sequence[Any]) -> list[str]:
+def merge_original_columns(builds: Sequence[Any]) -> list[str]:
     columns: list[str] = []
-    for pipeline in pipelines:
-        for name in export_original_frame(pipeline.prepared):
+    for build in builds:
+        for name in export_original_frame(build.prepared):
             if str(name) not in columns:
                 columns.append(str(name))
     return columns
@@ -99,18 +99,18 @@ def merge_registries(existing: Mapping[str, Any], candidate: Mapping[str, Any]) 
     }
 
 
-def build_registry(pipelines: Sequence[Any]) -> dict[str, Any]:
+def build_registry(builds: Sequence[Any]) -> dict[str, Any]:
     registry: dict[str, Any] | None = None
-    for pipeline in pipelines:
+    for build in builds:
         candidate = registry_from_frame(
-            pipeline.processed,
-            pipeline.channels,
-            resample_interval_seconds=int(pipeline.config.process.resample_interval_seconds),
+            build.processed,
+            build.channels,
+            resample_interval_seconds=int(build.config.process.resample_interval_seconds),
         )
         registry = candidate if registry is None else merge_registries(registry, candidate)
     if registry is None:
-        raise ValueError("Dataset requires at least one processed pipeline")
-    process = pipelines[0].config.process
+        raise ValueError("Dataset requires at least one processed build")
+    process = builds[0].config.process
     baseline = getattr(process, "baseline", None)
     registry.update(
         {
@@ -125,7 +125,7 @@ def build_registry(pipelines: Sequence[Any]) -> dict[str, Any]:
                 "mode": "ts-minus",
                 "seconds": None,
                 "fallback_seconds": float(
-                    getattr(pipelines[0].config.cycles, "stable_heating_seconds", 180)
+                    getattr(builds[0].config.cycles, "stable_heating_seconds", 180)
                 ),
                 "managed": False,
             },

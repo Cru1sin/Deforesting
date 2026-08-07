@@ -14,7 +14,7 @@ from .dataset_metadata import read_catalog, read_manifest
 
 
 class DatasetLoader:
-    """Load Dataset schema 3 without consulting Raw data, Runs, or YAML files."""
+    """Load Dataset schema 3 without consulting Raw data or configuration files."""
 
     def __init__(self, dataset_root: Path) -> None:
         self.dataset_root = Path(dataset_root).resolve()
