@@ -9,6 +9,15 @@ from frost_analysis import cli
 from .conftest import frame_for, write_dataset
 
 
+def test_cli_exposes_only_dataset_and_evidence(capsys) -> None:
+    try:
+        cli.main(["--help"])
+    except SystemExit as error:
+        assert error.code == 0
+
+    assert "{dataset,evidence}" in capsys.readouterr().out
+
+
 def test_dataset_validate_command_remains_registered(monkeypatch, tmp_path: Path) -> None:
     class Loader:
         def list_cycles(self) -> pd.DataFrame:
