@@ -223,8 +223,8 @@ def test_prepare_attaches_edf_channels_without_replacing_t4(tmp_path: Path) -> N
         },
     }
 
-    prepared, _, prepare_summary = prepare(config, channels)
-    without_edf, _, _ = prepare(replace(config, sensor_globs=("*.xls",)), channels)
+    prepared, _ = prepare(config, channels)
+    without_edf, _ = prepare(replace(config, sensor_globs=("*.xls",)), channels)
 
     assert prepared["timestamp"].tolist() == pd.to_datetime(
         [
@@ -241,8 +241,6 @@ def test_prepare_attaches_edf_channels_without_replacing_t4(tmp_path: Path) -> N
     assert environment["environment_temperature"].tolist() == [21.0, 25.0]
     assert environment["environment_relative_humidity"].tolist() == [102.0, 103.0]
     assert environment["environment_relative_humidity__invalid"].eq(False).all()
-    assert prepare_summary["edf_summary"]["rows_after_time_clip"] == 2
-
     old_columns = [
         column
         for column in without_edf.columns
@@ -302,12 +300,11 @@ def test_prepare_without_edf_keeps_new_channels_missing(tmp_path: Path) -> None:
         },
     }
 
-    prepared, _, prepare_summary = prepare(config, channels)
+    prepared, _ = prepare(config, channels)
 
     assert prepared["ambient_temperature"].tolist() == [10.0]
     assert prepared["environment_temperature"].isna().all()
     assert prepared["environment_relative_humidity"].isna().all()
-    assert "edf_summary" not in prepare_summary
 
 
 def test_label_cycles_defines_progress_only_during_frost_development() -> None:
@@ -847,7 +844,7 @@ def test_short_state_gap_with_irregular_timestamps_does_not_split_defrost_event(
 def test_0715_raw_data_has_four_defrost_events_and_three_formal_cycles() -> None:
     config = load_config(ROOT / "configs" / "0715.yaml")
     channels = load_channels(config.channels_path)
-    prepared, summary, _ = prepare(config, channels)
+    prepared, summary = prepare(config, channels)
 
     raw_state = prepared["defrost_active"].map(_normalize_state).astype("object")
     filled_state, long_gaps = _fill_short_state_gaps(
@@ -914,7 +911,7 @@ def test_prepare_duplicate_only_masks_affected_channel(tmp_path: Path) -> None:
         },
     }
 
-    prepared, _, _ = prepare(config, channels)
+    prepared, _ = prepare(config, channels)
 
     duplicate = prepared.loc[prepared["timestamp"].eq(pd.Timestamp("2026-07-15"))].iloc[0]
     assert pd.isna(duplicate["ambient_temperature"])
@@ -1085,7 +1082,7 @@ def test_prepare_enforces_configured_valid_range(tmp_path: Path) -> None:
         },
     }
 
-    prepared, _, _ = prepare(config, channels)
+    prepared, _ = prepare(config, channels)
 
     assert pd.isna(prepared.loc[0, "ambient_temperature"])
     assert bool(prepared.loc[0, "ambient_temperature__invalid"])

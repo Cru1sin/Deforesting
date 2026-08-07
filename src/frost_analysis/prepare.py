@@ -23,7 +23,7 @@
 #     ↓
 # 调用 images.py 将图片一次性匹配到传感器时间戳
 #     ↓
-# 生成 prepared_data、cycle_summary 和 prepare_summary
+# 生成 Prepared 数据和 cycle summary
 #
 # Prepare 明确“不做”的事情：
 # - 不重采样到 10 秒网格；
@@ -51,9 +51,6 @@ from collections import defaultdict
 # Mapping 表示字典式只读接口，兼容普通 dict 和其他 mapping 对象。
 from collections.abc import Mapping
 
-# UTC 和 datetime 用于记录本次 Prepare 运行的 UTC 创建时间。
-from datetime import UTC, datetime
-
 # Path 统一处理输入文件、图片路径和相对路径。
 from pathlib import Path
 
@@ -70,8 +67,7 @@ import pandas as pd
 from .alignment import match_nearest_one_to_one
 
 # Config：已经解析完成的一次实验配置。
-# resolved_config_sha256：对最终实际生效配置生成稳定指纹。
-from .config import Config, resolved_config_sha256
+from .config import Config
 
 # label_cycles：根据除霜状态和循环阈值，为 Prepared 表添加 cycle_id、
 # cycle_stage、cycle_progress 等标签，并返回循环摘要。
@@ -81,16 +77,7 @@ from .cycles import label_cycles
 from .images import match_images
 
 # discover_inputs：发现原始传感器文件和图片。
-# git_commit：记录当前代码提交。
-# optional_sha256：在路径存在时计算文件哈希。
-# source_file_metadata：记录每个原始传感器文件的路径、大小和哈希等来源信息。
-from .io import (
-    discover_inputs,
-    git_commit,
-    input_inventory_sha256,
-    optional_sha256,
-    source_file_metadata,
-)
+from .io import discover_inputs
 from .sensors import read_edf_environment
 
 # =============================================================================
@@ -100,10 +87,10 @@ from .sensors import read_edf_environment
 
 def prepare(
     config: Config, channels: Mapping[str, Mapping[str, Any]]
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load raw observations, segment cycles, and attach one-shot image matches."""
 
-    # 返回值由三部分组成：
+    # 返回值由两部分组成：
     #
     # 1. prepared:
     #    时间戳级数据表。包含原始标准化通道、质量标记、循环标签和图片匹配。
@@ -111,9 +98,6 @@ def prepare(
     # 2. cycle_summary:
     #    每个循环一行。包含循环边界、状态和 Prepare 阶段的覆盖质量指标。
     #
-    # 3. prepare_summary:
-    #    整次 Prepare 运行的来源追踪信息，例如输入文件、配置哈希和 Git commit。
-
     # -------------------------------------------------------------------------
     # 第 1 步：发现输入文件
     # -------------------------------------------------------------------------
@@ -146,9 +130,7 @@ def prepare(
     # 一个标准通道可能对应多个原始文件或多个原始列，因此 value 是 list。
     #
     # invalid_timestamp_rows 统计所有传感器文件中无法解析时间戳的原始行数。
-    channel_frames, invalid_timestamp_rows, edf_summary = _load_prepare_channel_frames(
-        inputs.sensor_files, config, channels
-    )
+    channel_frames = _load_prepare_channel_frames(inputs.sensor_files, config, channels)
 
     # 这里的“available”表示：
     # 至少在某个输入文件中发现了该标准通道对应的原始来源列。
@@ -178,9 +160,6 @@ def prepare(
     prepared.insert(0, "experiment_date", config.experiment_date)
     prepared.insert(0, "experiment_id", config.experiment_id)
 
-    # 记录在 channels 合同中声明、但本次输入文件里完全没有找到来源列的通道。
-    unavailable_channels: list[str] = []
-
     # 先在字典中集中构建所有通道列，最后一次 concat 到 prepared。
     # 这样比在循环中反复向 DataFrame 插列更清楚，也通常更高效。
     channel_columns: dict[str, pd.Series] = {}
@@ -194,10 +173,6 @@ def prepare(
         # Prepare 只整理 source channel，因此在这里跳过。
         if str(settings.get("kind")) == "derived":
             continue
-
-        # 如果没有发现该标准通道对应的任何原始来源列，记录为 unavailable。
-        if name not in channel_frames:
-            unavailable_channels.append(name)
 
         # 将该通道来自不同文件/列的记录合并、解析并对齐到 timestamps。
         #
@@ -310,79 +285,7 @@ def prepare(
         available_source_channels,
     )
 
-    # -------------------------------------------------------------------------
-    # 第 9 步：生成整次 Prepare 运行的 provenance 摘要
-    # -------------------------------------------------------------------------
-
-    prepare_summary: dict[str, Any] = {
-        # 实验身份。
-        "experiment_id": config.experiment_id,
-        "experiment_date": config.experiment_date,
-
-        # 原始输入位置。
-        "input_dir": str(config.input_dir),
-
-        # 日期配置文件路径及其原始文件哈希。
-        "config_path": str(config.config_path) if config.config_path else None,
-
-        # 使用 UTC 时间，避免不同时区运行产生歧义。
-        "created_at": datetime.now(UTC).isoformat(),
-
-        # 每个传感器源文件的元数据和内容哈希。
-        "sensor_files": [
-            source_file_metadata(path, config.input_dir) for path in inputs.sensor_files
-        ],
-
-        # 输入发现统计。
-        "image_file_count": len(inputs.image_files),
-        "sensor_file_count": len(inputs.sensor_files),
-        "input_inventory_sha256": input_inventory_sha256(
-            (*inputs.sensor_files, *inputs.image_files), config.input_dir
-        ),
-
-        # Prepare 产物规模。
-        "prepared_row_count": len(prepared),
-        "cycle_count": len(cycle_summary),
-
-        # 日期配置原文件的 SHA-256。
-        "config_sha256": optional_sha256(config.config_path),
-
-        # 共享 defaults 文件路径及原文件 SHA-256。
-        "defaults_path": str(config.defaults_path) if config.defaults_path else None,
-        "defaults_sha256": optional_sha256(config.defaults_path),
-
-        # 合并 defaults + overrides 并完成类型转换后的最终有效配置哈希。
-        "resolved_config_sha256": resolved_config_sha256(config),
-
-        # channels 合同路径和哈希。
-        "channels_path": str(config.channels_path),
-        "channels_sha256": optional_sha256(config.channels_path),
-
-        # 图片目录中实际发现的 camera ID。
-        "discovered_camera_ids": sorted({path.parent.name for path in inputs.image_files}),
-
-        # 日期配置中声明了角色映射的 camera ID。
-        "mapped_camera_ids": sorted(camera_roles),
-
-        # 已配置但本次输入目录没有发现图片的 camera ID。
-        "missing_camera_ids": sorted(
-            set(camera_roles) - {path.parent.name for path in inputs.image_files}
-        ),
-
-        # channels 合同中存在，但本次文件中没有发现来源列的非 derived 通道。
-        "unavailable_channels": unavailable_channels,
-
-        # 所有传感器文件中时间戳无法解析而被排除的原始行数。
-        "invalid_timestamp_row_count": invalid_timestamp_rows,
-
-        # 本次运行所使用代码仓库的 Git commit。
-        "git_commit": git_commit(config.project_root),
-    }
-    if edf_summary is not None:
-        prepare_summary["edf_summary"] = edf_summary
-
-    # Prepare 不在这里写文件；写盘由 pipeline/io 层统一负责。
-    return prepared, cycle_summary, prepare_summary
+    return prepared, cycle_summary
 
 
 # =============================================================================
@@ -394,24 +297,22 @@ def _load_prepare_channel_frames(
     sensor_files: tuple[Path, ...],
     config: Config,
     channels: Mapping[str, Mapping[str, Any]],
-) -> tuple[dict[str, list[pd.DataFrame]], int, dict[str, object] | None]:
+) -> dict[str, list[pd.DataFrame]]:
     """Load main files and append EDF environment frames when configured."""
     edf_paths = tuple(path for path in sensor_files if path.suffix.lower() == ".edf")
     main_paths = tuple(path for path in sensor_files if path.suffix.lower() != ".edf")
     if not main_paths:
         raise ValueError(f"no non-EDF sensor files found in {config.input_dir}")
 
-    channel_frames, invalid_timestamp_rows = _load_channel_frames(
-        main_paths, config.input_dir, channels, config.timestamp_column
-    )
+    channel_frames = _load_channel_frames(main_paths, channels, config.timestamp_column)
     main_timestamps = _all_timestamps(channel_frames)
     if main_timestamps.empty:
         raise ValueError("sensor files contain no valid timestamps")
 
     if not edf_paths:
-        return channel_frames, invalid_timestamp_rows, None
+        return channel_frames
 
-    environment, edf_summary = read_edf_environment(
+    environment, _ = read_edf_environment(
         edf_paths,
         pd.Timestamp(main_timestamps.min()),
         pd.Timestamp(main_timestamps.max()),
@@ -426,7 +327,7 @@ def _load_prepare_channel_frames(
         channel_frames[name] = [
             environment[["timestamp", name]].rename(columns={name: "raw"})
         ]
-    return channel_frames, invalid_timestamp_rows, edf_summary
+    return channel_frames
 
 
 def _align_environment_to_main_timestamps(
@@ -459,13 +360,9 @@ def _align_environment_to_main_timestamps(
 
 def _load_channel_frames(
     paths: tuple[Path, ...],
-    input_dir: Path,
     channels: Mapping[str, Mapping[str, Any]],
     timestamp_column: str,
-) -> tuple[dict[str, list[pd.DataFrame]], int]:
-    # input_dir 当前没有在函数体中直接使用。
-    # 它仍保留在接口中，可能是为了保持调用合同或为来源追踪扩展预留。
-    # 不要仅因“当前未使用”就在不了解测试和外部调用前直接删除。
+) -> dict[str, list[pd.DataFrame]]:
 
     # source_to_channels 建立：
     # 原始来源名称 → 一个或多个 canonical channel 名。
@@ -487,13 +384,9 @@ def _load_channel_frames(
     # canonical channel → 多个 DataFrame(timestamp, raw)。
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
 
-    # 跨所有文件累计无法解析时间戳的原始行数。
-    invalid_timestamp_rows = 0
-
     # 逐个读取传感器源文件。
     for path in paths:
-        table, invalid_count = _read_sensor_table(path, timestamp_column)
-        invalid_timestamp_rows += invalid_count
+        table = _read_sensor_table(path, timestamp_column)
 
         # 文件可能只有无效时间戳；过滤后为空则跳过。
         if table.empty:
@@ -523,7 +416,7 @@ def _load_channel_frames(
                     pd.DataFrame({"timestamp": table["timestamp"], "raw": table[raw_column]})
                 )
 
-    return frames, invalid_timestamp_rows
+    return frames
 
 
 # =============================================================================
@@ -531,7 +424,7 @@ def _load_channel_frames(
 # =============================================================================
 
 
-def _read_sensor_table(path: Path, timestamp_column: str) -> tuple[pd.DataFrame, int]:
+def _read_sensor_table(path: Path, timestamp_column: str) -> pd.DataFrame:
     # 只读取文件前 128 KiB 用于：
     # 1. 判断是否为二进制 Excel；
     # 2. 尝试编码；
@@ -592,15 +485,12 @@ def _read_sensor_table(path: Path, timestamp_column: str) -> tuple[pd.DataFrame,
     # 从原表移出时间戳列，并将无法解析的值转为 NaT。
     timestamps = pd.to_datetime(table.pop(timestamp_column), errors="coerce")
 
-    # 统计无效时间戳行；这些行不会进入 Prepared，因为无法与其他观测对齐。
-    invalid_count = int(timestamps.isna().sum())
-
     # 将规范化后的 timestamp 放回第一列。
     table = pd.concat([timestamps.rename("timestamp"), table], axis=1)
 
     # 删除无效时间戳行并重建连续索引。
     # 注意：这里只删除无法定位到时间轴的行，不删除通道值为空或非法的行。
-    return table.loc[table["timestamp"].notna()].reset_index(drop=True), invalid_count
+    return table.loc[table["timestamp"].notna()].reset_index(drop=True)
 
 
 # =============================================================================

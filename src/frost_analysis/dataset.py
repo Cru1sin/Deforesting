@@ -234,11 +234,10 @@ def _run_direct_pipeline(input_path: Path, config: Any) -> _DirectDatePipeline:
     from .validation import validate_prepared, validate_processed
 
     channels = load_channels(config.channels_path)
-    prepared, initial_summary, prepare_summary = prepare(config, channels)
+    prepared, initial_summary = prepare(config, channels)
     validate_prepared(prepared, initial_summary)
     processed, final_summary = process(prepared, initial_summary, config, channels)
     validate_processed(processed, final_summary)
-    _ = prepare_summary
     return _DirectDatePipeline(
         input_dir=input_path.resolve(),
         config=config,
