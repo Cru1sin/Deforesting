@@ -103,4 +103,3 @@ git diff --check
 - [x] Run strict mypy on surviving CLI, Dataset, and Evidence modules and confirm no new diagnostics.
 - [x] Compare retained Dataset/Evidence contract tests and inspect the final diff for accidental scientific changes.
 - [x] Commit and push `main`, leaving `docs/frost_defrost_optimal_timing_analysis_cn.md` untracked and untouched.
-
