@@ -7,15 +7,19 @@ Dataset or Dataset-native Evidence outputs:
 
 ```text
 Raw experiment directories
--> Dataset build and review
+-> Dataset build / review / edit
+-> Self-contained Cycle Dataset
 -> DatasetLoader
--> Evidence tables and figures
+-> Dataset-native Evidence
+-> Evidence tables + figures
 ```
 
 The public CLI contains only `dataset` and `evidence`.
 
-This is a structural cleanup. Dataset files, Evidence CSV schemas, numerical
-definitions, status semantics, figures, and manifests remain unchanged.
+This is a structural cleanup. Scientific Dataset values and contracts, Evidence
+CSV schemas and numerical definitions, status semantics, and figure meaning
+remain unchanged. Dead registry metadata and the hashes derived from it may
+change.
 
 ## Ponytail Rules
 
@@ -65,10 +69,12 @@ Delete the complete obsolete runtime closure:
 - `src/frost_analysis/pipeline.py`
 - `src/frost_analysis/analysis.py`
 - `src/frost_analysis/evidence_cycle.py`
-- old run-level and QA-only code in `src/frost_analysis/report.py`
+- `src/frost_analysis/report.py`
 - public `run`, `prepare`, `process`, and `report` CLI commands
 - old run/stage/evidence writers and loaders in `src/frost_analysis/io.py`
 - old analysis validation in `src/frost_analysis/validation.py`
+- old Analysis, Evidence policy, and Run provenance configuration in
+  `src/frost_analysis/config.py` and `configs/defaults.yaml`
 - old package exports from `src/frost_analysis/__init__.py`
 - documentation describing Run, stage artifacts, old Analyze, or QA Report
 
@@ -93,22 +99,35 @@ one concrete responsibility and reduces total code. File count is not a goal.
 
 ### Source I/O
 
-The surviving part of `io.py` contains only source discovery, source metadata,
-inventory hashes required by current Dataset output, and output-path checks used
-by Dataset construction. Rename it to `source_io.py` only if the final contents
-are exclusively source-facing; otherwise keep `io.py`. Do not create wrappers
-around moved functions.
+The surviving `io.py` contains source discovery only:
+
+```python
+@dataclass(frozen=True)
+class InputFiles:
+    sensor_files: tuple[Path, ...]
+    image_files: tuple[Path, ...]
+
+
+def discover_inputs(config: Config) -> InputFiles:
+    ...
+```
+
+Keep the existing filename. Delete source metadata, inventory hashing, stage
+writers, Run writers, old Evidence loading, and all helpers that exist only for
+those paths.
 
 ### Configuration
 
-`config.py` keeps only values consumed by Dataset construction or serialized into
-the current Dataset registry/manifest. Old Evidence runtime loaders, policy
-wrappers, timing adapters, ranking thresholds, and decision-only validation are
-removed.
+`config.py` keeps only values consumed by Raw -> Prepare -> Process -> Dataset:
+`Config`, cycle, process, and baseline settings, input format, camera roles,
+channel path, experiment identity, `load_config()`, and project-root discovery.
+Delete `AnalysisSettings`, `EvidencePolicy`, old Evidence loaders and timing
+adapters, resolved-config provenance hashing, and Run provenance machinery when
+their last active consumer is removed.
 
-If an old analysis mapping must remain to preserve current registry bytes, keep it
-as a plain normalized mapping instead of retaining an unused runtime class graph.
-The serialized keys and values must not change in this cleanup.
+Delete `analysis:` and its nested Evidence settings from `configs/defaults.yaml`.
+Dataset-native Evidence settings come only from `configs/evidence.yaml`. Remove
+dead `analysis_settings` registry metadata rather than preserving unused bytes.
 
 ### Validation
 
@@ -119,10 +138,11 @@ building Dataset. Dataset publication validation remains in
 ### Visualization
 
 Dataset currently reaches its publication renderer through private functions in
-the obsolete `report.py`. Move only the transitive function and constant closure
-needed by `render_cycle_publication()` into `visualization.py` or one focused
-Dataset figure module. Delete QA overview, run report, warning ledger, report
-manifest, baseline report, candidate report, and publish-report code.
+the obsolete `report.py`. Reimplement the smallest active Dataset publication
+renderer directly in `visualization.py`, preserving its required scientific
+content. Do not transplant the Report framework. Delete QA overview, run report,
+warning ledger, report manifest, baseline report, candidate report, and
+publish-report code with `report.py`.
 
 Publication PNG and RGB coverage output remain visually and structurally
 unchanged.
@@ -198,8 +218,9 @@ top-level commands == {dataset, evidence}
 
 Existing Dataset and Evidence fixtures are the output lock. During cleanup:
 
-- Dataset manifest, catalog, registry, cycle frames, Original frames, and image
-  metadata retain their schemas and values;
+- Dataset catalog, cycle frames, Original frames, image metadata, and scientific
+  registry/manifest fields retain their schemas and values;
+- dead registry metadata and hashes derived from removed metadata may disappear;
 - Evidence formal tables retain columns, row identities, statuses, and numbers;
 - publication and coverage figures retain their current required content;
 - no test baseline is updated merely to accept changed output.
@@ -208,14 +229,18 @@ Existing Dataset and Evidence fixtures are the output lock. During cleanup:
 
 1. Lock the two-command CLI and remove old public entry points.
 2. Remove old pipeline, analysis, run I/O, analysis validation, and their tests.
-3. isolate Dataset publication rendering and delete the remaining Report closure.
-4. Remove old Evidence runtime and simplify config while preserving serialized
-   Dataset settings.
-5. Simplify active Dataset, source I/O, validation, and Evidence implementations
+3. Isolate Dataset publication rendering and delete `report.py` entirely.
+4. Remove old Evidence runtime and its configuration and registry metadata.
+5. Change `prepare()` to return only Prepared data and cycle summary; delete the
+   discarded Run provenance summary and its complete helper closure.
+6. Simplify active Dataset, source I/O, validation, and Evidence implementations
    in small behavior-preserving changes.
-6. Remove unused dependencies and rewrite README/contracts around the sole flow.
-7. Run the full verification suite and inspect the final diff for code that only
+7. Remove unused dependencies and rewrite README/contracts around the sole flow.
+8. Run the full verification suite and inspect the final diff for code that only
    exists to support deleted behavior.
+
+Final acceptance requires that no Run artifact vocabulary, QA Report runtime,
+stage output writer, compatibility API, or second Evidence implementation remains.
 
 ## Verification
 
