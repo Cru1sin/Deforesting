@@ -207,6 +207,8 @@ def test_materialize_cycle_builds_one_catalog_record(
         "cycle_stage",
         "source_relative_path",
     ]
+    catalog = json.loads((dataset_dir / "cycle_catalog.json").read_text())
+    assert catalog["cycles"][0]["image"] == {"image_count": 0}
 
 
 def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
@@ -825,9 +827,31 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
     assert all("source_fingerprint" not in item for item in manifest["experiments"])
 
+    from frost_analysis import dataset_images
     from frost_analysis.dataset import edit_dataset, refresh_dataset
 
+    read_parquet = dataset_module.pd.read_parquet
+    scan_cycle_images = dataset_images.scan_cycle_images
+    processed_reads = 0
+    image_scans = 0
+
+    def counting_read_parquet(path: object, *args: object, **kwargs: object) -> pd.DataFrame:
+        nonlocal processed_reads
+        if "/cycles/" in str(path) and str(path).endswith(".parquet"):
+            processed_reads += 1
+        return read_parquet(path, *args, **kwargs)
+
+    def counting_scan(*args: object, **kwargs: object) -> pd.DataFrame:
+        nonlocal image_scans
+        image_scans += 1
+        return scan_cycle_images(*args, **kwargs)
+
+    monkeypatch.setattr(dataset_module.pd, "read_parquet", counting_read_parquet)
+    monkeypatch.setattr(dataset_images, "scan_cycle_images", counting_scan)
+
     edit_dataset(dataset_dir, baseline_seconds=30, recovery_seconds=30)
+    assert processed_reads == 2
+    assert image_scans == 2
     edited_registry = json.loads((dataset_dir / "channel_registry.json").read_text())
     assert edited_registry["baseline_managed"] is True
     assert edited_registry["recovery_edit"]["managed"] is True
@@ -1050,7 +1074,7 @@ def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path
         {
             cycle_name: pd.DataFrame(
                 {
-                    "timestamp": timestamps[::-1],
+                    "timestamp": timestamps[::-1].astype(str),
                     "compressor_power": [2.0, 1.0],
                     "evaporator_capacity": [10.0, 9.0],
                 }

@@ -123,10 +123,14 @@ def update_cycle_columns(
     for cycle_name, update in updates.items():
         parquet_path = dataset_dir / "cycles" / f"{cycle_name}.parquet"
         csv_path = parquet_path.with_suffix(".csv")
-        frame = pd.read_parquet(parquet_path).set_index("timestamp")
-        aligned = update.set_index("timestamp")
+        frame = pd.read_parquet(parquet_path)
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+        aligned = update.copy()
+        aligned["timestamp"] = pd.to_datetime(aligned["timestamp"])
+        frame = frame.set_index("timestamp")
+        aligned = aligned.set_index("timestamp")
         for column in aligned:
-            frame[column] = aligned[column]
+            frame[column] = aligned[column].reindex(frame.index)
         result = frame.reset_index()
         write_parquet(result, parquet_path)
         write_csv(result, csv_path)
@@ -292,7 +296,7 @@ def _materialize_cycle(
         cycle_uid=make_cycle_uid(*key),
         processed=canonical,
         original=original,
-        image_summary={"image_count": 0, "by_camera_role": {}},
+        image_summary={"image_count": 0},
         assets=assets,
     )
     metadata_result = image_metadata
@@ -675,7 +679,7 @@ def _refresh_cycle_record(
 
 
 def _refresh_all_cycles(dataset_dir: Path) -> None:
-    """Refresh image facts, coverage, publication, and Dataset timestamps."""
+    """Refresh image facts and both figure families."""
     from .dataset_io import read_json
     from .dataset_metadata import read_catalog, read_manifest, write_catalog
 
@@ -739,78 +743,72 @@ def edit_dataset(  # noqa: C901
         raise ValueError("dataset edit requires at least one edit")
 
     from .dataset_edit import apply_baseline, apply_recovery
-    from .dataset_images import _cycle_image_summary
+    from .dataset_images import (
+        _cycle_image_summary,
+        _cycle_window,
+        _sensor_coverage_intervals,
+    )
     from .dataset_io import read_json, write_csv, write_json, write_parquet
-    from .dataset_metadata import read_catalog, write_catalog
+    from .dataset_metadata import read_catalog, read_manifest, write_catalog
+    from .visualization import render_cycle_publication, render_rgb_coverage_intervals
 
     catalog = read_catalog(dataset_dir)
     registry = read_json(dataset_dir / "channel_registry.json")
     if not isinstance(registry, dict):
         raise ValueError("channel_registry.json must contain an object")
     recovery_edit = recovery_seconds is not None or recovery_end_by is not None
-    scientific_edit = baseline_seconds is not None or recovery_edit
     metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet") if recovery_edit else None
-    publication_cycles: set[str] = set()
-    coverage_cycles: set[str] = set()
+    manifest = read_manifest(dataset_dir) if recovery_edit else None
 
-    if scientific_edit:
-        for record in catalog["cycles"]:
-            if not isinstance(record, dict):
-                continue
-            cycle_name = str(record["cycle_name"])
-            assets = record["assets"]
-            processed = pd.read_parquet(dataset_dir / str(assets["parquet"]))
-            if recovery_edit:
-                assert metadata is not None
-                original = pd.read_csv(dataset_dir / str(assets["original_csv"]))
-                mask = metadata["cycle_name"].astype(str).eq(cycle_name)
-                original, processed, cycle_metadata = apply_recovery(
-                    original,
-                    processed,
-                    metadata.loc[mask].copy(),
-                    record,
-                    registry,
-                    mode="seconds" if recovery_seconds is not None else "ts-minus",
-                    seconds=recovery_seconds,
-                )
-                if mask.any():
-                    metadata.loc[mask, "cycle_stage"] = cycle_metadata["cycle_stage"].to_numpy()
-                write_csv(original, dataset_dir / str(assets["original_csv"]))
-                coverage_cycles.add(cycle_name)
-            if baseline_seconds is not None:
-                processed = apply_baseline(processed, record, registry, seconds=baseline_seconds)
-            write_parquet(processed, dataset_dir / str(assets["parquet"]))
-            write_csv(processed, dataset_dir / str(assets["csv"]))
-            publication_cycles.add(cycle_name)
-
-    if metadata is None and coverage_cycles:
-        metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
-    records = {
-        str(record["cycle_name"]): record
-        for record in catalog["cycles"]
-        if isinstance(record, dict)
-    }
-    for cycle_name in sorted(publication_cycles):
-        _render_publication(dataset_dir, records[cycle_name])
-    for cycle_name in sorted(coverage_cycles):
-        assert metadata is not None
-        record = records[cycle_name]
-        frame = pd.read_parquet(dataset_dir / str(record["assets"]["parquet"]))
-        from .dataset_metadata import read_manifest
-
-        roles = _experiment_camera_roles(
-            read_manifest(dataset_dir), str(record["experiment_id"])
+    for record in catalog["cycles"]:
+        if not isinstance(record, dict):
+            continue
+        cycle_name = str(record["cycle_name"])
+        assets = record["assets"]
+        processed = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+        if recovery_edit:
+            assert metadata is not None and manifest is not None
+            original = pd.read_csv(dataset_dir / str(assets["original_csv"]))
+            mask = metadata["cycle_name"].astype(str).eq(cycle_name)
+            original, processed, cycle_metadata = apply_recovery(
+                original,
+                processed,
+                metadata.loc[mask].copy(),
+                record,
+                registry,
+                mode="seconds" if recovery_seconds is not None else "ts-minus",
+                seconds=recovery_seconds,
+            )
+            if mask.any():
+                metadata.loc[mask, "cycle_stage"] = cycle_metadata["cycle_stage"].to_numpy()
+            write_csv(original, dataset_dir / str(assets["original_csv"]))
+        if baseline_seconds is not None:
+            processed = apply_baseline(processed, record, registry, seconds=baseline_seconds)
+        write_parquet(processed, dataset_dir / str(assets["parquet"]))
+        write_csv(processed, dataset_dir / str(assets["csv"]))
+        render_cycle_publication(
+            processed, record, dataset_dir / str(assets["publication"])
         )
-        image_summary, _ = _cycle_image_summary(
-            dataset_dir, cycle_name, frame, metadata, registry, roles
-        )
-        record["image"] = image_summary
-        _render_coverage(dataset_dir, record, metadata, registry, roles)
+        if recovery_edit:
+            assert metadata is not None and manifest is not None
+            roles = _experiment_camera_roles(manifest, str(record["experiment_id"]))
+            image_summary, intervals = _cycle_image_summary(
+                dataset_dir, cycle_name, processed, metadata, registry, roles
+            )
+            record["image"] = image_summary
+            start, end = _cycle_window(processed)
+            render_rgb_coverage_intervals(
+                cycle_name,
+                start,
+                end,
+                intervals,
+                dataset_dir / str(assets["rgb_coverage"]),
+                sensor_intervals=_sensor_coverage_intervals(processed, registry),
+            )
 
     if metadata is not None and recovery_edit:
         write_parquet(metadata, dataset_dir / "image_metadata.parquet")
-    if scientific_edit:
-        write_json(registry, dataset_dir / "channel_registry.json")
+    write_json(registry, dataset_dir / "channel_registry.json")
     write_catalog(dataset_dir, catalog)
     return dataset_dir
 

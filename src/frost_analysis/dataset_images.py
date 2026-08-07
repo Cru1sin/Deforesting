@@ -204,7 +204,6 @@ def _cycle_image_summary(
     max_gap = float(
         settings.get("max_image_gap_seconds", 40.0) if isinstance(settings, Mapping) else 40.0
     )
-    by_role: dict[str, Any] = {}
     intervals: dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] = {}
     if not images.empty:
         for role, group in images.groupby("camera_role", sort=True):
@@ -215,11 +214,7 @@ def _cycle_image_summary(
                 max_image_gap_seconds=max_gap,
             )
             intervals[str(role)] = role_intervals
-            by_role[str(role)] = {
-                "image_count": int(len(group)),
-                "coverage_ratio": summarize_rgb_coverage(start, end, role_intervals),
-            }
-    return {"image_count": int(len(images)), "by_camera_role": by_role}, intervals
+    return {"image_count": int(len(images))}, intervals
 
 
 def _sensor_coverage_intervals(  # noqa: C901
