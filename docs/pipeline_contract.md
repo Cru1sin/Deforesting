@@ -42,16 +42,17 @@ processed, cycle_summary
 Process applies one fixed order:
 
 ```text
-eligible within-stage filling
--> 10-second resampling
--> derived quantities
+10-second resampling
+-> bounded within-stage missing handling
+-> derived physical quantities
 -> baseline and residuals
--> lag, delta, rolling mean, and slope features
 ```
 
 Filling never crosses experiment, cycle, stage, or operating-mode boundaries.
 `<channel>__imputed` identifies reconstructed Processed values. Baselines and
-residuals are calculated only by the configured baseline method.
+residuals are calculated only by the configured baseline method. Dynamic trend,
+lag, rolling, lead, and prediction features are Evidence-side analysis, not
+Process outputs.
 
 Prepared and Processed validators protect these scientific contracts while the
 Dataset is built.

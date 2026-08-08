@@ -28,9 +28,9 @@ dataset/
 
 `cycles/` 保存 10 秒 Processed 科学数据；`cycles_original/` 保存按 cycle 切分的
 Prepared 分辨率标准化数据。Original CSV 保留真实 timestamp、标准通道、identity、
-构建状态和 cycle stage，但不保存逐通道质量审计列、图片字段、baseline、residual、
-dynamic features 或 10 秒聚合列。追加日期发现新标准通道时，历史 Original CSV 会补充
-该列并写入空值，保持跨日期 schema 一致。
+构建状态和 cycle stage，但不保存逐通道质量审计列、图片字段、baseline、residual
+或 10 秒聚合列。追加日期发现新标准通道时，历史 Original CSV 会补充该列并写入空值，
+保持跨日期 schema 一致。
 
 ## Manifest 与 Catalog
 
@@ -94,7 +94,7 @@ status、人工边界、baseline 或 camera role。
 科学 edit 的当前规则保存在 `channel_registry.json`。后续 `add` 会对新 cycle 应用同一
 baseline/recovery 规则，避免一个 Dataset 混用不同的管理设定。`--recovery-seconds` 与
 `--recovery-end-by ts-minus` 互斥。Recovery edit 会同步更新 Original、Processed、
-cycle coordinates、stage-partitioned dynamic features、图片 metadata stage 和相关图形。
+cycle coordinates、图片 metadata stage 和相关图形。
 
 ## 写入与校验
 

@@ -3,13 +3,17 @@
 The repository has one scientific workflow:
 
 ```text
-Raw experiment directories
--> Dataset build / review / edit
--> Self-contained Cycle Dataset
--> DatasetLoader
--> Dataset-native Evidence
--> Evidence tables and figures
+Raw
+-> Prepare
+-> Process
+-> Cycle Dataset
+-> Evidence
 ```
+
+`Prepare` only organizes raw observations, source quality information, and
+cycle/stage labels. `Process` only produces the 10-second scientific time
+series: resampled values, bounded missing handling, derived physical
+quantities, and baseline residuals.
 
 ## Dataset
 
@@ -40,8 +44,8 @@ python -m frost_analysis evidence \
 ```
 
 Evidence reads cycles only through `DatasetLoader` and never writes inside the
-Dataset. Dataset status is authoritative: valid cycles enter analysis; metric
-availability is recorded locally in the corresponding Evidence table.
+Dataset. Dataset status is authoritative: human-reviewed `status` controls cycle
+eligibility, while metric availability is recorded locally inside Evidence.
 
 Configuration has one owner per workflow:
 
