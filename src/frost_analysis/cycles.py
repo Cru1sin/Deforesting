@@ -119,7 +119,12 @@ def _make_cycle_record(
         long_gaps,
         settings,
     )
-    stable_start = find_stable_heating_start(labeled, heating_start, defrost_start, settings)
+    stable_start = resolve_stable_heating_start(
+        labeled,
+        heating_start,
+        defrost_start,
+        settings,
+    )
     if stable_start is None and status == "valid":
         status, reason = "incomplete", "recovery_end_not_observed"
     if (
@@ -189,6 +194,29 @@ def _cycle_status(
     ):
         return "invalid", "heating_duration_out_of_range"
     return "valid", ""
+
+
+def resolve_stable_heating_start(
+    frame: pd.DataFrame,
+    heating_start: Any,
+    defrost_start: Any,
+    settings: Mapping[str, Any] | Any,
+    *,
+    mode: str = "criterion",
+    seconds: int | None = None,
+) -> pd.Timestamp | None:
+    if mode == "seconds":
+        if not isinstance(heating_start, pd.Timestamp) or seconds is None or seconds < 0:
+            return None
+        candidate = heating_start + pd.Timedelta(seconds=seconds)
+        timestamps = pd.to_datetime(frame.get("timestamp", pd.Series(dtype="datetime64[ns]")))
+        valid = timestamps.dropna()
+        if valid.empty or valid.max() < candidate:
+            return None
+        return candidate
+    if mode != "criterion":
+        raise ValueError(f"unsupported recovery mode: {mode}")
+    return find_stable_heating_start(frame, heating_start, defrost_start, settings)
 
 
 def find_stable_heating_start(
@@ -570,7 +598,7 @@ def _partial_stage_context(  # noqa: C901
         observed = times.notna() & water_out.notna() & setpoint.notna()
         has_temperature_evidence = bool(observed.any())
         if has_temperature_evidence:
-            stable_start = find_stable_heating_start(
+            stable_start = resolve_stable_heating_start(
                 segment,
                 heating_start,
                 defrost_start,

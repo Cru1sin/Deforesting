@@ -2,17 +2,10 @@ targets:
   - heating_capacity
   - cop
 primary_target: heating_capacity
-primary_horizon_minutes: 10
-horizons_minutes:
-  - 5
-  - 10
-  - 20
 minimum_feature_points: 12
 minimum_feature_coverage: 0.8
 minimum_valid_pairs: 30
 minimum_pair_coverage: 0.8
-event_thresholds: [0.05, 0.10, 0.15]
-primary_event_threshold: 0.10
 event_persistence_seconds: 120
 signal_reference_minutes: 5
 signal_smoothing_seconds: 60

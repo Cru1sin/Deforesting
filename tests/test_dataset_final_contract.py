@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from frost_analysis.config import Config
 from frost_analysis.dataset import assign_final_cycle_names_by_time
 
 
@@ -145,7 +146,6 @@ def test_materialize_cycle_builds_one_catalog_record(
             process=SimpleNamespace(
                 resample_interval_seconds=10,
                 baseline=SimpleNamespace(baseline_seconds=60),
-                feature_windows_minutes=(),
             ),
         ),
         channels={
@@ -210,6 +210,42 @@ def test_materialize_cycle_builds_one_catalog_record(
     ]
     catalog = json.loads((dataset_dir / "cycle_catalog.json").read_text())
     assert catalog["cycles"][0]["image"] == {"image_count": 0}
+
+
+def test_load_config_for_input_allows_non_2026_dates_and_replaces_input_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import frost_analysis.config as config_module
+    from frost_analysis.dataset import _load_config_for_input
+
+    original = Config(
+        project_root=tmp_path,
+        experiment_id="exp_test",
+        experiment_date="2027-01-02",
+        input_dir=tmp_path / "old-input",
+        channels_path=tmp_path / "channels.yaml",
+        sensor_globs=("*.xls",),
+        image_extensions=(".jpg",),
+        timestamp_column="时间",
+        expected_sensor_interval_seconds=1,
+        image_match_tolerance_seconds=2,
+        edf_pair_tolerance_seconds=1.0,
+        cycles={},
+        process={"resample_interval_seconds": 10},
+        camera_roles={},
+    )
+    new_input = tmp_path / "0102"
+    new_input.mkdir()
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "0102.yaml").write_text("schema_version: 2\n", encoding="utf-8")
+
+    monkeypatch.setattr(config_module, "load_config", lambda _path: original)
+
+    loaded = _load_config_for_input(new_input, tmp_path)
+
+    assert original.input_dir == tmp_path / "old-input"
+    assert loaded.input_dir == new_input.resolve()
+    assert loaded.experiment_date == "2027-01-02"
 
 
 def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
@@ -493,7 +529,6 @@ def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -
         signal=list(range(len(timestamps))),
         cycle_elapsed_seconds=0.0,
         cycle_progress=0.0,
-        signal__lag_1min=100.0,
     )
     metadata = pd.DataFrame(
         {
@@ -517,7 +552,6 @@ def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -
     registry = {
         "resample_interval_seconds": 10,
         "channels": {"signal": {"analysis_candidate": True, "kind": "continuous"}},
-        "processing_settings": {"feature_windows_minutes": [1]},
     }
 
     new_original, new_processed, new_metadata = apply_recovery(
@@ -535,8 +569,66 @@ def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -
     assert pd.isna(new_processed.loc[1, "cycle_elapsed_seconds"])
     assert new_processed.loc[2, "cycle_elapsed_seconds"] == 0.0
     assert new_processed.loc[5, "cycle_progress"] == pytest.approx(0.375)
-    assert pd.isna(new_processed.loc[7, "signal__lag_1min"])
+    assert not any(
+        "__lag_" in column or "__delta_" in column or "__rolling_mean_" in column
+        for column in new_processed.columns
+    )
     assert new_metadata["cycle_stage"].tolist() == ["recovery", "frost_development"]
+
+
+def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
+    from frost_analysis.baseline import apply_fixed_baseline
+    from frost_analysis.cycles import resolve_stable_heating_start
+
+    timestamps = pd.date_range("2026-07-14 10:00:00", periods=6, freq="10s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "cycle_stage": ["recovery"] + ["frost_development"] * 5,
+            "signal": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            "signal__imputed": [False] * 6,
+            "water_out_temperature": [30.0, 31.0, 33.5, 35.0, 35.5, 36.0],
+            "water_temperature_setpoint": [36.0] * 6,
+        }
+    )
+
+    criterion_start = resolve_stable_heating_start(
+        frame,
+        timestamps[0],
+        timestamps[-1] + pd.Timedelta(seconds=10),
+        {"stable_heating_seconds": 20},
+    )
+    seconds_start = resolve_stable_heating_start(
+        frame,
+        timestamps[0],
+        timestamps[-1] + pd.Timedelta(seconds=10),
+        {"stable_heating_seconds": 20},
+        mode="seconds",
+        seconds=20,
+    )
+    seconds_at_defrost = resolve_stable_heating_start(
+        frame,
+        timestamps[0],
+        timestamps[2],
+        {"stable_heating_seconds": 20},
+        mode="seconds",
+        seconds=20,
+    )
+    baselined, unavailable = apply_fixed_baseline(
+        frame[["timestamp", "cycle_stage", "signal", "signal__imputed"]].copy(),
+        ["signal"],
+        start=timestamps[1],
+        end=timestamps[4],
+        minimum_observed_coverage=0.8,
+        stage="frost_development",
+    )
+
+    assert criterion_start == timestamps[3]
+    assert seconds_start == timestamps[2]
+    assert seconds_at_defrost == timestamps[2]
+    assert unavailable == []
+    assert baselined["signal__baseline"].dropna().unique().tolist() == [12.0]
+    assert baselined.loc[4, "signal__baseline_residual"] == pytest.approx(2.0)
 
 
 def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence() -> None:
@@ -730,9 +822,6 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
         if input_dir.name == "0716":
             prepared["humidity"] = [None] * len(timestamps)
         processed = prepared.drop(columns=["humidity"], errors="ignore").copy()
-        processed["signal__lag_1min"] = [None] * len(timestamps)
-        processed["signal__delta_1min"] = [None] * len(timestamps)
-        processed["signal__rolling_mean_1min"] = [None] * len(timestamps)
         summary = pd.DataFrame(
             [
                 {
@@ -757,7 +846,6 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
             process=SimpleNamespace(
                 resample_interval_seconds=10,
                 baseline=SimpleNamespace(baseline_seconds=60),
-                feature_windows_minutes=(1,),
             ),
         )
         channels = {
@@ -826,6 +914,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     assert processed_reads == 2
     assert image_scans == 2
     edited_registry = json.loads((dataset_dir / "channel_registry.json").read_text())
+    assert "processing_settings" not in edited_registry
     assert edited_registry["baseline_managed"] is True
     assert edited_registry["recovery_edit"]["managed"] is True
     third_input = tmp_path / "0716"
@@ -906,7 +995,6 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
         {
             "channels": {},
             "columns": ["timestamp", "cycle_stage"],
-            "processing_settings": {"feature_windows_minutes": []},
         },
         tmp_path / "channel_registry.json",
     )

@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import Any
 
 import pandas as pd
 
-from .cycles import find_stable_heating_start
+from .cycles import resolve_stable_heating_start
 
 
 def apply_recovery(
@@ -48,19 +47,21 @@ def apply_recovery(
 
     recovery_settings = registry.get("recovery_edit", {})
     if mode == "seconds":
-        candidate = (
-            heating_start + pd.Timedelta(seconds=int(seconds or 0))
-            if heating_start is not None
-            else None
+        stable = resolve_stable_heating_start(
+            original_result,
+            heating_start,
+            defrost_start,
+            recovery_settings if isinstance(recovery_settings, Mapping) else {},
+            mode="seconds",
+            seconds=int(seconds or 0),
         )
-        stable = _within_data(candidate, original_result)
     else:
         fallback_seconds = (
             recovery_settings.get("fallback_seconds", 180)
             if isinstance(recovery_settings, Mapping)
             else 180
         )
-        stable = find_stable_heating_start(
+        stable = resolve_stable_heating_start(
             original_result,
             heating_start,
             defrost_start,
@@ -97,6 +98,8 @@ def apply_baseline(
     seconds: int,
 ) -> pd.DataFrame:
     """Apply the fixed stable-start baseline window to one frame."""
+    from .baseline import apply_fixed_baseline
+
     if seconds < 0:
         raise ValueError("baseline seconds must be nonnegative")
     channels = registry.get("channels", {})
@@ -127,28 +130,14 @@ def apply_baseline(
         result[f"{name}__baseline_residual"] = pd.NA
 
     if enough and stable is not None and end is not None:
-        stage = result.get("cycle_stage", pd.Series("", index=result.index))
-        window = result.loc[
-            result["timestamp"].ge(stable)
-            & result["timestamp"].lt(end)
-            & stage.eq("frost_development")
-        ]
-        for name in eligible:
-            if name not in window:
-                continue
-            values = pd.to_numeric(window[name], errors="coerce")
-            observed = values.notna()
-            imputed = window.get(f"{name}__imputed")
-            if imputed is not None:
-                observed &= ~imputed.fillna(False).astype(bool)
-            finite = values.loc[observed]
-            if finite.empty:
-                continue
-            baseline = float(finite.median())
-            result.loc[:, f"{name}__baseline"] = baseline
-            result.loc[:, f"{name}__baseline_residual"] = (
-                pd.to_numeric(result[name], errors="coerce") - baseline
-            )
+        result, _unavailable = apply_fixed_baseline(
+            result,
+            eligible,
+            start=stable,
+            end=end,
+            minimum_observed_coverage=0.0,
+            stage="frost_development",
+        )
         boundaries["baseline_start"] = _iso(stable)
         boundaries["baseline_end"] = _iso(end)
     else:
@@ -189,7 +178,6 @@ def _recompute_stage_dependent_fields(
     record: Mapping[str, Any],
     registry: Mapping[str, Any],
 ) -> pd.DataFrame:
-    from .features import recompute_dynamic_features
     from .process import recompute_cycle_coordinates
 
     boundaries = record.get("boundaries", {})
@@ -207,20 +195,9 @@ def _recompute_stage_dependent_fields(
             }
         ]
     )
-    result = recompute_cycle_coordinates(processed, summary)
-    channels = registry.get("channels", {})
-    if not isinstance(channels, Mapping):
-        return result
-    windows = _feature_windows(result, registry)
-    if not windows:
-        return result
-    interval = int(registry.get("resample_interval_seconds", 10))
-    return recompute_dynamic_features(
-        result,
-        channels,
-        interval_seconds=interval,
-        windows_minutes=windows,
-    ).sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(drop=True)
+    return recompute_cycle_coordinates(processed, summary).sort_values(
+        ["experiment_id", "timestamp"], kind="stable"
+    ).reset_index(drop=True)
 
 
 def _update_image_stages(
@@ -267,18 +244,3 @@ def _within_data(value: pd.Timestamp | None, frame: pd.DataFrame) -> pd.Timestam
     if value is None or frame.empty:
         return None
     return value if pd.Timestamp(frame["timestamp"].max()) >= value else None
-
-
-def _feature_windows(frame: pd.DataFrame, registry: Mapping[str, Any]) -> list[int]:
-    settings = registry.get("processing_settings")
-    if isinstance(settings, Mapping):
-        configured = settings.get("feature_windows_minutes")
-        if isinstance(configured, (list, tuple)):
-            return sorted({int(value) for value in configured if int(value) > 0})
-    found: set[int] = set()
-    pattern = re.compile(r"__(?:lag|delta|rolling_mean)_(\d+)min$")
-    for column in frame.columns:
-        match = pattern.search(str(column))
-        if match is not None:
-            found.add(int(match.group(1)))
-    return sorted(found)

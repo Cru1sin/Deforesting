@@ -12,14 +12,10 @@ def _payload() -> dict[str, object]:
     return {
         "targets": ["heating_capacity", "cop"],
         "primary_target": "heating_capacity",
-        "primary_horizon_minutes": 10,
-        "horizons_minutes": [5, 10, 20],
         "minimum_feature_points": 12,
         "minimum_feature_coverage": 0.8,
         "minimum_valid_pairs": 30,
         "minimum_pair_coverage": 0.8,
-        "event_thresholds": [0.05, 0.1, 0.15],
-        "primary_event_threshold": 0.1,
         "event_persistence_seconds": 120,
         "signal_reference_minutes": 5,
         "signal_smoothing_seconds": 60,
@@ -48,22 +44,28 @@ def test_settings_from_yaml_loads_only_scientific_contract(tmp_path: Path) -> No
     assert settings.minimum_feature_coverage == pytest.approx(0.8)
     assert settings.event_thresholds == (0.05, 0.1, 0.15)
     assert settings.context_features[-1] == "compressor_frequency"
-    assert settings.normalized() == _payload()
+    assert settings.normalized() == {
+        **_payload(),
+        "primary_horizon_minutes": 10,
+        "horizons_minutes": [5, 10, 20],
+        "event_thresholds": [0.05, 0.1, 0.15],
+        "primary_event_threshold": 0.1,
+    }
 
 
-def test_settings_ignores_legacy_non_scientific_fields(tmp_path: Path) -> None:
+def test_settings_rejects_protocol_fields_in_yaml(tmp_path: Path) -> None:
     payload = {
         **_payload(),
-        "analysis_version": "legacy",
-        "aggregation_method": "legacy",
+        "primary_horizon_minutes": 20,
+        "horizons_minutes": [1, 2, 3],
+        "event_thresholds": [0.9],
+        "primary_event_threshold": 0.9,
     }
     path = tmp_path / "legacy.yaml"
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
-    settings = EvidenceSettings.from_yaml(path)
-
-    assert not hasattr(settings, "analysis_version")
-    assert not hasattr(settings, "aggregation_method")
+    with pytest.raises(ValueError, match="horizons_minutes"):
+        EvidenceSettings.from_yaml(path)
 
 
 def test_settings_post_init_checks_only_required_relationships() -> None:
@@ -71,19 +73,6 @@ def test_settings_post_init_checks_only_required_relationships() -> None:
         EvidenceSettings(
             targets=("heating_capacity",),
             primary_target="cop",
-            primary_horizon_minutes=10,
-            horizons_minutes=(5, 10, 20),
-            minimum_feature_points=1,
-            minimum_feature_coverage=0.8,
-            minimum_valid_pairs=1,
-            minimum_pair_coverage=0.8,
-        )
-    with pytest.raises(ValueError, match="primary_horizon"):
-        EvidenceSettings(
-            targets=("heating_capacity",),
-            primary_target="heating_capacity",
-            primary_horizon_minutes=15,
-            horizons_minutes=(5, 10, 20),
             minimum_feature_points=1,
             minimum_feature_coverage=0.8,
             minimum_valid_pairs=1,
@@ -93,8 +82,6 @@ def test_settings_post_init_checks_only_required_relationships() -> None:
         EvidenceSettings(
             targets=("heating_capacity",),
             primary_target="heating_capacity",
-            primary_horizon_minutes=10,
-            horizons_minutes=(5, 10, 20),
             minimum_feature_points=1,
             minimum_feature_coverage=1.1,
             minimum_valid_pairs=1,
@@ -106,8 +93,6 @@ def test_settings_constructor_contains_only_scientific_parameters() -> None:
     evidence_settings = EvidenceSettings(
         targets=("heating_capacity", "cop"),
         primary_target="heating_capacity",
-        primary_horizon_minutes=10,
-        horizons_minutes=(5, 10, 20),
         minimum_feature_points=12,
         minimum_feature_coverage=0.8,
         minimum_valid_pairs=30,
@@ -118,21 +103,20 @@ def test_settings_constructor_contains_only_scientific_parameters() -> None:
     assert not hasattr(evidence_settings, "analysis_version")
 
 
-def test_settings_rejects_thresholds_or_horizons_that_disagree_with_csv_schema() -> None:
+def test_settings_protocol_fields_are_not_constructor_parameters() -> None:
     common = {
         "targets": ("heating_capacity", "cop"),
         "primary_target": "heating_capacity",
-        "primary_horizon_minutes": 5,
         "minimum_feature_points": 12,
         "minimum_feature_coverage": 0.8,
         "minimum_valid_pairs": 30,
         "minimum_pair_coverage": 0.8,
     }
-    with pytest.raises(ValueError, match="horizons_minutes"):
+    with pytest.raises(TypeError):
         EvidenceSettings(horizons_minutes=(5, 15, 30), **common)
-    with pytest.raises(ValueError, match="event_thresholds"):
+    with pytest.raises(TypeError):
         EvidenceSettings(
-            horizons_minutes=(5, 10, 20),
+            primary_horizon_minutes=20,
             event_thresholds=(0.08, 0.12),
             primary_event_threshold=0.08,
             **common,

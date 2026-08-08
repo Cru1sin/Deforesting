@@ -63,7 +63,7 @@ def test_target_event_uses_current_degradation_and_elapsed_persistence() -> None
     frame.loc[frame["cycle_elapsed_seconds"] >= 60, "heating_capacity"] = 89.0
 
     row = audit_performance_target(
-        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+        _record(frame), frame, "heating_capacity", settings()
     )
 
     assert row["event_5_elapsed_minutes"] == pytest.approx(1.0)
@@ -85,7 +85,7 @@ def test_target_audit_rejects_invalid_baseline(baseline: float, reason: str) -> 
     frame["heating_capacity__baseline"] = baseline
 
     row = audit_performance_target(
-        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+        _record(frame), frame, "heating_capacity", settings()
     )
 
     assert row["metric_status"] == "unavailable"
@@ -97,7 +97,7 @@ def test_target_audit_rejects_inconsistent_baseline() -> None:
     frame.loc[1, "heating_capacity__baseline"] = 101.0
 
     row = audit_performance_target(
-        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+        _record(frame), frame, "heating_capacity", settings()
     )
 
     assert row["exclusion_reason"] == "baseline_inconsistent"
@@ -109,10 +109,10 @@ def test_target_event_is_right_censored_and_missing_breaks_persistence() -> None
     frame.loc[frame["cycle_elapsed_seconds"] == 120, "heating_capacity__imputed"] = True
 
     row = audit_performance_target(
-        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+        _record(frame), frame, "heating_capacity", settings()
     )
 
-    assert row["primary_event_status"] == "right_censored_at_legacy_defrost"
+    assert row["primary_event_status"] == "right_censored_at_defrost_start"
     assert np.isnan(row["primary_event_elapsed_minutes"])
 
 
@@ -125,7 +125,7 @@ def test_target_without_observations_is_unavailable(mode: str) -> None:
         frame["heating_capacity__imputed"] = True
 
     row = audit_performance_target(
-        _record(frame), frame, "heating_capacity", settings(horizons=(5, 10, 20))
+        _record(frame), frame, "heating_capacity", settings()
     )
 
     assert row["primary_event_status"] == "target_unavailable"
@@ -139,16 +139,16 @@ def test_baseline_window_cannot_trigger_event_or_supply_model_anchor() -> None:
     record = _record(frame)
 
     audit = audit_performance_target(
-        record, frame, "heating_capacity", settings(horizons=(5, 10, 20))
+        record, frame, "heating_capacity", settings()
     )
     rows = compare_incremental_models(
         [(record, frame)],
         [("feature_a", "increase")],
         pd.DataFrame([audit]),
-        settings(targets=("heating_capacity",), horizons=(5, 10, 20)),
+        settings(targets=("heating_capacity",)),
     )
 
-    assert audit["primary_event_status"] == "right_censored_at_legacy_defrost"
+    assert audit["primary_event_status"] == "right_censored_at_defrost_start"
     assert audit["valid_pairs_5min"] == 85
     five_minute = rows.loc[rows["horizon_minutes"].eq(5)].iloc[0]
     assert five_minute["expected_anchor_count"] == 85
@@ -387,4 +387,4 @@ def test_readiness_summary_uses_date_units_and_dynamic_increment() -> None:
     assert summary["lead_median_minutes"] == pytest.approx(3.5)
     assert summary["level_skill_median"] == pytest.approx(0.2)
     assert summary["dynamic_skill_median"] == pytest.approx(0.1)
-    assert summary["readiness_status"] == "dynamic_prediction_candidate"
+    assert summary["readiness_status"] == "dynamic_increment_supported"

@@ -18,13 +18,10 @@ def settings(
     minimum_valid_pairs: int = 2,
     minimum_pair_coverage: float = 0.8,
     targets: tuple[str, ...] = ("heating_capacity", "cop"),
-    horizons: tuple[int, ...] = (5, 10, 20),
 ) -> EvidenceSettings:
     return EvidenceSettings(
         targets=targets,
         primary_target=targets[0],
-        primary_horizon_minutes=horizons[0],
-        horizons_minutes=horizons,
         minimum_feature_points=minimum_feature_points,
         minimum_feature_coverage=minimum_feature_coverage,
         minimum_valid_pairs=minimum_valid_pairs,

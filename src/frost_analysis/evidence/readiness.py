@@ -87,7 +87,7 @@ def audit_performance_target(
     primary = events[settings.primary_event_threshold]
     row["primary_event_elapsed_minutes"] = primary
     row["primary_event_status"] = (
-        "event_observed" if np.isfinite(primary) else "right_censored_at_legacy_defrost"
+        "event_observed" if np.isfinite(primary) else "right_censored_at_defrost_start"
     )
     for horizon in (5, 10, 20):
         row[f"valid_pairs_{horizon}min"] = _target_pair_count(
@@ -792,20 +792,20 @@ def _readiness_status(
         return "insufficient_validation_data", reason
     lead_q25 = _as_float(row["lead_q25_minutes"])
     if lead_q25 <= 0:
-        return "state_candidate", "lead_not_stably_positive"
+        return "state_marker_candidate", "lead_not_stably_positive"
     level_stable = (
         _as_float(row["level_skill_median"]) > 0
         and _as_float(row["level_improvement_fraction"]) > 0.5
     )
     if not level_stable:
-        return "no_incremental_prediction", "level_increment_not_stable"
+        return "no_stable_linear_increment", "level_increment_not_stable"
     dynamic_stable = (
         _as_float(row["dynamic_skill_median"]) > 0
         and _as_float(row["dynamic_improvement_fraction"]) > 0.5
     )
     if dynamic_stable:
-        return "dynamic_prediction_candidate", ""
-    return "static_prediction_candidate", "dynamic_increment_not_stable"
+        return "dynamic_increment_supported", ""
+    return "level_increment_supported", "dynamic_increment_not_stable"
 
 
 def _median(values: FloatArray) -> float:

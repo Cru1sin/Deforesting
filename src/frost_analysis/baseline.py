@@ -20,6 +20,39 @@ BASELINE_FAILURE_REASONS = {
 BASELINE_REFERENCE_TYPE = "cycle_local_early_stable_proxy"
 
 
+def apply_fixed_baseline(
+    frame: pd.DataFrame,
+    eligible_channels: list[str],
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    minimum_observed_coverage: float,
+    stage: str = "frost_development",
+) -> tuple[pd.DataFrame, list[str]]:
+    """Apply one fixed baseline window to all eligible channels in one cycle frame."""
+    result = frame.copy()
+    for name in eligible_channels:
+        if f"{name}__baseline" not in result:
+            result[f"{name}__baseline"] = np.nan
+        if f"{name}__baseline_residual" not in result:
+            result[f"{name}__baseline_residual"] = np.nan
+    window = result.loc[
+        result["cycle_stage"].eq(stage)
+        & pd.to_datetime(result["timestamp"], errors="coerce").ge(start)
+        & pd.to_datetime(result["timestamp"], errors="coerce").lt(end)
+    ].copy()
+    unavailable: list[str] = []
+    for name in eligible_channels:
+        baseline = _channel_baseline(window, name, minimum_observed_coverage)
+        if baseline is None:
+            unavailable.append(name)
+            continue
+        result.loc[:, f"{name}__baseline"] = baseline
+        values = pd.to_numeric(result[name], errors="coerce")
+        result.loc[:, f"{name}__baseline_residual"] = values - baseline
+    return result, unavailable
+
+
 def add_baseline_residuals(
     frame: pd.DataFrame,
     cycle_summary: pd.DataFrame,
@@ -53,15 +86,17 @@ def add_baseline_residuals(
         summary.loc[index, "baseline_failure_reason"] = ""
         summary.loc[index, "baseline_start"] = start
         summary.loc[index, "baseline_end"] = end
-        unavailable: list[str] = []
-        for name in eligible:
-            baseline = _channel_baseline(anchor_window, name, rules)
-            if baseline is None:
-                unavailable.append(name)
-                continue
-            result.loc[cycle_mask, f"{name}__baseline"] = baseline
-            values = pd.to_numeric(result.loc[cycle_mask, name], errors="coerce")
-            result.loc[cycle_mask, f"{name}__baseline_residual"] = values - baseline
+        updated, unavailable = apply_fixed_baseline(
+            result.loc[cycle_mask].copy(),
+            eligible,
+            start=start,
+            end=end,
+            minimum_observed_coverage=rules.minimum_observed_coverage,
+            stage=rules.stage,
+        )
+        for column in updated.columns:
+            if str(column).endswith("__baseline") or str(column).endswith("__baseline_residual"):
+                result.loc[cycle_mask, column] = updated[column].to_numpy()
         summary.at[index, "baseline_unavailable_channels"] = cast(Any, unavailable)
     return result, summary
 
@@ -155,14 +190,14 @@ def _anchors_are_stable(
 
 
 def _channel_baseline(
-    window: pd.DataFrame, name: str, settings: BaselineSettings
+    window: pd.DataFrame, name: str, minimum_observed_coverage: float
 ) -> float | None:
     if name not in window:
         return None
     values = pd.to_numeric(window[name], errors="coerce")
     observed = values.notna() & ~_imputed_column(window, name)
     coverage = float(observed.mean()) if len(values) else 0.0
-    if coverage < settings.minimum_observed_coverage:
+    if coverage < minimum_observed_coverage:
         return None
     finite = values.loc[observed]
     if finite.empty:
