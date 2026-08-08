@@ -72,10 +72,6 @@ def add_baseline_residuals(
         cycle_mask = result["experiment_id"].eq(cycle["experiment_id"]) & result[
             "cycle_id"
         ].eq(cycle["cycle_id"])
-        if cycle.get("cycle_status") != "valid":
-            summary.loc[index, "baseline_status"] = "not_applicable"
-            summary.loc[index, "baseline_failure_reason"] = "cycle_not_valid"
-            continue
         window, reason = _find_common_window(result.loc[cycle_mask], cycle, rules)
         if window is None:
             summary.loc[index, "baseline_status"] = "unavailable"

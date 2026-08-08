@@ -59,23 +59,23 @@ def process(
         name = str(column)
         derived[name] = raw_system_quantities[name]
         derived[f"{name}__imputed"] = False
-    baselined, baseline_summary = add_baseline_residuals(
-        derived, initial_summary, channels, config.process.baseline
-    )
     fallback = _resample_fallback(
         _mask_duplicate_values(fallback_source, channels),
         channels,
         interval_seconds,
-    ).reindex(columns=baselined.columns)
+    ).reindex(columns=derived.columns)
     for column in fallback.columns:
         if str(column).endswith("__imputed"):
             fallback[column] = False
-    if baselined.empty:
-        baselined = fallback.copy()
+    if derived.empty:
+        derived = fallback.copy()
     elif not fallback.empty:
-        baselined = pd.concat([baselined, fallback], ignore_index=True)
-    baselined = baselined.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
+        derived = pd.concat([derived, fallback], ignore_index=True)
+    derived = derived.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
+    )
+    baselined, baseline_summary = add_baseline_residuals(
+        derived, initial_summary, channels, config.process.baseline
     )
     final_summary = _update_summary(
         baseline_summary,
@@ -99,12 +99,8 @@ def _partition_process_inputs(
     ):
         key = (str(group_values[0]), str(group_values[1]))
         summary = summary_lookup[key]
-        target = (
-            scientific_indices
-            if str(group["cycle_status"].iloc[0]) == "valid"
-            and _has_complete_boundaries(summary)
-            else fallback_indices
-        )
+        processable = _has_complete_boundaries(summary) and group["cycle_stage"].ne("partial").any()
+        target = scientific_indices if processable else fallback_indices
         target.extend(group.index.tolist())
     return prepared.loc[scientific_indices].copy(), prepared.loc[fallback_indices].copy()
 
@@ -166,7 +162,7 @@ def _resample(
         experiment_id, cycle_id = (str(value) for value in group_values)
         summary = summary_lookup[(experiment_id, cycle_id)]
         observed_end = ordered["timestamp"].max()
-        if not _has_process_boundaries(summary, observed_end):
+        if not _has_complete_boundaries(summary):
             continue
         grid = _cycle_grid(summary, frequency, observed_end=observed_end)
         buckets = ordered["timestamp"].dt.floor(frequency)
@@ -622,27 +618,6 @@ def _has_complete_boundaries(summary: pd.Series) -> bool:
         _as_timestamp(summary.get(column)) is not None
         for column in ("heating_start", "stable_heating_start", "defrost_start", "defrost_end")
     )
-
-
-def _has_open_boundaries(summary: pd.Series) -> bool:
-    """Return whether an incomplete cycle has an observed defrost onset."""
-    if str(summary.get("cycle_status")) != "incomplete":
-        return False
-    return all(
-        _as_timestamp(summary.get(column)) is not None
-        for column in ("heating_start", "stable_heating_start", "defrost_start")
-    ) and _as_timestamp(summary.get("defrost_end")) is None
-
-
-def _observed_defrost_onset(summary: pd.Series, observed_end: pd.Timestamp) -> bool:
-    defrost = _as_timestamp(summary.get("defrost_start"))
-    return defrost is not None and observed_end >= defrost
-
-
-def _has_process_boundaries(summary: pd.Series, observed_end: pd.Timestamp) -> bool:
-    if _has_complete_boundaries(summary):
-        return True
-    return _has_open_boundaries(summary) and _observed_defrost_onset(summary, observed_end)
 
 
 def _calculate_unfilled_system_quantities(
