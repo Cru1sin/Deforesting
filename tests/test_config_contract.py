@@ -50,10 +50,7 @@ def _write_v2_config(
             "control_max_gap_seconds": 30,
             "baseline": {
                 "stage": "frost_development",
-                "search_start_minutes": 0,
-                "search_end_minutes": 20,
-                "window_minutes": 5,
-                "window_step_minutes": 1,
+                "baseline_seconds": 60,
                 "minimum_observed_coverage": 0.8,
                 "required_anchor_channels": [
                     "ambient_temperature",
@@ -68,7 +65,6 @@ def _write_v2_config(
                     "compressor_frequency": 5.0,
                 },
             },
-            "features": {"windows_minutes": [5, 10, 30]},
         },
     }
     if defaults:
@@ -138,7 +134,6 @@ def test_v2_config_loads_defaults_and_inline_camera_roles(tmp_path: Path) -> Non
     assert config.channels_path == tmp_path / "configs" / "channels.yaml"
     assert config.camera_roles == {"camera_01": "front"}
     assert config.process.baseline.stage == "frost_development"
-    assert config.process.feature_windows_minutes == (5, 10, 30)
     assert config.edf_pair_tolerance_seconds == 1.0
 
 
@@ -174,15 +169,24 @@ def test_v2_loader_merges_existing_nested_overrides(tmp_path: Path) -> None:
         tmp_path,
         overrides={
             "cycles": {"required_operating_mode": "4"},
-            "process": {"features": {"windows_minutes": [1, 5, 15]}},
+            "process": {"baseline": {"baseline_seconds": 90}},
         },
     )
 
     config = load_config(path)
 
     assert config.cycles.required_operating_mode == "4"
-    assert config.process.feature_windows_minutes == (1, 5, 15)
-    assert config.process.baseline.window_minutes == 5
+    assert config.process.baseline.baseline_seconds == 90
+
+
+def test_v2_loader_rejects_removed_process_features_override(tmp_path: Path) -> None:
+    path = _write_v2_config(
+        tmp_path,
+        overrides={"process": {"features": {"windows_minutes": [1, 5, 15]}}},
+    )
+
+    with pytest.raises(ValueError, match="unknown override"):
+        load_config(path)
 
 
 def test_v2_loader_applies_state_gap_override_without_changing_defaults(tmp_path: Path) -> None:

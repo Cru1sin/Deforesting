@@ -2,45 +2,24 @@
 
 from __future__ import annotations
 
-# copy 用于深拷贝 defaults 和 overrides，避免合并时修改原始字典。
 import copy
 import math
-
-# Mapping 表示“字典式对象”，兼容普通 dict 和其他 Mapping 实现。
 from collections.abc import Mapping
-
-# dataclass：声明不可变的类型化配置对象。
-# field：为可变字段提供安全的 default_factory。
-# fields：读取 dataclass 的字段名，用于拒绝未知配置键。
 from dataclasses import dataclass, field, fields
-
-# date 用于严格检查 experiment_date 是否为 ISO YYYY-MM-DD。
 from datetime import date
-
-# Path 统一处理跨平台文件路径。
 from pathlib import Path
-
-# Any 用于 YAML 刚加载后尚未完成类型收敛的数据。
 from typing import Any
 
-# PyYAML：读取日期配置和共享 defaults.yaml。
 import yaml
-
-# =============================================================================
-# 1. 循环切分配置
-# =============================================================================
 
 
 @dataclass(frozen=True)
 class CycleSettings:
     """保存 cycles.py 切分制热—结霜—除霜循环时使用的阈值。
 
-    frozen=True 表示对象构造完成后不可原地修改，防止同一次运行中参数被意外改变。
-    本类只保存并校验阈值；真正的状态去抖、除霜事件识别和循环切分在 cycles.py 中完成。
+    本类只保存阈值；状态去抖、事件识别和循环切分由 cycles.py 完成。
     """
 
-    # cycles.py 用来识别“是否正在除霜”的标准化事件通道名。
-    # 这里保存 canonical channel 名，而不是原始 Excel 列名。
     defrost_channel: str = "defrost_active"
 
     # 允许自动桥接的除霜状态缺失区间上限（秒）。
@@ -48,53 +27,28 @@ class CycleSettings:
     # 0.0 表示任何除霜状态缺失均不自动推断。
     maximum_state_gap_seconds: float = 0.0
 
-    # 除霜状态去抖阈值（秒）。
-    # 用于抑制持续时间过短的 ON/OFF 状态抖动，避免将瞬时跳变识别为真实除霜事件。
+    # 抑制短暂 ON/OFF 抖动，避免将瞬时跳变识别为除霜事件。
     debounce_seconds: float = 20.0
 
-    # 一次已识别除霜事件被判为有效时允许的持续时间范围（秒）。
-    # 它们用于质量判定，不是控制机组实际除霜持续时间。
+    # 以下持续时间只用于构建质量判定，不定义机组控制行为。
     minimum_defrost_seconds: float = 60.0
     maximum_defrost_seconds: float = 1200.0
 
-    # 相邻两次除霜之间制热阶段的有效持续时间范围（秒）。
-    # 具体区间是：前一次除霜结束 heating_start 到下一次除霜开始 defrost_start。
     minimum_heating_seconds: float = 1800.0
     maximum_heating_seconds: float = 21600.0
 
-    # 制热开始后保留为 recovery 阶段的固定时长（秒）。
-    # stable_heating_start = heating_start + stable_heating_seconds；
-    # 此后才标记为 frost_development。
     # “stable”是固定阶段划分假设，不代表代码通过数据检测到系统已经稳定。
     stable_heating_seconds: float = 180.0
 
-    # 用于检查制热阶段运行模式的 canonical channel 名。
-    # 空字符串表示不启用运行模式检查。
     operating_mode_channel: str = ""
 
-    # 有效制热循环要求的运行模式值。
-    # 使用字符串是为了与源数据中的文本/分类值保持一致。
     required_operating_mode: str = "3"
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> CycleSettings:
-        """将 YAML 中的 cycles mapping 转换为经过校验的 CycleSettings。
-
-        执行顺序：
-        1. 确认输入是 YAML mapping；
-        2. 拒绝 dataclass 中不存在的未知键；
-        3. 将 YAML 值显式转换为固定 Python 类型；
-        4. 检查非负、正数和最小值不大于最大值等约束。
-        """
-
-        # 将任意 Mapping 规范化为 str key 的普通字典。
+        """Parse and validate cycle construction thresholds."""
         mapping = _mapping(values, "cycles")
-
-        # 只允许出现 CycleSettings 已声明的字段。
-        # 例如 debounce_second 的拼写错误不会被静默忽略。
         _validate_dataclass_keys(mapping, cls, "cycles")
-
-        # 将 YAML 中可能为 int、float 或字符串形式的值收敛到明确类型。
         result = cls(
             defrost_channel=str(
                 mapping.get("defrost_channel", cls.defrost_channel)
@@ -153,13 +107,11 @@ class CycleSettings:
             ),
         )
 
-        # 缺失桥接阈值允许为 0，但不能为负数。
         _validate_nonnegative(
             "maximum_state_gap_seconds",
             result.maximum_state_gap_seconds,
         )
 
-        # 去抖时间和有效持续时间范围必须严格大于 0。
         _validate_positive("debounce_seconds", result.debounce_seconds)
         _validate_positive(
             "minimum_defrost_seconds",
@@ -178,20 +130,17 @@ class CycleSettings:
             result.maximum_heating_seconds,
         )
 
-        # recovery 持续时间允许设为 0，表示不保留固定 recovery 阶段。
         _validate_nonnegative(
             "stable_heating_seconds",
             result.stable_heating_seconds,
         )
 
-        # 最小有效除霜时长不能大于最大有效除霜时长。
         if result.minimum_defrost_seconds > result.maximum_defrost_seconds:
             raise ValueError(
                 "minimum_defrost_seconds must not exceed "
                 "maximum_defrost_seconds"
             )
 
-        # 最小有效制热时长不能大于最大有效制热时长。
         if result.minimum_heating_seconds > result.maximum_heating_seconds:
             raise ValueError(
                 "minimum_heating_seconds must not exceed "
@@ -201,45 +150,15 @@ class CycleSettings:
         return result
 
 
-# =============================================================================
-# 2. Baseline 配置
-# =============================================================================
 @dataclass(frozen=True)
 class BaselineSettings:
-    """定义每个循环共同、局部早期 Baseline 窗口的搜索规则。
+    """Cycle-local early stable proxy, not verified frost-free ground truth."""
 
-    本类只定义搜索范围和合格阈值。
-    真正的窗口滑动、稳定性检查和 baseline/residual 计算在 baseline.py 中完成。
-
-    当前 baseline 的科学定位是：
-    cycle_local_early_stable_proxy
-
-    它是每个循环早期的稳定参考代理，不是人工或图像确认的绝对无霜真值。
-    """
-
-    # Baseline 只能在 frost_development 阶段搜索。
-    # from_mapping() 会拒绝其他阶段，避免 recovery 或 defrost 被用作参考。
+    # Recovery and defrost observations cannot define the reference window.
     stage: str = "frost_development"
 
-    # The baseline is the first fixed window after recovery.  The older
-    # search_* fields remain readable for existing configs, but are no longer
-    # used to slide the window forward.
     baseline_seconds: int = 60
 
-    # Baseline 搜索区间相对于 stable_heating_start 的起点和终点（分钟）。
-    # 默认在结霜发展开始后的第 0～20 分钟内寻找候选窗口。
-    search_start_minutes: int = 0
-    search_end_minutes: int = 20
-
-    # 每个候选 Baseline 窗口的长度（分钟）。
-    window_minutes: int = 5
-
-    # 滑动搜索候选窗口时，每次向后移动的步长（分钟）。
-    # 默认每隔 1 分钟检查一个 5 分钟窗口。
-    window_step_minutes: int = 1
-
-    # 每个 required anchor 在候选窗口内必须达到的最低原始观测覆盖率。
-    # 0.8 表示至少 80% 的时间点存在非空观测。
     minimum_observed_coverage: float = 0.8
 
     # 共同窗口必须同时满足稳定性要求的锚点通道。
@@ -252,9 +171,6 @@ class BaselineSettings:
         "compressor_frequency",
     )
 
-    # 每个锚点在候选窗口内允许的最大标准差。
-    # 使用 default_factory 是为了让每个 BaselineSettings 实例拥有独立字典，
-    # 避免多个实例共享同一个可变对象。
     anchor_maximum_std: dict[str, float] = field(
         default_factory=lambda: {
             "ambient_temperature": 1.0,
@@ -269,16 +185,9 @@ class BaselineSettings:
         cls,
         values: Mapping[str, Any],
     ) -> BaselineSettings:
-        """将 YAML baseline mapping 转成经过校验的 BaselineSettings。"""
-
-        # 确认 baseline 是 mapping，并将 key 统一转成字符串。
+        """Parse and validate the active baseline method."""
         mapping = _mapping(values, "baseline")
-
-        # BaselineSettings 的 YAML 结构与 dataclass 字段一一对应，
-        # 因此可以直接通过 dataclass 字段列表拒绝未知键。
         _validate_dataclass_keys(mapping, cls, "baseline")
-
-        # tuple 和 dict 是复合字段，先取出原始值，再分别完成类型转换。
         anchors = mapping.get(
             "required_anchor_channels",
             cls().required_anchor_channels,
@@ -293,47 +202,21 @@ class BaselineSettings:
             baseline_seconds=int(
                 mapping.get("baseline_seconds", cls.baseline_seconds)
             ),
-            search_start_minutes=int(
-                mapping.get(
-                    "search_start_minutes",
-                    cls.search_start_minutes,
-                )
-            ),
-            search_end_minutes=int(
-                mapping.get(
-                    "search_end_minutes",
-                    cls.search_end_minutes,
-                )
-            ),
-            window_minutes=int(
-                mapping.get("window_minutes", cls.window_minutes)
-            ),
-            window_step_minutes=int(
-                mapping.get(
-                    "window_step_minutes",
-                    cls.window_step_minutes,
-                )
-            ),
             minimum_observed_coverage=float(
                 mapping.get(
                     "minimum_observed_coverage",
                     cls.minimum_observed_coverage,
                 )
             ),
-
-            # 将 YAML list 转为不可变 tuple[str, ...]。
             required_anchor_channels=tuple(
                 str(value) for value in anchors
             ),
-
-            # 将 YAML mapping 的 key 标准化为 str，阈值标准化为 float。
             anchor_maximum_std={
                 str(key): float(value)
                 for key, value in maximum_std.items()
             },
         )
 
-        # 当前 Baseline 算法只允许在 frost_development 中搜索。
         if result.stage != "frost_development":
             raise ValueError(
                 "baseline stage must be frost_development"
@@ -342,46 +225,11 @@ class BaselineSettings:
         if result.baseline_seconds <= 0:
             raise ValueError("baseline_seconds must be positive")
 
-        # 搜索起点相对于 stable_heating_start，不能是负数。
-        if result.search_start_minutes < 0:
-            raise ValueError(
-                "baseline search_start_minutes must be nonnegative"
-            )
-
-        # 搜索终点必须严格晚于搜索起点。
-        if result.search_end_minutes <= result.search_start_minutes:
-            raise ValueError(
-                "baseline search_end_minutes must be later than "
-                "search_start_minutes"
-            )
-
-        # 窗口长度和滑动步长必须严格为正数。
-        if (
-            result.window_minutes <= 0
-            or result.window_step_minutes <= 0
-        ):
-            raise ValueError(
-                "baseline window and step must be positive"
-            )
-
-        # 候选窗口必须能够完整放入搜索区间。
-        if (
-            result.window_minutes
-            > result.search_end_minutes
-            - result.search_start_minutes
-        ):
-            raise ValueError(
-                "baseline window_minutes must fit within "
-                "the search range"
-            )
-
-        # 覆盖率必须在闭区间 [0, 1] 中。
         _validate_fraction(
             "minimum_observed_coverage",
             result.minimum_observed_coverage,
         )
 
-        # 标准差阈值可以为 0，但不能为负数。
         if any(
             value < 0
             for value in result.anchor_maximum_std.values()
@@ -393,22 +241,13 @@ class BaselineSettings:
         return result
 
 
-# =============================================================================
-# 3. Process 配置
-# =============================================================================
-
-
 @dataclass(frozen=True)
 class ProcessSettings:
     """定义 Prepared → Processed 阶段的处理规则。
 
-    对应 process.py 的主要顺序：
-    公共时间网格 → bucket coverage → bounded 缺失处理
-    → 派生量 → Baseline/残差 → past-only 动态特征。
+    顺序为公共时间网格、bounded 缺失处理、派生量、Baseline/残差。
     """
 
-    # Processed 数据的统一时间网格间隔（秒）。
-    # 默认将原生 1 秒数据聚合为 10 秒 bucket。
     resample_interval_seconds: int = 10
 
     # continuous 通道在一个重采样 bucket 中的最低观测覆盖率。
@@ -424,28 +263,19 @@ class ProcessSettings:
     # 每个缺失 bucket 都按其距最后 observed 值的真实时间差独立判断。
     control_max_gap_seconds: float = 30.0
 
-    # 嵌套的共同 Baseline 搜索规则。
-    # default_factory 保证每个 ProcessSettings 实例拥有独立 BaselineSettings。
     baseline: BaselineSettings = field(
         default_factory=BaselineSettings
     )
-
-    # 为 analysis_candidate 通道生成动态特征的时间窗口（分钟）。
-    # 对每个窗口生成 lag、delta 和 past-only rolling mean。
-    feature_windows_minutes: tuple[int, ...] = (5, 10, 30)
 
     @classmethod
     def from_mapping(
         cls,
         values: Mapping[str, Any],
     ) -> ProcessSettings:
-        """将 YAML process mapping 转成经过校验的 ProcessSettings。"""
+        """Parse and validate Process settings."""
 
         mapping = _mapping(values, "process")
 
-        # 这里不能直接使用 _validate_dataclass_keys()：
-        # YAML 公共结构使用 process.features.windows_minutes，
-        # 但 dataclass 内部直接保存为 feature_windows_minutes。
         _validate_keys(
             mapping,
             {
@@ -454,40 +284,14 @@ class ProcessSettings:
                 "continuous_max_gap_seconds",
                 "control_max_gap_seconds",
                 "baseline",
-                "features",
             },
             "process",
         )
 
-        # baseline 和 features 都是 process 下的嵌套 mapping。
         baseline_values = mapping.get("baseline", {})
-        feature_values = mapping.get("features", {})
 
-        # 防止用户将嵌套对象错误写成数字、字符串或列表。
-        if (
-            not isinstance(baseline_values, Mapping)
-            or not isinstance(feature_values, Mapping)
-        ):
-            raise ValueError(
-                "process.baseline and process.features "
-                "must be mappings"
-            )
-
-        # features 当前只允许 windows_minutes，拒绝其他未知功能键。
-        _validate_keys(
-            feature_values,
-            {"windows_minutes"},
-            "process.features",
-        )
-
-        # 将 YAML list 转为不可变的分钟窗口 tuple。
-        windows = tuple(
-            int(value)
-            for value in feature_values.get(
-                "windows_minutes",
-                list(cls.feature_windows_minutes),
-            )
-        )
+        if not isinstance(baseline_values, Mapping):
+            raise ValueError("process.baseline must be a mapping")
 
         result = cls(
             resample_interval_seconds=int(
@@ -514,27 +318,21 @@ class ProcessSettings:
                     cls.control_max_gap_seconds,
                 )
             ),
-
-            # BaselineSettings 自己负责其内部字段和范围校验。
             baseline=BaselineSettings.from_mapping(
                 baseline_values
             ),
-            feature_windows_minutes=windows,
         )
 
-        # 重采样时间间隔必须严格大于 0。
         if result.resample_interval_seconds <= 0:
             raise ValueError(
                 "resample_interval_seconds must be positive"
             )
 
-        # coverage 阈值必须在 [0, 1] 内。
         _validate_fraction(
             "minimum_continuous_bucket_coverage",
             result.minimum_continuous_bucket_coverage,
         )
 
-        # 缺失处理阈值允许为 0，表示不允许对应类型的自动重建。
         _validate_nonnegative(
             "continuous_max_gap_seconds",
             result.continuous_max_gap_seconds,
@@ -544,51 +342,20 @@ class ProcessSettings:
             result.control_max_gap_seconds,
         )
 
-        # 至少需要一个动态特征窗口，并且每个窗口必须是正整数分钟。
-        if (
-            not result.feature_windows_minutes
-            or any(
-                value <= 0
-                for value in result.feature_windows_minutes
-            )
-        ):
-            raise ValueError(
-                "feature windows must be positive"
-            )
-
         return result
 
-
-# =============================================================================
-# 4. Dataset construction config
-# =============================================================================
 
 @dataclass(frozen=True)
 class Config:
     """One experiment's Raw-to-Dataset settings."""
 
-    # 仓库根目录，用于解析仓库相对路径和记录运行来源。
     project_root: Path
-
-    # 一次实验的稳定唯一标识，例如 exp_20260715。
     experiment_id: str
-
-    # 实验日期，正式格式必须为 ISO YYYY-MM-DD。
     experiment_date: str
-
-    # 原始实验数据目录；Dataset construction 将其视为只读输入。
     input_dir: Path
-
-    # 共享 channels.yaml 的绝对路径。
     channels_path: Path
-
-    # 在 input_dir 根目录中发现传感器文本文件的 glob 规则。
     sensor_globs: tuple[str, ...]
-
-    # 允许发现的图片扩展名，统一为小写且带前导点。
     image_extensions: tuple[str, ...]
-
-    # 原始传感器文件中的时间戳列名。
     timestamp_column: str
 
     # 原始传感器理论采样间隔（秒），用于估算每个重采样桶的期望点数。
@@ -603,7 +370,7 @@ class Config:
     # 循环切分规则。
     cycles: CycleSettings
 
-    # 重采样、缺失处理、Baseline 和动态特征规则。
+    # 重采样、bounded 缺失处理、派生量和 Baseline 规则。
     process: ProcessSettings
 
     # 原始相机目录 ID 到物理角色的映射。
@@ -617,12 +384,9 @@ class Config:
         这里仍接受 Mapping，便于测试构造和保持 Config 自身边界稳定。
         """
 
-        # 先保留原始类型，便于 mypy 理解后续 Mapping 分支。
         raw_cycles: Any = self.cycles
         raw_process: Any = self.process
 
-        # frozen dataclass 不能普通赋值。
-        # object.__setattr__ 是 __post_init__ 中完成类型规范化的受控方式。
         if isinstance(raw_cycles, Mapping):
             object.__setattr__(
                 self,

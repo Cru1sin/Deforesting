@@ -114,11 +114,6 @@ def build_registry(builds: Sequence[Any]) -> dict[str, Any]:
     baseline = getattr(process, "baseline", None)
     registry.update(
         {
-            "processing_settings": {
-                "feature_windows_minutes": [
-                    int(value) for value in getattr(process, "feature_windows_minutes", ())
-                ]
-            },
             "baseline_seconds": int(getattr(baseline, "baseline_seconds", 60)),
             "baseline_managed": False,
             "recovery_edit": {

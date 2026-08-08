@@ -10,7 +10,7 @@ import pandas as pd
 
 from .baseline import add_baseline_residuals
 from .config import Config
-from .features import calculate_derived_features, recompute_dynamic_features
+from .features import calculate_derived_features
 from .images import image_columns, image_roles
 
 _PARTITION_KEYS = ["experiment_id", "cycle_id", "cycle_stage"]
@@ -62,36 +62,30 @@ def process(
     baselined, baseline_summary = add_baseline_residuals(
         derived, initial_summary, channels, config.process.baseline
     )
-    featured = recompute_dynamic_features(
-        baselined,
-        channels,
-        interval_seconds=interval_seconds,
-        windows_minutes=list(config.process.feature_windows_minutes),
-    )
     fallback = _resample_fallback(
         _mask_duplicate_values(fallback_source, channels),
         channels,
         interval_seconds,
-    ).reindex(columns=featured.columns)
+    ).reindex(columns=baselined.columns)
     for column in fallback.columns:
         if str(column).endswith("__imputed"):
             fallback[column] = False
-    if featured.empty:
-        featured = fallback.copy()
+    if baselined.empty:
+        baselined = fallback.copy()
     elif not fallback.empty:
-        featured = pd.concat([featured, fallback], ignore_index=True)
-    featured = featured.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
+        baselined = pd.concat([baselined, fallback], ignore_index=True)
+    baselined = baselined.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
     final_summary = _update_summary(
         baseline_summary,
-        featured,
+        baselined,
         excluded_transition_buckets,
         low_coverage_buckets,
         eligible_channel_buckets,
         processed_cycles,
     )
-    return featured, final_summary
+    return baselined, final_summary
 
 
 def _partition_process_inputs(

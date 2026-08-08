@@ -36,15 +36,11 @@ def _config(
             "control_max_gap_seconds": 30,
             "baseline": {
                 "stage": "frost_development",
-                "search_start_minutes": 0,
-                "search_end_minutes": 5,
-                "window_minutes": 1,
-                "window_step_minutes": 1,
+                "baseline_seconds": 60,
                 "minimum_observed_coverage": 0.8,
                 "required_anchor_channels": ["anchor"],
                 "anchor_maximum_std": {"anchor": 1.0},
             },
-            "features": {"windows_minutes": [1]},
         },
         camera_roles={},
     )
@@ -639,14 +635,15 @@ def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
     assert processed["cop__imputed"].eq(False).all()
     assert processed["temperature__baseline"].isna().all()
     assert processed["temperature__baseline_residual"].isna().all()
-    assert processed["temperature__lag_1min"].isna().all()
-    assert processed["temperature__delta_1min"].isna().all()
-    assert processed["temperature__rolling_mean_1min"].isna().all()
     imputed_columns = [column for column in processed if column.endswith("__imputed")]
     assert imputed_columns
     assert not processed[imputed_columns].any(axis=None)
     assert not any(
         column.endswith(("__missing", "__invalid", "__duplicate", "__conflict"))
+        for column in processed
+    )
+    assert not any(
+        "__lag_" in column or "__delta_" in column or "__rolling_mean_" in column
         for column in processed
     )
     assert final_summary.loc[0, "processed_row_count"] == 2
@@ -817,17 +814,15 @@ def test_image_bucket_membership_uses_image_time_not_sensor_attachment_time(
     assert processed.loc[0, "image_front_center_offset_seconds"] == 9.9
 
 
-def test_dynamic_features_require_a_full_past_window(tmp_path: Path) -> None:
+def test_process_does_not_emit_precomputed_dynamic_features(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=8, freq="10s")
     frame = _frame(timestamps, temperature=list(range(8)))
     summary = _summary(defrost="2026-07-15 00:05:00")
 
     processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
-    assert processed["temperature__rolling_mean_1min"].iloc[5] != processed[
-        "temperature__rolling_mean_1min"
-    ].iloc[5]
-    assert processed.loc[6, "temperature__rolling_mean_1min"] == 2.5
-    assert processed.loc[6, "temperature__lag_1min"] == 0.0
-    assert processed.loc[6, "temperature__delta_1min"] == 6.0
+    assert not any(
+        "__lag_" in column or "__delta_" in column or "__rolling_mean_" in column
+        for column in processed.columns
+    )
     assert not any("__slope" in column for column in processed.columns)
