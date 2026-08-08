@@ -1078,6 +1078,38 @@ def test_prepare_enforces_configured_valid_range(tmp_path: Path) -> None:
     assert bool(prepared.loc[0, "ambient_temperature__invalid"])
 
 
+def test_prepare_requires_declared_defrost_channel_contract(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    (raw / "sample参数1.xls").write_text(
+        "时间\tT4\n2026-07-15 00:00:00\t10\n",
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, raw)
+    channels = {
+        "ambient_temperature": {
+            "source_names": ["p1__T4"],
+            "unit": "degC",
+            "kind": "continuous",
+            "role": "context",
+            "resample": "mean",
+            "missing": "none",
+            "analysis_candidate": False,
+        }
+    }
+
+    with pytest.raises(ValueError, match="defrost_active"):
+        prepare(config, channels)
+
+
+def test_read_sensor_table_rejects_invalid_multibyte_fallback_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "bad参数1.xls"
+    path.write_bytes(b"\x80")
+
+    with pytest.raises(UnicodeDecodeError):
+        prepare_module._read_sensor_table(path, "时间")
+
+
 def test_summary_expected_row_count_uses_left_closed_interval() -> None:
     row = pd.Series(
         {

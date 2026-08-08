@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -221,10 +221,7 @@ def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
     from .config import load_config
 
     config = load_config(project_root / "configs" / f"{input_path.name}.yaml")
-    if not str(config.experiment_date).startswith("2026-"):
-        raise ValueError("Dataset currently accepts only 2026 experiment dates")
-    object.__setattr__(config, "input_dir", input_path.resolve())
-    return config
+    return replace(config, input_dir=input_path.resolve())
 
 
 def _build_date(input_path: Path, config: Any) -> _DateBuild:
@@ -488,7 +485,6 @@ def _append_build(  # noqa: C901
     merged_registry = merge_registries(old_registry, candidate)
     for setting_name in (
         "image_coverage",
-        "processing_settings",
         "baseline_seconds",
         "baseline_managed",
         "recovery_edit",
