@@ -9,10 +9,12 @@ from matplotlib.figure import Figure
 
 from frost_analysis.evidence import EvidenceBundle, build_evidence
 from frost_analysis.evidence.figures import (
+    FIGURE_NAMES,
     plot_availability_audit,
     plot_cycle_progress,
     plot_feature_profiles,
     plot_future_horizon_summary,
+    plot_readiness_decision,
 )
 
 from .conftest import frame_for, settings, write_dataset
@@ -72,6 +74,27 @@ def test_s2_pair_panel_uses_only_primary_target_and_horizon(tmp_path: Path) -> N
 
     labels = [label.get_text() for label in figure.axes[1].get_xticklabels()]
     assert labels == ["feature_a", "feature_b"]
+
+
+def test_s2_uses_evidence_eligible_cycles_not_only_valid_status(tmp_path: Path) -> None:
+    loader = write_dataset(
+        tmp_path / "dataset",
+        [
+            ("valid", "2026-07-01", "valid", frame_for()),
+            ("incomplete", "2026-07-02", "incomplete", frame_for()),
+        ],
+    )
+    evidence_settings = settings(
+        targets=("heating_capacity",),
+        eligible_statuses=("valid", "incomplete"),
+    )
+    bundle = build_evidence(loader, evidence_settings)
+
+    figure = plot_availability_audit(bundle, evidence_settings)
+
+    labels = {label.get_text() for label in figure.axes[0].get_yticklabels()}
+    assert labels == {"valid", "incomplete"}
+    assert "eligible cycle" in figure.axes[0].get_title()
 
 
 def test_figure_one_uses_fixed_bins_and_excludes_imputed_nonfinite_values(
@@ -309,3 +332,68 @@ def test_figure_three_labels_summary_counts_and_support() -> None:
     labels = " ".join(text.get_text() for text in figure.axes[0].texts)
     assert "cycle=3" in labels
     assert "date=2" in labels
+
+
+def test_readiness_decision_is_a_four_panel_visual_argument(tmp_path: Path) -> None:
+    loader = write_dataset(
+        tmp_path / "dataset",
+        [
+            (
+                "c1",
+                "2026-07-01",
+                "valid",
+                frame_for(
+                    elapsed=range(0, 1201, 10),
+                    heating_capacity=np.linspace(100.0, 80.0, 121),
+                    cop=np.linspace(4.0, 3.0, 121),
+                ),
+            )
+        ],
+    )
+    evidence_settings = settings(minimum_valid_pairs=10, minimum_pair_coverage=0.5)
+    bundle = build_evidence(loader, evidence_settings)
+
+    figure = plot_readiness_decision(bundle, evidence_settings)
+
+    assert FIGURE_NAMES[-1] == "figure_4_readiness_decision"
+    assert len(figure.axes) == 4
+    panel_labels = {
+        text.get_text()
+        for axis in figure.axes
+        for text in axis.texts
+        if text.get_text() in {"a", "b", "c", "d"}
+    }
+    assert panel_labels == {"a", "b", "c", "d"}
+
+
+def test_readiness_decision_labels_current_status_contract(tmp_path: Path) -> None:
+    loader = write_dataset(
+        tmp_path / "dataset",
+        [("c1", "2026-07-01", "valid", frame_for())],
+    )
+    evidence_settings = settings(targets=("heating_capacity",))
+    bundle = build_evidence(loader, evidence_settings)
+    summary = bundle.readiness_summary.copy()
+    summary.loc[
+        summary["feature"].eq("feature_a"), "readiness_status"
+    ] = "state_marker_candidate"
+    summary.loc[
+        summary["feature"].eq("feature_b"), "readiness_status"
+    ] = "no_stable_linear_increment"
+    updated = EvidenceBundle(
+        cycle_eligibility=bundle.cycle_eligibility,
+        feature_cycle_metrics=bundle.feature_cycle_metrics,
+        future_association=bundle.future_association,
+        future_horizon_summary=bundle.future_horizon_summary,
+        feature_profile=bundle.feature_profile,
+        feature_pair_similarity=bundle.feature_pair_similarity,
+        target_audit=bundle.target_audit,
+        readiness_split=bundle.readiness_split,
+        readiness_summary=summary,
+    )
+
+    figure = plot_readiness_decision(updated, evidence_settings)
+    labels = {text.get_text() for text in figure.axes[2].texts}
+
+    assert "state" in labels
+    assert "lead only" in labels

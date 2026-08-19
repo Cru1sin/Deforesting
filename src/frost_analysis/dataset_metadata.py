@@ -22,7 +22,7 @@ def cycle_assets(cycle_name: str) -> dict[str, str]:
         "csv": f"cycles/{cycle_name}.csv",
         "original_csv": f"cycles_original/{cycle_name}.csv",
         "publication": f"cycles/{cycle_name}.png",
-        "rgb_coverage": f"cycles/{cycle_name}_rgb_coverage.png",
+        "rgb_panel": f"cycles/{cycle_name}_rgb_panel.png",
     }
 
 
@@ -58,6 +58,21 @@ def write_manifest(dataset_dir: Path, manifest: Mapping[str, Any]) -> None:
     write_json(dict(manifest), dataset_dir / MANIFEST_FILENAME)
 
 
+def image_root(dataset_dir: Path, manifest: Mapping[str, Any] | None = None) -> Path:
+    """Resolve the single Dataset image-location entry."""
+    payload = (
+        read_manifest(dataset_dir)
+        if manifest is None and (dataset_dir / MANIFEST_FILENAME).is_file()
+        else (manifest or {})
+    )
+    configured = Path(str(payload.get("images_root", "images"))).expanduser()
+    return (
+        configured.resolve()
+        if configured.is_absolute()
+        else (dataset_dir / configured).resolve()
+    )
+
+
 def read_catalog(dataset_dir: Path) -> dict[str, Any]:
     """Read the human-readable cycle catalog."""
     payload = _read_object(dataset_dir / CATALOG_FILENAME)
@@ -76,12 +91,10 @@ def write_catalog(dataset_dir: Path, catalog: Mapping[str, Any]) -> None:
 def experiment_record(
     experiment_id: str,
     experiment_date: str,
-    camera_roles: Mapping[str, str],
 ) -> dict[str, object]:
     return {
         "experiment_id": str(experiment_id),
         "experiment_date": str(experiment_date)[:10],
-        "camera_roles": dict(camera_roles),
     }
 
 
@@ -113,6 +126,7 @@ def build_cycle_record(
             "end_time",
             "heating_start",
             "stable_heating_start",
+            "defrost_preparation_start",
             "defrost_start",
             "defrost_end",
             "baseline_start",

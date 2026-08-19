@@ -3,111 +3,201 @@
 from __future__ import annotations
 
 import shutil
-from collections.abc import Mapping
-from pathlib import Path
+import subprocess
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 from typing import Any, cast
+from zipfile import ZipFile
 
 import pandas as pd
 
-from .dataset import make_cycle_uid
-from .images import image_columns, image_roles
+from .images import _image_timestamp
+
+DEFAULT_CLOUD_IMAGES_ROOT = Path(
+    "/Users/cruisin/Library/CloudStorage/OneDrive-Personal/"
+    "HKUST/Project/Defrost/dataset/images"
+)
+DEFAULT_CLOUD_IMAGES_REMOTE = "onedrive_hkust:HKUST/Project/Defrost/dataset/images"
 
 
-def collect_images(  # noqa: C901
-    prepared: pd.DataFrame,
+@contextmanager
+def materialize_cycle_images(  # noqa: C901
+    dataset_dir: Path,
+    cycle_name: str,
+    *,
+    fetch_cloud: bool = False,
+    cloud_root: Path | None = None,
+) -> Iterator[Path]:
+    """Temporarily copy one exact cloud ZIP into the local Dataset image tree."""
+    if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
+        raise ValueError(f"invalid cycle name: {cycle_name}")
+    images_root = Path(dataset_dir).resolve() / "images"
+    cycle_dir = images_root / cycle_name
+    if cycle_dir.is_dir() or not fetch_cloud:
+        yield cycle_dir
+        return
+
+    default_cloud = cloud_root is None
+    archive = Path(cloud_root or DEFAULT_CLOUD_IMAGES_ROOT) / f"{cycle_name}.zip"
+    if not archive.is_file():
+        print(f"[images] no local directory or cloud ZIP: {cycle_name}", flush=True)
+        yield cycle_dir
+        return
+
+    images_root.mkdir(parents=True, exist_ok=True)
+    if archive.stat().st_size > shutil.disk_usage(images_root).free * 0.8:
+        raise OSError(f"not enough local space to copy {archive.name}")
+
+    temporary_cycle = False
+    with TemporaryDirectory(prefix=f".{cycle_name}-", dir=images_root) as temporary:
+        work = Path(temporary)
+        local_archive = work / archive.name
+        print(f"[images] copying cloud ZIP: {archive.name}", flush=True)
+        if default_cloud:
+            subprocess.run(
+                [
+                    "rclone",
+                    "copyto",
+                    f"{DEFAULT_CLOUD_IMAGES_REMOTE}/{archive.name}",
+                    str(local_archive),
+                    "--progress",
+                    "--stats",
+                    "1s",
+                    "--multi-thread-streams",
+                    "8",
+                    "--multi-thread-cutoff",
+                    "256M",
+                    "--timeout",
+                    "2m",
+                    "--retries",
+                    "10",
+                    "--retries-sleep",
+                    "10s",
+                ],
+                check=True,
+            )
+        else:
+            shutil.copyfile(archive, local_archive)
+        with ZipFile(local_archive) as bundle:
+            members = bundle.infolist()
+            for member in members:
+                path = PurePosixPath(member.filename)
+                if path.is_absolute() or ".." in path.parts or path.parts[:1] != (cycle_name,):
+                    raise ValueError(f"unsafe cycle ZIP member: {member.filename}")
+            required = sum(member.file_size for member in members)
+            if required > shutil.disk_usage(images_root).free * 0.8:
+                raise OSError(f"not enough local space to extract {archive.name}")
+            print(f"[images] extracting local copy: {cycle_name}", flush=True)
+            bundle.extractall(work)
+
+        extracted = work / cycle_name
+        if not extracted.is_dir():
+            raise ValueError(f"cycle ZIP has no {cycle_name} directory")
+        if cycle_dir.exists():
+            yield cycle_dir
+            return
+        extracted.replace(cycle_dir)
+        temporary_cycle = True
+        try:
+            yield cycle_dir
+        finally:
+            if temporary_cycle and cycle_dir.is_dir():
+                shutil.rmtree(cycle_dir)
+                print(f"[images] removed local copy: {cycle_name}", flush=True)
+
+
+def collect_cycle_images(  # noqa: C901
+    image_files: list[Path],
     *,
     input_dir: Path,
-    cycle_names: Mapping[tuple[str, str], str],
+    cycles: list[Mapping[str, object]],
 ) -> list[dict[str, object]]:
-    """Collect Prepared image matches without re-matching or hashing bytes."""
-    roles = image_roles(prepared)
-    candidates: dict[tuple[str, str, str], dict[str, object]] = {}
-    for values in prepared.to_dict(orient="records"):
-        key = (str(values["experiment_id"]), str(values["cycle_id"]))
-        cycle_name = cycle_names.get(key)
-        if cycle_name is None:
-            continue
-        cycle_uid = make_cycle_uid(*key)
-        for role in roles:
-            path_column, time_column, offset_column = image_columns(role)
-            raw_path = values.get(path_column)
-            raw_time = values.get(time_column)
-            raw_offset = values.get(offset_column)
-            if pd.isna(raw_path):
-                if not pd.isna(raw_time) or not pd.isna(raw_offset):
-                    raise ValueError(f"incomplete image match for {path_column}")
-                continue
-            if pd.isna(raw_time) or pd.isna(raw_offset):
-                raise ValueError(f"incomplete image match for {path_column}")
-            relative = str(raw_path).replace("\\", "/")
-            source_path = input_dir / relative
-            if not source_path.is_file():
-                raise FileNotFoundError(f"matched source image does not exist: {source_path}")
-            source_camera_id = relative.split("/", 1)[0]
-            image_time = pd.Timestamp(raw_time)
-            record = {
-                "cycle_uid": cycle_uid,
-                "cycle_name": cycle_name,
-                "source_camera_id": source_camera_id,
-                "image_time": image_time,
-                "matched_timestamp": pd.Timestamp(values["timestamp"]),
-                "offset_seconds": float(raw_offset),
-                "cycle_stage": str(values.get("cycle_stage", "")),
-                "source_relative_path": relative,
-                "file_name": Path(relative).name,
-                "source_path": source_path,
-            }
-            candidate_key = (cycle_uid, source_camera_id, relative)
-            candidates.setdefault(candidate_key, record)
-
-    grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
-    for record in candidates.values():
-        key = (str(record["cycle_name"]), str(record["source_camera_id"]))
-        grouped.setdefault(key, []).append(record)
-
-    records: list[dict[str, object]] = []
-    seen_filenames: set[tuple[str, str, str]] = set()
-    for group_key in sorted(grouped):
-        group = sorted(
-            grouped[group_key],
-            key=lambda item: (
-                pd.Timestamp(cast(Any, item["image_time"])),
-                str(item["source_relative_path"]),
-            ),
+    """Assign every parseable image in a half-open cycle time window."""
+    windows = [
+        (
+            cycle,
+            pd.to_datetime(cycle.get("start_time"), errors="coerce"),
+            pd.to_datetime(cycle.get("end_time"), errors="coerce"),
+            pd.to_datetime(cycle.get("stable_heating_start"), errors="coerce"),
+            pd.to_datetime(cycle.get("defrost_preparation_start"), errors="coerce"),
+            pd.to_datetime(cycle.get("defrost_start"), errors="coerce"),
+            pd.to_datetime(cycle.get("defrost_end"), errors="coerce"),
         )
-        cycle_name, source_camera_id = group_key
-        for frame_index, record in enumerate(group, start=1):
-            file_name = str(record["file_name"])
-            filename_key = (cycle_name, source_camera_id, file_name)
-            if filename_key in seen_filenames:
-                raise ValueError(
-                    "duplicate source basename within camera: "
-                    f"{cycle_name}/{source_camera_id}/{file_name}"
-                )
-            seen_filenames.add(filename_key)
-            record.update(
+        for cycle in cycles
+    ]
+    records: list[dict[str, object]] = []
+    for path in image_files:
+        source_path = path if path.is_absolute() else input_dir / path
+        image_time = _image_timestamp(source_path)
+        if image_time is None:
+            continue
+        for cycle, start, end, stable, preparation_start, defrost_start, defrost_end in windows:
+            if pd.isna(start) or pd.isna(end) or not (start <= image_time < end):
+                continue
+            stage = "partial"
+            if not pd.isna(defrost_start) and image_time >= defrost_start:
+                if pd.isna(defrost_end) or image_time < defrost_end:
+                    stage = "defrost"
+            elif not pd.isna(preparation_start) and image_time >= preparation_start:
+                stage = "defrost_preparation"
+            elif not pd.isna(stable):
+                stage = "recovery" if image_time < stable else "frost_development"
+            elif not pd.isna(defrost_start):
+                stage = "recovery"
+            records.append(
                 {
-                    "frame_index": frame_index,
-                    "image_path": f"images/{cycle_name}/{source_camera_id}/{file_name}",
+                    "cycle_name": str(cycle["cycle_name"]),
+                    "camera_role": source_path.parent.name,
+                    "file_name": source_path.name,
+                    "image_time": image_time,
+                    "cycle_stage": stage,
+                    "source_path": source_path,
+                    "image_path": (
+                        f"images/{cycle['cycle_name']}/{source_path.parent.name}/"
+                        f"{source_path.name}"
+                    ),
                 }
             )
-            records.append(record)
+            break
+
+    records.sort(
+        key=lambda item: (
+            str(item["cycle_name"]),
+            str(item["camera_role"]),
+            pd.Timestamp(cast(Any, item["image_time"])),
+            str(item["file_name"]),
+        )
+    )
+    seen: set[tuple[str, str, str]] = set()
+    counts: dict[tuple[str, str], int] = {}
+    for record in records:
+        key = (
+            str(record["cycle_name"]),
+            str(record["camera_role"]),
+            str(record["file_name"]),
+        )
+        if key in seen:
+            raise ValueError(
+                "duplicate source basename within camera: " + "/".join(key)
+            )
+        seen.add(key)
+        group = key[:2]
+        counts[group] = counts.get(group, 0) + 1
+        record["frame_index"] = counts[group]
     return records
 
 
 def image_metadata_frame(records: list[dict[str, object]]) -> pd.DataFrame:
     """Build the final metadata table without current role or image SHA."""
     columns = [
-        "cycle_uid",
         "cycle_name",
-        "source_camera_id",
+        "camera_role",
         "file_name",
         "frame_index",
         "image_time",
-        "matched_timestamp",
-        "offset_seconds",
         "cycle_stage",
-        "source_relative_path",
     ]
     return pd.DataFrame(
         [{column: record[column] for column in columns} for record in records],
@@ -116,9 +206,11 @@ def image_metadata_frame(records: list[dict[str, object]]) -> pd.DataFrame:
 
 
 def copy_image(record: Mapping[str, object], dataset_dir: Path) -> None:
-    """Copy one matched source image into its cycle/camera directory."""
+    """Copy one cycle-owned source image into its cycle/camera directory."""
+    from .dataset_metadata import image_root
+
     source = Path(str(record["source_path"]))
-    target = dataset_dir / str(record["image_path"])
+    target = image_root(dataset_dir) / Path(str(record["image_path"])).relative_to("images")
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
 
@@ -127,27 +219,26 @@ def scan_cycle_images(
     dataset_root: Path,
     cycle_name: str,
     image_metadata: pd.DataFrame,
-    camera_roles: Mapping[str, str],
+    *,
+    cycle_dir: Path | None = None,
 ) -> pd.DataFrame:
-    """Join available source-camera files to metadata and Manifest roles."""
+    """Join Dataset image files to their metadata."""
+    from .dataset_metadata import image_root
+
     columns = [
         "cycle_name",
         "camera_role",
-        "source_camera_id",
         "file_name",
         "path",
         "frame_index",
         "image_time",
-        "matched_timestamp",
-        "offset_seconds",
         "cycle_stage",
-        "source_relative_path",
     ]
-    root = dataset_root / "images" / cycle_name
+    root = Path(cycle_dir) if cycle_dir is not None else image_root(dataset_root) / cycle_name
     if not root.is_dir():
         return pd.DataFrame(columns=columns)
     scoped = image_metadata.loc[image_metadata["cycle_name"].astype(str).eq(cycle_name)].copy()
-    key_columns = ["cycle_name", "source_camera_id", "file_name"]
+    key_columns = ["cycle_name", "camera_role", "file_name"]
     if scoped.duplicated(key_columns).any():
         raise ValueError(f"image metadata has duplicate source/file key: {cycle_name}")
     lookup = {
@@ -156,17 +247,15 @@ def scan_cycle_images(
     }
     rows: list[dict[str, object]] = []
     for camera_dir in sorted(path for path in root.iterdir() if path.is_dir()):
-        source_camera_id = camera_dir.name
-        camera_role = camera_roles.get(source_camera_id, source_camera_id)
+        camera_role = camera_dir.name
         for image_path in sorted(path for path in camera_dir.iterdir() if path.is_file()):
-            key = (cycle_name, source_camera_id, image_path.name)
+            key = (cycle_name, camera_role, image_path.name)
             metadata = lookup.get(key)
             if metadata is None:
                 continue
             row = {str(key): value for key, value in metadata.items()}
             row.update(
                 {
-                    "camera_role": camera_role,
                     "path": image_path,
                 }
             )
@@ -193,13 +282,23 @@ def _cycle_image_summary(
     frame: pd.DataFrame,
     image_metadata: pd.DataFrame,
     registry: Mapping[str, Any],
-    camera_roles: Mapping[str, str],
 ) -> tuple[
     dict[str, Any],
     dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
 ]:
     start, end = _cycle_window(frame)
-    images = scan_cycle_images(dataset_dir, cycle_name, image_metadata, camera_roles)
+    images = scan_cycle_images(dataset_dir, cycle_name, image_metadata)
+    intervals = image_coverage_intervals(frame, images, registry)
+    return {"image_count": int(len(images))}, intervals
+
+
+def image_coverage_intervals(
+    frame: pd.DataFrame,
+    images: pd.DataFrame,
+    registry: Mapping[str, Any],
+) -> dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]]:
+    """Compute per-role intervals from already-selected image facts."""
+    start, end = _cycle_window(frame)
     settings = registry.get("image_coverage", {})
     max_gap = float(
         settings.get("max_image_gap_seconds", 40.0) if isinstance(settings, Mapping) else 40.0
@@ -214,7 +313,70 @@ def _cycle_image_summary(
                 max_image_gap_seconds=max_gap,
             )
             intervals[str(role)] = role_intervals
-    return {"image_count": int(len(images))}, intervals
+    return intervals
+
+
+def rgb_stage_metrics(
+    frame: pd.DataFrame,
+    intervals: Mapping[str, Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
+    expected_roles: tuple[str, ...],
+) -> dict[str, object]:
+    """Compute cycle-level RGB coverage from the intersection of all roles."""
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    stages = frame.get("cycle_stage", pd.Series(index=frame.index, dtype="string")).astype(
+        "string"
+    )
+    result: dict[str, object] = {}
+    for output_name, stage_name in (
+        ("frost", "frost_development"),
+        ("defrost", "defrost"),
+    ):
+        stage_times = timestamps.loc[stages.eq(stage_name) & timestamps.notna()]
+        if stage_times.empty:
+            coverage: float | None = None
+            status = "not_applicable"
+        else:
+            available = pd.Series(True, index=stage_times.index)
+            for role in expected_roles:
+                role_available = pd.Series(False, index=stage_times.index)
+                for start, end in intervals.get(role, {}).get("available", []):
+                    role_available |= stage_times.ge(start) & stage_times.lt(end)
+                available &= role_available
+            if not expected_roles:
+                available &= False
+            coverage = float(available.mean())
+            status = "valid" if coverage >= 0.8 else "invalid"
+        result[f"rgb_{output_name}_coverage"] = coverage
+        result[f"rgb_{output_name}_auto_status"] = status
+    return result
+
+
+def rgb_overall_intervals(
+    frame: pd.DataFrame,
+    intervals: Mapping[str, Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]]],
+    expected_roles: tuple[str, ...],
+) -> dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]:
+    """Return continuous availability where every expected camera is present."""
+    start, end = _cycle_window(frame)
+    available = [(start, end)] if expected_roles else []
+    for role in expected_roles:
+        available = _merge_intervals(
+            [
+                (max(left, role_left), min(right, role_right))
+                for left, right in available
+                for role_left, role_right in intervals.get(role, {}).get("available", [])
+                if min(right, role_right) > max(left, role_left)
+            ]
+        )
+    missing: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    cursor = start
+    for left, right in available:
+        if cursor < left:
+            missing.append((cursor, left))
+        cursor = max(cursor, right)
+    if cursor < end:
+        missing.append((cursor, end))
+    return {"available": available, "missing": missing}
 
 
 def _sensor_coverage_intervals(  # noqa: C901

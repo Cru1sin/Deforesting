@@ -27,7 +27,7 @@ class DatasetLoader:
         if not metadata_path.is_file():
             raise FileNotFoundError("Dataset is missing image_metadata.parquet")
         self._image_metadata = pd.read_parquet(metadata_path)
-        for name in ("cycles", "cycles_original", "images"):
+        for name in ("cycles", "cycles_original"):
             if not (self.dataset_root / name).is_dir():
                 raise FileNotFoundError(f"Dataset is missing {name}/")
 
@@ -113,21 +113,10 @@ class DatasetLoader:
         return result.reset_index(drop=True)
 
     def load_cycle_images(self, cycle_name: str) -> pd.DataFrame:
-        record = self.get_cycle_record(cycle_name)
-        experiment_id = str(record["experiment_id"])
-        experiment = next(
-            item
-            for item in self._manifest["experiments"]
-            if str(item["experiment_id"]) == experiment_id
-        )
-        roles = experiment.get("camera_roles", {})
-        if not isinstance(roles, Mapping):
-            raise ValueError(f"camera_roles must be an object: {experiment_id}")
         return scan_cycle_images(
             self.dataset_root,
             cycle_name,
             self._image_metadata,
-            {str(key): str(value) for key, value in roles.items()},
         )
 
     @property
@@ -155,12 +144,12 @@ class DatasetLoader:
             raise ValueError(f"cycle assets are missing: {cycle_name}")
         return self.dataset_root / str(assets["publication"])
 
-    def rgb_coverage_path(self, cycle_name: str) -> Path:
+    def rgb_panel_path(self, cycle_name: str) -> Path:
         record = self.get_cycle_record(cycle_name)
         assets = record.get("assets")
         if not isinstance(assets, Mapping):
             raise ValueError(f"cycle assets are missing: {cycle_name}")
-        return self.dataset_root / str(assets["rgb_coverage"])
+        return self.dataset_root / str(assets["rgb_panel"])
 
 
 def _read_object(path: Path) -> dict[str, object]:

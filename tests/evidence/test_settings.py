@@ -16,6 +16,8 @@ def _payload() -> dict[str, object]:
         "minimum_feature_coverage": 0.8,
         "minimum_valid_pairs": 30,
         "minimum_pair_coverage": 0.8,
+        "eligible_statuses": ["valid", "incomplete"],
+        "minimum_cycle_minutes": 30.0,
         "event_persistence_seconds": 120,
         "signal_reference_minutes": 5,
         "signal_smoothing_seconds": 60,
@@ -44,6 +46,8 @@ def test_settings_from_yaml_loads_only_scientific_contract(tmp_path: Path) -> No
     assert settings.minimum_feature_coverage == pytest.approx(0.8)
     assert settings.event_thresholds == (0.05, 0.1, 0.15)
     assert settings.context_features[-1] == "compressor_frequency"
+    assert settings.eligible_statuses == ("valid", "incomplete")
+    assert settings.minimum_cycle_minutes == pytest.approx(30.0)
     assert settings.normalized() == {
         **_payload(),
         "primary_horizon_minutes": 10,
@@ -77,6 +81,26 @@ def test_settings_post_init_checks_only_required_relationships() -> None:
             minimum_feature_coverage=0.8,
             minimum_valid_pairs=1,
             minimum_pair_coverage=0.8,
+        )
+    with pytest.raises(ValueError, match="eligible_statuses"):
+        EvidenceSettings(
+            targets=("heating_capacity",),
+            primary_target="heating_capacity",
+            minimum_feature_points=1,
+            minimum_feature_coverage=0.8,
+            minimum_valid_pairs=1,
+            minimum_pair_coverage=0.8,
+            eligible_statuses=(),
+        )
+    with pytest.raises(ValueError, match="minimum_cycle_minutes"):
+        EvidenceSettings(
+            targets=("heating_capacity",),
+            primary_target="heating_capacity",
+            minimum_feature_points=1,
+            minimum_feature_coverage=0.8,
+            minimum_valid_pairs=1,
+            minimum_pair_coverage=0.8,
+            minimum_cycle_minutes=-1.0,
         )
     with pytest.raises(ValueError, match="feature_coverage"):
         EvidenceSettings(

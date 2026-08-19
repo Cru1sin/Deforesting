@@ -19,6 +19,7 @@ CYCLE_ELIGIBILITY_COLUMNS = [
     "experiment_id",
     "experiment_date",
     "status",
+    "analysis_duration_minutes",
     "eligible",
     "exclusion_reason",
 ]

@@ -17,17 +17,16 @@ quantities, and baseline residuals.
 
 ## Dataset
 
-Build all experiment dates:
+Add experiment dates in order:
 
 ```bash
-python -m frost_analysis dataset rebuild \
-  data/0714 data/0715 data/0716 data/0717 data/0720 data/0721 data/0722 \
-  --dataset dataset
+python -m frost_analysis dataset add data/0714 --dataset dataset
+python -m frost_analysis dataset add data/0715 --dataset dataset
 ```
 
-The Dataset CLI also supports `add`, `validate`, `refresh`, `review-cycle`,
-`edit`, and `render`. Use `python -m frost_analysis dataset --help` for their
-arguments.
+The Dataset CLI supports `add`, `remove`, `refresh`, `review-cycle`, `edit`,
+`validate`, and `render`. It deliberately has no destructive rebuild command.
+Use `python -m frost_analysis dataset --help` for arguments.
 
 `prepare()` and `process()` are internal transformations used while building a
 Dataset. They are not public commands and do not write standalone artifacts.
@@ -47,11 +46,20 @@ Evidence reads cycles only through `DatasetLoader` and never writes inside the
 Dataset. Dataset status is authoritative: human-reviewed `status` controls cycle
 eligibility, while metric availability is recorded locally inside Evidence.
 
+The current exploratory configuration includes `valid` cycles strictly longer
+than 30 minutes. The Evidence eligibility table records this inclusion and its
+reason. Use a frozen, stricter admission protocol before treating the future
+100+ cycle run as confirmatory.
+
+Each run writes nine auditable CSV tables and five Python/matplotlib figures in
+editable SVG, PDF, PNG, and 600-dpi TIFF. The scientific gates and interpretation
+rules are documented in
+[`docs/evidence_analysis_framework_cn.md`](docs/evidence_analysis_framework_cn.md).
+
 Configuration has one owner per workflow:
 
-- `configs/defaults.yaml`: Raw-to-Dataset scientific transformations.
+- `configs/config.yaml`: channels and shared Raw-to-Dataset rules.
 - `configs/evidence.yaml`: Dataset-to-Evidence scientific analysis.
-- `configs/channels.yaml`: channel names, units, roles, formulas, and quality rules.
 
 The formal data contracts are documented in
 [`docs/pipeline_contract.md`](docs/pipeline_contract.md) and

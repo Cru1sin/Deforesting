@@ -25,6 +25,8 @@ class EvidenceSettings:
     minimum_feature_coverage: float
     minimum_valid_pairs: int
     minimum_pair_coverage: float
+    eligible_statuses: tuple[str, ...] = ("valid",)
+    minimum_cycle_minutes: float = 0.0
     primary_horizon_minutes: int = field(
         default=PRIMARY_FORECAST_HORIZON_MINUTES, init=False
     )
@@ -53,6 +55,10 @@ class EvidenceSettings:
             raise ValueError("primary_target must be one of targets")
         if not 0 <= self.minimum_feature_coverage <= 1:
             raise ValueError("minimum_feature_coverage must be in [0, 1]")
+        if not self.eligible_statuses:
+            raise ValueError("eligible_statuses must not be empty")
+        if self.minimum_cycle_minutes < 0:
+            raise ValueError("minimum_cycle_minutes must be nonnegative")
         if any(value <= 0 for value in self.event_thresholds):
             raise ValueError("event_thresholds must be positive")
         durations = (
@@ -93,6 +99,8 @@ class EvidenceSettings:
             minimum_feature_coverage=loaded["minimum_feature_coverage"],
             minimum_valid_pairs=loaded["minimum_valid_pairs"],
             minimum_pair_coverage=loaded["minimum_pair_coverage"],
+            eligible_statuses=tuple(loaded.get("eligible_statuses", ["valid"])),
+            minimum_cycle_minutes=float(loaded.get("minimum_cycle_minutes", 0.0)),
             event_persistence_seconds=loaded["event_persistence_seconds"],
             signal_reference_minutes=loaded["signal_reference_minutes"],
             signal_smoothing_seconds=loaded["signal_smoothing_seconds"],
@@ -114,6 +122,8 @@ class EvidenceSettings:
             "minimum_feature_coverage": self.minimum_feature_coverage,
             "minimum_valid_pairs": self.minimum_valid_pairs,
             "minimum_pair_coverage": self.minimum_pair_coverage,
+            "eligible_statuses": list(self.eligible_statuses),
+            "minimum_cycle_minutes": self.minimum_cycle_minutes,
             "event_thresholds": list(self.event_thresholds),
             "primary_event_threshold": self.primary_event_threshold,
             "event_persistence_seconds": self.event_persistence_seconds,

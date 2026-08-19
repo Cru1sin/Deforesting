@@ -173,9 +173,13 @@ def _pair_sensor_records(
                     + float(sensor_2.iloc[right]["humidity"])
                 )
                 / 2,
+                "sensor_1_temperature": float(sensor_1.iloc[left]["temperature"]),
+                "sensor_1_humidity": float(sensor_1.iloc[left]["humidity"]),
+                "sensor_2_temperature": float(sensor_2.iloc[right]["temperature"]),
+                "sensor_2_humidity": float(sensor_2.iloc[right]["humidity"]),
             }
         )
-    return pd.DataFrame(rows, columns=["timestamp", *_ENVIRONMENT_COLUMNS])
+    return pd.DataFrame(rows, columns=["timestamp", *_ENVIRONMENT_COLUMNS, *_SIGNAL_COLUMNS])
 
 
 _ENVIRONMENT_COLUMNS = ["environment_temperature", "environment_relative_humidity"]
@@ -183,9 +187,6 @@ _ENVIRONMENT_COLUMNS = ["environment_temperature", "environment_relative_humidit
 
 def _empty_environment_frame() -> pd.DataFrame:
     return pd.DataFrame(
-        {
-            "timestamp": pd.Series(dtype="datetime64[ns]"),
-            "environment_temperature": pd.Series(dtype="float64"),
-            "environment_relative_humidity": pd.Series(dtype="float64"),
-        }
+        {"timestamp": pd.Series(dtype="datetime64[ns]")}
+        | {name: pd.Series(dtype="float64") for name in [*_ENVIRONMENT_COLUMNS, *_SIGNAL_COLUMNS]}
     )

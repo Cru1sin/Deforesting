@@ -294,17 +294,22 @@ def _cycle_stage_intervals(
 ) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
     heating = _as_timestamp(summary.get("heating_start"))
     stable = _as_timestamp(summary.get("stable_heating_start"))
+    preparation = _as_timestamp(summary.get("defrost_preparation_start"))
     defrost = _as_timestamp(summary.get("defrost_start"))
     defrost_end = _as_timestamp(summary.get("defrost_end"))
     if defrost_end is None and observed_end is not None:
         defrost_end = observed_end + pd.Timedelta(frequency)
     if heating is None or stable is None or defrost is None or defrost_end is None:
         raise ValueError("complete cycle is missing required stage boundaries")
-    return {
+    frost_end = preparation or defrost
+    intervals = {
         "recovery": (heating, stable),
-        "frost_development": (stable, defrost),
+        "frost_development": (stable, frost_end),
         "defrost": (defrost, defrost_end),
     }
+    if preparation is not None:
+        intervals["defrost_preparation"] = (preparation, defrost)
+    return intervals
 
 
 def _stage_for_complete_bucket(
@@ -429,6 +434,7 @@ def recompute_cycle_coordinates(
     for _, cycle in cycle_summary.iterrows():
         stable = _timestamp_or_none(cycle.get("stable_heating_start"))
         defrost = _timestamp_or_none(cycle.get("defrost_start"))
+        frost_end = _timestamp_or_none(cycle.get("defrost_preparation_start")) or defrost
         if stable is None or defrost is None:
             continue
         mask = result["experiment_id"].eq(cycle["experiment_id"]) & result["cycle_id"].eq(
@@ -438,7 +444,7 @@ def recompute_cycle_coordinates(
         if not development.any():
             continue
         elapsed = (result.loc[development, "timestamp"] - stable).dt.total_seconds()
-        duration = (defrost - stable).total_seconds()
+        duration = (frost_end - stable).total_seconds()
         if duration <= 0:
             continue
         if (elapsed < 0).any():
@@ -673,7 +679,7 @@ def _validate_cycle_summary_input(prepared: pd.DataFrame, summary: pd.DataFrame)
         if key not in lookup:
             raise ValueError(f"missing cycle summary for cycle {key[1]}")
         status = str(group["cycle_status"].iloc[0])
-        if status not in {"valid", "partial", "invalid", "incomplete"}:
+        if status not in {"valid", "invalid"}:
             raise ValueError(f"invalid cycle status for cycle {key[1]}")
     summary_only = set(lookup) - prepared_keys
     if summary_only:

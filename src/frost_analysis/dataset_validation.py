@@ -7,24 +7,29 @@ from pathlib import Path
 import pandas as pd
 
 from .dataset_loader import DatasetLoader
+from .dataset_metadata import image_root
 
 
 def validate_dataset(dataset_dir: Path) -> None:
     loader = DatasetLoader(dataset_dir)
+    cycles = loader.list_cycles()
+    _validate_statuses(cycles)
     columns = loader.registry.get("columns")
     if not isinstance(columns, list):
         raise ValueError("channel_registry columns are missing")
     expected = ["cycle_name", "cycle_uid", *map(str, columns)]
 
     metadata = loader.load_image_metadata()
-    keys = ["cycle_name", "source_camera_id", "file_name"]
+    if not metadata.empty and not image_root(dataset_dir).is_dir():
+        raise ValueError("configured images_root does not exist")
+    keys = ["cycle_name", "camera_role", "file_name"]
     missing = [name for name in keys if name not in metadata]
     if missing:
         raise ValueError(f"image metadata is missing connection keys: {missing}")
     if metadata.duplicated(keys).any():
         raise ValueError("image metadata contains duplicate connection keys")
 
-    for cycle_name in loader.list_cycles()["cycle_name"].astype(str):
+    for cycle_name in cycles["cycle_name"].astype(str):
         processed = loader.load_cycle(cycle_name)
         original = loader.load_cycle_original(cycle_name)
         if processed.empty or original.empty:
@@ -36,6 +41,11 @@ def validate_dataset(dataset_dir: Path) -> None:
         for name in ("cycle_name", "cycle_uid", "experiment_id", "cycle_id"):
             if name in processed and processed[name].nunique(dropna=False) != 1:
                 raise ValueError(f"{cycle_name}: inconsistent {name}")
+
+
+def _validate_statuses(cycles: pd.DataFrame) -> None:
+    if not cycles.empty and not cycles["status"].isin({"valid", "invalid"}).all():
+        raise ValueError("Dataset status must be valid or invalid")
 
 
 def _check_time(frame: pd.DataFrame, cycle_name: str, *, unique: bool) -> None:

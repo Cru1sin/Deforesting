@@ -50,7 +50,7 @@ def audit_performance_target(
 
     timestamps = pd.to_datetime(stage["timestamp"], errors="coerce")
     frost_start = timestamps.min()
-    censor = _defrost_start(record)
+    censor, censor_source = _analysis_end(record)
     analysis_start = _baseline_end(record)
     if pd.isna(frost_start) or pd.isna(censor) or pd.isna(analysis_start):
         return _unavailable(row, "target_unavailable")
@@ -87,7 +87,7 @@ def audit_performance_target(
     primary = events[settings.primary_event_threshold]
     row["primary_event_elapsed_minutes"] = primary
     row["primary_event_status"] = (
-        "event_observed" if np.isfinite(primary) else "right_censored_at_defrost_start"
+        "event_observed" if np.isfinite(primary) else f"right_censored_at_{censor_source}"
     )
     for horizon in (5, 10, 20):
         row[f"valid_pairs_{horizon}min"] = _target_pair_count(
@@ -171,6 +171,15 @@ def compare_incremental_models(
 ) -> pd.DataFrame:
     """Compare M0-M3 on common anchors and independent held-out cycles."""
     rows: list[dict[str, object]] = []
+    model_data: dict[tuple[str, str, str, int], _ModelData] = {}
+    for record, frame in cycles:
+        cycle_name = str(record.get("cycle_name", ""))
+        for feature, _ in features:
+            for target in settings.targets:
+                for horizon in settings.horizons_minutes:
+                    model_data[(cycle_name, feature, target, horizon)] = _model_data(
+                        record, frame, feature, target, horizon, settings
+                    )
     for split_id, held_out, training in _leave_out_splits(cycles):
         for held_record, held_frame in held_out:
             rows.extend(
@@ -182,6 +191,7 @@ def compare_incremental_models(
                     features,
                     target_audit,
                     settings,
+                    model_data,
                 )
             )
     return pd.DataFrame(rows, columns=READINESS_SPLIT_COLUMNS)
@@ -195,6 +205,7 @@ def _compare_held_cycle(
     features: list[tuple[str, str]],
     target_audit: pd.DataFrame,
     settings: EvidenceSettings,
+    model_data: dict[tuple[str, str, str, int], _ModelData],
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     cycle_name = str(held_record.get("cycle_name", ""))
@@ -215,9 +226,7 @@ def _compare_held_cycle(
                 settings,
             )
             for horizon in settings.horizons_minutes:
-                test_data = _model_data(
-                    held_record, held_frame, feature, target, horizon, settings
-                )
+                test_data = model_data[(cycle_name, feature, target, horizon)]
                 row = _split_row(
                     split_id,
                     cycle_name,
@@ -241,6 +250,7 @@ def _compare_held_cycle(
                     target,
                     horizon,
                     settings,
+                    model_data,
                 )
                 rows.append(row)
     return rows
@@ -254,13 +264,13 @@ def _fit_split_models(
     target: str,
     horizon: int,
     settings: EvidenceSettings,
+    model_data: dict[tuple[str, str, str, int], _ModelData],
 ) -> None:
     train_parts: list[_ModelData] = []
     train_dates: set[str] = set()
-    for train_record, train_frame in training:
-        part = _model_data(
-            train_record, train_frame, feature, target, horizon, settings
-        )
+    for train_record, _ in training:
+        cycle_name = str(train_record.get("cycle_name", ""))
+        part = model_data[(cycle_name, feature, target, horizon)]
         if not _sample_reason(part, settings):
             train_parts.append(part)
             train_dates.add(str(train_record.get("experiment_date", ""))[:10])
@@ -419,8 +429,11 @@ def _cycle_baseline(series: pd.Series[Any]) -> tuple[float, str]:
     return baseline, ""
 
 
-def _defrost_start(record: Mapping[str, object]) -> pd.Timestamp:
-    return _boundary(record, "defrost_start")
+def _analysis_end(record: Mapping[str, object]) -> tuple[pd.Timestamp, str]:
+    defrost_start = _boundary(record, "defrost_start")
+    if not pd.isna(defrost_start):
+        return defrost_start, "defrost_start"
+    return _boundary(record, "end_time"), "cycle_end"
 
 
 def _baseline_end(record: Mapping[str, object]) -> pd.Timestamp:
@@ -541,9 +554,10 @@ def _model_data(
     timestamps = pd.to_datetime(stage["timestamp"], errors="coerce")
     frost_start = timestamps.min()
     analysis_start = _baseline_end(record)
-    if pd.isna(frost_start) or pd.isna(analysis_start):
+    analysis_end, _ = _analysis_end(record)
+    if pd.isna(frost_start) or pd.isna(analysis_start) or pd.isna(analysis_end):
         return _ModelData(0, empty, np.empty(0, dtype=float))
-    analysis_period = timestamps.ge(analysis_start)
+    analysis_period = timestamps.ge(analysis_start) & timestamps.lt(analysis_end)
     stage = stage.loc[analysis_period].reset_index(drop=True)
     timestamps = timestamps.loc[analysis_period].reset_index(drop=True)
     positions = {

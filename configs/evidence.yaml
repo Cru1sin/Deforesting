@@ -2,6 +2,9 @@ targets:
   - heating_capacity
   - cop
 primary_target: heating_capacity
+eligible_statuses:
+  - valid
+minimum_cycle_minutes: 30.0
 minimum_feature_points: 12
 minimum_feature_coverage: 0.8
 minimum_valid_pairs: 30

@@ -58,7 +58,8 @@ def export_original_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def merge_original_columns(builds: Sequence[Any]) -> list[str]:
     columns: list[str] = []
     for build in builds:
-        for name in export_original_frame(build.prepared):
+        source = build.original if build.original is not None else build.prepared
+        for name in export_original_frame(source):
             if str(name) not in columns:
                 columns.append(str(name))
     return columns

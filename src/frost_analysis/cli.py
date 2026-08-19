@@ -9,9 +9,10 @@ from pathlib import Path
 from frost_analysis.config import find_project_root
 from frost_analysis.dataset import (
     add_dataset,
+    aggregate_original,
     edit_dataset,
-    rebuild_dataset,
     refresh_dataset,
+    remove_dataset,
     render_dataset,
     review_cycle,
 )
@@ -43,10 +44,6 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     dataset = subparsers.add_parser("dataset")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
 
-    rebuild_parser = dataset_commands.add_parser("rebuild")
-    rebuild_parser.add_argument("input_dirs", nargs="+", type=Path)
-    rebuild_parser.add_argument("--dataset", type=Path)
-
     validate_parser = dataset_commands.add_parser("validate")
     validate_parser.add_argument("--dataset", type=Path)
 
@@ -54,7 +51,20 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     add_parser.add_argument("input_dir", type=Path)
     add_parser.add_argument("--dataset", type=Path)
 
+    replace_parser = dataset_commands.add_parser("replace")
+    replace_parser.add_argument("input_dir", type=Path)
+    replace_parser.add_argument("--dataset", type=Path)
+
+    aggregate_parser = dataset_commands.add_parser("aggregate-original")
+    aggregate_parser.add_argument("--dataset", type=Path)
+    aggregate_parser.add_argument("--seconds", type=int, default=10)
+
+    remove_parser = dataset_commands.add_parser("remove")
+    remove_parser.add_argument("date")
+    remove_parser.add_argument("--dataset", type=Path)
+
     refresh_parser = dataset_commands.add_parser("refresh")
+    refresh_parser.add_argument("mode", choices=["roles", "images", "figures", "all"])
     refresh_parser.add_argument("--dataset", type=Path)
 
     review_parser = dataset_commands.add_parser("review-cycle")
@@ -63,9 +73,15 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     review_parser.add_argument(
         "--status",
         required=True,
-        choices=["valid", "partial", "incomplete", "invalid"],
+        choices=["valid", "invalid"],
     )
     review_parser.add_argument("--reason")
+    review_parser.add_argument(
+        "--rgb-frost", choices=["valid", "invalid", "not_applicable"]
+    )
+    review_parser.add_argument(
+        "--rgb-defrost", choices=["valid", "invalid", "not_applicable"]
+    )
 
     edit_parser = dataset_commands.add_parser("edit")
     edit_parser.add_argument("--dataset", type=Path)
@@ -73,24 +89,37 @@ def _add_dataset_commands(subparsers: argparse._SubParsersAction[argparse.Argume
     recovery_group = edit_parser.add_mutually_exclusive_group()
     recovery_group.add_argument("--recovery-seconds", type=int)
     recovery_group.add_argument("--recovery-end-by", choices=["ts-minus"])
+    edit_parser.add_argument("--defrost-preparation", action="store_true")
+    edit_parser.add_argument("--skip-rgb-panels", action="store_true")
 
     render_parser = dataset_commands.add_parser("render")
     render_parser.add_argument("--dataset", type=Path)
     render_parser.add_argument("cycle")
     render_parser.add_argument("--publication", action="store_true")
-    render_parser.add_argument("--coverage", action="store_true")
+    render_parser.add_argument("--panel", action="store_true")
+    render_parser.add_argument("--fetch-cloud-images", action="store_true")
 
 
 def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
     if arguments.dataset_command == "add":
         print(add_dataset(arguments.input_dir, arguments.dataset))
         return 0
-    if arguments.dataset_command == "rebuild":
-        print(rebuild_dataset(arguments.input_dirs, arguments.dataset))
+    if arguments.dataset_command == "replace":
+        from frost_analysis.dataset import replace_dataset
+
+        print(replace_dataset(arguments.input_dir, arguments.dataset))
+        return 0
+    if arguments.dataset_command == "aggregate-original":
+        dataset = arguments.dataset or (_project_root() / "dataset")
+        print(aggregate_original(dataset, seconds=arguments.seconds))
+        return 0
+    if arguments.dataset_command == "remove":
+        dataset = arguments.dataset or (_project_root() / "dataset")
+        print(remove_dataset(dataset, arguments.date))
         return 0
     if arguments.dataset_command == "refresh":
         dataset = arguments.dataset or (_project_root() / "dataset")
-        print(refresh_dataset(dataset))
+        print(refresh_dataset(dataset, arguments.mode))
         return 0
     if arguments.dataset_command == "review-cycle":
         dataset = arguments.dataset or (_project_root() / "dataset")
@@ -99,6 +128,8 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
             arguments.cycle,
             status=arguments.status,
             reason=arguments.reason,
+            rgb_frost=arguments.rgb_frost,
+            rgb_defrost=arguments.rgb_defrost,
         )
         print(dataset)
         return 0
@@ -110,6 +141,8 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
                 baseline_seconds=arguments.baseline_seconds,
                 recovery_seconds=arguments.recovery_seconds,
                 recovery_end_by=arguments.recovery_end_by,
+                defrost_preparation=arguments.defrost_preparation,
+                render_rgb_panels=not arguments.skip_rgb_panels,
             )
         )
         return 0
@@ -119,8 +152,9 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
             render_dataset(
                 dataset,
                 arguments.cycle,
-                publication=arguments.publication or not arguments.coverage,
-                coverage=arguments.coverage or not arguments.publication,
+                publication=arguments.publication or not arguments.panel,
+                panel=arguments.panel or not arguments.publication,
+                fetch_cloud_images=arguments.fetch_cloud_images,
             )
         )
         return 0

@@ -31,6 +31,15 @@ Prepared rows use observed source timestamps. Every source channel has explicit
 `__missing`, `__invalid`, `__duplicate`, and `__conflict` flags. Cycle labels come
 from the configured defrost state and operating-mode rules.
 
+Dataset construction separately joins every raw controller point to these
+standardized observations for `cycles_original`. Raw controller columns keep
+their parameter-group-prefixed source names and duplicate timestamp records;
+they do not enter Process unless declared by the formal channel contract.
+
+Automatic cycle status is binary: `valid` or `invalid`. Recoverable state gaps
+and dataset-edge segments remain explicit in `cycle_status_reason` and boundary
+fields without creating a third status.
+
 ## Process
 
 `process(prepared, cycle_summary, config, channels)` returns:
@@ -56,6 +65,12 @@ Process outputs.
 
 Prepared and Processed validators protect these scientific contracts while the
 Dataset is built.
+
+`cycle_stage` uses `recovery → frost_development → defrost_preparation → defrost`.
+The preparation stage is present only when the compressor-frequency setpoint drops
+by at least 10 Hz during the 120 seconds before the formal defrost signal; its start
+is the setpoint-switch timestamp. If the control evidence is absent,
+`frost_development` continues directly to `defrost`.
 
 ## Dataset
 

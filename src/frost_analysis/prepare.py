@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import csv
 import re
 from collections import defaultdict
@@ -15,7 +16,7 @@ import pandas as pd
 from .alignment import match_nearest_one_to_one
 from .config import Config
 from .cycles import label_cycles
-from .images import match_images
+from .images import image_roles, match_images
 from .io import discover_inputs
 from .sensors import read_edf_environment
 
@@ -29,7 +30,6 @@ def prepare(
     if not inputs.sensor_files:
         raise ValueError(f"no sensor files found in {config.input_dir}")
 
-    camera_roles = config.camera_roles
     channel_frames = _load_prepare_channel_frames(inputs.sensor_files, config, channels)
     available_source_channels = set(channel_frames)
 
@@ -72,13 +72,13 @@ def prepare(
         config.cycles,
         experiment_id=config.experiment_id,
         experiment_date=config.experiment_date,
+        shutdown_gap_seconds=config.process.continuous_max_gap_seconds,
     )
 
     # 使用相对路径可避免 Prepared 表依赖某台机器的绝对目录。
     image_matches = match_images(
         prepared["timestamp"],
         [path.relative_to(config.input_dir) for path in inputs.image_files],
-        camera_roles=camera_roles,
         tolerance_seconds=config.image_match_tolerance_seconds,
     )
 
@@ -93,12 +93,80 @@ def prepare(
         prepared,
         cycle_summary,
         channels,
-        camera_roles,
+        image_roles(prepared),
         config.expected_sensor_interval_seconds,
         available_source_channels,
     )
 
     return prepared, cycle_summary
+
+
+def prepare_original(config: Config, prepared: pd.DataFrame) -> pd.DataFrame:
+    """Attach every raw controller point to standardized Prepared observations."""
+    from .dataset_schema import export_original_frame
+
+    inputs = discover_inputs(config)
+    grouped_paths: dict[str, list[Path]] = defaultdict(list)
+    for path in inputs.sensor_files:
+        if path.suffix.lower() == ".edf":
+            continue
+        grouped_paths[_parameter_group(path) or path.stem].append(path)
+
+    occurrence = "__raw_timestamp_occurrence"
+    raw: pd.DataFrame | None = None
+    for group, paths in grouped_paths.items():
+        tables = [
+            _read_sensor_table(path, config.timestamp_column, infer_types=True)
+            for path in paths
+        ]
+        combined = pd.concat(tables, ignore_index=True, sort=False)
+        combined = combined.rename(
+            columns={
+                name: _canonical_name(group, str(name))
+                for name in combined.columns
+                if name != "timestamp"
+            }
+        )
+        combined[occurrence] = combined.groupby("timestamp", sort=False).cumcount()
+        raw = (
+            combined
+            if raw is None
+            else raw.merge(
+                combined,
+                on=["timestamp", occurrence],
+                how="outer",
+                sort=False,
+                validate="one_to_one",
+            )
+        )
+
+    original = export_original_frame(prepared)
+    result = original if raw is None else original.merge(
+        raw, on="timestamp", how="outer", sort=False, validate="one_to_many"
+    )
+    edf_paths = tuple(path for path in inputs.sensor_files if path.suffix.lower() == ".edf")
+    if edf_paths:
+        environment = read_edf_environment(
+            edf_paths,
+            pd.Timestamp(original["timestamp"].min()),
+            pd.Timestamp(original["timestamp"].max()),
+            pd.to_timedelta(config.edf_pair_tolerance_seconds, unit="s"),
+        )
+        environment = _align_environment_to_main_timestamps(
+            environment,
+            original["timestamp"],
+            pd.to_timedelta(config.expected_sensor_interval_seconds / 2, unit="s"),
+        ).rename(columns=lambda name: f"edf__{name}" if str(name).startswith("sensor_") else name)
+        edf_columns = [name for name in environment if str(name).startswith("edf__")]
+        result = result.merge(
+            environment[["timestamp", *edf_columns]],
+            on="timestamp",
+            how="left",
+            validate="many_to_one",
+        )
+    return result.sort_values(["timestamp", occurrence], kind="stable").drop(
+        columns=occurrence
+    ).reset_index(drop=True)
 
 
 def _load_prepare_channel_frames(
@@ -163,7 +231,7 @@ def _align_environment_to_main_timestamps(
     aligned["timestamp"] = pd.Series(
         [main.iloc[position] for position in main_positions], dtype=main.dtype
     )
-    return aligned[["timestamp", "environment_temperature", "environment_relative_humidity"]]
+    return aligned
 
 
 def _load_channel_frames(
@@ -203,7 +271,9 @@ def _load_channel_frames(
     return frames
 
 
-def _read_sensor_table(path: Path, timestamp_column: str) -> pd.DataFrame:
+def _read_sensor_table(
+    path: Path, timestamp_column: str, *, infer_types: bool = False
+) -> pd.DataFrame:
     sample = path.read_bytes()[:131_072]
 
     # 即使文件扩展名伪装成 .txt/.csv，也会被拒绝。
@@ -213,7 +283,9 @@ def _read_sensor_table(path: Path, timestamp_column: str) -> pd.DataFrame:
     # 优先尝试 UTF-8 with BOM，再尝试兼容中文 Windows 文件的 gb18030。
     for encoding in ("utf-8-sig", "gb18030"):
         try:
-            decoded = sample.decode(encoding)
+            decoded = codecs.getincrementaldecoder(encoding)().decode(
+                sample, final=len(sample) < 131_072
+            )
             break
         except UnicodeDecodeError:
             continue
@@ -232,14 +304,12 @@ def _read_sensor_table(path: Path, timestamp_column: str) -> pd.DataFrame:
     # - 防止 pandas 自动改变设备编号或分类值；
     # - 统一由 channels 合同决定后续解析方式；
     # - keep_default_na=False 保留空字符串，便于区分缺失与非法非空值。
-    table = pd.read_csv(
-        path,
-        sep=delimiter,
-        encoding=encoding,
-        dtype=str,
-        keep_default_na=False,
-        engine="python",
+    options = (
+        {"keep_default_na": True, "low_memory": False}
+        if infer_types
+        else {"dtype": str, "keep_default_na": False, "engine": "python"}
     )
+    table = pd.read_csv(path, sep=delimiter, encoding=encoding, **options)
 
     table.columns = [str(column).strip() for column in table.columns]
 
@@ -252,8 +322,6 @@ def _read_sensor_table(path: Path, timestamp_column: str) -> pd.DataFrame:
     # 删除无效时间戳行并重建连续索引。
     # 注意：这里只删除无法定位到时间轴的行，不删除通道值为空或非法的行。
     return table.loc[table["timestamp"].notna()].reset_index(drop=True)
-
-
 def _combine_channel(
     frames: list[pd.DataFrame], settings: Mapping[str, Any], timestamps: pd.Series
 ) -> pd.DataFrame:
@@ -393,7 +461,7 @@ def _add_cycle_summary_metrics(
     prepared: pd.DataFrame,
     summary: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
-    camera_roles: Mapping[str, str],
+    roles: tuple[str, ...],
     expected_interval_seconds: int,
     available_source_channels: set[str],
 ) -> pd.DataFrame:
@@ -405,10 +473,10 @@ def _add_cycle_summary_metrics(
 
     # 根据配置的物理角色构造图片路径列名。
     # set() 去除重复角色；config.py 已原则上禁止角色重复。
-    role_path_columns = [f"image_{role}_path" for role in sorted(set(camera_roles.values()))]
+    role_path_columns = [f"image_{role}_path" for role in roles]
 
     # 对应构造每个角色的图片实际拍摄时间列名。
-    role_time_columns = [f"image_{role}_time" for role in sorted(set(camera_roles.values()))]
+    role_time_columns = [f"image_{role}_time" for role in roles]
 
     # 不原地修改 cycles.py 返回的 summary。
     result = summary.copy()
@@ -416,7 +484,7 @@ def _add_cycle_summary_metrics(
     # 每个循环生成一个指标字典，最后一次性转 DataFrame。
     records: list[dict[str, object]] = []
 
-    # cycle_summary 每行代表一个循环，包括 valid / incomplete / invalid 等状态。
+    # cycle_summary 每行代表一个循环，状态只分 valid / invalid。
     for _, row in result.iterrows():
         cycle_id = row["cycle_id"]
 
@@ -519,7 +587,7 @@ def _expected_row_count(row: pd.Series, interval_seconds: int) -> object:
     start = row.get("heating_start")
     end = row.get("defrost_end")
 
-    # incomplete/invalid 循环可能缺少明确边界，此时期望行数不可定义。
+    # 开放边界或 invalid 循环可能缺少明确边界，此时期望行数不可定义。
     if not isinstance(start, pd.Timestamp) or not isinstance(end, pd.Timestamp):
         return np.nan
 

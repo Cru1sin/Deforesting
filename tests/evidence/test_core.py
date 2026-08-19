@@ -7,6 +7,7 @@ import pytest
 
 from frost_analysis.evidence import EvidenceBundle, build_evidence, write_evidence
 from frost_analysis.evidence.contracts import (
+    CYCLE_ELIGIBILITY_COLUMNS,
     FEATURE_CYCLE_METRIC_COLUMNS,
     FUTURE_ASSOCIATION_COLUMNS,
     READINESS_SPLIT_COLUMNS,
@@ -114,6 +115,7 @@ def test_evidence_entry_points_accept_loader_contract_without_runtime_type_guard
 
 
 def test_contract_columns_end_with_status_and_include_degradation_support() -> None:
+    assert "analysis_duration_minutes" in CYCLE_ELIGIBILITY_COLUMNS
     assert FEATURE_CYCLE_METRIC_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]
     assert "degradation_support" in FUTURE_ASSOCIATION_COLUMNS
     assert TARGET_AUDIT_COLUMNS[-2:] == ["metric_status", "exclusion_reason"]

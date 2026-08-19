@@ -18,6 +18,8 @@ def settings(
     minimum_valid_pairs: int = 2,
     minimum_pair_coverage: float = 0.8,
     targets: tuple[str, ...] = ("heating_capacity", "cop"),
+    eligible_statuses: tuple[str, ...] = ("valid",),
+    minimum_cycle_minutes: float = 0.0,
 ) -> EvidenceSettings:
     return EvidenceSettings(
         targets=targets,
@@ -26,6 +28,8 @@ def settings(
         minimum_feature_coverage=minimum_feature_coverage,
         minimum_valid_pairs=minimum_valid_pairs,
         minimum_pair_coverage=minimum_pair_coverage,
+        eligible_statuses=eligible_statuses,
+        minimum_cycle_minutes=minimum_cycle_minutes,
     )
 
 
@@ -143,13 +147,19 @@ def write_dataset(
                 "experiment_date": experiment_date,
                 "status": status,
                 "boundaries": {
+                    "stable_heating_start": pd.to_datetime(frame["timestamp"])
+                    .min()
+                    .isoformat(),
                     "baseline_end": (
                         pd.to_datetime(frame["timestamp"]).min()
                         + pd.Timedelta(seconds=60)
                     ).isoformat(),
                     "defrost_start": (
                         pd.to_datetime(frame["timestamp"]).max() + pd.Timedelta(seconds=10)
-                    ).isoformat()
+                    ).isoformat(),
+                    "end_time": (
+                        pd.to_datetime(frame["timestamp"]).max() + pd.Timedelta(seconds=10)
+                    ).isoformat(),
                 },
                 "assets": {
                     "parquet": f"cycles/{cycle_name}.parquet",

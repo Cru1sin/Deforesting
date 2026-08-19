@@ -51,7 +51,6 @@ def _config(root: Path, raw: Path, *, sensor_globs: tuple[str, ...] = ("*.xls",)
             "stable_heating_seconds": 2,
         },
         process={"resample_interval_seconds": 10},
-        camera_roles={},
     )
 
 
@@ -330,6 +329,130 @@ def test_label_cycles_defines_progress_only_during_frost_development() -> None:
     assert labeled.loc[labeled["cycle_stage"] != "frost_development", "cycle_progress"].isna().all()
 
 
+def test_label_cycles_separates_frequency_drop_as_defrost_preparation() -> None:
+    timestamps = pd.date_range("2026-07-15 00:00:00", periods=11, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [
+                True,
+                True,
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+                True,
+                True,
+                False,
+            ],
+            "compressor_frequency_setpoint": [30, 30, 70, 70, 70, 70, 70, 55, 30, 30, 70],
+        }
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        {
+            **_short_cycle_settings(),
+            "defrost_preparation_setpoint_drop_hz": 10,
+            "defrost_preparation_lookback_seconds": 120,
+        },
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert cycle["defrost_preparation_start"] == timestamps[7]
+    assert labeled.loc[labeled["cycle_id"].eq("cycle_001"), "cycle_stage"].tolist() == [
+        "recovery",
+        "recovery",
+        "frost_development",
+        "frost_development",
+        "frost_development",
+        "defrost_preparation",
+        "defrost",
+        "defrost",
+    ]
+    assert pd.isna(labeled.loc[labeled["timestamp"].eq(timestamps[7]), "cycle_progress"].iloc[0])
+
+
+def test_label_cycles_does_not_invent_defrost_preparation_without_frequency_drop() -> None:
+    frame = _cycle_frame_with_mode(
+        [True, True, False, False, False, False, False, True, True, False, False]
+    )
+    frame["compressor_frequency_setpoint"] = 70
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        {
+            **_short_cycle_settings(),
+            "defrost_preparation_setpoint_drop_hz": 10,
+            "defrost_preparation_lookback_seconds": 120,
+        },
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
+    assert pd.isna(cycle["defrost_preparation_start"])
+    assert not labeled["cycle_stage"].eq("defrost_preparation").any()
+
+
+def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
+    from frost_analysis.cycles import find_defrost_preparation_start
+
+    defrost_start = pd.Timestamp("2026-07-15 00:01:00")
+    frame = pd.DataFrame(
+        {
+            "timestamp": [
+                defrost_start - pd.Timedelta(seconds=20),
+                defrost_start - pd.Timedelta(seconds=10),
+            ],
+            "compressor_frequency_setpoint": [70, 50],
+        }
+    )
+
+    assert find_defrost_preparation_start(
+        frame,
+        defrost_start - pd.Timedelta(minutes=10),
+        defrost_start,
+        {
+            "maximum_state_gap_seconds": 5,
+            "defrost_preparation_setpoint_drop_hz": 10,
+            "defrost_preparation_lookback_seconds": 120,
+        },
+    ) is None
+
+
+def test_defrost_preparation_uses_frequency_channels_own_sampling_interval() -> None:
+    from frost_analysis.cycles import find_defrost_preparation_start
+
+    defrost_start = pd.Timestamp("2026-07-15 00:01:00")
+    timestamps = pd.date_range(defrost_start - pd.Timedelta(seconds=50), periods=5, freq="10s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "compressor_frequency_setpoint": [70, 70, 70, 55, 30],
+        }
+    )
+
+    assert find_defrost_preparation_start(
+        frame,
+        defrost_start - pd.Timedelta(minutes=10),
+        defrost_start,
+        {
+            "maximum_state_gap_seconds": 5,
+            "defrost_preparation_setpoint_drop_hz": 10,
+            "defrost_preparation_lookback_seconds": 120,
+        },
+    ) == timestamps[3]
+
+
+
+
 def _cycle_frame_with_mode(
     states: list[object], modes: list[object] | None = None
 ) -> pd.DataFrame:
@@ -417,7 +540,7 @@ def test_cycle_summary_reports_each_defrost_duration_failure_reason(
         ),
         (
             [None, None, None, None, None, None, None, "2", "2", "3", "3"],
-            "incomplete",
+            "valid",
             "missing_operating_mode",
         ),
         (
@@ -467,6 +590,25 @@ def test_single_defrost_event_preserves_known_defrost_stage() -> None:
         "partial",
         "partial",
     ]
+
+
+def test_leading_partial_keeps_observed_defrost_end_at_next_cycle_start() -> None:
+    frame = _cycle_frame_with_mode(
+        [False, True, True, False, False, False, True, True, False]
+    )
+
+    _, summary = label_cycles(
+        frame,
+        "defrost_active",
+        _short_cycle_settings(),
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+    )
+
+    partial = summary.loc[summary["cycle_id"].eq("partial_001")].iloc[0]
+    assert partial["defrost_end"] == frame["timestamp"].iloc[3]
+    assert partial["cycle_status"] == "valid"
+    assert partial["cycle_status_reason"] == "outside_complete_cycle"
 
 
 def test_partial_cycle_uses_water_setpoint_and_defrost_to_label_known_stages() -> None:
@@ -549,7 +691,7 @@ def test_partial_cycle_without_setpoint_crossing_still_labels_defrost_boundary()
     assert summary.iloc[0]["defrost_start"] == timestamps[2]
 
 
-def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> None:
+def test_long_defrost_state_gap_is_not_filled_but_open_segment_remains_valid() -> None:
     timestamps = pd.to_datetime(
         [
             "2026-07-15 00:00:00",
@@ -580,10 +722,11 @@ def test_long_defrost_state_gap_is_not_filled_and_marks_cycle_incomplete() -> No
 
     assert labeled["defrost_active"].isna().any()
     assert not summary["cycle_id"].eq("cycle_001").any()
-    assert summary["cycle_status"].eq("incomplete").all()
+    assert summary["cycle_status"].eq("valid").all()
+    assert summary["cycle_status_reason"].eq("outside_complete_cycle").all()
 
 
-def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
+def test_long_gap_does_not_invalidate_cycles_with_recovered_boundaries() -> None:
     timestamps = pd.date_range("2026-07-15", periods=23, freq="s")
     states: list[object] = [
         True,
@@ -629,7 +772,9 @@ def test_long_gap_only_marks_the_intersecting_cycle_incomplete() -> None:
     )
 
     statuses = summary.set_index("cycle_id")["cycle_status"]
-    assert statuses["cycle_001"] == "incomplete"
+    reasons = summary.set_index("cycle_id")["cycle_status_reason"]
+    assert statuses["cycle_001"] == "valid"
+    assert reasons["cycle_001"] == "defrost_state_gap"
     assert statuses["cycle_002"] == "valid"
 
 
@@ -654,7 +799,7 @@ def test_short_nan_between_on_and_off_ends_at_explicit_off() -> None:
     assert events[0]["end"] == timestamps[2]
 
 
-def test_long_off_state_gap_keeps_cycle_but_marks_it_incomplete() -> None:
+def test_long_off_state_gap_keeps_recovered_cycle_valid_with_diagnostic() -> None:
     timestamps = pd.to_datetime(
         [
             "2026-07-15 00:00:00",
@@ -685,22 +830,21 @@ def test_long_off_state_gap_keeps_cycle_but_marks_it_incomplete() -> None:
 
     cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
     assert labeled["defrost_active"].isna().any()
-    assert cycle["cycle_status"] == "incomplete"
+    assert cycle["cycle_status"] == "valid"
     assert cycle["cycle_status_reason"] == "defrost_state_gap"
 
 
-def test_long_on_state_gap_is_not_merged_into_a_complete_event() -> None:
+def test_long_on_state_gap_keeps_one_uncertain_complete_event() -> None:
     timestamps = pd.date_range("2026-07-15", periods=5, freq="s")
     state = pd.Series([True, np.nan, np.nan, True, False], dtype="object")
     long_gaps = ((timestamps[0], timestamps[3]),)
 
     events = _defrost_runs(timestamps.to_series(index=range(5)), state, long_gaps)
 
-    assert len(events) == 2
-    assert events[0]["end"] is None
+    assert len(events) == 1
+    assert events[0]["start"] == timestamps[0]
+    assert events[0]["end"] == timestamps[4]
     assert events[0]["boundary_uncertain"] is True
-    assert events[1]["start"] == timestamps[3]
-    assert events[1]["boundary_uncertain"] is True
 
 
 def test_cycle_pairs_without_heating_start_are_skipped_and_numbered_continuously() -> None:
@@ -740,7 +884,7 @@ def test_data_starting_on_does_not_create_a_phantom_cycle() -> None:
     assert labeled["cycle_id"].eq("partial_001").all()
 
 
-def test_data_ending_on_keeps_only_an_incomplete_cycle_with_data() -> None:
+def test_data_ending_on_keeps_only_a_valid_open_cycle_with_data() -> None:
     frame = _cycle_frame_with_mode(
         [False, False, True, True, False, False, False, True, True]
     )
@@ -754,7 +898,7 @@ def test_data_ending_on_keeps_only_an_incomplete_cycle_with_data() -> None:
     )
 
     formal = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
-    assert formal["cycle_status"] == "incomplete"
+    assert formal["cycle_status"] == "valid"
     assert formal["cycle_status_reason"] == "defrost_end_not_observed"
     assert labeled.loc[labeled["cycle_id"].eq("cycle_001")].shape[0] > 0
     assert not summary["cycle_id"].eq("cycle_002").any()
@@ -775,7 +919,7 @@ def test_stable_start_uses_ts_minus_two_before_looser_thresholds() -> None:
     assert stable == start + pd.Timedelta(seconds=3)
 
 
-def test_stable_start_falls_back_to_ts_minus_three_only_if_minus_two_is_absent() -> None:
+def test_stable_start_does_not_fall_back_below_ts_minus_two() -> None:
     start = pd.Timestamp("2026-07-15 00:00:00")
     frame = pd.DataFrame(
         {
@@ -787,7 +931,70 @@ def test_stable_start_falls_back_to_ts_minus_three_only_if_minus_two_is_absent()
 
     stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=4), {})
 
-    assert stable == start + pd.Timedelta(seconds=2)
+    assert stable is None
+
+
+def test_stable_start_uses_earlier_slope_knee_or_ts_minus_two() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    timestamps = pd.date_range(start, periods=181, freq="10s")
+    minutes = np.arange(len(timestamps)) / 6.0
+    water_out = np.where(
+        minutes <= 5.0,
+        25.0 + 3.0 * minutes,
+        40.0 + 0.2 * (minutes - 5.0),
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "water_out_temperature": water_out,
+            "water_temperature_setpoint": [70.0] * len(timestamps),
+        }
+    )
+
+    stable = find_stable_heating_start(
+        frame,
+        start,
+        timestamps[-1] + pd.Timedelta(seconds=10),
+        {},
+    )
+
+    assert stable is not None
+    assert abs((stable - (start + pd.Timedelta(minutes=5))).total_seconds()) <= 60
+
+
+def test_stable_start_compares_threshold_with_knee_from_full_curve() -> None:
+    start = pd.Timestamp("2026-07-15 00:00:00")
+    timestamps = pd.date_range(start, periods=181, freq="10s")
+    minutes = np.arange(len(timestamps)) / 6.0
+    water_out = np.piecewise(
+        minutes,
+        [minutes <= 5.0, (minutes > 5.0) & (minutes <= 13.0), minutes > 13.0],
+        [
+            lambda value: 25.0 + 2.0 * value,
+            lambda value: 35.0 + 1.5 * (value - 5.0),
+            lambda value: 47.0 + 0.08 * (value - 13.0),
+        ],
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "water_out_temperature": water_out,
+            "water_temperature_setpoint": [44.5] * len(timestamps),
+        }
+    )
+
+    stable = find_stable_heating_start(
+        frame,
+        start,
+        timestamps[-1] + pd.Timedelta(seconds=10),
+        {},
+    )
+
+    threshold = frame.loc[
+        frame["water_out_temperature"].ge(frame["water_temperature_setpoint"] - 2.0),
+        "timestamp",
+    ].iloc[0]
+    assert stable == threshold
 
 
 def test_stable_start_is_missing_when_all_priority_thresholds_have_no_observation() -> None:
@@ -832,7 +1039,11 @@ def test_short_state_gap_with_irregular_timestamps_does_not_split_defrost_event(
     reason="0715 raw data is not available",
 )
 def test_0715_raw_data_has_four_defrost_events_and_three_formal_cycles() -> None:
-    config = load_config(ROOT / "configs" / "0715.yaml")
+    config = load_config(
+        ROOT / "configs/config.yaml",
+        experiment_date="2026-07-15",
+        input_dir=ROOT / "data/0715",
+    )
     channels = load_channels(config.channels_path)
     prepared, summary = prepare(config, channels)
 
@@ -919,14 +1130,13 @@ def test_match_images_does_not_reuse_one_image() -> None:
         ["2026-07-15 00:00:00", "2026-07-15 00:00:01", "2026-07-15 00:00:02"]
     )
     image_files = [
-        Path("192.168.1.1_1/20260715000000100.jpg"),
-        Path("192.168.1.1_1/20260715000001000.jpg"),
+        Path("front_center/20260715000000100.jpg"),
+        Path("front_center/20260715000001000.jpg"),
     ]
 
     matched = match_images(
         timestamps,
         image_files,
-        camera_roles={"192.168.1.1_1": "front_center"},
         tolerance_seconds=2,
     )
 
@@ -938,12 +1148,11 @@ def test_match_images_assigns_image_to_closest_sensor_timestamp() -> None:
     timestamps = pd.to_datetime(
         ["2026-07-15 00:00:00", "2026-07-15 00:00:01"]
     )
-    image_files = [Path("192.168.1.1_1/20260715000000900.jpg")]
+    image_files = [Path("front_center/20260715000000900.jpg")]
 
     matched = match_images(
         timestamps,
         image_files,
-        camera_roles={"192.168.1.1_1": "front_center"},
         tolerance_seconds=2,
     )
 
@@ -957,17 +1166,13 @@ def test_match_images_assigns_image_to_closest_sensor_timestamp() -> None:
 def test_match_images_keeps_same_time_images_for_separate_roles() -> None:
     timestamps = pd.to_datetime(["2026-07-15 00:00:00"])
     image_files = [
-        Path("192.168.1.1_1/20260715000000000.jpg"),
-        Path("192.168.1.2_1/20260715000000000.jpg"),
+        Path("front_center/20260715000000000.jpg"),
+        Path("left_near/20260715000000000.jpg"),
     ]
 
     matched = match_images(
         timestamps,
         image_files,
-        camera_roles={
-            "192.168.1.1_1": "front_center",
-            "192.168.1.2_1": "left_near",
-        },
         tolerance_seconds=2,
     )
 
@@ -1039,6 +1244,113 @@ def test_partial_regions_receive_separate_cycle_ids() -> None:
     partial_ids = sorted(labeled.loc[labeled["cycle_stage"].eq("partial"), "cycle_id"].unique())
     assert partial_ids == ["partial_001", "partial_002"]
     assert summary["cycle_id"].isin(partial_ids).sum() == 2
+    assert set(summary["cycle_status"]) <= {"valid", "invalid"}
+
+
+def test_shutdown_gap_splits_cycle_but_sensor_disconnect_does_not() -> None:
+    timestamps = pd.to_datetime(
+        [
+            "2026-07-15 00:00:00",
+            "2026-07-15 00:00:01",
+            "2026-07-15 00:05:00",
+            "2026-07-15 00:05:01",
+            "2026-07-15 00:05:02",
+            "2026-07-15 00:05:03",
+        ]
+    )
+    settings = {
+        "maximum_state_gap_seconds": 5,
+        "debounce_seconds": 0.5,
+        "minimum_defrost_seconds": 1,
+        "maximum_defrost_seconds": 10,
+        "minimum_heating_seconds": 1,
+        "maximum_heating_seconds": 1000,
+        "stable_heating_seconds": 0,
+        "operating_mode_channel": "operating_mode",
+        "required_operating_mode": "3",
+    }
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "defrost_active": [False, False, False, False, True, False],
+            "operating_mode": ["3", "3", "0", "3", "3", "3"],
+        }
+    )
+
+    labeled, summary = label_cycles(
+        frame,
+        "defrost_active",
+        settings,
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+        shutdown_gap_seconds=60,
+    )
+
+    assert summary["cycle_id"].tolist() == ["partial_001", "partial_002"]
+    assert summary["cycle_status"].tolist() == ["invalid", "valid"]
+    assert summary["cycle_status_reason"].tolist() == [
+        "shutdown_during_sensor_gap",
+        "outside_complete_cycle",
+    ]
+    assert labeled.groupby("cycle_id")["cycle_status"].first().to_dict() == {
+        "partial_001": "invalid",
+        "partial_002": "valid",
+    }
+
+    frame["operating_mode"] = "3"
+    _, uninterrupted = label_cycles(
+        frame,
+        "defrost_active",
+        settings,
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+        shutdown_gap_seconds=60,
+    )
+
+    assert uninterrupted["cycle_id"].tolist() == ["partial_001"]
+    assert uninterrupted["cycle_status"].tolist() == ["valid"]
+
+
+def test_shutdown_gap_breaks_cycle_between_two_defrost_events() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-07-15 00:00:00",
+                    "2026-07-15 00:00:01",
+                    "2026-07-15 00:00:02",
+                    "2026-07-15 00:05:00",
+                    "2026-07-15 00:05:01",
+                    "2026-07-15 00:05:02",
+                    "2026-07-15 00:05:03",
+                ]
+            ),
+            "defrost_active": [True, False, False, False, False, True, False],
+            "operating_mode": ["3", "3", "3", "0", "3", "3", "3"],
+        }
+    )
+
+    _, summary = label_cycles(
+        frame,
+        "defrost_active",
+        {
+            "maximum_state_gap_seconds": 5,
+            "debounce_seconds": 0.5,
+            "minimum_defrost_seconds": 1,
+            "maximum_defrost_seconds": 10,
+            "minimum_heating_seconds": 1,
+            "maximum_heating_seconds": 1000,
+            "stable_heating_seconds": 0,
+            "operating_mode_channel": "operating_mode",
+            "required_operating_mode": "3",
+        },
+        experiment_id="exp_test",
+        experiment_date="2026-07-15",
+        shutdown_gap_seconds=60,
+    )
+
+    assert summary["cycle_id"].tolist() == ["partial_001", "partial_002"]
+    assert summary["cycle_status"].tolist() == ["invalid", "valid"]
 
 
 def test_prepare_enforces_configured_valid_range(tmp_path: Path) -> None:
@@ -1134,36 +1446,77 @@ def test_observed_fraction_uses_source_discovery_denominator() -> None:
     assert _observed_fraction(group, ["valid", "invalid"], {"valid"}) == 1.0
 
 
-def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:
-    path = tmp_path / "config.yaml"
-    path.write_text(
-        """
-schema_version: 2
-defaults_path: defaults.yaml
-experiment_id: exp_test
-experiment_date: "2026-02-31"
-input_dir: data/0715
-expected_sensor_interval_seconds: 1
-camera_roles: {}
-""",
-        encoding="utf-8",
-    )
-    (tmp_path / "defaults.yaml").write_text(
-        """
-channels_path: channels.yaml
-input_format:
-  sensor_globs: ["*.xls"]
-  image_extensions: [".jpg"]
-  timestamp_column: 时间
-  edf:
-    pair_tolerance_seconds: 1.0
-image_match_tolerance_seconds: 2
-cycles: {}
-process: {}
-""",
-        encoding="utf-8",
-    )
-    (tmp_path / "pyproject.toml").write_text("[build-system]\n", encoding="utf-8")
+def test_sensor_sample_may_end_midway_through_gb18030_character(tmp_path: Path) -> None:
+    from frost_analysis.prepare import _read_sensor_table
 
+    path = tmp_path / "sample参数1.xls"
+    prefix = "时间\t值\n2026-07-14 10:00:00\t".encode("gb18030")
+    padding = b"1" * (131_071 - len(prefix))
+    path.write_bytes(prefix + padding + "中\n".encode("gb18030"))
+
+    result = _read_sensor_table(path, "时间")
+
+    assert len(result) == 1
+
+
+def test_prepare_original_preserves_all_raw_points_and_duplicate_rows(tmp_path: Path) -> None:
+    raw = tmp_path / "data" / "0715"
+    raw.mkdir(parents=True)
+    (raw / "sample参数1.xls").write_text(
+        "时间\tdeclared\tundeclared_point\n"
+        "2026-07-15 00:00:00\t1\ta\n"
+        "2026-07-15 00:00:00\t2\tb\n"
+        "2026-07-15 00:00:01\t3\tc\n",
+        encoding="utf-8",
+    )
+    (raw / "sample参数2.xls").write_text(
+        "时间\tother_point\n"
+        "2026-07-15 00:00:00\tx\n"
+        "2026-07-15 00:00:01\ty\n",
+        encoding="utf-8",
+    )
+    _write_edf(
+        raw / "environment.edf",
+        [
+            ("0", "2026-07-15T00:00:00+08:00", "20", "60", "", ""),
+            ("1", "2026-07-15T00:00:00.200000+08:00", "", "", "22", "62"),
+            ("2", "2026-07-15T00:00:00.800000+08:00", "24", "64", "", ""),
+            ("3", "2026-07-15T00:00:01+08:00", "", "", "26", "66"),
+        ],
+    )
+    prepared = pd.DataFrame(
+        {
+            "experiment_id": ["exp_test", "exp_test"],
+            "experiment_date": ["2026-07-15", "2026-07-15"],
+            "timestamp": pd.to_datetime(
+                ["2026-07-15 00:00:00", "2026-07-15 00:00:01"]
+            ),
+            "cycle_id": ["cycle_001", "cycle_001"],
+            "cycle_stage": ["frost_development", "frost_development"],
+            "cycle_status": ["valid", "valid"],
+            "cycle_status_reason": ["", ""],
+            "signal": [1.0, 3.0],
+        }
+    )
+
+    result = prepare_module.prepare_original(
+        _config(tmp_path, raw, sensor_globs=("*.xls", "*.edf")), prepared
+    )
+
+    assert len(result) == 3
+    assert result["p1__declared"].tolist() == [1.0, 2.0, 3.0]
+    assert result["p1__undeclared_point"].tolist() == ["a", "b", "c"]
+    assert result["p2__other_point"].iloc[[0, 2]].tolist() == ["x", "y"]
+    assert pd.isna(result.loc[1, "p2__other_point"])
+    assert result["signal"].tolist() == [1.0, 1.0, 3.0]
+    assert result["edf__sensor_1_temperature"].tolist() == [20.0, 20.0, 24.0]
+    assert result["edf__sensor_2_humidity"].tolist() == [62.0, 62.0, 66.0]
+
+
+def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="ISO"):
-        load_config(path)
+        load_config(
+            ROOT / "configs/config.yaml",
+            experiment_date="2026-02-31",
+            input_dir=tmp_path,
+        )

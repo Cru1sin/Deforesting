@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
@@ -39,6 +38,10 @@ class CycleSettings:
 
     # “stable”是固定阶段划分假设，不代表代码通过数据检测到系统已经稳定。
     stable_heating_seconds: float = 180.0
+
+    # 除霜信号前，压机频率出现该幅度的单步下降即视为除霜准备开始。
+    defrost_preparation_setpoint_drop_hz: float = 10.0
+    defrost_preparation_lookback_seconds: float = 120.0
 
     operating_mode_channel: str = ""
 
@@ -93,6 +96,18 @@ class CycleSettings:
                     cls.stable_heating_seconds,
                 )
             ),
+            defrost_preparation_setpoint_drop_hz=float(
+                mapping.get(
+                    "defrost_preparation_setpoint_drop_hz",
+                    cls.defrost_preparation_setpoint_drop_hz,
+                )
+            ),
+            defrost_preparation_lookback_seconds=float(
+                mapping.get(
+                    "defrost_preparation_lookback_seconds",
+                    cls.defrost_preparation_lookback_seconds,
+                )
+            ),
             operating_mode_channel=str(
                 mapping.get(
                     "operating_mode_channel",
@@ -128,6 +143,14 @@ class CycleSettings:
         _validate_positive(
             "maximum_heating_seconds",
             result.maximum_heating_seconds,
+        )
+        _validate_positive(
+            "defrost_preparation_setpoint_drop_hz",
+            result.defrost_preparation_setpoint_drop_hz,
+        )
+        _validate_positive(
+            "defrost_preparation_lookback_seconds",
+            result.defrost_preparation_lookback_seconds,
         )
 
         _validate_nonnegative(
@@ -373,10 +396,6 @@ class Config:
     # 重采样、bounded 缺失处理、派生量和 Baseline 规则。
     process: ProcessSettings
 
-    # 原始相机目录 ID 到物理角色的映射。
-    # 例如 {"camera_01": "front"}。
-    camera_roles: dict[str, str] = field(default_factory=dict)
-
     def __post_init__(self) -> None:
         """兼容测试或内部代码直接传入 Mapping，并检查跨字段约束。
 
@@ -424,265 +443,69 @@ class Config:
 
 
 # =============================================================================
-# 6. schema v2 配置加载入口
+# 6. Shared configuration loader
 # =============================================================================
 
 
-def load_config(path: Path) -> Config:
-    """读取一个 schema v2 日期配置，并解析其共享 defaults。
-
-    配置解析顺序：
-    日期实验事实
-        → 共享 defaults
-        → 日期 overrides
-        → 嵌套结构和数值校验
-        → 类型化 Config
-
-    日期 YAML 只保存日期事实和少量例外；
-    defaults.yaml 保存跨日期共享的输入格式和科学处理规则。
-    """
-
-    # 将调用者传入的相对路径立即规范化为绝对路径。
+def load_config(
+    path: Path, *, experiment_date: str, input_dir: Path
+) -> Config:
+    """Build one experiment from the shared channel and processing config."""
     config_path = path.resolve()
-
-    # 读取日期 YAML，并确保其顶层是 mapping。
-    loaded = _load_yaml_mapping(
-        config_path,
-        "experiment config",
-    )
-
-    # schema v2 日期文件只允许这些顶层键。
-    # 未知键通常意味着拼写错误或旧 schema 残留，因此立即拒绝。
-    _validate_keys(
-        loaded,
-        {
-            "schema_version",
-            "defaults_path",
-            "experiment_id",
-            "experiment_date",
-            "input_dir",
-            "expected_sensor_interval_seconds",
-            "camera_roles",
-            "overrides",
-        },
-        "experiment config",
-    )
-
-    # 最终代码只支持 schema v2，不保留 legacy loader。
-    if loaded.get("schema_version") != 2:
-        raise ValueError(
-            "only config schema_version 2 is supported"
-        )
-
-    # overrides 是可选项；其余字段是每个日期文件必须明确提供的实验事实。
+    loaded = _load_yaml_mapping(config_path, "config")
     required = {
-        "schema_version",
-        "defaults_path",
-        "experiment_id",
-        "experiment_date",
-        "input_dir",
-        "expected_sensor_interval_seconds",
-        "camera_roles",
-    }
-    missing = sorted(required - set(loaded))
-    if missing:
-        raise ValueError(
-            f"config missing keys: {missing}"
-        )
-
-    # defaults_path 相对于“日期配置文件所在目录”解析，
-    # 而不是相对于当前工作目录或仓库根目录。
-    defaults_path = (
-        config_path.parent
-        / str(loaded["defaults_path"])
-    ).resolve()
-
-    # 读取共享 defaults.yaml。
-    defaults = _load_yaml_mapping(
-        defaults_path,
-        "defaults",
-    )
-
-    # defaults.yaml 只允许保存跨日期共享的事实和规则。
-    _validate_keys(
-        defaults,
-        {
-            "channels_path",
-            "input_format",
-            "image_match_tolerance_seconds",
-            "cycles",
-            "process",
-        },
-        "defaults",
-    )
-
-    # 日期文件可选地提供 overrides；没有时使用空 mapping。
-    overrides = loaded.get("overrides", {})
-
-    # overrides 必须保持 YAML mapping 结构。
-    if not isinstance(overrides, Mapping):
-        raise ValueError(
-            "overrides must be a YAML mapping"
-        )
-
-    # 将日期 overrides 递归覆盖到 defaults。
-    # 只能替换 defaults 中已存在的键，不能通过 overrides 创建新参数。
-    resolved = _merge_existing_keys(
-        defaults,
-        overrides,
-    )
-
-    # input_format 是共享 defaults 中的一个嵌套 mapping。
-    input_format = _mapping(
-        resolved["input_format"],
+        "channels",
         "input_format",
-    )
+        "expected_sensor_interval_seconds",
+        "image_match_tolerance_seconds",
+        "cycles",
+        "process",
+    }
+    _validate_keys(loaded, required, "config")
+    if missing := sorted(required - loaded.keys()):
+        raise ValueError(f"config missing keys: {missing}")
 
-    # 输入格式目前固定由三项组成。
+    # 日期和输入目录属于本次导入，不属于所有日期共用的处理规则。
+    if not _is_iso_date(experiment_date):
+        raise ValueError("experiment_date must use ISO YYYY-MM-DD format")
+
+    input_format = _mapping(loaded["input_format"], "input_format")
     _validate_keys(
         input_format,
-        {
-            "sensor_globs",
-            "image_extensions",
-            "timestamp_column",
-            "edf",
-        },
+        {"sensor_globs", "image_extensions", "timestamp_column", "edf"},
         "input_format",
     )
-
-    if "edf" not in input_format:
-        raise ValueError("input_format missing keys: ['edf']")
     edf_input = _mapping(input_format["edf"], "input_format.edf")
-    _validate_keys(
-        edf_input,
-        {"pair_tolerance_seconds"},
-        "input_format.edf",
-    )
-    if "pair_tolerance_seconds" not in edf_input:
-        raise ValueError("input_format.edf missing keys: ['pair_tolerance_seconds']")
+    _validate_keys(edf_input, {"pair_tolerance_seconds"}, "input_format.edf")
+
+    expected_interval = int(loaded["expected_sensor_interval_seconds"])
+    image_tolerance = float(loaded["image_match_tolerance_seconds"])
     edf_pair_tolerance = float(edf_input["pair_tolerance_seconds"])
-    # 日期值统一转为字符串后，再严格检查 ISO 格式。
-    experiment_date = str(
-        loaded["experiment_date"]
-    )
-    if not _is_iso_date(experiment_date):
-        raise ValueError(
-            "experiment_date must use ISO YYYY-MM-DD format"
-        )
-
-    # 从日期配置向父目录逐级寻找 pyproject.toml，
-    # 以此确定仓库根目录，而不是依赖命令执行时的 cwd。
-    project_root = _find_project_root(config_path)
-
-    # 将共享 defaults + 日期 overrides 中的 process 规则转换为类型化对象。
-    process = ProcessSettings.from_mapping(
-        _mapping(
-            resolved["process"],
-            "process",
-        )
-    )
-
-    # 原始采样间隔是日期实验事实，因此从日期 YAML 读取。
-    expected_interval = int(
-        loaded["expected_sensor_interval_seconds"]
-    )
-
-    # 图片匹配容差属于共享处理规则，但可由日期 overrides 覆盖。
-    image_tolerance = float(
-        resolved["image_match_tolerance_seconds"]
-    )
-
-    # 原始采样间隔必须严格大于 0。
-    _validate_positive(
-        "expected_sensor_interval_seconds",
-        expected_interval,
-    )
-
-    # 重采样间隔必须是原始采样间隔的整数倍。
-    # 例如 1 秒原始采样可聚合为 10 秒；3 秒不能完整划入 10 秒期望点数。
-    if (
-        process.resample_interval_seconds
-        % expected_interval
-        != 0
-    ):
-        raise ValueError(
-            "resample_interval_seconds must be divisible by "
-            "expected_sensor_interval_seconds"
-        )
-
-    # 图片匹配容差可以为 0，但不能为负数。
-    _validate_nonnegative(
-        "image_match_tolerance_seconds",
-        image_tolerance,
-    )
-    _validate_positive(
-        "edf_pair_tolerance_seconds",
-        edf_pair_tolerance,
-    )
-
-    # 时间戳列名不能是空字符串或纯空白。
+    _validate_positive("expected_sensor_interval_seconds", expected_interval)
+    _validate_nonnegative("image_match_tolerance_seconds", image_tolerance)
+    _validate_positive("edf_pair_tolerance_seconds", edf_pair_tolerance)
     if not str(input_format["timestamp_column"]).strip():
-        raise ValueError(
-            "timestamp_column must not be empty"
-        )
+        raise ValueError("timestamp_column must not be empty")
 
-    # 验证并标准化日期文件中的相机 ID → 物理角色映射。
-    camera_roles = _camera_roles(
-        loaded["camera_roles"]
-    )
-
-    # 构造一次运行唯一使用的最终 Config。
     return Config(
-        project_root=project_root,
-        experiment_id=str(
-            loaded["experiment_id"]
-        ),
+        project_root=_find_project_root(config_path),
+        experiment_id=f"exp_{experiment_date.replace('-', '')}",
         experiment_date=experiment_date,
-
-        # input_dir 相对于仓库根目录解析。
-        input_dir=_resolve_path(
-            project_root,
-            loaded["input_dir"],
-        ),
-
-        # channels_path 相对于 defaults.yaml 所在目录解析。
-        channels_path=_resolve_path(
-            defaults_path.parent,
-            resolved["channels_path"],
-        ),
-
-        # 将 YAML list 转为不可变 tuple[str, ...]。
-        sensor_globs=_tuple_strings(
-            input_format["sensor_globs"],
-            "sensor_globs",
-        ),
-
-        # 同时将扩展名规范化为小写且带前导点。
-        image_extensions=_image_extensions(
-            input_format["image_extensions"]
-        ),
-
-        timestamp_column=str(
-            input_format["timestamp_column"]
-        ),
+        input_dir=Path(input_dir).resolve(),
+        channels_path=config_path,
+        sensor_globs=_tuple_strings(input_format["sensor_globs"], "sensor_globs"),
+        image_extensions=_image_extensions(input_format["image_extensions"]),
+        timestamp_column=str(input_format["timestamp_column"]),
         expected_sensor_interval_seconds=expected_interval,
         image_match_tolerance_seconds=image_tolerance,
         edf_pair_tolerance_seconds=edf_pair_tolerance,
-
-        # cycles 同样使用共享 defaults + 日期 overrides 的最终结果。
-        cycles=CycleSettings.from_mapping(
-            _mapping(
-                resolved["cycles"],
-                "cycles",
-            )
-        ),
-        process=process,
-        camera_roles=camera_roles,
+        cycles=CycleSettings.from_mapping(_mapping(loaded["cycles"], "cycles")),
+        process=ProcessSettings.from_mapping(_mapping(loaded["process"], "process")),
     )
 
 
 # =============================================================================
-# 6. 路径、YAML、键名和合并辅助函数
+# 7. YAML and validation helpers
 # =============================================================================
 
 
@@ -710,21 +533,6 @@ def find_project_root(config_path: Path) -> Path | None:
         if (parent / "pyproject.toml").is_file():
             return parent
     return None
-
-
-def _resolve_path(root: Path, value: Any) -> Path:
-    """将配置路径规范化为绝对路径。
-
-    若 value 已经是绝对路径，直接 resolve；
-    否则将其相对于调用者指定的 root 解析。
-    """
-
-    path = Path(str(value))
-    return (
-        path.resolve()
-        if path.is_absolute()
-        else (root / path).resolve()
-    )
 
 
 def _load_yaml_mapping(
@@ -784,113 +592,6 @@ def _validate_dataclass_keys(
         {item.name for item in fields(cls)},
         name,
     )
-
-
-def _merge_existing_keys(
-    base: Mapping[str, Any],
-    overrides: Mapping[str, Any],
-    prefix: str = "",
-) -> dict[str, Any]:
-    """递归覆盖 defaults 中已经存在的键。
-
-    规则：
-    1. overrides 不允许新增 defaults 中不存在的键；
-    2. mapping 只能被 mapping 覆盖，不能被标量替换，反之亦然；
-    3. list/tuple 等非 mapping 值整体替换，不执行追加或逐项合并；
-    4. 使用深拷贝，避免修改调用者传入的 defaults 或 overrides。
-    """
-
-    # 先深拷贝 base，确保后续递归写入不污染原始 defaults。
-    result = copy.deepcopy(dict(base))
-
-    for key, value in overrides.items():
-        # prefix 用于产生完整错误路径，例如 process.baseline.window_minutes。
-        name = (
-            f"{prefix}.{key}"
-            if prefix
-            else str(key)
-        )
-
-        # overrides 只能覆盖已经存在的正式配置键。
-        if key not in result:
-            raise ValueError(
-                f"unknown override key: {name}"
-            )
-
-        existing = result[key]
-
-        # 两侧都是 mapping 时递归合并其中已有键。
-        if (
-            isinstance(existing, Mapping)
-            and isinstance(value, Mapping)
-        ):
-            result[key] = _merge_existing_keys(
-                existing,
-                value,
-                name,
-            )
-
-        # 一侧是 mapping、另一侧不是，说明用户改变了配置结构。
-        elif (
-            isinstance(existing, Mapping)
-            != isinstance(value, Mapping)
-        ):
-            raise ValueError(
-                "override mapping shape does not match: "
-                f"{name}"
-            )
-
-        # 标量、字符串、列表和 tuple 等值都按整体替换处理。
-        else:
-            result[key] = copy.deepcopy(value)
-
-    return result
-
-
-def _camera_roles(value: Any) -> dict[str, str]:
-    """验证并标准化 camera ID → physical role 映射。"""
-
-    # camera_roles 必须是 mapping。
-    roles = _mapping(value, "camera_roles")
-
-    # 将 camera ID 和 role 都统一转成字符串。
-    result = {
-        str(camera): str(role)
-        for camera, role in roles.items()
-    }
-
-    # 不允许空 camera ID 或空物理角色。
-    if any(
-        not camera.strip() or not role.strip()
-        for camera, role in result.items()
-    ):
-        raise ValueError(
-            "camera_roles contains an empty camera ID or role"
-        )
-
-    # 当前下游按 role 生成 image_<role>_* 三列，
-    # 因此一个 role 只能由一个 camera ID 提供，避免列语义冲突。
-    if len(result.values()) != len(set(result.values())):
-        raise ValueError(
-            "two camera IDs cannot map to the same role"
-        )
-
-    return result
-
-
-def _relative_path(path: Path, root: Path) -> str:
-    """尽可能返回 path 相对于 root 的 POSIX 路径。"""
-
-    try:
-        # 仓库内部路径写成相对路径，使有效配置不依赖机器绝对目录。
-        return (
-            path.resolve()
-            .relative_to(root.resolve())
-            .as_posix()
-        )
-    except ValueError:
-        # path 位于 root 外部时无法相对化，保留规范化绝对路径。
-        return path.resolve().as_posix()
 
 
 def _tuple_strings(

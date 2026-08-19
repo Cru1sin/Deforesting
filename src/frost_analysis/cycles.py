@@ -8,9 +8,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-_STAGES = {"recovery", "frost_development", "defrost", "partial"}
-_STATUSES = {"valid", "incomplete", "invalid"}
-_RECOVERY_THRESHOLD_OFFSETS = (2.0, 3.0, 4.0)
+from .recovery_knee import find_global_knee
+
+_STAGES = {
+    "recovery",
+    "frost_development",
+    "defrost_preparation",
+    "defrost",
+    "partial",
+}
+_STATUSES = {"valid", "invalid"}
 
 
 def label_cycles(
@@ -20,6 +27,7 @@ def label_cycles(
     *,
     experiment_id: str,
     experiment_date: str,
+    shutdown_gap_seconds: float = 60,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Assign cycle boundaries without interpreting unknown as OFF."""
     if not {"timestamp", defrost_column} <= set(frame.columns):
@@ -34,6 +42,7 @@ def label_cycles(
     debounced = _debounce_state(
         labeled["timestamp"], filled_state, _setting(settings, "debounce_seconds", 20)
     )
+    shutdown_gaps = _shutdown_gaps(labeled, settings, shutdown_gap_seconds)
     events = _defrost_runs(labeled["timestamp"], debounced, long_gaps)
     cycles, cycle_ranges = _build_cycles(
         events,
@@ -42,6 +51,7 @@ def label_cycles(
         labeled,
         experiment_id=experiment_id,
         experiment_date=experiment_date,
+        shutdown_gaps=shutdown_gaps,
     )
     labeled = _assign_cycle_ranges(labeled, cycle_ranges)
 
@@ -52,6 +62,7 @@ def label_cycles(
         experiment_date,
         defrost_column=defrost_column,
         settings=settings,
+        shutdown_gaps=shutdown_gaps,
     )
     _add_cycle_coordinates(labeled, cycles)
     labeled["cycle_stage"] = labeled["cycle_stage"].astype("string")
@@ -68,6 +79,7 @@ def _build_cycles(
     *,
     experiment_id: str,
     experiment_date: str,
+    shutdown_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...] = (),
 ) -> tuple[
     list[dict[str, object]],
     list[tuple[dict[str, object], pd.Timestamp, pd.Timestamp | None]],
@@ -78,6 +90,11 @@ def _build_cycles(
     for index in range(len(events) - 1):
         heating_start = events[index]["end"]
         if not isinstance(heating_start, pd.Timestamp):
+            continue
+        following_end = events[index + 1]["end"] or events[index + 1]["start"]
+        if isinstance(following_end, pd.Timestamp) and _interval_intersects(
+            heating_start, following_end, shutdown_gaps
+        ):
             continue
         row = _make_cycle_record(
             events[index],
@@ -125,8 +142,11 @@ def _make_cycle_record(
         defrost_start,
         settings,
     )
+    preparation_start = find_defrost_preparation_start(
+        labeled, stable_start, defrost_start, settings
+    )
     if stable_start is None and status == "valid":
-        status, reason = "incomplete", "recovery_end_not_observed"
+        reason = reason or "recovery_end_not_observed"
     if (
         stable_start is not None
         and isinstance(defrost_start, pd.Timestamp)
@@ -134,12 +154,16 @@ def _make_cycle_record(
     ):
         status, reason = "invalid", "invalid_cycle_boundaries"
     if status == "valid":
-        status, reason = _operating_mode_status(
+        mode_status, mode_reason = _operating_mode_status(
             labeled,
             heating_start,
             defrost_start,
             settings,
         )
+        if mode_status == "invalid":
+            status, reason = mode_status, mode_reason
+        elif not reason:
+            reason = mode_reason
     return _cycle_row(
         experiment_id,
         experiment_date,
@@ -148,6 +172,7 @@ def _make_cycle_record(
         reason,
         heating_start,
         stable_start,
+        preparation_start,
         defrost_start,
         defrost_end,
         previous["duration"],
@@ -165,23 +190,30 @@ def _cycle_status(
     settings: Mapping[str, Any] | Any,
 ) -> tuple[str, str]:
     if heating_start is None or defrost_start is None:
-        return "incomplete", "defrost_state_gap"
-    if defrost_end is None:
-        return "incomplete", "defrost_end_not_observed"
-    if defrost_start <= heating_start or defrost_end <= defrost_start:
+        return "valid", "defrost_state_gap"
+    if defrost_start <= heating_start:
         return "invalid", "invalid_cycle_boundaries"
-    if following.get("boundary_uncertain"):
-        return "incomplete", "defrost_state_gap"
-    if _interval_intersects(heating_start, defrost_end, long_gaps):
-        return "incomplete", "defrost_state_gap"
-    if not _duration_in_range(
-        previous["duration"],
+    if defrost_end is not None and defrost_end <= defrost_start:
+        return "invalid", "invalid_cycle_boundaries"
+
+    reason = ""
+    if defrost_end is None:
+        reason = "defrost_end_not_observed"
+    elif following.get("boundary_uncertain") or _interval_intersects(
+        heating_start, defrost_end, long_gaps
+    ):
+        reason = "defrost_state_gap"
+
+    preceding_duration = previous["duration"]
+    if preceding_duration is not None and not _duration_in_range(
+        preceding_duration,
         _setting(settings, "minimum_defrost_seconds", 60),
         _setting(settings, "maximum_defrost_seconds", 1200),
     ):
         return "invalid", "preceding_defrost_duration_out_of_range"
-    if not _duration_in_range(
-        following["duration"],
+    terminal_duration = following["duration"]
+    if terminal_duration is not None and not _duration_in_range(
+        terminal_duration,
         _setting(settings, "minimum_defrost_seconds", 60),
         _setting(settings, "maximum_defrost_seconds", 1200),
     ):
@@ -193,7 +225,7 @@ def _cycle_status(
         _setting(settings, "maximum_heating_seconds", 21600),
     ):
         return "invalid", "heating_duration_out_of_range"
-    return "valid", ""
+    return "valid", reason
 
 
 def resolve_stable_heating_start(
@@ -249,13 +281,62 @@ def find_stable_heating_start(
             "setpoint": setpoint.loc[mask],
         }
     ).sort_values("timestamp", kind="stable")
-    for offset in _RECOVERY_THRESHOLD_OFFSETS:
-        crossing = observations.loc[
-            observations["water_out"].ge(observations["setpoint"] - offset),
-            "timestamp",
-        ]
-        if not crossing.empty:
-            return pd.Timestamp(crossing.iloc[0])
+    threshold = observations.loc[
+        observations["water_out"].ge(observations["setpoint"] - 2.0),
+        "timestamp",
+    ]
+    elapsed = (
+        observations["timestamp"] - pd.Timestamp(heating_start)
+    ).dt.total_seconds().to_numpy(dtype=float) / 60.0
+    knee = find_global_knee(
+        elapsed,
+        observations["water_out"].to_numpy(dtype=float),
+    )
+    candidates = []
+    if not threshold.empty:
+        candidates.append(pd.Timestamp(threshold.iloc[0]))
+    if knee is not None:
+        candidates.append(pd.Timestamp(heating_start) + pd.Timedelta(minutes=knee))
+    return min(candidates) if candidates else None
+
+
+def find_defrost_preparation_start(
+    frame: pd.DataFrame,
+    stable_start: Any,
+    defrost_start: Any,
+    settings: Mapping[str, Any] | Any,
+) -> pd.Timestamp | None:
+    """Return the first compressor setpoint unload command before defrost."""
+    channel = "compressor_frequency_setpoint"
+    if not isinstance(defrost_start, pd.Timestamp) or channel not in frame:
+        return None
+    lookback = _setting(settings, "defrost_preparation_lookback_seconds", 120)
+    threshold = _setting(settings, "defrost_preparation_setpoint_drop_hz", 10)
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    setpoint = pd.to_numeric(frame[channel], errors="coerce")
+    start = defrost_start - pd.Timedelta(seconds=lookback)
+    if isinstance(stable_start, pd.Timestamp):
+        start = max(start, stable_start)
+    observations = pd.DataFrame(
+        {"timestamp": timestamps, "setpoint": setpoint}
+    ).loc[timestamps.ge(start) & timestamps.lt(defrost_start)].dropna()
+    observations = observations.sort_values("timestamp", kind="stable").drop_duplicates(
+        "timestamp", keep="last"
+    )
+    gaps = observations["timestamp"].diff().dt.total_seconds()
+    positive_gaps = gaps.loc[gaps.gt(0)]
+    typical_gap = float(positive_gaps.median()) if len(positive_gaps) >= 3 else 0.0
+    maximum_gap = max(
+        _setting(settings, "maximum_state_gap_seconds", 5),
+        typical_gap * 1.5,
+        1,
+    )
+    groups = gaps.gt(maximum_gap).cumsum()
+    for _, group in observations.groupby(groups, sort=False):
+        drops = group["setpoint"].shift() - group["setpoint"]
+        candidates = group.loc[drops.ge(threshold), "timestamp"]
+        if not candidates.empty:
+            return pd.Timestamp(candidates.iloc[0])
     return None
 
 
@@ -277,6 +358,7 @@ def _assign_cycle_ranges(
         result.loc[mask, "cycle_stage"] = _stage_for_times(
             result.loc[mask, "timestamp"],
             row["stable_heating_start"],
+            row["defrost_preparation_start"],
             row["defrost_start"],
             row["defrost_end"],
         ).to_numpy()
@@ -374,8 +456,6 @@ def _defrost_runs(
         if crossed_long_gap:
             if active_event is not None:
                 active_event["boundary_uncertain"] = True
-                events.append(active_event)
-                active_event = None
             last_known_state = None
         unknown_since_known = False
 
@@ -412,6 +492,7 @@ def _cycle_row(
     reason: str,
     heating_start: pd.Timestamp | None,
     stable_start: pd.Timestamp | None,
+    preparation_start: pd.Timestamp | None,
     defrost_start: pd.Timestamp | None,
     defrost_end: pd.Timestamp | None,
     preceding_defrost_duration: float | None = None,
@@ -431,6 +512,7 @@ def _cycle_row(
         "cycle_status_reason": reason,
         "heating_start": heating_start,
         "stable_heating_start": stable_start,
+        "defrost_preparation_start": preparation_start,
         "defrost_start": defrost_start,
         "defrost_end": defrost_end,
         "heating_duration_seconds": heating_duration,
@@ -450,7 +532,7 @@ def _operating_mode_status(
         return "valid", ""
     required = _string_setting(settings, "required_operating_mode", "3")
     if channel not in frame:
-        return "incomplete", "missing_operating_mode"
+        return "valid", "missing_operating_mode"
     interval = frame.loc[
         frame["timestamp"].ge(heating_start) & frame["timestamp"].lt(defrost_start)
     ]
@@ -461,10 +543,41 @@ def _operating_mode_status(
             quality = interval.loc[observed.index, quality_column].fillna(False).astype(bool)
             observed = observed.loc[~quality]
     if observed.empty:
-        return "incomplete", "missing_operating_mode"
+        return "valid", "missing_operating_mode"
     if not observed.eq(required).all():
         return "invalid", "non_heating_mode_present"
     return "valid", ""
+
+
+def _shutdown_gaps(
+    frame: pd.DataFrame,
+    settings: Mapping[str, Any] | Any,
+    maximum_seconds: float,
+) -> tuple[tuple[pd.Timestamp, pd.Timestamp], ...]:
+    """Find sensor gaps that also cross from heating mode into shutdown."""
+    channel = _string_setting(settings, "operating_mode_channel", "")
+    if not channel or channel not in frame:
+        return ()
+    valid = frame[channel].notna()
+    for suffix in ("__duplicate", "__conflict"):
+        quality = f"{channel}{suffix}"
+        if quality in frame:
+            valid &= ~frame[quality].fillna(False).astype(bool)
+    observed = frame.loc[valid, ["timestamp", channel]]
+    modes = observed[channel].astype(str).str.removesuffix(".0")
+    required = _string_setting(settings, "required_operating_mode", "3").removesuffix(".0")
+    shutdown = (
+        observed["timestamp"].diff().dt.total_seconds().gt(maximum_seconds)
+        & modes.shift().eq(required)
+        & modes.ne(required)
+    )
+    return tuple(
+        zip(
+            observed["timestamp"].shift().loc[shutdown],
+            observed.loc[shutdown, "timestamp"],
+            strict=True,
+        )
+    )
 
 
 def _string_setting(settings: Mapping[str, Any] | Any, name: str, default: str) -> str:
@@ -476,6 +589,7 @@ def _string_setting(settings: Mapping[str, Any] | Any, name: str, default: str) 
 def _stage_for_times(
     times: pd.Series,
     stable_start: object,
+    preparation_start: object,
     defrost_start: object,
     defrost_end: object,
 ) -> pd.Series:
@@ -483,7 +597,10 @@ def _stage_for_times(
     if not isinstance(stable_start, pd.Timestamp) or not isinstance(defrost_start, pd.Timestamp):
         return stage
     stage.loc[times.lt(stable_start)] = "recovery"
-    stage.loc[times.ge(stable_start) & times.lt(defrost_start)] = "frost_development"
+    frost_end = preparation_start if isinstance(preparation_start, pd.Timestamp) else defrost_start
+    stage.loc[times.ge(stable_start) & times.lt(frost_end)] = "frost_development"
+    if isinstance(preparation_start, pd.Timestamp):
+        stage.loc[times.ge(preparation_start) & times.lt(defrost_start)] = "defrost_preparation"
     if isinstance(defrost_end, pd.Timestamp):
         stage.loc[times.ge(defrost_start) & times.lt(defrost_end)] = "defrost"
     else:
@@ -499,8 +616,10 @@ def _label_unassigned_rows(
     *,
     defrost_column: str,
     settings: Mapping[str, Any] | Any,
+    shutdown_gaps: tuple[tuple[pd.Timestamp, pd.Timestamp], ...] = (),
 ) -> None:
     unassigned = labeled["cycle_id"].isna().to_numpy()
+    gap_ends = {end for _start, end in shutdown_gaps}
     position = 0
     partial_index = 1
     while position < len(unassigned):
@@ -508,7 +627,11 @@ def _label_unassigned_rows(
             position += 1
             continue
         end = position
-        while end + 1 < len(unassigned) and unassigned[end + 1]:
+        while (
+            end + 1 < len(unassigned)
+            and unassigned[end + 1]
+            and labeled["timestamp"].iloc[end + 1] not in gap_ends
+        ):
             end += 1
         partial_id = f"partial_{partial_index:03d}"
         index = labeled.index[position : end + 1]
@@ -520,18 +643,40 @@ def _label_unassigned_rows(
             defrost_start,
             defrost_end,
         ) = _partial_stage_context(segment, defrost_column, settings)
+        preparation_start = find_defrost_preparation_start(
+            segment, stable_start, defrost_start, settings
+        )
+        if preparation_start is not None and defrost_start is not None:
+            times = pd.to_datetime(segment["timestamp"], errors="coerce")
+            segment_stages.loc[
+                times.ge(preparation_start) & times.lt(defrost_start)
+            ] = "defrost_preparation"
+        if defrost_start is not None and defrost_end is None:
+            segment_end = pd.Timestamp(segment["timestamp"].max())
+            following_starts = [
+                value
+                for row in cycles
+                if isinstance(value := row.get("heating_start"), pd.Timestamp)
+                and value > segment_end
+            ]
+            if following_starts:
+                defrost_end = min(following_starts)
         labeled.loc[index, "cycle_id"] = partial_id
         labeled.loc[index, "cycle_stage"] = segment_stages.to_numpy()
-        labeled.loc[index, "cycle_status"] = "incomplete"
-        labeled.loc[index, "cycle_status_reason"] = "outside_complete_cycle"
+        interrupted = end + 1 < len(unassigned) and labeled["timestamp"].iloc[end + 1] in gap_ends
+        status = "invalid" if interrupted else "valid"
+        reason = "shutdown_during_sensor_gap" if interrupted else "outside_complete_cycle"
+        labeled.loc[index, "cycle_status"] = status
+        labeled.loc[index, "cycle_status_reason"] = reason
         partial = _cycle_row(
             experiment_id,
             experiment_date,
             partial_id,
-            "incomplete",
-            "outside_complete_cycle",
+            status,
+            reason,
             heating_start,
             stable_start,
+            preparation_start,
             defrost_start,
             defrost_end,
         )
@@ -556,8 +701,8 @@ def _partial_stage_context(  # noqa: C901
 
     An open segment has no trusted cycle boundary on one side, but its observed
     water temperature and defrost state can still identify useful phases.  The
-    status remains ``incomplete``; these labels are only the best supported
-    stage facts for Process and publication.
+    Structural limitations remain explicit in the reason and boundary fields;
+    they do not create a third quality status.
     """
     times = pd.to_datetime(segment["timestamp"], errors="coerce")
     valid_times = times.dropna().sort_values(kind="stable")
@@ -655,6 +800,9 @@ def _add_cycle_coordinates(labeled: pd.DataFrame, cycles: list[dict[str, object]
             continue
         stable_start = row["stable_heating_start"]
         defrost_start = row["defrost_start"]
+        frost_end = row.get("defrost_preparation_start")
+        if not isinstance(frost_end, pd.Timestamp):
+            frost_end = defrost_start
         if not isinstance(stable_start, pd.Timestamp) or not isinstance(
             defrost_start, pd.Timestamp
         ):
@@ -664,7 +812,7 @@ def _add_cycle_coordinates(labeled: pd.DataFrame, cycles: list[dict[str, object]
             "frost_development"
         )
         elapsed = (labeled.loc[mask, "timestamp"] - stable_start).dt.total_seconds()
-        duration = (defrost_start - stable_start).total_seconds()
+        duration = (frost_end - stable_start).total_seconds()
         if duration <= 0:
             continue
         labeled.loc[mask, "cycle_elapsed_seconds"] = elapsed
@@ -699,6 +847,7 @@ def _cycle_columns() -> list[str]:
         "cycle_status_reason",
         "heating_start",
         "stable_heating_start",
+        "defrost_preparation_start",
         "defrost_start",
         "defrost_end",
         "heating_duration_seconds",

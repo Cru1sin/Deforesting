@@ -31,13 +31,18 @@ def build_evidence(loader: DatasetLoader, settings: EvidenceSettings) -> Evidenc
     features = candidate_features(loader.registry, settings)
     cycles = loader.list_cycles()
     cycle_rows = _cycle_metadata_rows(cycles)
-    eligibility = _eligibility_table(cycle_rows)
+    eligibility = _eligibility_table(cycle_rows, settings)
+    eligible_names = set(
+        eligibility.loc[eligibility["eligible"], "cycle_name"].astype(str)
+    )
 
     feature_rows: list[dict[str, object]] = []
     future_rows: list[dict[str, object]] = []
     pair_inputs: list[tuple[str, str, dict[str, dict[float, float]]]] = []
     readiness_inputs: list[tuple[Mapping[str, object], pd.DataFrame]] = []
-    for record, frame in loader.iter_cycle_frames(statuses={"valid"}):
+    for record, frame in loader.iter_cycle_frames(statuses=set(settings.eligible_statuses)):
+        if str(record.get("cycle_name", "")) not in eligible_names:
+            continue
         readiness_inputs.append((record, frame))
         metadata = _record_metadata(record)
         feature_rows.extend(feature_cycle_rows(frame, metadata, features, settings))
@@ -127,21 +132,53 @@ def _record_metadata(record: Mapping[str, object]) -> dict[str, object]:
         "experiment_id": _text(record.get("experiment_id")),
         "experiment_date": _date_text(record.get("experiment_date")),
         "status": _text(record.get("status")),
+        "analysis_duration_minutes": _analysis_duration_minutes(record),
     }
 
 
-def _eligibility_table(rows: list[dict[str, object]]) -> pd.DataFrame:
+def _eligibility_table(
+    rows: list[dict[str, object]], settings: EvidenceSettings
+) -> pd.DataFrame:
     result: list[dict[str, object]] = []
     for row in rows:
-        valid = row["status"] == "valid"
+        duration = float(
+            pd.to_numeric(pd.Series([row["analysis_duration_minutes"]]), errors="coerce").iloc[0]
+        )
+        status_eligible = row["status"] in settings.eligible_statuses
+        duration_eligible = np.isfinite(duration) and duration > settings.minimum_cycle_minutes
+        if not status_eligible:
+            reason = "cycle_status_not_eligible"
+        elif not np.isfinite(duration):
+            reason = "cycle_duration_unavailable"
+        elif not duration_eligible:
+            reason = "cycle_duration_not_over_minimum"
+        else:
+            reason = ""
         result.append(
             {
                 **row,
-                "eligible": valid,
-                "exclusion_reason": "" if valid else "cycle_status_not_valid",
+                "eligible": status_eligible and duration_eligible,
+                "exclusion_reason": reason,
             }
         )
     return _frame(result, CYCLE_ELIGIBILITY_COLUMNS)
+
+
+def _analysis_duration_minutes(record: Mapping[str, object]) -> float:
+    boundaries = record.get("boundaries")
+    if not isinstance(boundaries, Mapping):
+        return np.nan
+    start_value = boundaries.get("stable_heating_start")
+    end_value = boundaries.get("defrost_start") or boundaries.get("end_time")
+    start = (
+        pd.to_datetime(str(start_value), errors="coerce")
+        if start_value is not None
+        else pd.NaT
+    )
+    end = pd.to_datetime(str(end_value), errors="coerce") if end_value is not None else pd.NaT
+    if pd.isna(start) or pd.isna(end):
+        return np.nan
+    return float((end - start).total_seconds() / 60.0)
 
 
 def _frame(rows: list[dict[str, object]], columns: Sequence[str]) -> pd.DataFrame:

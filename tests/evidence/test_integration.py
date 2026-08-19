@@ -31,13 +31,50 @@ def test_real_loader_eligibility_uses_all_statuses_and_valid_stage_is_not_a_gate
     eligibility = bundle.cycle_eligibility.set_index("cycle_name")
     assert bool(eligibility.loc["valid", "eligible"])
     assert not bool(eligibility.loc["invalid", "eligible"])
-    assert eligibility.loc["invalid", "exclusion_reason"] == "cycle_status_not_valid"
+    assert eligibility.loc["invalid", "exclusion_reason"] == "cycle_status_not_eligible"
     assert bool(eligibility.loc["valid_without_stage", "eligible"])
     missing_stage = bundle.feature_cycle_metrics.loc[
         bundle.feature_cycle_metrics["cycle_name"].eq("valid_without_stage")
     ]
     assert set(missing_stage["exclusion_reason"]) == {"missing_frost_stage"}
     assert "invalid" not in set(bundle.feature_cycle_metrics["cycle_name"])
+
+
+def test_exploratory_cohort_uses_status_and_strict_minimum_duration(
+    tmp_path: Path,
+) -> None:
+    over_30 = frame_for(elapsed=range(0, 1861, 10))
+    exactly_30 = frame_for(elapsed=range(0, 1800, 10))
+    loader = write_dataset(
+        tmp_path / "dataset",
+        [
+            ("valid_long", "2026-07-01", "valid", over_30),
+            ("incomplete_long", "2026-07-02", "incomplete", over_30),
+            ("valid_30", "2026-07-03", "valid", exactly_30),
+            ("invalid_long", "2026-07-04", "invalid", over_30),
+        ],
+    )
+
+    bundle = build_evidence(
+        loader,
+        settings(
+            targets=("heating_capacity",),
+            eligible_statuses=("valid", "incomplete"),
+            minimum_cycle_minutes=30.0,
+        ),
+    )
+
+    eligibility = bundle.cycle_eligibility.set_index("cycle_name")
+    assert bool(eligibility.loc["valid_long", "eligible"])
+    assert bool(eligibility.loc["incomplete_long", "eligible"])
+    assert not bool(eligibility.loc["valid_30", "eligible"])
+    assert eligibility.loc["valid_30", "exclusion_reason"] == "cycle_duration_not_over_minimum"
+    assert eligibility.loc["invalid_long", "exclusion_reason"] == "cycle_status_not_eligible"
+    assert eligibility.loc["valid_long", "analysis_duration_minutes"] > 30.0
+    assert set(bundle.feature_cycle_metrics["cycle_name"]) == {
+        "valid_long",
+        "incomplete_long",
+    }
 
 
 def test_registry_order_direction_and_finite_quality_mask_are_applied(

@@ -42,7 +42,6 @@ def _config(
                 "anchor_maximum_std": {"anchor": 1.0},
             },
         },
-        camera_roles={},
     )
 
 
@@ -234,17 +233,17 @@ def test_process_aggregates_environment_channels_and_keeps_rh_over_100(tmp_path:
     assert first_bucket["environment_relative_humidity"] == pytest.approx(103.0)
 
 
-def test_incomplete_cycle_with_observed_defrost_onset_keeps_observed_processed_grid(
+def test_valid_open_cycle_with_observed_defrost_onset_keeps_observed_processed_grid(
     tmp_path: Path,
 ) -> None:
     timestamps = pd.date_range("2026-07-15", periods=30, freq="10s")
     frame = _frame(timestamps, temperature=[10.0] * len(timestamps))
-    frame["cycle_status"] = "incomplete"
+    frame["cycle_status"] = "valid"
     frame["cycle_status_reason"] = "defrost_end_not_observed"
     frame.loc[:4, "cycle_stage"] = "recovery"
     frame.loc[5:19, "cycle_stage"] = "frost_development"
     frame.loc[20:, "cycle_stage"] = "defrost"
-    summary = _summary(status="incomplete", defrost="2026-07-15 00:03:20")
+    summary = _summary(status="valid", defrost="2026-07-15 00:03:20")
     summary["cycle_status_reason"] = "defrost_end_not_observed"
     summary["defrost_end"] = pd.NaT
 
@@ -260,8 +259,8 @@ def test_partial_cycle_uses_observed_fallback(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
     frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0], stage="partial")
     frame["cycle_id"] = "partial_001"
-    frame["cycle_status"] = "incomplete"
-    summary = _summary(status="incomplete")
+    frame["cycle_status"] = "valid"
+    summary = _summary(status="valid")
     summary["cycle_id"] = "partial_001"
     summary[["heating_start", "stable_heating_start", "defrost_start", "defrost_end"]] = pd.NaT
 
@@ -269,12 +268,12 @@ def test_partial_cycle_uses_observed_fallback(tmp_path: Path) -> None:
 
     assert processed["timestamp"].tolist() == timestamps.tolist()
     assert processed["cycle_stage"].eq("partial").all()
-    assert processed["cycle_status"].eq("incomplete").all()
+    assert processed["cycle_status"].eq("valid").all()
     assert processed["temperature"].tolist() == [1.0, 2.0, 3.0]
     assert final_summary.loc[0, "processed_row_count"] == 3
 
 
-def test_explicit_partial_status_uses_observed_fallback(tmp_path: Path) -> None:
+def test_process_rejects_legacy_partial_status(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=2, freq="10s")
     frame = _frame(timestamps, temperature=[1.0, 2.0], stage="partial")
     frame["cycle_status"] = "partial"
@@ -283,11 +282,8 @@ def test_explicit_partial_status_uses_observed_fallback(tmp_path: Path) -> None:
     summary["cycle_id"] = "partial_001"
     summary[["heating_start", "stable_heating_start", "defrost_start", "defrost_end"]] = pd.NaT
 
-    processed, _ = process(frame, summary, _config(tmp_path), _channels())
-
-    assert processed["cycle_status"].eq("partial").all()
-    assert processed["cycle_stage"].eq("partial").all()
-    assert processed["temperature"].tolist() == [1.0, 2.0]
+    with pytest.raises(ValueError, match="invalid cycle status"):
+        process(frame, summary, _config(tmp_path), _channels())
 
 
 def test_fallback_cycles_anchor_buckets_to_each_cycle_start(tmp_path: Path) -> None:
@@ -296,18 +292,18 @@ def test_fallback_cycles_anchor_buckets_to_each_cycle_start(tmp_path: Path) -> N
     )
     first = _frame(first_timestamps, temperature=[1.0, 2.0], stage="partial")
     first["cycle_id"] = "partial_001"
-    first["cycle_status"] = "incomplete"
+    first["cycle_status"] = "valid"
 
     second_timestamps = pd.to_datetime(
         ["2026-07-15 00:00:16", "2026-07-15 00:00:19"]
     )
     second = _frame(second_timestamps, temperature=[3.0, 4.0], stage="partial")
     second["cycle_id"] = "partial_002"
-    second["cycle_status"] = "incomplete"
+    second["cycle_status"] = "valid"
 
-    first_summary = _summary(status="incomplete")
+    first_summary = _summary(status="valid")
     first_summary["cycle_id"] = "partial_001"
-    second_summary = _summary(status="incomplete")
+    second_summary = _summary(status="valid")
     second_summary["cycle_id"] = "partial_002"
     summary = pd.concat([first_summary, second_summary], ignore_index=True)
     summary[["heating_start", "stable_heating_start", "defrost_start", "defrost_end"]] = pd.NaT
@@ -347,13 +343,13 @@ def test_all_partial_rows_use_fallback_even_with_complete_boundaries(tmp_path: P
         temperature=[10.0] * len(timestamps),
         stage="partial",
     )
-    frame["cycle_status"] = "incomplete"
+    frame["cycle_status"] = "valid"
     frame["heating_capacity"] = 10.0
     frame["compressor_power"] = [2.428, np.nan, 2.0, 2.0]
 
     processed, _ = process(
         frame,
-        _summary(status="incomplete"),
+        _summary(status="valid"),
         _config(tmp_path),
         _channels(),
     )
@@ -599,7 +595,7 @@ def test_process_rejects_non_divisible_coverage_grid(tmp_path: Path) -> None:
         _config(tmp_path, expected_interval=3)
 
 
-def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
+def test_valid_open_cycle_without_boundaries_uses_observed_ten_second_fallback(
     tmp_path: Path,
 ) -> None:
     timestamps = pd.to_datetime(
@@ -611,10 +607,10 @@ def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
         ]
     )
     frame = _frame(timestamps, temperature=[1.0, 3.0, 5.0, 7.0])
-    frame["cycle_status"] = "incomplete"
+    frame["cycle_status"] = "valid"
     for suffix in ("__missing", "__invalid", "__duplicate", "__conflict"):
         frame[f"temperature{suffix}"] = False
-    summary = _summary(status="incomplete", defrost="2026-07-15 00:05:00")
+    summary = _summary(status="valid", defrost="2026-07-15 00:05:00")
     summary["defrost_end"] = pd.NaT
 
     processed, final_summary = process(
@@ -628,7 +624,7 @@ def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
     assert processed["timestamp"].tolist() == expected_timestamps
     assert processed["temperature"].tolist() == [2.0, 6.0]
     assert processed["cycle_stage"].eq("frost_development").all()
-    assert processed["cycle_status"].eq("incomplete").all()
+    assert processed["cycle_status"].eq("valid").all()
     assert processed["cycle_progress"].isna().all()
     assert processed["cycle_elapsed_seconds"].isna().all()
     assert processed["cop"].notna().all()
@@ -653,8 +649,8 @@ def test_incomplete_cycle_without_boundaries_uses_observed_ten_second_fallback(
 def test_fallback_cycle_computes_baseline_when_window_is_available(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=37, freq="10s")
     frame = _frame(timestamps, temperature=list(np.linspace(10, 8, len(timestamps))))
-    frame["cycle_status"] = "incomplete"
-    summary = _summary(status="incomplete", defrost="2026-07-15 00:06:00")
+    frame["cycle_status"] = "valid"
+    summary = _summary(status="valid", defrost="2026-07-15 00:06:00")
     summary["defrost_end"] = pd.NaT
 
     processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
@@ -687,7 +683,7 @@ def test_nonpartial_cycle_without_summary_is_a_process_contract_error(tmp_path: 
 
 def test_summary_cycle_without_prepared_rows_is_a_process_contract_error(tmp_path: Path) -> None:
     frame = _frame(pd.date_range("2026-07-15", periods=2, freq="10s"), temperature=[1.0, 2.0])
-    summary_only = _summary(status="incomplete")
+    summary_only = _summary(status="valid")
     summary_only["cycle_id"] = "cycle_002"
     summary = pd.concat([_summary(), summary_only], ignore_index=True)
 

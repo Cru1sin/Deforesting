@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from .cycles import resolve_stable_heating_start
+from .cycles import find_defrost_preparation_start, resolve_stable_heating_start
 
 
 def apply_recovery(
@@ -41,6 +41,7 @@ def apply_recovery(
         raise ValueError("cycle boundaries must be a mapping")
     heating_start = _timestamp(boundaries.get("heating_start"))
     defrost_start = _timestamp(boundaries.get("defrost_start"))
+    preparation_start = _timestamp(boundaries.get("defrost_preparation_start"))
     defrost_end = _timestamp(boundaries.get("defrost_end"))
     if heating_start is None and not original_result.empty:
         heating_start = pd.Timestamp(original_result["timestamp"].min())
@@ -70,12 +71,16 @@ def apply_recovery(
 
     boundaries["heating_start"] = _iso(heating_start)
     boundaries["stable_heating_start"] = _iso(stable)
-    _rewrite_stage_column(original_result, stable, defrost_start, defrost_end)
-    _rewrite_stage_column(processed_result, stable, defrost_start, defrost_end)
+    _rewrite_stage_column(
+        original_result, stable, preparation_start, defrost_start, defrost_end
+    )
+    _rewrite_stage_column(
+        processed_result, stable, preparation_start, defrost_start, defrost_end
+    )
     processed_result = _recompute_stage_dependent_fields(
         processed_result, record, registry
     )
-    metadata_result = _update_image_stages(metadata_result, processed_result, record)
+    metadata_result = _update_image_stages(metadata_result, record)
 
     registry["recovery_edit"] = {
         "mode": mode,
@@ -86,6 +91,55 @@ def apply_recovery(
             else 180.0
         ),
         "managed": True,
+    }
+    return original_result, processed_result, metadata_result
+
+
+def apply_defrost_preparation(
+    original: pd.DataFrame,
+    processed: pd.DataFrame,
+    image_metadata: pd.DataFrame,
+    record: dict[str, Any],
+    registry: dict[str, Any],
+    *,
+    setpoint_drop_hz: float = 10.0,
+    lookback_seconds: float = 120.0,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Derive the pre-defrost unloading interval from Dataset sensor facts."""
+    original_result = original.copy()
+    processed_result = processed.copy()
+    metadata_result = image_metadata.copy()
+    original_result["timestamp"] = pd.to_datetime(original_result["timestamp"], errors="raise")
+    processed_result["timestamp"] = pd.to_datetime(processed_result["timestamp"], errors="raise")
+    boundaries = record.setdefault("boundaries", {})
+    if not isinstance(boundaries, dict):
+        raise ValueError("cycle boundaries must be a mapping")
+    stable = _timestamp(boundaries.get("stable_heating_start"))
+    defrost_start = _timestamp(boundaries.get("defrost_start"))
+    defrost_end = _timestamp(boundaries.get("defrost_end"))
+    preparation_start = find_defrost_preparation_start(
+        original_result,
+        stable,
+        defrost_start,
+        {
+            "defrost_preparation_setpoint_drop_hz": setpoint_drop_hz,
+            "defrost_preparation_lookback_seconds": lookback_seconds,
+        },
+    )
+    boundaries["defrost_preparation_start"] = _iso(preparation_start)
+    _rewrite_stage_column(
+        original_result, stable, preparation_start, defrost_start, defrost_end
+    )
+    _rewrite_stage_column(
+        processed_result, stable, preparation_start, defrost_start, defrost_end
+    )
+    processed_result = _recompute_stage_dependent_fields(
+        processed_result, record, registry
+    )
+    metadata_result = _update_image_stages(metadata_result, record)
+    registry["defrost_preparation"] = {
+        "setpoint_drop_hz": float(setpoint_drop_hz),
+        "lookback_seconds": float(lookback_seconds),
     }
     return original_result, processed_result, metadata_result
 
@@ -152,6 +206,7 @@ def apply_baseline(
 def _rewrite_stage_column(
     frame: pd.DataFrame,
     stable: pd.Timestamp | None,
+    preparation_start: pd.Timestamp | None,
     defrost_start: pd.Timestamp | None,
     defrost_end: pd.Timestamp | None,
 ) -> None:
@@ -161,10 +216,19 @@ def _rewrite_stage_column(
     stages = pd.Series("partial", index=frame.index, dtype="string")
     before_defrost = timestamps.notna() if defrost_start is None else timestamps.lt(defrost_start)
     if stable is not None:
+        frost_end = preparation_start or defrost_start
         stages.loc[before_defrost & timestamps.lt(stable)] = "recovery"
-        stages.loc[before_defrost & timestamps.ge(stable)] = "frost_development"
+        stages.loc[
+            before_defrost
+            & timestamps.ge(stable)
+            & (timestamps.lt(frost_end) if frost_end is not None else True)
+        ] = "frost_development"
     elif defrost_start is not None:
         stages.loc[before_defrost] = "recovery"
+    if preparation_start is not None and defrost_start is not None:
+        stages.loc[
+            timestamps.ge(preparation_start) & timestamps.lt(defrost_start)
+        ] = "defrost_preparation"
     if defrost_start is not None:
         active = timestamps.ge(defrost_start)
         if defrost_end is not None:
@@ -191,6 +255,9 @@ def _recompute_stage_dependent_fields(
                 "stable_heating_start": _timestamp(
                     boundaries.get("stable_heating_start")
                 ),
+                "defrost_preparation_start": _timestamp(
+                    boundaries.get("defrost_preparation_start")
+                ),
                 "defrost_start": _timestamp(boundaries.get("defrost_start")),
             }
         ]
@@ -202,7 +269,6 @@ def _recompute_stage_dependent_fields(
 
 def _update_image_stages(
     metadata: pd.DataFrame,
-    processed: pd.DataFrame,
     record: Mapping[str, Any],
 ) -> pd.DataFrame:
     result = metadata.copy()
@@ -212,20 +278,24 @@ def _update_image_stages(
     mask = result["cycle_name"].astype(str).eq(cycle_name)
     if not mask.any():
         return result
-    timestamps = pd.to_datetime(result.loc[mask, "matched_timestamp"], errors="coerce")
-    if "image_time" in result:
-        timestamps = timestamps.fillna(
-            pd.to_datetime(result.loc[mask, "image_time"], errors="coerce")
-        )
-    lookup = (
-        processed[["timestamp", "cycle_stage"]]
-        .assign(timestamp=lambda frame: pd.to_datetime(frame["timestamp"]))
-        .drop_duplicates("timestamp")
-        .set_index("timestamp")["cycle_stage"]
+    boundaries = record.get("boundaries", {})
+    if not isinstance(boundaries, Mapping):
+        boundaries = {}
+    images = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(result.loc[mask, "image_time"], errors="coerce"),
+            "cycle_stage": result.loc[mask, "cycle_stage"].to_numpy(),
+        },
+        index=result.index[mask],
     )
-    result.loc[mask, "cycle_stage"] = timestamps.map(lookup).fillna(
-        result.loc[mask, "cycle_stage"]
+    _rewrite_stage_column(
+        images,
+        _timestamp(boundaries.get("stable_heating_start")),
+        _timestamp(boundaries.get("defrost_preparation_start")),
+        _timestamp(boundaries.get("defrost_start")),
+        _timestamp(boundaries.get("defrost_end")),
     )
+    result.loc[mask, "cycle_stage"] = images["cycle_stage"]
     return result
 
 

@@ -48,8 +48,12 @@ def test_writer_rejects_dataset_internal_output_and_preserves_dataset(tmp_path: 
         "readiness_summary.csv",
     }
     assert expected_tables <= {path.name for path in output.iterdir()}
-    assert len(list(output.glob("*.png"))) == 4
-    assert len(list(output.glob("*.pdf"))) == 4
+    assert len(list(output.glob("*.png"))) == 5
+    assert len(list(output.glob("*.pdf"))) == 5
+    assert len(list(output.glob("*.svg"))) == 5
+    assert len(list(output.glob("*.tiff"))) == 5
+    svg = (output / "figure_4_readiness_decision.svg").read_text(encoding="utf-8")
+    assert "<text" in svg
     manifest = json.loads((output / "analysis_manifest.json").read_text(encoding="utf-8"))
     assert set(manifest) == {
         "analysis_version",

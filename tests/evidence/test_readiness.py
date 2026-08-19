@@ -116,6 +116,31 @@ def test_target_event_is_right_censored_and_missing_breaks_persistence() -> None
     assert np.isnan(row["primary_event_elapsed_minutes"])
 
 
+def test_cycle_end_right_censors_target_and_model_anchors() -> None:
+    frame = _readiness_frame(seconds=1200)
+    record = _record(frame)
+    start = pd.to_datetime(frame["timestamp"]).min()
+    record["boundaries"] = {
+        "baseline_end": (start + pd.Timedelta(seconds=60)).isoformat(),
+        "defrost_start": None,
+        "end_time": (start + pd.Timedelta(seconds=600)).isoformat(),
+    }
+
+    audit = audit_performance_target(
+        record, frame, "heating_capacity", settings(targets=("heating_capacity",))
+    )
+    rows = compare_incremental_models(
+        [(record, frame)],
+        [("feature_a", "increase")],
+        pd.DataFrame([audit]),
+        settings(targets=("heating_capacity",)),
+    )
+
+    assert audit["primary_event_status"] == "right_censored_at_cycle_end"
+    assert audit["valid_pairs_5min"] == 24
+    assert rows.loc[rows["horizon_minutes"].eq(5), "expected_anchor_count"].iloc[0] == 24
+
+
 @pytest.mark.parametrize("mode", ["nan", "imputed"])
 def test_target_without_observations_is_unavailable(mode: str) -> None:
     frame = _readiness_frame()
@@ -308,6 +333,48 @@ def test_model_skills_use_m1_for_level_and_m2_for_dynamic() -> None:
         available["skill_dynamic_vs_level"],
         1.0 - available["mae_m3"] / available["mae_m2"],
     )
+
+
+def test_model_data_is_computed_once_per_cycle_feature_target_horizon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import frost_analysis.evidence.readiness as readiness
+
+    cycles = []
+    for index, date in enumerate(("2026-07-01", "2026-07-02", "2026-07-03")):
+        frame = _readiness_frame(seconds=1200)
+        frame["timestamp"] = pd.Timestamp(f"{date}T00:00:00") + pd.to_timedelta(
+            frame["cycle_elapsed_seconds"], unit="s"
+        )
+        record = _record(frame)
+        record["cycle_name"] = f"cycle_{index}"
+        record["experiment_date"] = date
+        cycles.append((record, frame))
+    evidence_settings = settings(targets=("heating_capacity",))
+    audits = pd.DataFrame(
+        [
+            audit_performance_target(record, frame, "heating_capacity", evidence_settings)
+            for record, frame in cycles
+        ]
+    )
+    original = readiness._model_data
+    calls = 0
+
+    def counted(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(readiness, "_model_data", counted)
+
+    compare_incremental_models(
+        cycles,
+        [("feature_a", "increase")],
+        audits,
+        evidence_settings,
+    )
+
+    assert calls == len(cycles) * len(evidence_settings.horizons_minutes)
 
 
 def test_readiness_summary_uses_date_units_and_dynamic_increment() -> None:
