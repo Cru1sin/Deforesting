@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "title": "Cost-derived visual frost states for heat-pump defrost timing",
+  "target_journal": "Nature Communications",
+  "entry_stage": "00_intake",
+  "created_at": "2026-08-19T21:19:07.765251+00:00",
+  "updated_at": "2026-08-20T05:19:41+08:00",
+  "stages": {
+    "00_intake": {
+      "label": "Intake and plan",
+      "status": "complete",
+      "gate": "Research question, data scope, deliverables and claim boundaries are explicit.",
+      "notes": "Implementation plan: docs/superpowers/plans/2026-08-20-cost-to-rgb-paper-demo.md"
+    },
+    "01_sources": {
+      "label": "Source ingestion",
+      "status": "in_progress",
+      "gate": "",
+      "notes": ""
+    },
+    "02_research": {
+      "label": "Research question and evidence",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    },
+    "03_spine": {
+      "label": "Motivation spine",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    },
+    "04_manuscript": {
+      "label": "Drafting",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    },
+    "05_figures": {
+      "label": "Figures",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    },
+    "06_review": {
+      "label": "Scientific review",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    },
+    "07_revision": {
+      "label": "Revision and verification",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    },
+    "08_final": {
+      "label": "Humanization and finalization",
+      "status": "pending",
+      "gate": "",
+      "notes": ""
+    }
+  }
+}

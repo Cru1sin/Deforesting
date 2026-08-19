@@ -28,6 +28,11 @@ dev = [
     "scipy-stubs>=1.14",
     "types-PyYAML>=6",
 ]
+ml = [
+    "scikit-learn>=1.6,<2",
+    "torch>=2.6,<3",
+    "torchvision>=0.21,<1",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
