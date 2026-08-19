@@ -9,6 +9,11 @@ import pandas as pd
 from PIL import Image
 
 
+def selected_names(requested: str, available: tuple[str, ...]) -> tuple[str, ...]:
+    """Return all model names or the one explicitly requested."""
+    return available if requested == "all" else (requested,)
+
+
 def even_sample_groups(
     frame: pd.DataFrame,
     group_columns: list[str],

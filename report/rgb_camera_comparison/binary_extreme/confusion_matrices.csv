@@ -1,0 +1,9 @@
+model,split,true_state,predicted_state,count
+color_rbf_svm,validation,pre_optimal,pre_optimal,16
+color_rbf_svm,validation,pre_optimal,post_optimal,8
+color_rbf_svm,validation,post_optimal,pre_optimal,1
+color_rbf_svm,validation,post_optimal,post_optimal,11
+color_rbf_svm,test,pre_optimal,pre_optimal,57
+color_rbf_svm,test,pre_optimal,post_optimal,15
+color_rbf_svm,test,post_optimal,pre_optimal,6
+color_rbf_svm,test,post_optimal,post_optimal,42

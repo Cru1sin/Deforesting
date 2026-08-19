@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from frost_analysis.rgb_smoke import even_sample_groups, image_color_features
+from frost_analysis.rgb_smoke import even_sample_groups, image_color_features, selected_names
 
 
 def test_even_sample_groups_keeps_endpoints(tmp_path) -> None:
@@ -30,3 +30,10 @@ def test_color_features_are_finite_for_a_constant_rgb_image(tmp_path) -> None:
     assert features.shape == (34,)
     assert np.isfinite(features).all()
     assert np.allclose(features[24:27], [1.0, 0.0, 0.0])
+
+
+def test_selected_names_returns_one_requested_model_or_every_model() -> None:
+    available = ("logistic", "svm")
+
+    assert selected_names("svm", available) == ("svm",)
+    assert selected_names("all", available) == available

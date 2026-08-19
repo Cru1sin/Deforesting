@@ -28,7 +28,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
-from frost_analysis.rgb_smoke import even_sample_groups, image_color_features
+from frost_analysis.rgb_smoke import even_sample_groups, image_color_features, selected_names
 
 CAMERA_GROUPS = {
     "top": ("top",),
@@ -42,6 +42,13 @@ CAMERA_GROUPS = {
     "all": ("top", "top_close", "left", "left_close", "front", "extreme"),
 }
 ROLE_ORDER = ("top", "top_close", "left", "left_close", "front", "extreme")
+MODEL_NAMES = (
+    "color_logistic",
+    "color_random_forest",
+    "color_rbf_svm",
+    "small_cnn",
+    "resnet18_linear_probe",
+)
 
 
 class ImageRows(Dataset):
@@ -189,6 +196,7 @@ def run(  # noqa: C901
     task: str,
     camera_group: str,
     maximum_per_group: int,
+    model: str = "all",
 ) -> None:
     states = ["pre_optimal", "near_optimal", "post_optimal"]
     if task == "binary":
@@ -250,7 +258,11 @@ def run(  # noqa: C901
     metric_rows: list[dict[str, object]] = []
     prediction_frames: list[pd.DataFrame] = []
     confusion_rows: list[dict[str, object]] = []
-    for name, estimator in estimators.items():
+    chosen_models = selected_names(model, MODEL_NAMES)
+    for name in chosen_models:
+        if name not in estimators:
+            continue
+        estimator = estimators[name]
         print(f"[model] {name}", flush=True)
         estimator.fit(x_train, y_train)
         for split, rows, values in (
@@ -285,30 +297,38 @@ def run(  # noqa: C901
                         }
                     )
 
-    torch.manual_seed(0)
-    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-    normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    neural_models = [
-        (
-            "small_cnn",
-            SmallCNN(len(states)),
-            transforms.Compose([transforms.Resize((64, 64)), transforms.ToTensor(), normalize]),
-            3,
-        )
-    ]
-    weights = models.ResNet18_Weights.DEFAULT
-    resnet = models.resnet18(weights=weights)
-    for parameter in resnet.parameters():
-        parameter.requires_grad = False
-    resnet.fc = nn.Linear(resnet.fc.in_features, len(states))
-    neural_models.append(
-        (
-            "resnet18_linear_probe",
-            resnet,
-            transforms.Compose([transforms.Resize((112, 112)), transforms.ToTensor(), normalize]),
-            2,
-        )
-    )
+    neural_models = []
+    if any(name in chosen_models for name in ("small_cnn", "resnet18_linear_probe")):
+        torch.manual_seed(0)
+        device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        if "small_cnn" in chosen_models:
+            neural_models.append(
+                (
+                    "small_cnn",
+                    SmallCNN(len(states)),
+                    transforms.Compose(
+                        [transforms.Resize((64, 64)), transforms.ToTensor(), normalize]
+                    ),
+                    3,
+                )
+            )
+        if "resnet18_linear_probe" in chosen_models:
+            weights = models.ResNet18_Weights.DEFAULT
+            resnet = models.resnet18(weights=weights)
+            for parameter in resnet.parameters():
+                parameter.requires_grad = False
+            resnet.fc = nn.Linear(resnet.fc.in_features, len(states))
+            neural_models.append(
+                (
+                    "resnet18_linear_probe",
+                    resnet,
+                    transforms.Compose(
+                        [transforms.Resize((112, 112)), transforms.ToTensor(), normalize]
+                    ),
+                    2,
+                )
+            )
     for name, model, transform, epochs in neural_models:
         print(f"[model] {name} device={device}", flush=True)
         model = _train_torch(
@@ -370,7 +390,7 @@ def run(  # noqa: C901
 - Sampling: at most {maximum_per_group} evenly spaced frames per split × cycle × state × camera role.
 - Decode QA: {len(excluded)} unreadable sampled images were excluded from every model and recorded in `excluded_images.csv`; source files were not modified or deleted.
 - Split: fixed experiment-level split from `report/rgb_cost_labels/cycle_splits.csv`.
-- Models: color logistic regression, color random forest, color RBF-SVM, small CNN and pretrained ResNet18 linear probe.
+- Models: {", ".join(chosen_models)}.
 - Scope: local-image engineering smoke test only. No hyperparameter search, repeated seeds, confidence intervals or cloud-cycle completion; do not use these metrics as publication evidence.
 """,
         encoding="utf-8",
@@ -387,6 +407,7 @@ def main() -> None:
     )
     parser.add_argument("--task", choices=("binary", "three"), default="three")
     parser.add_argument("--camera-group", choices=tuple(CAMERA_GROUPS), default="all")
+    parser.add_argument("--model", choices=("all", *MODEL_NAMES), default="all")
     parser.add_argument("--maximum-per-group", type=int, default=12)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -398,6 +419,7 @@ def main() -> None:
         task=args.task,
         camera_group=args.camera_group,
         maximum_per_group=args.maximum_per_group,
+        model=args.model,
     )
 
 

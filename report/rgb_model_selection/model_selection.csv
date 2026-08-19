@@ -1,0 +1,12 @@
+selection_stage,task,model,camera_group,split,balanced_accuracy,macro_f1,macro_auroc,image_count,cycle_count,pre_cycles,near_cycles,post_cycles,status
+task_and_model,three,color_logistic,all,validation,0.616534,0.551036,0.722799,359,2,2,2,1,provisional
+task_and_model,binary,color_rbf_svm,all,validation,0.815972,0.752716,0.814140,216,2,2,0,1,selected_for_camera_smoke
+camera,binary,color_rbf_svm,all,validation,0.815972,0.752716,0.814140,216,2,2,0,1,provisional_leader
+camera,binary,color_rbf_svm,front,validation,0.812500,0.748252,0.777778,36,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,left,validation,0.812500,0.748252,0.781250,36,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,left_close,validation,0.812500,0.748252,0.812500,36,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,left_pair,validation,0.812500,0.748252,0.824653,72,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,top,validation,0.812500,0.748252,0.722222,36,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,top_pair,validation,0.812500,0.748252,0.807292,72,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,extreme,validation,0.791667,0.745083,0.763889,36,2,2,0,1,statistically_unresolved
+camera,binary,color_rbf_svm,top_close,validation,0.625000,0.614815,0.739583,36,2,2,0,1,statistically_unresolved
