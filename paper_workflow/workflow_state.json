@@ -4,7 +4,7 @@
   "target_journal": "Nature Communications",
   "entry_stage": "00_intake",
   "created_at": "2026-08-19T21:19:07.765251+00:00",
-  "updated_at": "2026-08-20T16:20:00+08:00",
+  "updated_at": "2026-08-20T20:30:00+08:00",
   "stages": {
     "00_intake": {
       "label": "Intake and plan",
@@ -32,15 +32,15 @@
     },
     "04_manuscript": {
       "label": "Drafting",
-      "status": "in_progress",
-      "gate": "",
-      "notes": ""
+      "status": "complete",
+      "gate": "All complete-cohort quantitative claims map to committed experiment-level outputs and preserve retrospective scope.",
+      "notes": "Complete-cohort results replace all placeholders; all-view null increment and exploratory front-camera increment are both reported."
     },
     "05_figures": {
       "label": "Figures",
-      "status": "in_progress",
-      "gate": "",
-      "notes": ""
+      "status": "complete",
+      "gate": "Figures 1-4 form the core argument and provide Python SVG/PDF/TIFF/PNG exports with panel source data.",
+      "notes": "Figure 3 reports camera-specific paired increments and threshold coverage; Figure 4 exposes experiment and cycle failures."
     },
     "06_review": {
       "label": "Scientific review",
