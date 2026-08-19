@@ -10,6 +10,19 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 
+def high_confidence_coverage(
+    label_balance: pd.DataFrame, camera_group: str, threshold: float
+) -> float:
+    """Return retained pre/post images as a fraction of all candidate-domain images."""
+    rows = label_balance.loc[
+        label_balance["camera_group"].eq(camera_group)
+        & label_balance["regret_threshold"].eq(threshold)
+        & label_balance["cost_state"].isin(("pre_optimal", "near_optimal", "post_optimal"))
+    ]
+    retained = rows.loc[rows["cost_state"].ne("near_optimal"), "image_count"].sum()
+    return float(retained / rows["image_count"].sum())
+
+
 def retain_high_confidence_rows(frame: pd.DataFrame, threshold: float) -> pd.DataFrame:
     """Exclude images whose pointwise cost regret lies in the ambiguity region."""
     return frame.loc[frame["relative_regret"].gt(threshold)].copy()

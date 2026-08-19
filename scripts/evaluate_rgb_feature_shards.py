@@ -13,6 +13,7 @@ from frost_analysis.rgb_evaluation import (
     add_cycle_time_features,
     bootstrap_mean_interval,
     experiment_prediction_metrics,
+    high_confidence_coverage,
     leave_one_experiment_out_predictions,
     retain_high_confidence_rows,
 )
@@ -48,6 +49,11 @@ def main() -> None:
         type=Path,
         default=Path("report/raw_optimal_defrost/source_data/candidate_cost_curves.parquet"),
     )
+    parser.add_argument(
+        "--label-balance",
+        type=Path,
+        default=Path("report/rgb_cost_labels/label_balance.csv"),
+    )
     parser.add_argument("--camera-groups", nargs="+", choices=tuple(CAMERA_GROUPS), default=["all"])
     parser.add_argument(
         "--regret-thresholds", nargs="+", type=float, default=[0.01, 0.02, 0.05, 0.10]
@@ -60,6 +66,7 @@ def main() -> None:
         raise SystemExit("no feature shards")
     features = pd.concat((pd.read_parquet(path) for path in paths), ignore_index=True)
     features = add_cycle_time_features(features, pd.read_parquet(args.candidates))
+    label_balance = pd.read_csv(args.label_balance)
     predictions = []
     metrics = []
     experiment_metrics = []
@@ -68,7 +75,10 @@ def main() -> None:
         camera_rows = features.loc[features["camera_role"].isin(CAMERA_GROUPS[group_name])]
         for regret_threshold in args.regret_thresholds:
             scoped = retain_high_confidence_rows(camera_rows, regret_threshold)
-            retained_fraction = len(scoped) / len(camera_rows)
+            sample_retained_fraction = len(scoped) / len(camera_rows)
+            eligible_image_coverage = high_confidence_coverage(
+                label_balance, group_name, regret_threshold
+            )
             rgb_columns = [column for column in scoped if column.startswith("feature_")]
             time_only = scoped.drop(columns=rgb_columns).copy()
             time_only["feature_000"] = scoped["time_elapsed_minutes"]
@@ -99,7 +109,8 @@ def main() -> None:
                             "camera_group": group_name,
                             "modality": modality,
                             "regret_threshold": regret_threshold,
-                            "retained_fraction": retained_fraction,
+                            "sample_retained_fraction": sample_retained_fraction,
+                            "eligible_image_coverage": eligible_image_coverage,
                             "metric": metric,
                             **interval,
                             "experiment_count": len(held_out),
@@ -111,7 +122,8 @@ def main() -> None:
                         "camera_group": group_name,
                         "modality": modality,
                         "regret_threshold": regret_threshold,
-                        "retained_fraction": retained_fraction,
+                        "sample_retained_fraction": sample_retained_fraction,
+                        "eligible_image_coverage": eligible_image_coverage,
                         "scope": "all_held_out_predictions",
                         **score_rows(predicted),
                         "image_count": len(predicted),
@@ -125,7 +137,8 @@ def main() -> None:
                             "camera_group": group_name,
                             "modality": modality,
                             "regret_threshold": regret_threshold,
-                            "retained_fraction": retained_fraction,
+                            "sample_retained_fraction": sample_retained_fraction,
+                            "eligible_image_coverage": eligible_image_coverage,
                             "scope": str(experiment),
                             **score_rows(rows),
                             "image_count": len(rows),

@@ -9,6 +9,7 @@ from frost_analysis.rgb_evaluation import (
     add_cycle_time_features,
     bootstrap_mean_interval,
     experiment_prediction_metrics,
+    high_confidence_coverage,
     leave_one_experiment_out_predictions,
     retain_high_confidence_rows,
 )
@@ -116,3 +117,16 @@ def test_bootstrap_mean_interval_handles_no_evaluable_experiments() -> None:
 
     assert all(math.isnan(value) for value in interval.values())
     assert not caught
+
+
+def test_high_confidence_coverage_uses_all_candidate_domain_states() -> None:
+    balance = pd.DataFrame(
+        {
+            "regret_threshold": [0.01] * 3,
+            "camera_group": ["all"] * 3,
+            "cost_state": ["pre_optimal", "near_optimal", "post_optimal"],
+            "image_count": [30, 40, 30],
+        }
+    )
+
+    assert high_confidence_coverage(balance, "all", 0.01) == 0.6
