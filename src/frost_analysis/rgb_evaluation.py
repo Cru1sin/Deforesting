@@ -10,16 +10,21 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 
+def retain_high_confidence_rows(frame: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Exclude images whose pointwise cost regret lies in the ambiguity region."""
+    return frame.loc[frame["relative_regret"].gt(threshold)].copy()
+
+
 def experiment_prediction_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
     """Score held-out predictions with one row per independent experiment."""
     rows = []
     for experiment, values in predictions.groupby("experiment_id", sort=True):
-        incorrect_regret = values["relative_regret"].where(
-            values["target"].ne(values["predicted_target"]), 0.0
-        )
-        rows.append(
-            {
-                "experiment_id": experiment,
+        evaluable = values["target"].nunique() == 2
+        if evaluable:
+            incorrect_regret = values["relative_regret"].where(
+                values["target"].ne(values["predicted_target"]), 0.0
+            )
+            scores = {
                 "balanced_accuracy": balanced_accuracy_score(
                     values["target"], values["predicted_target"]
                 ),
@@ -30,6 +35,22 @@ def experiment_prediction_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
                 "balanced_misclassification_regret": incorrect_regret.groupby(
                     values["target"]
                 ).mean().mean(),
+            }
+        else:
+            scores = dict.fromkeys(
+                (
+                    "balanced_accuracy",
+                    "macro_f1",
+                    "auroc",
+                    "balanced_misclassification_regret",
+                ),
+                float("nan"),
+            )
+        rows.append(
+            {
+                "experiment_id": experiment,
+                "evaluable": evaluable,
+                **scores,
                 "image_count": len(values),
                 "cycle_count": values["cycle_name"].nunique(),
             }
@@ -42,6 +63,8 @@ def bootstrap_mean_interval(
 ) -> dict[str, float]:
     """Return a percentile interval for a mean across independent experiments."""
     array = values.dropna().to_numpy(dtype=float)
+    if not len(array):
+        return dict.fromkeys(("estimate", "lower", "upper"), float("nan"))
     rng = np.random.default_rng(seed)
     means = rng.choice(array, size=(repeats, len(array)), replace=True).mean(axis=1)
     lower, upper = np.quantile(means, [0.025, 0.975])

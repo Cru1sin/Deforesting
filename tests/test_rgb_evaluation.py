@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+import warnings
+
 import pandas as pd
 
 from frost_analysis.rgb_evaluation import (
@@ -7,6 +10,7 @@ from frost_analysis.rgb_evaluation import (
     bootstrap_mean_interval,
     experiment_prediction_metrics,
     leave_one_experiment_out_predictions,
+    retain_high_confidence_rows,
 )
 
 
@@ -77,3 +81,38 @@ def test_bootstrap_mean_interval_is_reproducible() -> None:
 
     assert first == second
     assert first["lower"] <= first["estimate"] <= first["upper"]
+
+
+def test_retain_high_confidence_rows_uses_pointwise_regret() -> None:
+    rows = pd.DataFrame({"relative_regret": [0.005, 0.01, 0.011, 0.05]})
+
+    retained = retain_high_confidence_rows(rows, threshold=0.01)
+
+    assert retained["relative_regret"].tolist() == [0.011, 0.05]
+
+
+def test_experiment_metrics_mark_single_class_as_not_evaluable() -> None:
+    predictions = pd.DataFrame(
+        {
+            "experiment_id": ["a", "a"],
+            "cycle_name": ["cycle", "cycle"],
+            "target": [0, 0],
+            "predicted_target": [0, 1],
+            "decision_score": [-1.0, 1.0],
+            "relative_regret": [0.1, 0.2],
+        }
+    )
+
+    metrics = experiment_prediction_metrics(predictions).iloc[0]
+
+    assert not metrics["evaluable"]
+    assert math.isnan(metrics["balanced_accuracy"])
+    assert math.isnan(metrics["auroc"])
+
+
+def test_bootstrap_mean_interval_handles_no_evaluable_experiments() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        interval = bootstrap_mean_interval(pd.Series([float("nan")]))
+
+    assert all(math.isnan(value) for value in interval.values())
+    assert not caught
