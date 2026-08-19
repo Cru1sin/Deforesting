@@ -9,7 +9,12 @@ from pathlib import Path
 import pandas as pd
 from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 
-from frost_analysis.rgb_evaluation import leave_one_experiment_out_predictions
+from frost_analysis.rgb_evaluation import (
+    add_cycle_time_features,
+    bootstrap_mean_interval,
+    experiment_prediction_metrics,
+    leave_one_experiment_out_predictions,
+)
 
 CAMERA_GROUPS = {
     "top": ("top",),
@@ -37,6 +42,11 @@ def score_rows(frame: pd.DataFrame) -> dict[str, float]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shards", type=Path, default=Path("report/rgb_feature_shards/cycles"))
+    parser.add_argument(
+        "--candidates",
+        type=Path,
+        default=Path("report/raw_optimal_defrost/source_data/candidate_cost_curves.parquet"),
+    )
     parser.add_argument("--camera-groups", nargs="+", choices=tuple(CAMERA_GROUPS), default=["all"])
     parser.add_argument("--output", type=Path, default=Path("report/rgb_full_cohort"))
     args = parser.parse_args()
@@ -45,37 +55,94 @@ def main() -> None:
     if not paths:
         raise SystemExit("no feature shards")
     features = pd.concat((pd.read_parquet(path) for path in paths), ignore_index=True)
+    features = add_cycle_time_features(features, pd.read_parquet(args.candidates))
     predictions = []
     metrics = []
+    experiment_metrics = []
+    summary_metrics = []
     for group_name in args.camera_groups:
         scoped = features.loc[features["camera_role"].isin(CAMERA_GROUPS[group_name])]
-        predicted = leave_one_experiment_out_predictions(scoped)
-        predicted["camera_group"] = group_name
-        predictions.append(predicted)
-        metrics.append(
-            {
-                "camera_group": group_name,
-                "scope": "all_held_out_predictions",
-                **score_rows(predicted),
-                "image_count": len(predicted),
-                "cycle_count": predicted["cycle_name"].nunique(),
-                "experiment_count": predicted["experiment_id"].nunique(),
-            }
-        )
-        for experiment, rows in predicted.groupby("experiment_id", sort=True):
+        rgb_columns = [column for column in scoped if column.startswith("feature_")]
+        time_only = scoped.drop(columns=rgb_columns).copy()
+        time_only["feature_000"] = scoped["time_elapsed_minutes"]
+        time_only["feature_001"] = scoped["time_candidate_progress"]
+        rgb_time = scoped.copy()
+        rgb_time["feature_040"] = scoped["time_elapsed_minutes"]
+        rgb_time["feature_041"] = scoped["time_candidate_progress"]
+        for modality, values in (("rgb", scoped), ("time", time_only), ("rgb_time", rgb_time)):
+            predicted = leave_one_experiment_out_predictions(values)
+            predicted["camera_group"] = group_name
+            predicted["modality"] = modality
+            predictions.append(predicted)
+            held_out = experiment_prediction_metrics(predicted)
+            held_out["camera_group"] = group_name
+            held_out["modality"] = modality
+            experiment_metrics.append(held_out)
+            for metric in (
+                "balanced_accuracy",
+                "macro_f1",
+                "auroc",
+                "balanced_misclassification_regret",
+            ):
+                interval = bootstrap_mean_interval(held_out[metric])
+                summary_metrics.append(
+                    {
+                        "camera_group": group_name,
+                        "modality": modality,
+                        "metric": metric,
+                        **interval,
+                        "experiment_count": len(held_out),
+                    }
+                )
             metrics.append(
                 {
                     "camera_group": group_name,
-                    "scope": str(experiment),
-                    **score_rows(rows),
-                    "image_count": len(rows),
-                    "cycle_count": rows["cycle_name"].nunique(),
-                    "experiment_count": 1,
+                    "modality": modality,
+                    "scope": "all_held_out_predictions",
+                    **score_rows(predicted),
+                    "image_count": len(predicted),
+                    "cycle_count": predicted["cycle_name"].nunique(),
+                    "experiment_count": predicted["experiment_id"].nunique(),
                 }
             )
+            for experiment, rows in predicted.groupby("experiment_id", sort=True):
+                metrics.append(
+                    {
+                        "camera_group": group_name,
+                        "modality": modality,
+                        "scope": str(experiment),
+                        **score_rows(rows),
+                        "image_count": len(rows),
+                        "cycle_count": rows["cycle_name"].nunique(),
+                        "experiment_count": 1,
+                    }
+                )
 
     args.output.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(metrics).to_csv(args.output / "metrics.csv", index=False)
+    held_out = pd.concat(experiment_metrics, ignore_index=True)
+    held_out.to_csv(args.output / "experiment_metrics.csv", index=False)
+    pd.DataFrame(summary_metrics).to_csv(args.output / "summary_metrics.csv", index=False)
+
+    comparisons = []
+    for (camera_group, metric), values in held_out.melt(
+        id_vars=["experiment_id", "camera_group", "modality"],
+        value_vars=["balanced_accuracy", "balanced_misclassification_regret"],
+        var_name="metric",
+    ).groupby(["camera_group", "metric"], sort=True):
+        paired = values.pivot(index="experiment_id", columns="modality", values="value")
+        for modality in ("rgb", "rgb_time"):
+            interval = bootstrap_mean_interval(paired[modality] - paired["time"])
+            comparisons.append(
+                {
+                    "camera_group": camera_group,
+                    "comparison": f"{modality}_minus_time",
+                    "metric": metric,
+                    **interval,
+                    "experiment_count": len(paired),
+                }
+            )
+    pd.DataFrame(comparisons).to_csv(args.output / "modality_deltas.csv", index=False)
     pd.concat(predictions, ignore_index=True).to_parquet(
         args.output / "predictions.parquet", index=False
     )
