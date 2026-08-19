@@ -54,3 +54,59 @@ def image_color_features(path: Path) -> np.ndarray:
             [dx.mean(), dx.std(), dy.mean(), dy.std()],
         ]
     ).astype(np.float32)
+
+
+def image_feature_matrix(
+    rows: pd.DataFrame,
+    role_order: tuple[str, ...],
+) -> tuple[np.ndarray, list[int], pd.DataFrame]:
+    """Extract shared color features and record unreadable images once."""
+    role_eye = np.eye(len(role_order), dtype=np.float32)
+    role_index = {name: index for index, name in enumerate(role_order)}
+    features: list[np.ndarray] = []
+    good_positions: list[int] = []
+    errors: list[dict[str, object]] = []
+    for position, row in enumerate(rows.itertuples(index=False)):
+        try:
+            color = image_color_features(Path(row.absolute_path))
+        except OSError as error:
+            errors.append(
+                {
+                    "cycle_name": row.cycle_name,
+                    "camera_role": row.camera_role,
+                    "file_name": row.file_name,
+                    "error": str(error),
+                }
+            )
+            continue
+        features.append(np.concatenate([color, role_eye[role_index[row.camera_role]]]))
+        good_positions.append(position)
+        if (position + 1) % 500 == 0:
+            print(f"[features] {position + 1}/{len(rows)}", flush=True)
+    width = 34 + len(role_order)
+    matrix = np.stack(features) if features else np.empty((0, width), dtype=np.float32)
+    return matrix, good_positions, pd.DataFrame(errors)
+
+
+def cycle_feature_shard(
+    rows: pd.DataFrame,
+    cycle_dir: Path,
+    role_order: tuple[str, ...],
+    *,
+    maximum_per_group: int,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Sample one cycle and persistable features without retaining its images."""
+    rows = rows.copy()
+    rows["absolute_path"] = rows.apply(
+        lambda row: str(cycle_dir / row["camera_role"] / row["file_name"]), axis=1
+    )
+    sampled = even_sample_groups(
+        rows,
+        ["cost_state", "camera_role"],
+        maximum_per_group=maximum_per_group,
+    )
+    features, good_positions, excluded = image_feature_matrix(sampled, role_order)
+    shard = sampled.iloc[good_positions].drop(columns="absolute_path").reset_index(drop=True)
+    for index in range(features.shape[1]):
+        shard[f"feature_{index:03d}"] = features[:, index]
+    return shard, excluded

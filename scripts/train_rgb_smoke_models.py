@@ -28,7 +28,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
-from frost_analysis.rgb_smoke import even_sample_groups, image_color_features, selected_names
+from frost_analysis.rgb_smoke import even_sample_groups, image_feature_matrix, selected_names
 
 CAMERA_GROUPS = {
     "top": ("top",),
@@ -117,34 +117,6 @@ def _record_predictions(
     return result
 
 
-def _traditional_features(
-    rows: pd.DataFrame,
-) -> tuple[np.ndarray, list[int], pd.DataFrame]:
-    role_eye = np.eye(len(ROLE_ORDER), dtype=np.float32)
-    role_index = {name: index for index, name in enumerate(ROLE_ORDER)}
-    features = []
-    good_positions: list[int] = []
-    errors: list[dict[str, object]] = []
-    for number, row in enumerate(rows.itertuples(index=False), start=1):
-        try:
-            color = image_color_features(Path(row.absolute_path))
-        except OSError as error:
-            errors.append(
-                {
-                    "cycle_name": row.cycle_name,
-                    "camera_role": row.camera_role,
-                    "file_name": row.file_name,
-                    "error": str(error),
-                }
-            )
-            continue
-        features.append(np.concatenate([color, role_eye[role_index[row.camera_role]]]))
-        good_positions.append(number - 1)
-        if number % 500 == 0:
-            print(f"[features] {number}/{len(rows)}", flush=True)
-    return np.stack(features), good_positions, pd.DataFrame(errors)
-
-
 def _torch_probabilities(
     model: nn.Module,
     rows: pd.DataFrame,
@@ -217,7 +189,7 @@ def run(  # noqa: C901
         maximum_per_group=maximum_per_group,
     )
     print(f"[data] sampled={len(sampled)}", flush=True)
-    features, good_positions, excluded = _traditional_features(sampled)
+    features, good_positions, excluded = image_feature_matrix(sampled, ROLE_ORDER)
     sampled = sampled.iloc[good_positions].reset_index(drop=True)
     train_mask = sampled["split"].eq("train").to_numpy()
     validation_mask = sampled["split"].eq("validation").to_numpy()
