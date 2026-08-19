@@ -4,7 +4,7 @@
   "target_journal": "Nature Communications",
   "entry_stage": "00_intake",
   "created_at": "2026-08-19T21:19:07.765251+00:00",
-  "updated_at": "2026-08-20T20:30:00+08:00",
+  "updated_at": "2026-08-20T21:10:00+08:00",
   "stages": {
     "00_intake": {
       "label": "Intake and plan",
@@ -44,15 +44,15 @@
     },
     "06_review": {
       "label": "Scientific review",
-      "status": "pending",
-      "gate": "",
-      "notes": ""
+      "status": "complete",
+      "gate": "Independent editorial, methods, domain, perspective and devil's-advocate findings are synthesized with stable IDs and verification criteria.",
+      "notes": "Decision: Major revision. The paper is a retrospective proof-of-concept; prospective action validation and independent front-camera confirmation remain mandatory."
     },
     "07_revision": {
       "label": "Revision and verification",
-      "status": "pending",
+      "status": "in_progress",
       "gate": "",
-      "notes": ""
+      "notes": "Resolve reporting findings now; retain new-data findings as explicit submission blockers."
     },
     "08_final": {
       "label": "Humanization and finalization",
