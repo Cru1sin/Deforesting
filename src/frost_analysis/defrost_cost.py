@@ -7,6 +7,17 @@ from typing import Any
 import pandas as pd
 
 
+def count_true_runs(values: list[bool] | pd.Series) -> int:
+    """Count disconnected True regions in an ordered Boolean sequence."""
+    previous = False
+    runs = 0
+    for value in values:
+        current = bool(value)
+        runs += int(current and not previous)
+        previous = current
+    return runs
+
+
 def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
     """Return raw water-side heating capacity in kW."""
     return (

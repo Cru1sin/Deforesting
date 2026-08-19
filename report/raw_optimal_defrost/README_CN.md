@@ -20,7 +20,7 @@
 - 未给出点估计的 30 个循环包括：无实际除霜边界 12 个、catalog 无效 9 个、候选域被长缺口截断 5 个、clean anchor 无效 4 个。
 - 内部最小值：37；左边界：0；右边界：10。
 - 相对实际除霜的提前量中位数：58.8 min。
-- 5% near-optimal 区间宽度中位数：95.0 min。
+- 5% near-optimal envelope 宽度中位数：95.0 min；其中 3 个循环含不连续低-regret 段，因此图像标签必须使用逐图 regret，不能把 envelope 内全部时刻视为 near-optimal。
 - 均值门票改为中位数门票后，最优点绝对移动量中位数：0.0 min；90% 分位：36.2 min。
 - 双 clean anchor 改为仅用当前 clean anchor 后，最优点绝对移动量中位数：1.0 min；90% 分位：50.4 min；超过 30 min 的循环占比：12.8%。
 
@@ -36,6 +36,6 @@
 - `source_data/clean_anchor_summary.csv`：clean anchor 与 COP。
 - `source_data/cohort_audit.csv`：队列纳入审计。
 - `source_data/empirical_policy_summary.csv`：经验门票和换算系数。
-- `source_data/near_optimal_band_sensitivity.csv`：1%、2%、5%、10% regret 阈值对应的区间宽度。
+- `source_data/near_optimal_band_sensitivity.csv`：1%、2%、5%、10% regret 阈值对应的 envelope 宽度与连续段数。
 - `figures/figure_1_empirical_optimal_defrost.*`：PNG/SVG/PDF/TIFF 主图。
 - `figures/cycles/`：每个有效循环一张原始曲线与成本曲线图。

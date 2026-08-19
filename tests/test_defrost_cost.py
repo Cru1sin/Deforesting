@@ -5,11 +5,16 @@ import pandas as pd
 import pytest
 
 from frost_analysis.defrost_cost import (
+    count_true_runs,
     find_recovery_time,
     integrate_energy_kwh,
     optimize_renewal_cost,
     water_side_heating_kw,
 )
+
+
+def test_count_true_runs_preserves_disconnected_near_optimal_regions() -> None:
+    assert count_true_runs([True, True, False, True, False]) == 2
 
 
 def test_water_side_heating_uses_raw_water_measurements() -> None:
