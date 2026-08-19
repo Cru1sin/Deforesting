@@ -1,0 +1,7 @@
+# Motivation options after research
+
+| Option | One-sentence motivation | Core innovation | Why it is not overbroad | Required evidence | Best-fit paper arc |
+|---|---|---|---|---|---|
+| A — selected | Historical heat-pump records lack a trustworthy visual decision label, so we translate cycle-specific empirical cost regret into ambiguity-aware RGB supervision and test its information beyond cycle time. | Cost-regret-to-image bridge plus shortcut-controlled validation | Does not claim a new global optimizer, first image defrosting or realized savings | Complete cost audit, experiment-held-out RGB/time comparison, uncertainty and failure analysis | Cost surface → regret labels → visual increment → limits |
+| B | Broad cost valleys make a single optimal timestamp a poor supervision target, motivating selective pre/post classification with a near-optimal abstention region. | Decision ambiguity as an explicit learning target | Narrower ML-method claim | Threshold/coverage sensitivity and cost-weighted errors | Argmin ambiguity → reject region → risk–coverage |
+| C | Existing defrost controllers can be retrospectively benchmarked by the gap between observed action and a fixed-policy empirical renewal-cost minimum. | Auditable controller gap | Stops before visual learning and causal optimization | Cost sensitivity and prospective follow-up design | Raw data → empirical benchmark → intervention agenda |

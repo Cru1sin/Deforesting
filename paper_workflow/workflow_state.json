@@ -4,7 +4,7 @@
   "target_journal": "Nature Communications",
   "entry_stage": "00_intake",
   "created_at": "2026-08-19T21:19:07.765251+00:00",
-  "updated_at": "2026-08-20T05:19:41+08:00",
+  "updated_at": "2026-08-20T16:20:00+08:00",
   "stages": {
     "00_intake": {
       "label": "Intake and plan",
@@ -14,31 +14,31 @@
     },
     "01_sources": {
       "label": "Source ingestion",
-      "status": "in_progress",
-      "gate": "",
-      "notes": ""
+      "status": "complete",
+      "gate": "Every source used downstream has a stable source ID, DOI or local author-data anchor, and a stated read/verification status.",
+      "notes": "Direct optimal-timing, frost-tracking, image-control and grouped-validation precedents are indexed; full-text audits still gate detailed comparative claims."
     },
     "02_research": {
       "label": "Research question and evidence",
-      "status": "pending",
-      "gate": "",
-      "notes": ""
+      "status": "complete",
+      "gate": "Every central planned claim is mapped to author data or verified literature and unsupported causal or priority claims are blocked.",
+      "notes": "Evidence matrix and claim register distinguish supported cost results, provisional RGB results, contradicted novelty claims and unsupported deployment claims."
     },
     "03_spine": {
       "label": "Motivation spine",
-      "status": "pending",
-      "gate": "",
-      "notes": ""
+      "status": "complete",
+      "gate": "One controlling motivation connects the operational decision gap, cost-regret labels, RGB validation and explicit claim boundaries.",
+      "notes": "Confirmed motivation: an auditable cost-regret-to-image bridge with experiment-held-out and time-only controls."
     },
     "04_manuscript": {
       "label": "Drafting",
-      "status": "pending",
+      "status": "in_progress",
       "gate": "",
       "notes": ""
     },
     "05_figures": {
       "label": "Figures",
-      "status": "pending",
+      "status": "in_progress",
       "gate": "",
       "notes": ""
     },
