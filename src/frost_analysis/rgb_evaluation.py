@@ -58,6 +58,22 @@ def make_rgb_model(name: str):  # type: ignore[no-untyped-def]
     return make_pipeline(StandardScaler(), classifier)
 
 
+def fit_predict_rgb_model(
+    train: pd.DataFrame, test: pd.DataFrame, model_name: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fit one compact model and return class predictions plus ranking scores."""
+    feature_columns = [column for column in train if column.startswith("feature_")]
+    model = make_rgb_model(model_name)
+    model.fit(train[feature_columns], train["target"])
+    predicted = model.predict(test[feature_columns])
+    score = (
+        model.decision_function(test[feature_columns])
+        if hasattr(model, "decision_function")
+        else model.predict_proba(test[feature_columns])[:, 1]
+    )
+    return np.asarray(predicted), np.asarray(score)
+
+
 def high_confidence_coverage(
     label_balance: pd.DataFrame, camera_group: str, threshold: float
 ) -> float:
@@ -152,20 +168,15 @@ def leave_one_experiment_out_predictions(
     frame: pd.DataFrame, model_name: str = "rbf_svm"
 ) -> pd.DataFrame:
     """Fit one locked model on all but one experiment at a time."""
-    feature_columns = [column for column in frame if column.startswith("feature_")]
     predictions = []
     for experiment in sorted(frame["experiment_id"].unique()):
         test = frame.loc[frame["experiment_id"].eq(experiment)].copy()
         train = frame.loc[~frame["experiment_id"].eq(experiment)]
         if train["target"].nunique() < 2:
             continue
-        model = make_rgb_model(model_name)
-        model.fit(train[feature_columns], train["target"])
-        test["predicted_target"] = model.predict(test[feature_columns])
-        if hasattr(model, "decision_function"):
-            test["decision_score"] = model.decision_function(test[feature_columns])
-        else:
-            test["decision_score"] = model.predict_proba(test[feature_columns])[:, 1]
+        test["predicted_target"], test["decision_score"] = fit_predict_rgb_model(
+            train, test, model_name
+        )
         test["held_out_experiment"] = experiment
         test["model"] = model_name
         predictions.append(test)

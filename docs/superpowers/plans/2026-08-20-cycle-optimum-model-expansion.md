@@ -113,8 +113,24 @@
 - [ ] **Step 3: 运行** `.venv/bin/pytest -q`、`.venv/bin/ruff check .`、`git diff --check` 和 LaTeX 编译检查，记录真实结果。
 - [ ] **Step 4: 最终提交并推送**：`docs: review expanded manuscript evidence`。
 
+### Task 9: 全量云端循环与模型数据量曲线
+
+**Files:**
+- Modify: `scripts/extract_rgb_feature_shards.py`
+- Create: `scripts/evaluate_rgb_learning_curves.py`
+- Create: `tests/test_rgb_learning_curves.py`
+- Create: `report/rgb_full_features/`
+- Create: `report/rgb_learning_curves/`
+
+- [ ] **Step 1: 逐cycle流式物化全部cost-valid云端图像**：提取全部pre/near/post冻结特征；每个临时cycle处理后仅删除本地副本，云端对象不修改、不删除。
+- [ ] **Step 2: 用全量特征重跑9机位组×5模型LOEO**，保持1% pointwise-regret协议和experiment隔离。
+- [ ] **Step 3: 数据量以训练experiment/cycle数量定义**，在每个held-out experiment内使用嵌套训练子集；禁止通过随机抽帧制造虚假的样本量曲线。
+- [ ] **Step 4: front与all pooled先比较五模型的学习曲线、方差和饱和点**；只有机位排序改变时才扩展到其余7组。
+- [ ] **Step 5: 主模型锁定后单独流式提取cycle11并做扰动OOD**，不进入训练、选模或学习曲线。
+- [ ] **Step 6: 用全量结果替换demo数字、重画Figure 5--6并重新编译中文PDF；提交并推送**：`analysis: validate models on full cloud cohort`。
+
 ## 自审结果
 
-- 需求覆盖：候选域扩展、逐循环背景带、9×5、cycle11 OOD、pooled/fusion 区分、主命题检验、升级门控、中文 LaTeX/PDF 均有对应任务。
+- 需求覆盖：候选域扩展、逐循环背景带、9×5、cycle11 OOD、pooled/fusion 区分、主命题检验、全云端循环、按experiment/cycle定义的数据量曲线、升级门控、中文 LaTeX/PDF 均有对应任务。
 - 刻意不做：当前不下载图像、不引入 timm/Swin/YOLO、不实现同步 multi-view、不强制所有循环产生内部最小值。
 - 科学边界：Tier B 只作右截尾敏感性；cycle11 只作 OOD；所有“最优”均是固定经验 ticket 下的离线点估计。
