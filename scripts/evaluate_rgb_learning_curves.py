@@ -264,6 +264,70 @@ def plot_learning_curves(summary: pd.DataFrame, output: Path) -> None:
     plt.close(fig)
 
 
+def plot_camera_grid(summary: pd.DataFrame, output: Path, metric: str, ylabel: str) -> None:
+    """Plot one learning-curve metric for all nine camera groups."""
+    camera_order = list(CAMERA_GROUPS)
+    colors = dict(
+        zip(
+            MODEL_NAMES,
+            ["#4C78A8", "#72B7B2", "#F58518", "#B279A2", "#E45756"],
+            strict=True,
+        )
+    )
+    fig, axes = plt.subplots(
+        3,
+        3,
+        figsize=(7.2, 6.4),
+        sharex=True,
+        sharey=True,
+        gridspec_kw={"hspace": 0.30, "wspace": 0.20},
+    )
+    for index, (camera, axis) in enumerate(zip(camera_order, axes.flat, strict=True)):
+        values = summary.loc[summary["camera_group"].eq(camera) & summary["metric"].eq(metric)]
+        for model in MODEL_NAMES:
+            points = values.loc[values["model"].eq(model)].sort_values("training_experiment_count")
+            if points.empty:
+                continue
+            axis.plot(
+                points["training_experiment_count"],
+                points["estimate"],
+                "o-",
+                color=colors[model],
+                ms=2.5,
+                lw=0.9,
+                label=model.replace("_", " "),
+            )
+        axis.set_title(camera.replace("_", " "), fontsize=7, fontweight="bold")
+        axis.grid(axis="y", color="#DDDDDD", lw=0.4)
+        axis.text(
+            -0.15,
+            1.03,
+            chr(ord("a") + index),
+            transform=axis.transAxes,
+            fontsize=8,
+            fontweight="bold",
+        )
+    fig.supxlabel("Training experiments", fontsize=7, y=0.045)
+    fig.supylabel(ylabel, fontsize=7, x=0.015)
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=5, frameon=False, fontsize=5.8)
+    fig.subplots_adjust(bottom=0.12, left=0.08)
+    base = output / f"{metric}_all_camera_learning_curves"
+    for suffix, kwargs in {
+        ".svg": {},
+        ".pdf": {},
+        ".png": {"dpi": 300},
+        ".tiff": {"dpi": 600},
+    }.items():
+        fig.savefig(
+            base.with_suffix(suffix),
+            bbox_inches="tight",
+            facecolor="white",
+            **kwargs,
+        )
+    plt.close(fig)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -304,6 +368,13 @@ def main() -> None:
     summary.to_csv(args.output / "summary.csv", index=False)
     data_requirements(summary).to_csv(args.output / "data_requirements.csv", index=False)
     plot_learning_curves(summary, args.output)
+    plot_camera_grid(summary, args.output, "balanced_accuracy", "Balanced accuracy")
+    plot_camera_grid(
+        summary,
+        args.output,
+        "balanced_misclassification_regret",
+        "Balanced cost regret",
+    )
 
 
 if __name__ == "__main__":
