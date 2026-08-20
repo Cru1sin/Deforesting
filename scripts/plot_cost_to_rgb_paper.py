@@ -70,7 +70,11 @@ def main() -> None:
     curve["state_01pct"] = np.where(
         curve["relative_regret"].le(0.01),
         "near-optimal",
-        np.where(pd.to_datetime(curve["candidate_time"]).lt(optimum), "pre-optimal", "post-optimal"),
+        np.where(
+            pd.to_datetime(curve["candidate_time"]).lt(optimum),
+            "pre-optimal",
+            "post-optimal",
+        ),
     )
     curve.to_csv(source / "figure_2_representative_curve.csv", index=False)
 
@@ -138,7 +142,14 @@ def main() -> None:
     x = np.arange(len(split_summary))
     width = 0.36
     ax.bar(x - width / 2, split_summary["experiment_count"], width, color=BLUE, label="Experiments")
-    ax.bar(x + width / 2, split_summary["cycle_count"], width, color=PALE, edgecolor=BLUE, label="Cycles")
+    ax.bar(
+        x + width / 2,
+        split_summary["cycle_count"],
+        width,
+        color=PALE,
+        edgecolor=BLUE,
+        label="Cycles",
+    )
     ax.set_xticks(x, ["Train", "Validation", "Test"])
     ax.set(ylabel="Independent units")
     ax.legend(fontsize=7)

@@ -122,7 +122,10 @@ def _plot_figure_3(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) 
     )
 
     ax_b = fig.add_subplot(grid[0, 1])
-    comparisons = (("rgb_minus_time", "RGB − time", BLUE, -0.11), ("rgb_time_minus_time", "RGB + time − time", ORANGE, 0.11))
+    comparisons = (
+        ("rgb_minus_time", "RGB − time", BLUE, -0.11),
+        ("rgb_time_minus_time", "RGB + time − time", ORANGE, 0.11),
+    )
     for comparison, label, color, offset in comparisons:
         rows = delta.loc[delta["comparison"].eq(comparison)].set_index("camera_group")
         rows = rows.reindex(available)
@@ -253,7 +256,9 @@ def _plot_figure_4(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) 
     ax_c.barh(np.arange(len(failures)), values, color=RED, alpha=0.82)
     ax_c.set_yticks(np.arange(len(failures)), labels)
     ax_c.set(xlabel="Mean misclassification regret (%)", ylabel="Highest-regret cycles")
-    for position, (value, error_rate) in enumerate(zip(values, failures["error_rate"], strict=True)):
+    for position, (value, error_rate) in enumerate(
+        zip(values, failures["error_rate"], strict=True)
+    ):
         ax_c.text(value, position, f" {error_rate:.0%} errors", va="center", fontsize=5.8)
 
     for label, axis in zip("abc", (ax_a, ax_b, ax_c), strict=True):
