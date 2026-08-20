@@ -7,20 +7,20 @@
 ## 固定方法
 
 - 水侧制热量：`1.161 × water_flow × (water_out_temperature - water_in_temperature)`，单位 kW。
-- clean reference：每循环稳定制热开始后的 60 s 中位数，与下一循环 clean anchor 线性连接。
+- clean reference：Tier A 将本循环与下一循环的 60 s clean anchor 线性连接；Tier B 因无后续动作，仅用本循环 clean anchor 常数参考并标记为右截尾敏感性。
 - clean COP：2.487；热量缺口等效电量系数 `lambda_Q = 1/COP = 0.402`。
 - 恢复：除霜结束后原始制热量连续 30 s 达到下一 clean anchor 的 90%。
 - 经验门票：50 个有效事件；均值成本 1.018 kWh-eq.，均值时长 13.60 min。
-- 候选：稳定制热后 10 min 起，以 1 min 网格搜索，并包含实际除霜时刻。
+- 候选：稳定制热后 10 min 起，以 1 min 网格搜索；Tier A 包含实际除霜时刻，Tier B 截止原始传感器记录终点。
 - 目标：`rho(tau) = [C_H(tau) + mean(K_D)] / [T_H(tau) + mean(T_D)]`。
 
 ## 当前结果
 
-- catalog 循环：77；得到有效经验最优点：47。
-- 未给出点估计的 30 个循环包括：无实际除霜边界 12 个、catalog 无效 9 个、候选域被长缺口截断 5 个、clean anchor 无效 4 个。
-- 内部最小值：37；左边界：0；右边界：10。
-- 相对实际除霜的提前量中位数：58.8 min。
-- 5% near-optimal envelope 宽度中位数：95.0 min；其中 3 个循环含不连续低-regret 段，因此图像标签必须使用逐图 regret，不能把 envelope 内全部时刻视为 near-optimal。
+- catalog 循环：77；Tier A 完整观察策略循环 47 个，Tier B 传感器终点右截尾循环 12 个，共得到 59 个经验点估计。
+- 未给出点估计的 18 个循环包括：catalog 无效 9 个、候选域被长缺口截断 5 个、clean anchor 无效 4 个。
+- Tier A 内部最小值：37；左边界：0；右边界：10。Tier B 内部最小值 7 个、右边界 5 个；后者不能解释为已经观测到最优点。
+- Tier A 相对实际除霜的提前量中位数：58.8 min。
+- Tier A 的 5% near-optimal envelope 宽度中位数：95.0 min；其中 3 个循环含不连续低-regret 段，因此图像标签必须使用逐图 regret，不能把 envelope 内全部时刻视为 near-optimal。
 - 均值门票改为中位数门票后，最优点绝对移动量中位数：0.0 min；90% 分位：36.2 min。
 - 双 clean anchor 改为仅用当前 clean anchor 后，最优点绝对移动量中位数：1.0 min；90% 分位：50.4 min；超过 30 min 的循环占比：12.8%。
 

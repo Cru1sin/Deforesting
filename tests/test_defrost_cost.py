@@ -5,12 +5,34 @@ import pandas as pd
 import pytest
 
 from frost_analysis.defrost_cost import (
+    candidate_domain_end,
     count_true_runs,
     find_recovery_time,
     integrate_energy_kwh,
     optimize_renewal_cost,
     water_side_heating_kw,
 )
+
+
+def test_candidate_domain_distinguishes_observed_and_right_censored_cycles() -> None:
+    observed = pd.Timestamp("2026-01-01 02:00")
+    record_end = pd.Timestamp("2026-01-01 03:00")
+
+    assert candidate_domain_end(observed, record_end) == (
+        observed,
+        "observed_defrost",
+        False,
+    )
+    assert candidate_domain_end(None, record_end) == (
+        record_end,
+        "sensor_record_end",
+        True,
+    )
+
+
+def test_candidate_domain_requires_a_real_end_time() -> None:
+    with pytest.raises(ValueError, match="candidate end"):
+        candidate_domain_end(None, None)
 
 
 def test_count_true_runs_preserves_disconnected_near_optimal_regions() -> None:

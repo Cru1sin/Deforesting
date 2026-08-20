@@ -15,6 +15,7 @@ from matplotlib.lines import Line2D
 
 from frost_analysis.dataset_loader import DatasetLoader
 from frost_analysis.defrost_cost import (
+    candidate_domain_end,
     count_true_runs,
     find_recovery_time,
     integrate_energy_kwh,
@@ -109,14 +110,14 @@ def _candidate_costs(
     frame: pd.DataFrame,
     *,
     stable_start: pd.Timestamp,
-    defrost_start: pd.Timestamp,
+    candidate_end: pd.Timestamp,
     q_start_kw: float,
     next_stable_start: pd.Timestamp,
     q_end_kw: float,
     lambda_q: float,
 ) -> pd.DataFrame:
     heating = frame.loc[
-        frame["timestamp"].ge(stable_start) & frame["timestamp"].le(defrost_start)
+        frame["timestamp"].ge(stable_start) & frame["timestamp"].le(candidate_end)
     ].copy()
     heating["q_reference_kw"] = _reference_kw(
         heating["timestamp"], stable_start, q_start_kw, next_stable_start, q_end_kw
@@ -128,9 +129,9 @@ def _candidate_costs(
         heating["power_total"] + lambda_q * heating["thermal_shortfall_kw"]
     )
     first = stable_start + pd.Timedelta(minutes=MINIMUM_HEATING_MINUTES)
-    candidates = list(pd.date_range(first, defrost_start, freq=f"{CANDIDATE_STEP_MINUTES}min"))
-    if candidates and candidates[-1] != defrost_start:
-        candidates.append(defrost_start)
+    candidates = list(pd.date_range(first, candidate_end, freq=f"{CANDIDATE_STEP_MINUTES}min"))
+    if candidates and candidates[-1] != candidate_end:
+        candidates.append(candidate_end)
     rows: list[dict[str, object]] = []
     for candidate in candidates:
         observed = heating.loc[heating["timestamp"].le(candidate)]
@@ -462,32 +463,50 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
         following = next_cycle.get(name)
         stable = _timestamp(row.get("stable_heating_start"))
         actual = _timestamp(row.get("defrost_start"))
+        sensor_end = _timestamp(row.get("end_time")) or _timestamp(frames[name]["timestamp"].max())
         reason = ""
         if row["status"] != "valid":
             reason = f"catalog_{row['status']}"
-        elif actual is None:
-            reason = "missing_actual_defrost"
-        elif following is None:
+        elif actual is not None and following is None:
             reason = "missing_next_cycle_reference"
-        elif not anchors[name]["valid"] or not anchors[following]["valid"]:
+        elif not anchors[name]["valid"]:
             reason = "invalid_clean_anchor"
-        elif stable is None or (actual - stable) < pd.Timedelta(minutes=MINIMUM_HEATING_MINUTES):
+        elif actual is not None and not anchors[following]["valid"]:
+            reason = "invalid_clean_anchor"
+        elif stable is None:
+            reason = "missing_stable_heating_start"
+        else:
+            try:
+                candidate_end, candidate_end_source, is_censored = candidate_domain_end(
+                    actual, sensor_end
+                )
+            except ValueError:
+                reason = "missing_candidate_end"
+        if not reason and (candidate_end - stable) < pd.Timedelta(minutes=MINIMUM_HEATING_MINUTES):
             reason = "heating_interval_shorter_than_10min"
         if reason:
             result_rows.append({"cycle_name": name, "valid": False, "invalid_reason": reason})
             audit_rows.append({"cycle_name": name, "included": False, "reason": reason})
             continue
 
-        assert following is not None and stable is not None and actual is not None
-        next_stable = _timestamp(records[following].get("stable_heating_start"))
-        assert next_stable is not None
+        assert stable is not None
+        if is_censored:
+            reference_end = candidate_end
+            q_end_kw = float(anchors[name]["q_clean_kw"])
+            cohort_tier = "B_sensor_censored"
+        else:
+            assert following is not None and actual is not None
+            reference_end = _timestamp(records[following].get("stable_heating_start"))
+            assert reference_end is not None
+            q_end_kw = float(anchors[following]["q_clean_kw"])
+            cohort_tier = "A_observed_policy"
         candidates = _candidate_costs(
             frames[name],
             stable_start=stable,
-            defrost_start=actual,
+            candidate_end=candidate_end,
             q_start_kw=float(anchors[name]["q_clean_kw"]),
-            next_stable_start=next_stable,
-            q_end_kw=float(anchors[following]["q_clean_kw"]),
+            next_stable_start=reference_end,
+            q_end_kw=q_end_kw,
             lambda_q=lambda_q,
         )
         candidates = candidates.loc[
@@ -503,7 +522,7 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
                 candidates,
                 ticket_cost_kwh=mean_ticket_cost,
                 ticket_duration_hours=mean_ticket_hours,
-                required_end_time=actual,
+                required_end_time=candidate_end,
             )
         except ValueError:
             reason = "candidate_domain_truncated_before_actual_defrost"
@@ -511,6 +530,9 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
             audit_rows.append({"cycle_name": name, "included": False, "reason": reason})
             continue
         curve.insert(0, "cycle_name", name)
+        curve["cohort_tier"] = cohort_tier
+        curve["candidate_end_source"] = candidate_end_source
+        curve["is_censored"] = is_censored
         curve["relative_regret"] = curve["renewal_cost_kw"] / float(optimum["renewal_cost_kw"]) - 1
         curve["is_near_optimal"] = curve["renewal_cost_kw"].le(
             1.05 * float(optimum["renewal_cost_kw"])
@@ -535,15 +557,15 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
             candidates,
             ticket_cost_kwh=median_ticket_cost,
             ticket_duration_hours=median_ticket_hours,
-            required_end_time=actual,
+            required_end_time=candidate_end,
         )
         median_ticket_t_star = pd.Timestamp(median_ticket_optimum["candidate_time"])
         constant_reference_candidates = _candidate_costs(
             frames[name],
             stable_start=stable,
-            defrost_start=actual,
+            candidate_end=candidate_end,
             q_start_kw=float(anchors[name]["q_clean_kw"]),
-            next_stable_start=next_stable,
+            next_stable_start=reference_end,
             q_end_kw=float(anchors[name]["q_clean_kw"]),
             lambda_q=lambda_q,
         )
@@ -554,7 +576,7 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
             constant_reference_candidates,
             ticket_cost_kwh=mean_ticket_cost,
             ticket_duration_hours=mean_ticket_hours,
-            required_end_time=actual,
+            required_end_time=candidate_end,
         )
         constant_reference_t_star = pd.Timestamp(constant_reference_optimum["candidate_time"])
         near_start = pd.Timestamp(optimum["near_opt_start"])
@@ -564,6 +586,11 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
                 "cycle_name": name,
                 "t_heating_stable": stable,
                 "t_actual_defrost": actual,
+                "candidate_end": candidate_end,
+                "candidate_end_source": candidate_end_source,
+                "is_censored": is_censored,
+                "cohort_tier": cohort_tier,
+                "primary_analysis": not is_censored,
                 "t_star": t_star,
                 "t_star_median_ticket": median_ticket_t_star,
                 "median_ticket_shift_minutes": (median_ticket_t_star - t_star).total_seconds() / 60,
@@ -573,8 +600,12 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
                 ).total_seconds()
                 / 60,
                 "minutes_from_stable": (t_star - stable).total_seconds() / 60,
-                "actual_minutes_from_stable": (actual - stable).total_seconds() / 60,
-                "minutes_earlier_than_actual": (actual - t_star).total_seconds() / 60,
+                "actual_minutes_from_stable": (
+                    (actual - stable).total_seconds() / 60 if actual is not None else np.nan
+                ),
+                "minutes_earlier_than_actual": (
+                    (actual - t_star).total_seconds() / 60 if actual is not None else np.nan
+                ),
                 "rho_min_kw_equivalent": optimum["renewal_cost_kw"],
                 "near_opt_start": near_start,
                 "near_opt_end": near_end,
@@ -587,7 +618,16 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
                 "invalid_reason": "",
             }
         )
-        audit_rows.append({"cycle_name": name, "included": True, "reason": ""})
+        audit_rows.append(
+            {
+                "cycle_name": name,
+                "included": True,
+                "reason": "",
+                "cohort_tier": cohort_tier,
+                "candidate_end_source": candidate_end_source,
+                "is_censored": is_censored,
+            }
+        )
 
     results = pd.DataFrame(result_rows)
     candidate_curves = pd.concat(curves, ignore_index=True) if curves else pd.DataFrame()
@@ -619,7 +659,8 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
     valid_results = results.loc[results["valid"]].copy()
     if valid_results.empty:
         raise ValueError("No valid cycle optimum is available")
-    for _, result in valid_results.iterrows():
+    primary_results = valid_results.loc[valid_results["primary_analysis"]].copy()
+    for _, result in primary_results.iterrows():
         name = str(result["cycle_name"])
         following = next_cycle[name]
         next_stable = _timestamp(records[following].get("stable_heating_start"))
@@ -634,8 +675,8 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
             output=figures / "cycles" / f"{name}.png",
         )
 
-    interior = valid_results.loc[valid_results["minimum_location"].eq("interior")]
-    pool = interior if not interior.empty else valid_results
+    interior = primary_results.loc[primary_results["minimum_location"].eq("interior")]
+    pool = interior if not interior.empty else primary_results
     median_advance = pool["minutes_earlier_than_actual"].median()
     representative = pool.iloc[
         (pool["minutes_earlier_than_actual"] - median_advance).abs().argmin()
@@ -648,7 +689,7 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
         frames[representative_name],
         representative,
         candidate_curves.loc[candidate_curves["cycle_name"].eq(representative_name)],
-        valid_results,
+        primary_results,
         tickets,
         q_start_kw=float(anchors[representative_name]["q_clean_kw"]),
         next_stable_start=next_stable,
@@ -656,10 +697,11 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
         output=figures / "figure_1_empirical_optimal_defrost",
     )
 
-    counts = valid_results["minimum_location"].value_counts()
+    counts = primary_results["minimum_location"].value_counts()
+    censored_results = valid_results.loc[valid_results["is_censored"]].copy()
     invalid_counts = results.loc[~results["valid"], "invalid_reason"].value_counts()
-    median_ticket_shift = valid_results["median_ticket_shift_minutes"].abs()
-    constant_reference_shift = valid_results["constant_reference_shift_minutes"].abs()
+    median_ticket_shift = primary_results["median_ticket_shift_minutes"].abs()
+    constant_reference_shift = primary_results["constant_reference_shift_minutes"].abs()
     summary = f"""# 原始数据经验最优除霜点：论文初稿级 demo
 
 ## 结论边界
@@ -669,20 +711,20 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
 ## 固定方法
 
 - 水侧制热量：`1.161 × water_flow × (water_out_temperature - water_in_temperature)`，单位 kW。
-- clean reference：每循环稳定制热开始后的 60 s 中位数，与下一循环 clean anchor 线性连接。
+- clean reference：Tier A 将本循环与下一循环的 60 s clean anchor 线性连接；Tier B 因无后续动作，仅用本循环 clean anchor 常数参考并标记为右截尾敏感性。
 - clean COP：{clean_cop:.3f}；热量缺口等效电量系数 `lambda_Q = 1/COP = {lambda_q:.3f}`。
 - 恢复：除霜结束后原始制热量连续 {RECOVERY_SECONDS} s 达到下一 clean anchor 的 {RECOVERY_FRACTION:.0%}。
 - 经验门票：{len(valid_tickets)} 个有效事件；均值成本 {mean_ticket_cost:.3f} kWh-eq.，均值时长 {mean_ticket_hours * 60:.2f} min。
-- 候选：稳定制热后 {MINIMUM_HEATING_MINUTES} min 起，以 {CANDIDATE_STEP_MINUTES} min 网格搜索，并包含实际除霜时刻。
+- 候选：稳定制热后 {MINIMUM_HEATING_MINUTES} min 起，以 {CANDIDATE_STEP_MINUTES} min 网格搜索；Tier A 包含实际除霜时刻，Tier B 截止原始传感器记录终点。
 - 目标：`rho(tau) = [C_H(tau) + mean(K_D)] / [T_H(tau) + mean(T_D)]`。
 
 ## 当前结果
 
-- catalog 循环：{len(results)}；得到有效经验最优点：{len(valid_results)}。
-- 未给出点估计的 30 个循环包括：无实际除霜边界 {int(invalid_counts.get("missing_actual_defrost", 0))} 个、catalog 无效 {int(invalid_counts.get("catalog_invalid", 0))} 个、候选域被长缺口截断 {int(invalid_counts.get("candidate_domain_truncated_before_actual_defrost", 0))} 个、clean anchor 无效 {int(invalid_counts.get("invalid_clean_anchor", 0))} 个。
-- 内部最小值：{int(counts.get("interior", 0))}；左边界：{int(counts.get("left_boundary", 0))}；右边界：{int(counts.get("right_boundary", 0))}。
-- 相对实际除霜的提前量中位数：{valid_results["minutes_earlier_than_actual"].median():.1f} min。
-- 5% near-optimal envelope 宽度中位数：{valid_results["near_opt_width_minutes"].median():.1f} min；其中 {int(valid_results["near_opt_segment_count"].gt(1).sum())} 个循环含不连续低-regret 段，因此图像标签必须使用逐图 regret，不能把 envelope 内全部时刻视为 near-optimal。
+- catalog 循环：{len(results)}；Tier A 完整观察策略循环 {len(primary_results)} 个，Tier B 传感器终点右截尾循环 {len(censored_results)} 个，共得到 {len(valid_results)} 个经验点估计。
+- 未给出点估计的 {int((~results["valid"]).sum())} 个循环包括：catalog 无效 {int(invalid_counts.get("catalog_invalid", 0))} 个、候选域被长缺口截断 {int(invalid_counts.get("candidate_domain_truncated_before_actual_defrost", 0))} 个、clean anchor 无效 {int(invalid_counts.get("invalid_clean_anchor", 0))} 个。
+- Tier A 内部最小值：{int(counts.get("interior", 0))}；左边界：{int(counts.get("left_boundary", 0))}；右边界：{int(counts.get("right_boundary", 0))}。Tier B 内部最小值 {int(censored_results["minimum_location"].eq("interior").sum())} 个、右边界 {int(censored_results["minimum_location"].eq("right_boundary").sum())} 个；后者不能解释为已经观测到最优点。
+- Tier A 相对实际除霜的提前量中位数：{primary_results["minutes_earlier_than_actual"].median():.1f} min。
+- Tier A 的 5% near-optimal envelope 宽度中位数：{primary_results["near_opt_width_minutes"].median():.1f} min；其中 {int(primary_results["near_opt_segment_count"].gt(1).sum())} 个循环含不连续低-regret 段，因此图像标签必须使用逐图 regret，不能把 envelope 内全部时刻视为 near-optimal。
 - 均值门票改为中位数门票后，最优点绝对移动量中位数：{median_ticket_shift.median():.1f} min；90% 分位：{median_ticket_shift.quantile(0.9):.1f} min。
 - 双 clean anchor 改为仅用当前 clean anchor 后，最优点绝对移动量中位数：{constant_reference_shift.median():.1f} min；90% 分位：{constant_reference_shift.quantile(0.9):.1f} min；超过 30 min 的循环占比：{constant_reference_shift.gt(30).mean():.1%}。
 
@@ -709,7 +751,7 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
 - Archetype: quantitative grid with one representative raw-data example and cross-cycle validation.
 - Backend: Python/matplotlib only.
 - Final size: 183 mm wide; 7.2 × 6.2 in working canvas.
-- n definition: {len(valid_results)} complete cycles with an untruncated candidate domain; {len(valid_tickets)} valid defrost/recovery tickets.
+- n definition: {len(primary_results)} complete observed-policy cycles in the primary figure; {len(censored_results)} sensor-end right-censored cycles are sensitivity-only; {len(valid_tickets)} valid defrost/recovery tickets.
 - Center/spread: panel d reports all cycle values and a box plot (median, interquartile range, 1.5×IQR whiskers); no hypothesis test is claimed.
 - Source data: `source_data/cycle_optimal_points.csv`, `source_data/candidate_cost_curves.parquet`, and `source_data/defrost_ticket_events.csv`.
 - Editable exports: SVG text preserved; PDF uses TrueType fonts; TIFF is 600 dpi; PNG is 300 dpi.

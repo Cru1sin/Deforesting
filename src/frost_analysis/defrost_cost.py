@@ -7,6 +7,18 @@ from typing import Any
 import pandas as pd
 
 
+def candidate_domain_end(
+    observed_defrost: pd.Timestamp | None,
+    sensor_record_end: pd.Timestamp | None,
+) -> tuple[pd.Timestamp, str, bool]:
+    """Return the observed boundary, or an explicitly right-censored sensor boundary."""
+    if observed_defrost is not None:
+        return pd.Timestamp(observed_defrost), "observed_defrost", False
+    if sensor_record_end is not None:
+        return pd.Timestamp(sensor_record_end), "sensor_record_end", True
+    raise ValueError("candidate end is unavailable")
+
+
 def count_true_runs(values: list[bool] | pd.Series) -> int:
     """Count disconnected True regions in an ordered Boolean sequence."""
     previous = False
