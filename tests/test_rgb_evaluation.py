@@ -6,6 +6,7 @@ import warnings
 import pandas as pd
 
 from frost_analysis.rgb_evaluation import (
+    MODEL_NAMES,
     add_cycle_time_features,
     bootstrap_mean_interval,
     experiment_prediction_metrics,
@@ -36,6 +37,31 @@ def test_leave_one_experiment_out_predicts_every_row_once() -> None:
     assert predictions.groupby("experiment_id")["held_out_experiment"].nunique().eq(1).all()
     assert predictions["experiment_id"].eq(predictions["held_out_experiment"]).all()
     assert set(predictions["predicted_target"]) == {0, 1}
+
+
+def test_all_locked_models_share_the_same_held_out_protocol() -> None:
+    rows = []
+    for experiment, offset in (("a", 0.0), ("b", 0.1), ("c", -0.1)):
+        for target, value in ((0, -2.0 + offset), (1, 2.0 + offset)):
+            for repeat in range(12):
+                rows.append(
+                    {
+                        "experiment_id": experiment,
+                        "cycle_name": experiment,
+                        "camera_role": "top",
+                        "target": target,
+                        "feature_000": value + repeat * 0.01,
+                        "feature_001": value * 0.5,
+                    }
+                )
+    frame = pd.DataFrame(rows)
+
+    for model_name in MODEL_NAMES:
+        predictions = leave_one_experiment_out_predictions(frame, model_name=model_name)
+        assert len(predictions) == len(frame)
+        assert predictions["model"].eq(model_name).all()
+        assert predictions["experiment_id"].eq(predictions["held_out_experiment"]).all()
+        assert predictions["decision_score"].notna().all()
 
 
 def test_add_cycle_time_features_uses_candidate_domain() -> None:

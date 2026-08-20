@@ -4,10 +4,47 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
+from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
+
+MODEL_NAMES = ("logistic", "random_forest", "rbf_svm", "hist_gradient_boosting", "mlp")
+
+
+def make_rgb_model(name: str):  # type: ignore[no-untyped-def]
+    """Return one locked compact classifier for the shared 40D feature protocol."""
+    if name == "logistic":
+        classifier = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=0)
+    elif name == "random_forest":
+        classifier = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=12,
+            class_weight="balanced",
+            n_jobs=-1,
+            random_state=0,
+        )
+    elif name == "rbf_svm":
+        classifier = SVC(C=2.0, class_weight="balanced", random_state=0)
+    elif name == "hist_gradient_boosting":
+        classifier = HistGradientBoostingClassifier(
+            max_iter=100, class_weight="balanced", random_state=0
+        )
+    elif name == "mlp":
+        classifier = MLPClassifier(
+            hidden_layer_sizes=(32,),
+            alpha=0.001,
+            early_stopping=True,
+            max_iter=300,
+            n_iter_no_change=15,
+            random_state=0,
+        )
+    else:
+        raise ValueError(f"unknown RGB model: {name}")
+    return make_pipeline(StandardScaler(), classifier)
 
 
 def high_confidence_coverage(
@@ -100,8 +137,10 @@ def add_cycle_time_features(frame: pd.DataFrame, candidates: pd.DataFrame) -> pd
     return result
 
 
-def leave_one_experiment_out_predictions(frame: pd.DataFrame) -> pd.DataFrame:
-    """Fit the locked RBF-SVM on all but one experiment at a time."""
+def leave_one_experiment_out_predictions(
+    frame: pd.DataFrame, model_name: str = "rbf_svm"
+) -> pd.DataFrame:
+    """Fit one locked model on all but one experiment at a time."""
     feature_columns = [column for column in frame if column.startswith("feature_")]
     predictions = []
     for experiment in sorted(frame["experiment_id"].unique()):
@@ -109,13 +148,14 @@ def leave_one_experiment_out_predictions(frame: pd.DataFrame) -> pd.DataFrame:
         train = frame.loc[~frame["experiment_id"].eq(experiment)]
         if train["target"].nunique() < 2:
             continue
-        model = make_pipeline(
-            StandardScaler(),
-            SVC(C=2.0, class_weight="balanced", random_state=0),
-        )
+        model = make_rgb_model(model_name)
         model.fit(train[feature_columns], train["target"])
         test["predicted_target"] = model.predict(test[feature_columns])
-        test["decision_score"] = model.decision_function(test[feature_columns])
+        if hasattr(model, "decision_function"):
+            test["decision_score"] = model.decision_function(test[feature_columns])
+        else:
+            test["decision_score"] = model.predict_proba(test[feature_columns])[:, 1]
         test["held_out_experiment"] = experiment
+        test["model"] = model_name
         predictions.append(test)
     return pd.concat(predictions, ignore_index=True)

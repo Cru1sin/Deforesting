@@ -10,6 +10,7 @@ import pandas as pd
 from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 
 from frost_analysis.rgb_evaluation import (
+    MODEL_NAMES,
     add_cycle_time_features,
     bootstrap_mean_interval,
     experiment_prediction_metrics,
@@ -41,7 +42,7 @@ def score_rows(frame: pd.DataFrame) -> dict[str, float]:
     }
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     parser = argparse.ArgumentParser()
     parser.add_argument("--shards", type=Path, default=Path("report/rgb_feature_shards/cycles"))
     parser.add_argument(
@@ -58,6 +59,13 @@ def main() -> None:
     parser.add_argument(
         "--regret-thresholds", nargs="+", type=float, default=[0.01, 0.02, 0.05, 0.10]
     )
+    parser.add_argument("--models", nargs="+", choices=MODEL_NAMES, default=["rbf_svm"])
+    parser.add_argument(
+        "--modalities",
+        nargs="+",
+        choices=("rgb", "time", "rgb_time"),
+        default=["rgb", "time", "rgb_time"],
+    )
     parser.add_argument("--output", type=Path, default=Path("report/rgb_full_cohort"))
     args = parser.parse_args()
 
@@ -72,6 +80,9 @@ def main() -> None:
     experiment_metrics = []
     summary_metrics = []
     for group_name in args.camera_groups:
+        training_protocol = (
+            "pooled_views" if group_name in {"top_pair", "left_pair", "all"} else "single_view"
+        )
         camera_rows = features.loc[features["camera_role"].isin(CAMERA_GROUPS[group_name])]
         for regret_threshold in args.regret_thresholds:
             scoped = retain_high_confidence_rows(camera_rows, regret_threshold)
@@ -86,66 +97,79 @@ def main() -> None:
             rgb_time = scoped.copy()
             rgb_time["feature_040"] = scoped["time_elapsed_minutes"]
             rgb_time["feature_041"] = scoped["time_candidate_progress"]
-            for modality, values in (("rgb", scoped), ("time", time_only), ("rgb_time", rgb_time)):
-                predicted = leave_one_experiment_out_predictions(values)
-                predicted["camera_group"] = group_name
-                predicted["modality"] = modality
-                predicted["regret_threshold"] = regret_threshold
-                predictions.append(predicted)
-                held_out = experiment_prediction_metrics(predicted)
-                held_out["camera_group"] = group_name
-                held_out["modality"] = modality
-                held_out["regret_threshold"] = regret_threshold
-                experiment_metrics.append(held_out)
-                for metric in (
-                    "balanced_accuracy",
-                    "macro_f1",
-                    "auroc",
-                    "balanced_misclassification_regret",
-                ):
-                    interval = bootstrap_mean_interval(held_out[metric])
-                    summary_metrics.append(
-                        {
-                            "camera_group": group_name,
-                            "modality": modality,
-                            "regret_threshold": regret_threshold,
-                            "sample_retained_fraction": sample_retained_fraction,
-                            "eligible_image_coverage": eligible_image_coverage,
-                            "metric": metric,
-                            **interval,
-                            "experiment_count": len(held_out),
-                            "evaluable_experiment_count": int(held_out[metric].notna().sum()),
-                        }
+            modality_frames = {"rgb": scoped, "time": time_only, "rgb_time": rgb_time}
+            for model_name in args.models:
+                for modality in args.modalities:
+                    values = modality_frames[modality]
+                    predicted = leave_one_experiment_out_predictions(
+                        values, model_name=model_name
                     )
-                metrics.append(
-                    {
-                        "camera_group": group_name,
-                        "modality": modality,
-                        "regret_threshold": regret_threshold,
-                        "sample_retained_fraction": sample_retained_fraction,
-                        "eligible_image_coverage": eligible_image_coverage,
-                        "scope": "all_held_out_predictions",
-                        **score_rows(predicted),
-                        "image_count": len(predicted),
-                        "cycle_count": predicted["cycle_name"].nunique(),
-                        "experiment_count": predicted["experiment_id"].nunique(),
-                    }
-                )
-                for experiment, rows in predicted.groupby("experiment_id", sort=True):
+                    predicted["training_protocol"] = training_protocol
+                    predicted["camera_group"] = group_name
+                    predicted["modality"] = modality
+                    predicted["regret_threshold"] = regret_threshold
+                    predictions.append(predicted)
+                    held_out = experiment_prediction_metrics(predicted)
+                    held_out["model"] = model_name
+                    held_out["camera_group"] = group_name
+                    held_out["modality"] = modality
+                    held_out["regret_threshold"] = regret_threshold
+                    experiment_metrics.append(held_out)
+                    for metric in (
+                        "balanced_accuracy",
+                        "macro_f1",
+                        "auroc",
+                        "balanced_misclassification_regret",
+                    ):
+                        interval = bootstrap_mean_interval(held_out[metric])
+                        summary_metrics.append(
+                            {
+                                "model": model_name,
+                                "camera_group": group_name,
+                                "training_protocol": training_protocol,
+                                "modality": modality,
+                                "regret_threshold": regret_threshold,
+                                "sample_retained_fraction": sample_retained_fraction,
+                                "eligible_image_coverage": eligible_image_coverage,
+                                "metric": metric,
+                                **interval,
+                                "experiment_count": len(held_out),
+                                "evaluable_experiment_count": int(held_out[metric].notna().sum()),
+                            }
+                        )
                     metrics.append(
                         {
+                            "model": model_name,
                             "camera_group": group_name,
+                            "training_protocol": training_protocol,
                             "modality": modality,
                             "regret_threshold": regret_threshold,
                             "sample_retained_fraction": sample_retained_fraction,
                             "eligible_image_coverage": eligible_image_coverage,
-                            "scope": str(experiment),
-                            **score_rows(rows),
-                            "image_count": len(rows),
-                            "cycle_count": rows["cycle_name"].nunique(),
-                            "experiment_count": 1,
+                            "scope": "all_held_out_predictions",
+                            **score_rows(predicted),
+                            "image_count": len(predicted),
+                            "cycle_count": predicted["cycle_name"].nunique(),
+                            "experiment_count": predicted["experiment_id"].nunique(),
                         }
                     )
+                    for experiment, rows in predicted.groupby("experiment_id", sort=True):
+                        metrics.append(
+                            {
+                                "model": model_name,
+                                "camera_group": group_name,
+                                "training_protocol": training_protocol,
+                                "modality": modality,
+                                "regret_threshold": regret_threshold,
+                                "sample_retained_fraction": sample_retained_fraction,
+                                "eligible_image_coverage": eligible_image_coverage,
+                                "scope": str(experiment),
+                                **score_rows(rows),
+                                "image_count": len(rows),
+                                "cycle_count": rows["cycle_name"].nunique(),
+                                "experiment_count": 1,
+                            }
+                        )
 
     args.output.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(metrics).to_csv(args.output / "metrics.csv", index=False)
@@ -154,17 +178,20 @@ def main() -> None:
     pd.DataFrame(summary_metrics).to_csv(args.output / "summary_metrics.csv", index=False)
 
     comparisons = []
-    for (camera_group, regret_threshold, metric), values in held_out.melt(
-        id_vars=["experiment_id", "camera_group", "modality", "regret_threshold"],
+    for (model_name, camera_group, regret_threshold, metric), values in held_out.melt(
+        id_vars=["experiment_id", "model", "camera_group", "modality", "regret_threshold"],
         value_vars=["balanced_accuracy", "balanced_misclassification_regret"],
         var_name="metric",
-    ).groupby(["camera_group", "regret_threshold", "metric"], sort=True):
+    ).groupby(["model", "camera_group", "regret_threshold", "metric"], sort=True):
         paired = values.pivot(index="experiment_id", columns="modality", values="value")
         for modality in ("rgb", "rgb_time"):
+            if "time" not in paired or modality not in paired:
+                continue
             differences = paired[modality] - paired["time"]
             interval = bootstrap_mean_interval(differences)
             comparisons.append(
                 {
+                    "model": model_name,
                     "camera_group": camera_group,
                     "regret_threshold": regret_threshold,
                     "comparison": f"{modality}_minus_time",
