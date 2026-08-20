@@ -7,12 +7,22 @@ from PIL import Image
 from torchvision import transforms
 
 from frost_analysis.rgb_deep_features import (
+    DEEP_REPRESENTATIONS,
     add_embedding_columns,
     cosine_similarity_rows,
     extract_embeddings,
     extract_representation_matrices,
     illumination_transform,
 )
+
+
+def test_lightweight_sota_representations_are_registered() -> None:
+    assert DEEP_REPRESENTATIONS == (
+        "dinov2",
+        "efficientnet",
+        "mobilenet_v3_small",
+        "repvit_m0_9",
+    )
 
 
 class ChannelMean(torch.nn.Module):

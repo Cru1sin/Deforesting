@@ -164,6 +164,8 @@ def test_representation_columns_select_only_requested_features() -> None:
             "feature_001": [2.0],
             "dinov2_000": [3.0],
             "efficientnet_000": [4.0],
+            "mobilenet_v3_small_000": [5.0],
+            "repvit_m0_9_000": [6.0],
             "target": [0],
         }
     )
@@ -171,6 +173,10 @@ def test_representation_columns_select_only_requested_features() -> None:
     assert representation_columns(frame, "handcrafted") == ["feature_000", "feature_001"]
     assert representation_columns(frame, "dinov2") == ["dinov2_000"]
     assert representation_columns(frame, "efficientnet") == ["efficientnet_000"]
+    assert representation_columns(frame, "mobilenet_v3_small") == [
+        "mobilenet_v3_small_000"
+    ]
+    assert representation_columns(frame, "repvit_m0_9") == ["repvit_m0_9_000"]
 
 
 def test_leave_one_experiment_out_uses_requested_representation() -> None:

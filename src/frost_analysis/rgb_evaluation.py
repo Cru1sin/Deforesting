@@ -12,12 +12,13 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
+from .rgb_deep_features import DEEP_REPRESENTATIONS
+
 MODEL_NAMES = ("logistic", "random_forest", "rbf_svm", "hist_gradient_boosting", "mlp")
-REPRESENTATIONS = ("handcrafted", "dinov2", "efficientnet")
+REPRESENTATIONS = ("handcrafted", *DEEP_REPRESENTATIONS)
 REPRESENTATION_PREFIXES = {
     "handcrafted": "feature_",
-    "dinov2": "dinov2_",
-    "efficientnet": "efficientnet_",
+    **{name: f"{name}_" for name in DEEP_REPRESENTATIONS},
 }
 CAMERA_GROUPS = {
     "top": ("top",),

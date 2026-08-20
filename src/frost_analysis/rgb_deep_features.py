@@ -10,9 +10,19 @@ import torch
 from PIL import Image, ImageEnhance
 from torch import nn
 from torchvision import transforms
-from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
+from torchvision.models import (
+    EfficientNet_B0_Weights,
+    MobileNet_V3_Small_Weights,
+    efficientnet_b0,
+    mobilenet_v3_small,
+)
 
-DEEP_REPRESENTATIONS = ("dinov2", "efficientnet")
+DEEP_REPRESENTATIONS = (
+    "dinov2",
+    "efficientnet",
+    "mobilenet_v3_small",
+    "repvit_m0_9",
+)
 IMAGE_TRANSFORM = transforms.Compose(
     [
         transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
@@ -109,7 +119,7 @@ def extract_representation_matrices(
 
 
 def load_frozen_extractors(names: list[str]) -> dict[str, tuple[nn.Module, object]]:
-    """Load the two locked pretrained image encoders without extra dependencies."""
+    """Load the locked pretrained image encoders used by the shared benchmark."""
     extractors = {}
     if "dinov2" in names:
         extractors["dinov2"] = (
@@ -126,6 +136,19 @@ def load_frozen_extractors(names: list[str]) -> dict[str, tuple[nn.Module, objec
         model = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
         model.classifier = nn.Identity()
         extractors["efficientnet"] = (model, IMAGE_TRANSFORM)
+    if "mobilenet_v3_small" in names:
+        model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
+        model.classifier = nn.Identity()
+        extractors["mobilenet_v3_small"] = (model, IMAGE_TRANSFORM)
+    if "repvit_m0_9" in names:
+        try:
+            import timm
+        except ImportError as error:
+            raise RuntimeError("repvit_m0_9 requires the ml extra with timm") from error
+        extractors["repvit_m0_9"] = (
+            timm.create_model("repvit_m0_9.dist_450e_in1k", pretrained=True, num_classes=0),
+            IMAGE_TRANSFORM,
+        )
     return extractors
 
 

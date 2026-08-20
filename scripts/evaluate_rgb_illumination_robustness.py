@@ -48,6 +48,8 @@ def evaluate_conditions(
     rows = []
     for representation in DEEP_REPRESENTATIONS:
         columns = representation_columns(cohort, representation)
+        if not columns:
+            continue
         for camera_group in camera_groups:
             roles = CAMERA_GROUPS[camera_group]
             scoped = cohort.loc[cohort["camera_role"].isin(roles)]

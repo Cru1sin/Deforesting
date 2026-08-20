@@ -20,6 +20,15 @@ DEFAULT_CLOUD_IMAGES_ROOT = Path(
     "HKUST/Project/Defrost/dataset/images"
 )
 DEFAULT_CLOUD_IMAGES_REMOTE = "onedrive_hkust:HKUST/Project/Defrost/dataset/images"
+MIN_FREE_BYTES = 50 * 1024**3
+
+
+def _require_free_space(path: Path, required: int, action: str) -> None:
+    if required + MIN_FREE_BYTES > shutil.disk_usage(path).free:
+        raise OSError(
+            f"{action} would cross the 50 GiB safety floor; "
+            "review local cycle images before deleting anything"
+        )
 
 
 @contextmanager
@@ -30,7 +39,7 @@ def materialize_cycle_images(  # noqa: C901
     fetch_cloud: bool = False,
     cloud_root: Path | None = None,
 ) -> Iterator[Path]:
-    """Temporarily copy one exact cloud ZIP into the local Dataset image tree."""
+    """Copy one exact cloud ZIP into the local Dataset image tree and retain it."""
     if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
         raise ValueError(f"invalid cycle name: {cycle_name}")
     images_root = Path(dataset_dir).resolve() / "images"
@@ -47,10 +56,8 @@ def materialize_cycle_images(  # noqa: C901
         return
 
     images_root.mkdir(parents=True, exist_ok=True)
-    if archive.stat().st_size > shutil.disk_usage(images_root).free * 0.8:
-        raise OSError(f"not enough local space to copy {archive.name}")
+    _require_free_space(images_root, archive.stat().st_size, f"downloading {archive.name}")
 
-    temporary_cycle = False
     with TemporaryDirectory(prefix=f".{cycle_name}-", dir=images_root) as temporary:
         work = Path(temporary)
         local_archive = work / archive.name
@@ -87,8 +94,7 @@ def materialize_cycle_images(  # noqa: C901
                 if path.is_absolute() or ".." in path.parts or path.parts[:1] != (cycle_name,):
                     raise ValueError(f"unsafe cycle ZIP member: {member.filename}")
             required = sum(member.file_size for member in members)
-            if required > shutil.disk_usage(images_root).free * 0.8:
-                raise OSError(f"not enough local space to extract {archive.name}")
+            _require_free_space(images_root, required, f"extracting {archive.name}")
             print(f"[images] extracting local copy: {cycle_name}", flush=True)
             bundle.extractall(work)
 
@@ -99,13 +105,8 @@ def materialize_cycle_images(  # noqa: C901
             yield cycle_dir
             return
         extracted.replace(cycle_dir)
-        temporary_cycle = True
-        try:
-            yield cycle_dir
-        finally:
-            if temporary_cycle and cycle_dir.is_dir():
-                shutil.rmtree(cycle_dir)
-                print(f"[images] removed local copy: {cycle_name}", flush=True)
+        print(f"[images] retained local copy: {cycle_name}", flush=True)
+        yield cycle_dir
 
 
 def collect_cycle_images(  # noqa: C901

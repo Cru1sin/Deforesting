@@ -120,7 +120,7 @@ def test_materialize_cycle_images_treats_missing_cloud_zip_as_no_images(
         assert not available.exists()
 
 
-def test_materialize_cycle_images_copies_extracts_and_removes_only_local_copy(
+def test_materialize_cycle_images_copies_extracts_and_preserves_local_copy(
     tmp_path: Path,
 ) -> None:
     from zipfile import ZipFile
@@ -143,9 +143,38 @@ def test_materialize_cycle_images_copies_extracts_and_removes_only_local_copy(
         assert (available / "front_center" / "frame.jpg").read_bytes() == b"rgb"
         assert archive.read_bytes() == cloud_bytes
 
-    assert not (dataset / "images" / cycle_name).exists()
+    assert (dataset / "images" / cycle_name / "front_center" / "frame.jpg").read_bytes() == b"rgb"
     assert archive.read_bytes() == cloud_bytes
-    assert list((dataset / "images").iterdir()) == []
+
+
+def test_materialize_cycle_images_stops_before_crossing_free_space_floor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections import namedtuple
+    from zipfile import ZipFile
+
+    from frost_analysis import dataset_images
+
+    cycle_name = "frost_cycle_000020"
+    dataset = tmp_path / "dataset"
+    cloud = tmp_path / "cloud"
+    cloud.mkdir()
+    with ZipFile(cloud / f"{cycle_name}.zip", "w") as bundle:
+        bundle.writestr(f"{cycle_name}/front/frame.jpg", b"rgb")
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(
+        dataset_images.shutil,
+        "disk_usage",
+        lambda _path: usage(100 * 1024**3, 51 * 1024**3, 49 * 1024**3),
+    )
+
+    with (
+        pytest.raises(OSError, match="50 GiB safety floor"),
+        dataset_images.materialize_cycle_images(
+            dataset, cycle_name, fetch_cloud=True, cloud_root=cloud
+        ),
+    ):
+        pass
 
 
 def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
@@ -182,7 +211,9 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
         f"remote:images/{cycle_name}.zip",
     ]
     assert calls[0][calls[0].index("--multi-thread-streams") + 1] == "8"
-    assert not (tmp_path / "dataset" / "images" / cycle_name).exists()
+    assert (
+        tmp_path / "dataset" / "images" / cycle_name / "front_center" / "frame.jpg"
+    ).read_bytes() == b"rgb"
 
 
 def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
@@ -685,7 +716,7 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
     )
 
     assert seen[1] == [tmp_path / "images" / cycle_name / "front_center" / file_name]
-    assert not (tmp_path / "images" / cycle_name).exists()
+    assert (tmp_path / "images" / cycle_name / "front_center" / file_name).is_file()
     assert archive.is_file()
 
 
