@@ -166,3 +166,46 @@ def test_window_overview_plot_accepts_missing_image_path_from_csv(tmp_path: Path
     module.plot_window_cop_rgb(overview, tmp_path / "overview")
 
     assert (tmp_path / "overview.png").is_file()
+
+
+def test_all_cost_publications_update_dataset_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    seen = []
+
+    class Loader:
+        dataset_root = tmp_path
+
+        @staticmethod
+        def get_cycle_record(cycle_name: str) -> dict[str, object]:
+            return {
+                "cycle_name": cycle_name,
+                "assets": {"publication": f"cycles/{cycle_name}.png"},
+            }
+
+    monkeypatch.setattr(
+        module,
+        "render_publication_asset",
+        lambda _root, record, **kwargs: seen.append((record, kwargs)),
+    )
+    curves = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_b", "cycle_a", "cycle_b"],
+            "candidate_time": pd.date_range("2026-01-01", periods=3, freq="1min"),
+            "renewal_cost_partial_pool": [2.0, 3.0, 1.0],
+            "relative_regret_partial_pool": [1.0, 0.0, 0.0],
+        }
+    )
+
+    cycles = module.render_all_cost_publications(Loader(), curves)
+
+    assert cycles == ["cycle_a", "cycle_b"]
+    assert len(seen) == 2
+    assert {call[1]["output_path"] for call in seen} == {
+        tmp_path / "cycles/cycle_a.png",
+        tmp_path / "cycles/cycle_b.png",
+    }
+    assert all(
+        call[1]["cost_curve"]["renewal_cost_kw"].notna().all() for call in seen
+    )

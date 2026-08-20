@@ -404,6 +404,44 @@ def partial_pool_optimal_points(curves: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def render_cost_publication(
+    loader: DatasetLoader,
+    cycle_name: str,
+    curves: pd.DataFrame,
+    output: Path | None = None,
+) -> None:
+    """Render one cycle with its empirical cost to its Dataset publication asset."""
+    record = loader.get_cycle_record(cycle_name)
+    curve = curves.loc[
+        curves["cycle_name"].eq(cycle_name),
+        ["candidate_time", "renewal_cost_partial_pool", "relative_regret_partial_pool"],
+    ].rename(
+        columns={
+            "renewal_cost_partial_pool": "renewal_cost_kw",
+            "relative_regret_partial_pool": "relative_regret",
+        }
+    )
+    assets = record.get("assets", {})
+    target = output or loader.dataset_root / str(assets["publication"])
+    render_publication_asset(
+        loader.dataset_root,
+        record,
+        output_path=target,
+        cost_curve=curve,
+    )
+
+
+def render_all_cost_publications(
+    loader: DatasetLoader,
+    curves: pd.DataFrame,
+) -> list[str]:
+    """Update every identifiable cycle's existing Dataset publication asset."""
+    cycles = sorted(curves["cycle_name"].unique())
+    for cycle_name in cycles:
+        render_cost_publication(loader, cycle_name, curves)
+    return cycles
+
+
 def render_representative_cost_publication(
     loader: DatasetLoader,
     points: pd.DataFrame,
@@ -418,23 +456,8 @@ def render_representative_cost_publication(
         (pool["minutes_earlier_than_actual"] - median_advance).abs().argmin()
     ]
     cycle_name = str(representative["cycle_name"])
-    record = loader.get_cycle_record(cycle_name)
-    curve = curves.loc[
-        curves["cycle_name"].eq(cycle_name),
-        ["candidate_time", "renewal_cost_partial_pool", "relative_regret_partial_pool"],
-    ].rename(
-        columns={
-            "renewal_cost_partial_pool": "renewal_cost_kw",
-            "relative_regret_partial_pool": "relative_regret",
-        }
-    )
     for path in (output, output.with_suffix(".pdf")):
-        render_publication_asset(
-            loader.dataset_root,
-            record,
-            output_path=path,
-            cost_curve=curve,
-        )
+        render_cost_publication(loader, cycle_name, curves, path)
     return cycle_name
 
 
@@ -756,6 +779,10 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
     plot_window_cop_rgb(
         overview,
         output.parent / "figures" / "figure_window_cop_rgb_overview",
+    )
+    render_all_cost_publications(
+        loader,
+        partial_pool_curves,
     )
     render_representative_cost_publication(
         loader,
