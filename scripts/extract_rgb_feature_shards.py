@@ -7,8 +7,15 @@ import argparse
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 from frost_analysis.dataset_images import materialize_cycle_images
+from frost_analysis.rgb_deep_features import (
+    DEEP_REPRESENTATIONS,
+    add_embedding_columns,
+    extract_representation_matrices,
+    load_frozen_extractors,
+)
 from frost_analysis.rgb_smoke import cycle_feature_shard
 
 ROLE_ORDER = ("top", "top_close", "left", "left_close", "front", "extreme")
@@ -33,8 +40,21 @@ def main() -> None:
         default=["pre_optimal", "post_optimal"],
     )
     parser.add_argument("--fetch-cloud", action="store_true")
+    parser.add_argument("--cloud-root", type=Path)
+    parser.add_argument(
+        "--deep-representations",
+        nargs="*",
+        choices=DEEP_REPRESENTATIONS,
+        default=[],
+    )
+    parser.add_argument("--deep-batch-size", type=int, default=32)
     parser.add_argument("--output", type=Path, default=Path("report/rgb_feature_shards"))
     args = parser.parse_args()
+
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    extractors = load_frozen_extractors(args.deep_representations)
+    if extractors:
+        print(f"[deep] device={device} representations={','.join(extractors)}", flush=True)
 
     labels = pd.read_parquet(args.labels)
     labels["cost_state"] = labels[args.state_column]
@@ -59,6 +79,7 @@ def main() -> None:
             args.dataset,
             str(cycle_name),
             fetch_cloud=args.fetch_cloud,
+            cloud_root=args.cloud_root,
         ) as cycle_dir:
             if not cycle_dir.is_dir():
                 print(f"[missing] {cycle_name}", flush=True)
@@ -70,6 +91,18 @@ def main() -> None:
                 ROLE_ORDER,
                 maximum_per_group=args.maximum_per_group,
             )
+            if extractors:
+                paths = [
+                    cycle_dir / row.camera_role / row.file_name
+                    for row in shard.itertuples(index=False)
+                ]
+                matrices = extract_representation_matrices(
+                    paths,
+                    extractors,
+                    device=device,
+                    batch_size=args.deep_batch_size,
+                )
+                shard = add_embedding_columns(shard, matrices)
             shard["target"] = shard["cost_state"].map(
                 {"pre_optimal": 0, "post_optimal": 1}
             )

@@ -13,6 +13,12 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 MODEL_NAMES = ("logistic", "random_forest", "rbf_svm", "hist_gradient_boosting", "mlp")
+REPRESENTATIONS = ("handcrafted", "dinov2", "efficientnet")
+REPRESENTATION_PREFIXES = {
+    "handcrafted": "feature_",
+    "dinov2": "dinov2_",
+    "efficientnet": "efficientnet_",
+}
 CAMERA_GROUPS = {
     "top": ("top",),
     "top_close": ("top_close",),
@@ -24,6 +30,12 @@ CAMERA_GROUPS = {
     "left_pair": ("left", "left_close"),
     "all": ("top", "top_close", "left", "left_close", "front", "extreme"),
 }
+
+
+def representation_columns(frame: pd.DataFrame, representation: str) -> list[str]:
+    """Return feature columns belonging to one image representation."""
+    prefix = REPRESENTATION_PREFIXES[representation]
+    return [column for column in frame if column.startswith(prefix)]
 
 
 def make_rgb_model(name: str):  # type: ignore[no-untyped-def]
@@ -59,10 +71,13 @@ def make_rgb_model(name: str):  # type: ignore[no-untyped-def]
 
 
 def fit_predict_rgb_model(
-    train: pd.DataFrame, test: pd.DataFrame, model_name: str
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    model_name: str,
+    representation: str = "handcrafted",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Fit one compact model and return class predictions plus ranking scores."""
-    feature_columns = [column for column in train if column.startswith("feature_")]
+    feature_columns = representation_columns(train, representation)
     model = make_rgb_model(model_name)
     model.fit(train[feature_columns], train["target"])
     predicted = model.predict(test[feature_columns])
@@ -165,7 +180,9 @@ def add_cycle_time_features(frame: pd.DataFrame, candidates: pd.DataFrame) -> pd
 
 
 def leave_one_experiment_out_predictions(
-    frame: pd.DataFrame, model_name: str = "rbf_svm"
+    frame: pd.DataFrame,
+    model_name: str = "rbf_svm",
+    representation: str = "handcrafted",
 ) -> pd.DataFrame:
     """Fit one locked model on all but one experiment at a time."""
     predictions = []
@@ -175,9 +192,10 @@ def leave_one_experiment_out_predictions(
         if train["target"].nunique() < 2:
             continue
         test["predicted_target"], test["decision_score"] = fit_predict_rgb_model(
-            train, test, model_name
+            train, test, model_name, representation
         )
         test["held_out_experiment"] = experiment
         test["model"] = model_name
+        test["representation"] = representation
         predictions.append(test)
     return pd.concat(predictions, ignore_index=True)
