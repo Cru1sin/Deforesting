@@ -11,6 +11,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.lines import Line2D
 
 from frost_analysis.dataset_loader import DatasetLoader
@@ -166,6 +167,16 @@ def _save_figure(fig: plt.Figure, base: Path) -> None:
     plt.close(fig)
 
 
+def _near_optimal_segments(curve: pd.DataFrame) -> list[tuple[float, float]]:
+    """Return disconnected <=5% regret intervals in plotted minutes."""
+    selected = curve["relative_regret"].le(0.05)
+    groups = selected.ne(selected.shift(fill_value=False)).cumsum()
+    return [
+        (float(rows["minutes"].min()), float(rows["minutes"].max()))
+        for _, rows in curve.loc[selected].groupby(groups[selected], sort=False)
+    ]
+
+
 def _plot_cycle(
     frame: pd.DataFrame,
     result: pd.Series,
@@ -175,11 +186,13 @@ def _plot_cycle(
     next_stable_start: pd.Timestamp,
     q_end_kw: float,
     output: Path,
+    atlas: PdfPages | None = None,
 ) -> None:
     stable = pd.Timestamp(result["t_heating_stable"])
-    actual = pd.Timestamp(result["t_actual_defrost"])
+    actual = _timestamp(result["t_actual_defrost"])
+    candidate_end = pd.Timestamp(result["candidate_end"])
     optimum = pd.Timestamp(result["t_star"])
-    shown = frame.loc[frame["timestamp"].between(stable, actual)].copy()
+    shown = frame.loc[frame["timestamp"].between(stable, candidate_end)].copy()
     shown["minutes"] = (shown["timestamp"] - stable).dt.total_seconds() / 60
     shown["q_reference_kw"] = _reference_kw(
         shown["timestamp"], stable, q_start_kw, next_stable_start, q_end_kw
@@ -187,7 +200,7 @@ def _plot_cycle(
     curve = curve.copy()
     curve["minutes"] = (pd.to_datetime(curve["candidate_time"]) - stable).dt.total_seconds() / 60
     x_star = (optimum - stable).total_seconds() / 60
-    x_actual = (actual - stable).total_seconds() / 60
+    x_actual = (actual - stable).total_seconds() / 60 if actual is not None else None
 
     fig, axes = plt.subplots(2, 1, figsize=(7.2, 4.8), sharex=True)
     axes[0].plot(
@@ -204,27 +217,31 @@ def _plot_cycle(
     axes[0].set_ylabel("Heating capacity (kW)")
     axes[0].legend(loc="best")
     axes[1].plot(curve["minutes"], curve["renewal_cost_kw"], color="#4C78A8", lw=1.3)
-    near = curve["renewal_cost_kw"].le(1.05 * curve["renewal_cost_kw"].min())
-    axes[1].fill_between(
-        curve["minutes"],
-        0,
-        1,
-        where=near,
-        transform=axes[1].get_xaxis_transform(),
-        color="#9ECAE1",
-        alpha=0.35,
-        label="5% near-optimal",
-    )
+    for segment_index, (start, end) in enumerate(_near_optimal_segments(curve)):
+        half_step = 0.5 * CANDIDATE_STEP_MINUTES if start == end else 0.0
+        for axis in axes:
+            axis.axvspan(
+                start - half_step,
+                end + half_step,
+                color="#9ECAE1",
+                alpha=0.28,
+                lw=0,
+                label="5% near-optimal" if segment_index == 0 and axis is axes[1] else None,
+            )
     for axis in axes:
         axis.axvline(x_star, color="#D95F02", lw=1.1, label="Empirical optimum")
-        axis.axvline(x_actual, color="#222222", lw=0.9, ls="--", label="Observed defrost")
+        if x_actual is not None:
+            axis.axvline(x_actual, color="#222222", lw=0.9, ls="--", label="Observed defrost")
     axes[1].set_ylabel("Renewal cost (kW-eq.)")
     axes[1].set_xlabel("Minutes from stable heating")
     axes[1].legend(loc="best", ncol=3)
-    fig.suptitle(str(result["cycle_name"]), fontsize=8)
+    boundary = "right-censored sensor end" if bool(result["is_censored"]) else "observed policy"
+    fig.suptitle(f"{result['cycle_name']} · {result['cohort_tier']} · {boundary}", fontsize=8)
     fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=220, bbox_inches="tight", facecolor="white")
+    if atlas is not None:
+        atlas.savefig(fig, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -469,9 +486,9 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
             reason = f"catalog_{row['status']}"
         elif actual is not None and following is None:
             reason = "missing_next_cycle_reference"
-        elif not anchors[name]["valid"]:
-            reason = "invalid_clean_anchor"
-        elif actual is not None and not anchors[following]["valid"]:
+        elif not anchors[name]["valid"] or (
+            actual is not None and not anchors[following]["valid"]
+        ):
             reason = "invalid_clean_anchor"
         elif stable is None:
             reason = "missing_stable_heating_start"
@@ -660,20 +677,27 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
     if valid_results.empty:
         raise ValueError("No valid cycle optimum is available")
     primary_results = valid_results.loc[valid_results["primary_analysis"]].copy()
-    for _, result in primary_results.iterrows():
-        name = str(result["cycle_name"])
-        following = next_cycle[name]
-        next_stable = _timestamp(records[following].get("stable_heating_start"))
-        assert next_stable is not None
-        _plot_cycle(
-            frames[name],
-            result,
-            candidate_curves.loc[candidate_curves["cycle_name"].eq(name)],
-            q_start_kw=float(anchors[name]["q_clean_kw"]),
-            next_stable_start=next_stable,
-            q_end_kw=float(anchors[following]["q_clean_kw"]),
-            output=figures / "cycles" / f"{name}.png",
-        )
+    with PdfPages(figures / "cycle_atlas.pdf") as atlas:
+        for _, result in valid_results.iterrows():
+            name = str(result["cycle_name"])
+            if bool(result["is_censored"]):
+                reference_end = pd.Timestamp(result["candidate_end"])
+                q_end_kw = float(anchors[name]["q_clean_kw"])
+            else:
+                following = next_cycle[name]
+                reference_end = _timestamp(records[following].get("stable_heating_start"))
+                assert reference_end is not None
+                q_end_kw = float(anchors[following]["q_clean_kw"])
+            _plot_cycle(
+                frames[name],
+                result,
+                candidate_curves.loc[candidate_curves["cycle_name"].eq(name)],
+                q_start_kw=float(anchors[name]["q_clean_kw"]),
+                next_stable_start=reference_end,
+                q_end_kw=q_end_kw,
+                output=figures / "cycles" / f"{name}.png",
+                atlas=atlas,
+            )
 
     interior = primary_results.loc[primary_results["minimum_location"].eq("interior")]
     pool = interior if not interior.empty else primary_results
