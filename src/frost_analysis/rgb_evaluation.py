@@ -13,6 +13,17 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 MODEL_NAMES = ("logistic", "random_forest", "rbf_svm", "hist_gradient_boosting", "mlp")
+CAMERA_GROUPS = {
+    "top": ("top",),
+    "top_close": ("top_close",),
+    "left": ("left",),
+    "left_close": ("left_close",),
+    "front": ("front",),
+    "extreme": ("extreme",),
+    "top_pair": ("top", "top_close"),
+    "left_pair": ("left", "left_close"),
+    "all": ("top", "top_close", "left", "left_close", "front", "extreme"),
+}
 
 
 def make_rgb_model(name: str):  # type: ignore[no-untyped-def]

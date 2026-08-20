@@ -10,6 +10,7 @@ import pandas as pd
 from sklearn.metrics import balanced_accuracy_score, f1_score, roc_auc_score
 
 from frost_analysis.rgb_evaluation import (
+    CAMERA_GROUPS,
     MODEL_NAMES,
     add_cycle_time_features,
     bootstrap_mean_interval,
@@ -18,18 +19,6 @@ from frost_analysis.rgb_evaluation import (
     leave_one_experiment_out_predictions,
     retain_high_confidence_rows,
 )
-
-CAMERA_GROUPS = {
-    "top": ("top",),
-    "top_close": ("top_close",),
-    "left": ("left",),
-    "left_close": ("left_close",),
-    "front": ("front",),
-    "extreme": ("extreme",),
-    "top_pair": ("top", "top_close"),
-    "left_pair": ("left", "left_close"),
-    "all": ("top", "top_close", "left", "left_close", "front", "extreme"),
-}
 
 
 def score_rows(frame: pd.DataFrame) -> dict[str, float]:

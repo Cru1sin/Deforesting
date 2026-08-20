@@ -25,6 +25,12 @@ def main() -> None:
     parser.add_argument("--splits", nargs="+", choices=("train", "validation", "test"))
     parser.add_argument("--cycles", nargs="+")
     parser.add_argument("--maximum-per-group", type=int, default=12)
+    parser.add_argument(
+        "--cost-states",
+        nargs="+",
+        choices=("pre_optimal", "near_optimal", "post_optimal"),
+        default=["pre_optimal", "post_optimal"],
+    )
     parser.add_argument("--fetch-cloud", action="store_true")
     parser.add_argument("--output", type=Path, default=Path("report/rgb_feature_shards"))
     args = parser.parse_args()
@@ -33,7 +39,7 @@ def main() -> None:
     labels["cost_state"] = labels["cost_state_01pct"]
     labels = labels.loc[
         labels["relative_regret"].notna()
-        & labels["cost_state"].isin(("pre_optimal", "post_optimal"))
+        & labels["cost_state"].isin(args.cost_states)
         & labels["camera_role"].isin(ROLE_ORDER)
     ].copy()
     if args.splits:
