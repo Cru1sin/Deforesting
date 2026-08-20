@@ -32,6 +32,17 @@ CAMERAS = [
     "left_pair",
     "all",
 ]
+CAMERA_LABELS = {
+    "top": "top",
+    "top_close": "top close",
+    "left": "left",
+    "left_close": "left close",
+    "front": "front",
+    "extreme": "extreme",
+    "top_pair": "top + top close",
+    "left_pair": "left + left close",
+    "all": "all views",
+}
 
 
 def export(fig: plt.Figure, stem: Path, *, dpi: int) -> None:
@@ -103,7 +114,7 @@ def _plot_figure_3(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) 
             color=COLORS[modality],
             label=LABELS[modality],
         )
-    ax_a.set_yticks(y, [name.replace("_", " + ") for name in available])
+    ax_a.set_yticks(y, [CAMERA_LABELS[name] for name in available])
     ax_a.invert_yaxis()
     ax_a.set(xlabel="Experiment-macro balanced accuracy", xlim=(0.5, 1.01))
     ax_a.legend(

@@ -4,7 +4,7 @@
   "target_journal": "Nature Communications",
   "entry_stage": "00_intake",
   "created_at": "2026-08-19T21:19:07.765251+00:00",
-  "updated_at": "2026-08-20T21:10:00+08:00",
+  "updated_at": "2026-08-20T21:45:00+08:00",
   "stages": {
     "00_intake": {
       "label": "Intake and plan",
@@ -50,9 +50,9 @@
     },
     "07_revision": {
       "label": "Revision and verification",
-      "status": "in_progress",
-      "gate": "",
-      "notes": "Resolve reporting findings now; retain new-data findings as explicit submission blockers."
+      "status": "complete",
+      "gate": "All no-new-data reporting findings are resolved or dispositioned; unresolved major findings are explicit submission blockers.",
+      "notes": "Figure labels and legends are fixed and analysis chronology is locked. Prospective validation, independent confirmation, online baseline, nuisance ablations, weight sensitivity, full-text audit and archival release remain open."
     },
     "08_final": {
       "label": "Humanization and finalization",

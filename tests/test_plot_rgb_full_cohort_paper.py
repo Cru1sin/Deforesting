@@ -81,4 +81,5 @@ def test_render_figures_exports_two_complete_bundles(tmp_path) -> None:
             assert (tmp_path / f"{figure}{suffix}").is_file()
     figure_3_svg = (tmp_path / "figure_3_rgb_increment.svg").read_text()
     assert "n=2" in figure_3_svg
+    assert "all views" in figure_3_svg
     assert (tmp_path / "source_data" / "figure_4_cycle_failures.csv").is_file()

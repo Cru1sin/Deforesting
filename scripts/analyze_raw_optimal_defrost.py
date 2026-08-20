@@ -151,7 +151,9 @@ def _candidate_costs(
 def _save_figure(fig: plt.Figure, base: Path) -> None:
     base.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(base.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(base.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
+    svg = base.with_suffix(".svg")
+    fig.savefig(svg, bbox_inches="tight", facecolor="white")
+    svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
     fig.savefig(base.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
     fig.savefig(
         base.with_suffix(".tiff"),
@@ -348,11 +350,6 @@ def _plot_main(
 
     for label, axis in zip("abcd", [ax_a, ax_b, ax_c, ax_d], strict=True):
         axis.text(-0.18, 1.08, label, transform=axis.transAxes, fontsize=9, fontweight="bold")
-    fig.suptitle(
-        "Raw-data empirical defrost timing under the observed fixed-duration policy",
-        fontsize=8.5,
-        y=0.995,
-    )
     _save_figure(fig, output)
 
 
