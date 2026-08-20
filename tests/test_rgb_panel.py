@@ -108,6 +108,53 @@ def test_publication_contains_sensor_and_rgb_availability_rows(
     original_close(figure)
 
 
+def test_publication_cost_panel_uses_full_cycle_axis_but_only_plots_frosting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from frost_analysis.visualization import render_cycle_publication
+
+    times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "cycle_stage": ["recovery", "frost_development", "frost_development", "defrost"],
+        }
+    )
+    cost = pd.DataFrame(
+        {
+            "candidate_time": times,
+            "renewal_cost_kw": [9.0, 3.0, 2.0, 8.0],
+            "relative_regret": [3.5, 0.5, 0.0, 3.0],
+        }
+    )
+    original_close = plt.close
+    monkeypatch.setattr(plt, "close", lambda _figure: None)
+
+    render_cycle_publication(
+        frame,
+        {
+            "cycle_name": "frost_cycle_000001",
+            "status": "valid",
+            "boundaries": {"defrost_start": times[-1].isoformat()},
+        },
+        tmp_path / "publication.png",
+        cost_curve=cost,
+    )
+
+    axis = next(axis for axis in plt.gcf().axes if axis.get_ylabel() == "Renewal cost [kW-eq.]")
+    curve = next(line for line in axis.lines if line.get_label() == "Empirical cost")
+    assert list(curve.get_xdata()) == [1.0, 2.0]
+    assert axis.get_xlim()[0] <= 0.0
+    assert axis.get_xlim()[1] >= 3.0
+    assert len(axis.patches) >= 3
+    assert {line.get_label() for line in axis.lines} >= {
+        "Empirical cost",
+        "Minimum",
+        "Observed defrost",
+    }
+    original_close(plt.gcf())
+
+
 def test_publication_humidity_uses_stage_and_missing_backgrounds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

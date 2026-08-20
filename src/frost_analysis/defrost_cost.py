@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -130,3 +131,89 @@ def optimize_renewal_cost(
         }
     )
     return curve, optimum
+
+
+def _partial_pool_prior_strength(events: pd.DataFrame, outcome: str) -> float:
+    groups = events.groupby("experiment_id", sort=False)[outcome]
+    counts = groups.size()
+    if len(counts) < 2 or len(events) <= len(counts):
+        return math.inf
+    within_sum = sum(float(((values - values.mean()) ** 2).sum()) for _, values in groups)
+    within_variance = within_sum / (len(events) - len(counts))
+    between_variance = max(
+        float(groups.mean().var(ddof=1) - within_variance * (1 / counts).mean()),
+        0.0,
+    )
+    return within_variance / between_variance if between_variance > 0 else math.inf
+
+
+def partial_pool_group_estimates(events: pd.DataFrame) -> pd.DataFrame:
+    """Shrink each experiment's observed ticket mean toward the cohort mean."""
+    rows = []
+    for experiment, values in events.groupby("experiment_id", sort=True):
+        row: dict[str, object] = {
+            "experiment_id": experiment,
+            "ticket_event_count": len(values),
+        }
+        for label, outcome in (("cost", "equivalent_cost_kwh"), ("duration", "duration_minutes")):
+            cohort_mean = float(events[outcome].mean())
+            strength = _partial_pool_prior_strength(events, outcome)
+            estimate = (
+                cohort_mean
+                if not math.isfinite(strength)
+                else (values[outcome].sum() + strength * cohort_mean) / (len(values) + strength)
+            )
+            row[f"partial_pool_{label}"] = float(estimate)
+            row[f"prior_strength_{label}"] = strength
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def leave_one_event_out_partial_pool(events: pd.DataFrame) -> pd.DataFrame:
+    """Audit partial pooling without using the held-out event's ticket outcome."""
+    rows = []
+    for index, event in events.iterrows():
+        train = events.drop(index=index)
+        estimates = partial_pool_group_estimates(train)
+        matched = estimates.loc[estimates["experiment_id"].eq(event["experiment_id"])]
+        rows.append(
+            {
+                "cycle_name": event["cycle_name"],
+                "predicted_partial_pool_cost": (
+                    float(matched.iloc[0]["partial_pool_cost"])
+                    if not matched.empty
+                    else float(train["equivalent_cost_kwh"].mean())
+                ),
+                "predicted_partial_pool_duration": (
+                    float(matched.iloc[0]["partial_pool_duration"])
+                    if not matched.empty
+                    else float(train["duration_minutes"].mean())
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_partial_pool_curves(
+    curves: pd.DataFrame,
+    events: pd.DataFrame,
+    catalog: pd.DataFrame,
+) -> pd.DataFrame:
+    """Recompute historical candidate costs with experiment-calibrated ticket terms."""
+    estimates = partial_pool_group_estimates(events)
+    result = curves.merge(
+        catalog[["cycle_name", "experiment_id"]], on="cycle_name", how="left"
+    ).merge(estimates, on="experiment_id", how="left")
+    result["partial_pool_cost"] = result["partial_pool_cost"].fillna(
+        events["equivalent_cost_kwh"].mean()
+    )
+    result["partial_pool_duration"] = result["partial_pool_duration"].fillna(
+        events["duration_minutes"].mean()
+    )
+    result["renewal_cost_partial_pool"] = (
+        result["heating_cost_kwh"] + result["partial_pool_cost"]
+    ) / (result["heating_hours"] + result["partial_pool_duration"] / 60.0)
+    result["relative_regret_partial_pool"] = result.groupby("cycle_name")[
+        "renewal_cost_partial_pool"
+    ].transform(lambda values: values / values.min() - 1.0)
+    return result

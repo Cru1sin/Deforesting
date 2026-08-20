@@ -1130,7 +1130,14 @@ def _append_build(  # noqa: C901
     write_json(catalog, dataset_dir / "cycle_catalog.json")
 
 
-def _render_publication(dataset_dir: Path, record: Mapping[str, Any]) -> None:
+def render_publication_asset(
+    dataset_dir: Path,
+    record: Mapping[str, Any],
+    *,
+    cost_curve: pd.DataFrame | None = None,
+    output_path: Path | None = None,
+) -> None:
+    """Render one Dataset publication, optionally with an analysis cost curve."""
     from .dataset_images import (
         _sensor_coverage_intervals,
         image_coverage_intervals,
@@ -1156,9 +1163,10 @@ def _render_publication(dataset_dir: Path, record: Mapping[str, Any]) -> None:
     render_cycle_publication(
         frame,
         record,
-        dataset_dir / str(assets["publication"]),
+        output_path or dataset_dir / str(assets["publication"]),
         sensor_intervals=_sensor_coverage_intervals(frame, registry),
         rgb_intervals=rgb_overall_intervals(frame, intervals, roles),
+        cost_curve=cost_curve,
     )
 
 
@@ -1288,7 +1296,7 @@ def review_cycle(
                 record["rgb_frost_status"] = rgb_frost
             if rgb_defrost is not None:
                 record["rgb_defrost_status"] = rgb_defrost
-            _render_publication(dataset_dir, record)
+            render_publication_asset(dataset_dir, record)
             write_catalog(dataset_dir, catalog)
             return dataset_dir
     raise KeyError(f"unknown cycle: {cycle_name}")
@@ -1556,7 +1564,7 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
                 f"[refresh] rendering figures: {index}/{len(records)} {record['cycle_name']}",
                 flush=True,
             )
-            _render_publication(root, record)
+            render_publication_asset(root, record)
             _render_rgb_panel(
                 root,
                 record,
@@ -1614,7 +1622,7 @@ def render_dataset(
         if isinstance(record, Mapping) and str(record.get("cycle_name")) == cycle_name
     )
     if publication:
-        _render_publication(dataset_dir, record)
+        render_publication_asset(dataset_dir, record)
     if panel:
         from .dataset_images import materialize_cycle_images, scan_cycle_images
 

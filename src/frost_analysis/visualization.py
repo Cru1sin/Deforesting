@@ -304,6 +304,7 @@ def render_cycle_publication(
     *,
     sensor_intervals: Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]] | None = None,
     rgb_intervals: Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]] | None = None,
+    cost_curve: pd.DataFrame | None = None,
 ) -> None:
     """Render the Dataset's cycle-level scientific overview."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
@@ -317,7 +318,8 @@ def render_cycle_publication(
         and not str(column).endswith("__imputed")
         and _observed_values(frame, str(column)).notna().any()
     ]
-    row_count = 1 + len(_PANELS) + bool(humidity)
+    has_cost = cost_curve is not None and not cost_curve.empty
+    row_count = 1 + len(_PANELS) + bool(has_cost) + bool(humidity)
     figure, axes = plt.subplots(
         row_count,
         1,
@@ -371,6 +373,14 @@ def render_cycle_publication(
             right,
         )
 
+    if has_cost:
+        _plot_cost_panel(
+            axes[1 + len(_PANELS)],
+            cast(pd.DataFrame, cost_curve),
+            origin,
+            stage_spans,
+        )
+
     if humidity:
         axis = axes[-1]
         for channel in humidity:
@@ -406,6 +416,96 @@ def render_cycle_publication(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(figure)
+
+
+def _plot_cost_panel(
+    axis: Any,
+    cost_curve: pd.DataFrame,
+    origin: pd.Timestamp,
+    stage_spans: list[tuple[str, float, float]],
+) -> None:
+    """Plot empirical cost only where the cycle is in frost development."""
+    curve = cost_curve.copy()
+    curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
+    curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
+    curve["renewal_cost_kw"] = pd.to_numeric(curve["renewal_cost_kw"], errors="coerce")
+    frost_spans = [
+        (left, right)
+        for stage, left, right in stage_spans
+        if stage == "frost_development"
+    ]
+    is_frost = pd.Series(False, index=curve.index)
+    for left, right in frost_spans:
+        is_frost |= curve["minutes"].ge(left) & curve["minutes"].lt(right)
+    curve = curve.loc[is_frost].dropna(subset=["minutes", "renewal_cost_kw"])
+
+    _shade_cycle_stages(axis, stage_spans, [])
+    if curve.empty:
+        axis.text(0.5, 0.5, "No frosting cost candidates", transform=axis.transAxes, ha="center")
+    else:
+        axis.plot(
+            curve["minutes"],
+            curve["renewal_cost_kw"],
+            color="#3775BA",
+            linewidth=1.25,
+            label="Empirical cost",
+        )
+        minimum_index = curve["renewal_cost_kw"].idxmin()
+        minimum_x = float(curve.loc[minimum_index, "minutes"])
+        axis.axvline(minimum_x, color="#E28E2C", linewidth=1.05, label="Minimum")
+        regret = (
+            pd.to_numeric(curve["relative_regret"], errors="coerce")
+            if "relative_regret" in curve
+            else curve["renewal_cost_kw"] / curve["renewal_cost_kw"].min() - 1.0
+        )
+        near = curve.loc[regret.le(0.01)]
+        if not near.empty:
+            axis.axvspan(
+                float(near["minutes"].min()),
+                float(near["minutes"].max()),
+                color="#E28E2C",
+                alpha=0.18,
+                label="1% window",
+                zorder=0.2,
+            )
+        location = (
+            "left boundary"
+            if minimum_index == curve.index[0]
+            else "right boundary"
+            if minimum_index == curve.index[-1]
+            else "interior"
+        )
+        axis.text(
+            0.01,
+            0.95,
+            f"Minimum: {location}",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7,
+            color="#4B5563",
+        )
+
+    defrost_starts = [left for stage, left, _ in stage_spans if stage == "defrost"]
+    if defrost_starts:
+        axis.axvline(
+            defrost_starts[0],
+            color="#777777",
+            linewidth=0.9,
+            linestyle="--",
+            label="Observed defrost",
+        )
+    axis.set_ylabel("Renewal cost [kW-eq.]", fontsize=8)
+    axis.grid(axis="x", alpha=0.12)
+    if axis.lines:
+        handle_count = len(axis.get_legend_handles_labels()[0])
+        axis.legend(
+            frameon=False,
+            fontsize=7,
+            loc="lower left",
+            bbox_to_anchor=(0, 1.01),
+            ncol=min(handle_count, 4),
+        )
 
 
 def _plot_stage_ribbon(axis: Any, spans: list[tuple[str, float, float]]) -> None:

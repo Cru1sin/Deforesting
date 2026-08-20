@@ -13,13 +13,19 @@ import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from PIL import Image
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from frost_analysis.dataset import render_publication_asset
 from frost_analysis.dataset_loader import DatasetLoader
-from frost_analysis.defrost_cost import water_side_heating_kw
+from frost_analysis.defrost_cost import (
+    build_partial_pool_curves,
+    leave_one_event_out_partial_pool,
+    water_side_heating_kw,
+)
 
 RAW_COLUMNS = [
     "timestamp",
@@ -41,10 +47,40 @@ STATE_FEATURES = [
     "compressor_frequency",
     "evaporating_temperature",
 ]
+DYNAMIC_BASE_FEATURES = [
+    "q_heating_kw",
+    "cop",
+    "power_total",
+    "water_flow",
+    "water_delta_temperature",
+    "ambient_temperature",
+    "environment_relative_humidity",
+    "water_in_temperature",
+    "water_out_temperature",
+    "compressor_frequency",
+    "evaporating_temperature",
+]
+DYNAMIC_FEATURES = [
+    "minutes_from_stable",
+    *DYNAMIC_BASE_FEATURES,
+    *(f"{column}_slope_per_min" for column in DYNAMIC_BASE_FEATURES),
+    *(f"{column}_iqr" for column in DYNAMIC_BASE_FEATURES),
+]
 OUTCOMES = {
     "cost": "equivalent_cost_kwh",
     "duration": "duration_minutes",
+    "electricity": "electricity_kwh",
+    "thermal_shortfall": "thermal_shortfall_kwh",
 }
+STRATEGIES = (
+    "mean",
+    "time",
+    "state",
+    "dynamic",
+    "nonlinear",
+    "component",
+    "partial_pool",
+)
 
 mpl.rcParams.update(
     {
@@ -62,22 +98,30 @@ mpl.rcParams.update(
 
 
 def preceding_features(
-    frame: pd.DataFrame, end: pd.Timestamp, *, seconds: int = 60
+    frame: pd.DataFrame,
+    end: pd.Timestamp,
+    *,
+    seconds: int = 60,
+    include_dynamics: bool = False,
 ) -> dict[str, float]:
-    """Return raw medians immediately before one candidate action."""
-    values = frame.copy()
-    values["timestamp"] = pd.to_datetime(values["timestamp"], errors="coerce")
-    values["q_heating_kw"] = water_side_heating_kw(values)
-    power = pd.to_numeric(values["power_total"], errors="coerce")
-    values["cop"] = values["q_heating_kw"] / power.where(power.gt(0))
+    """Return raw levels, and optionally dynamics, before one candidate action."""
+    values = (
+        frame
+        if {"q_heating_kw", "cop", "water_delta_temperature"} <= set(frame)
+        else _prepare_raw_features(frame)
+    )
+
     window = values.loc[
         values["timestamp"].gt(end - pd.Timedelta(seconds=seconds))
         & values["timestamp"].le(end)
     ]
+
     columns = [
         "q_heating_kw",
         "cop",
         "power_total",
+        "water_flow",
+        "water_delta_temperature",
         "ambient_temperature",
         "environment_relative_humidity",
         "water_in_temperature",
@@ -87,13 +131,48 @@ def preceding_features(
     ]
     result = {}
     for column in columns:
-        numeric = (
-            pd.to_numeric(window[column], errors="coerce").dropna()
-            if column in window
-            else pd.Series(dtype=float)
+        if column not in window:
+            result[column] = float("nan")
+            if include_dynamics:
+                result[f"{column}_iqr"] = float("nan")
+                result[f"{column}_slope_per_min"] = float("nan")
+            continue
+        numeric = pd.to_numeric(window[column], errors="coerce")
+        valid = numeric.notna()
+        observed = numeric.loc[valid]
+        result[column] = float(observed.median()) if not observed.empty else float("nan")
+        if not include_dynamics:
+            continue
+        result[f"{column}_iqr"] = (
+            float(observed.quantile(0.75) - observed.quantile(0.25))
+            if not observed.empty
+            else float("nan")
         )
-        result[column] = float(numeric.median()) if not numeric.empty else float("nan")
+        elapsed = (
+            (window.loc[valid, "timestamp"] - window.loc[valid, "timestamp"].min())
+            .dt.total_seconds()
+            .to_numpy(dtype=float)
+            / 60.0
+        )
+        result[f"{column}_slope_per_min"] = (
+            float(np.polyfit(elapsed, observed.to_numpy(dtype=float), 1)[0])
+            if len(observed) >= 2 and np.ptp(elapsed) > 0
+            else float("nan")
+        )
     return result
+
+
+def _prepare_raw_features(frame: pd.DataFrame) -> pd.DataFrame:
+    values = frame.copy()
+    values["timestamp"] = pd.to_datetime(values["timestamp"], errors="coerce")
+    values["q_heating_kw"] = water_side_heating_kw(values)
+    power = pd.to_numeric(values["power_total"], errors="coerce")
+    values["cop"] = values["q_heating_kw"] / power.where(power.gt(0))
+    values["water_delta_temperature"] = (
+        pd.to_numeric(values["water_out_temperature"], errors="coerce")
+        - pd.to_numeric(values["water_in_temperature"], errors="coerce")
+    )
+    return values
 
 
 def _ridge_predict(
@@ -110,11 +189,37 @@ def _ridge_predict(
     return model.predict(test[usable])
 
 
+def _nonlinear_predict(
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    features: list[str],
+    outcome: str,
+) -> np.ndarray:
+    usable = [column for column in features if train[column].notna().any()]
+    if not usable:
+        return np.repeat(train[outcome].mean(), len(test))
+    model = make_pipeline(
+        SimpleImputer(strategy="median"),
+        HistGradientBoostingRegressor(
+            max_iter=100,
+            max_leaf_nodes=7,
+            min_samples_leaf=8,
+            l2_regularization=1.0,
+            random_state=0,
+        ),
+    )
+    model.fit(train[usable], train[outcome])
+    return model.predict(test[usable])
+
+
 def leave_one_experiment_out_ticket_predictions(
-    events: pd.DataFrame, state_features: list[str]
+    events: pd.DataFrame,
+    state_features: list[str],
+    dynamic_features: list[str] | None = None,
 ) -> pd.DataFrame:
     """Predict held-out ticket outcomes using only other experiments."""
     predictions = []
+    dynamic_features = dynamic_features or state_features
     for experiment in sorted(events["experiment_id"].unique()):
         train = events.loc[~events["experiment_id"].eq(experiment)]
         test = events.loc[events["experiment_id"].eq(experiment)].copy()
@@ -127,6 +232,20 @@ def leave_one_experiment_out_ticket_predictions(
             test[f"predicted_state_{label}"] = _ridge_predict(
                 train, test, state_features, outcome
             )
+            test[f"predicted_dynamic_{label}"] = _ridge_predict(
+                train, test, dynamic_features, outcome
+            )
+            test[f"predicted_nonlinear_{label}"] = _nonlinear_predict(
+                train, test, dynamic_features, outcome
+            )
+        thermal_weight = (
+            (train["equivalent_cost_kwh"] - train["electricity_kwh"])
+            / train["thermal_shortfall_kwh"].where(train["thermal_shortfall_kwh"].gt(0))
+        ).median()
+        test["predicted_component_cost"] = (
+            test["predicted_dynamic_electricity"]
+            + thermal_weight * test["predicted_dynamic_thermal_shortfall"]
+        )
         predictions.append(test)
     return pd.concat(predictions, ignore_index=True)
 
@@ -200,11 +319,14 @@ def build_ticket_features(
     valid = valid.rename(columns={"actual_minutes_from_stable": "minutes_from_stable"})
     rows = []
     for event in valid.itertuples(index=False):
+        frame = _prepare_raw_features(_load_raw(loader, event.cycle_name))
         rows.append(
             {
                 "cycle_name": event.cycle_name,
                 **preceding_features(
-                    _load_raw(loader, event.cycle_name), pd.Timestamp(event.defrost_start)
+                    frame,
+                    pd.Timestamp(event.defrost_start),
+                    include_dynamics=True,
                 ),
             }
         )
@@ -222,7 +344,7 @@ def build_candidate_features(
     rows = []
     stable = points.set_index("cycle_name")["t_heating_stable"]
     for cycle, candidates in curves.groupby("cycle_name", sort=True):
-        frame = _load_raw(loader, cycle)
+        frame = _prepare_raw_features(_load_raw(loader, cycle))
         start = pd.Timestamp(stable.loc[cycle])
         for candidate in candidates.itertuples(index=False):
             time = pd.Timestamp(candidate.candidate_time)
@@ -242,21 +364,78 @@ def build_candidate_features(
 def ticket_model_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for experiment, values in predictions.groupby("experiment_id", sort=True):
-        for strategy in ("mean", "time", "state"):
+        for strategy in STRATEGIES:
             for label, outcome in OUTCOMES.items():
+                prediction = f"predicted_{strategy}_{label}"
+                if prediction not in values:
+                    continue
                 error = (
-                    values[f"predicted_{strategy}_{label}"] - values[outcome]
+                    values[prediction] - values[outcome]
                 ).abs()
                 rows.append(
                     {
                         "experiment_id": experiment,
                         "strategy": strategy,
                         "outcome": label,
+                        "protocol": (
+                            "leave_one_event_out_within_experiment"
+                            if strategy == "partial_pool"
+                            else "leave_one_experiment_out"
+                        ),
                         "mae": error.mean(),
                         "event_count": len(values),
                     }
                 )
     return pd.DataFrame(rows)
+
+
+def partial_pool_optimal_points(curves: pd.DataFrame) -> pd.DataFrame:
+    renamed = curves.rename(
+        columns={"renewal_cost_partial_pool": "renewal_cost_conditional"}
+    )
+    return conditional_optimal_points(renamed).rename(
+        columns={
+            "t_star_conditional": "t_star_partial_pool",
+            "rho_min_conditional": "rho_min_partial_pool",
+            "near_opt_start_conditional": "near_opt_start_partial_pool",
+            "near_opt_end_conditional": "near_opt_end_partial_pool",
+            "minimum_location_conditional": "minimum_location_partial_pool",
+        }
+    )
+
+
+def render_representative_cost_publication(
+    loader: DatasetLoader,
+    points: pd.DataFrame,
+    curves: pd.DataFrame,
+    output: Path,
+) -> str:
+    primary = points.loc[points["valid"] & points["primary_analysis"]].copy()
+    interior = primary.loc[primary["minimum_location"].eq("interior")]
+    pool = interior if not interior.empty else primary
+    median_advance = pool["minutes_earlier_than_actual"].median()
+    representative = pool.iloc[
+        (pool["minutes_earlier_than_actual"] - median_advance).abs().argmin()
+    ]
+    cycle_name = str(representative["cycle_name"])
+    record = loader.get_cycle_record(cycle_name)
+    curve = curves.loc[
+        curves["cycle_name"].eq(cycle_name),
+        ["candidate_time", "renewal_cost_partial_pool", "relative_regret_partial_pool"],
+    ].rename(
+        columns={
+            "renewal_cost_partial_pool": "renewal_cost_kw",
+            "relative_regret_partial_pool": "relative_regret",
+        }
+    )
+    for path in (output, output.with_suffix(".pdf")):
+        render_publication_asset(
+            loader.dataset_root,
+            record,
+            output_path=path,
+            cost_curve=curve,
+        )
+    return cycle_name
 
 
 def build_window_overview(
@@ -512,6 +691,7 @@ def plot_window_cop_rgb(overview: pd.DataFrame, output: Path) -> None:
 
 
 def analyze(dataset: Path, source: Path, output: Path) -> None:
+    # Stage 1: load the raw-data cost baseline.
     loader = DatasetLoader(dataset)
     catalog = loader.list_cycles()
     tickets = pd.read_csv(source / "defrost_ticket_events.csv")
@@ -521,11 +701,18 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
         points[column] = pd.to_datetime(points[column], errors="coerce")
     curves["candidate_time"] = pd.to_datetime(curves["candidate_time"], errors="coerce")
 
+    # Stage 2: audit observed defrost-ticket cost models.
     event_features = build_ticket_features(loader, tickets, points, catalog)
     event_predictions = leave_one_experiment_out_ticket_predictions(
-        event_features, STATE_FEATURES
+        event_features, STATE_FEATURES, DYNAMIC_FEATURES
+    )
+    event_predictions = event_predictions.merge(
+        leave_one_event_out_partial_pool(event_features), on="cycle_name", how="left"
     )
     metrics = ticket_model_metrics(event_predictions)
+    # Stage 3: recover empirical economic windows under each ticket model.
+    partial_pool_curves = build_partial_pool_curves(curves, event_features, catalog)
+    partial_pool_points = partial_pool_optimal_points(partial_pool_curves)
     candidate_features = build_candidate_features(
         loader, curves, points.loc[points["valid"]], catalog
     )
@@ -547,12 +734,16 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
     shifts["conditional_shift_minutes"] = (
         shifts["t_star_conditional"] - shifts["t_star"]
     ).dt.total_seconds() / 60
+    # Stage 4: connect windows to COP and RGB evidence.
     labels = pd.read_parquet("report/rgb_cost_labels/image_cost_labels.parquet")
     overview = build_window_overview(loader, points, labels, dataset)
 
+    # Stage 5: write publication evidence from the same tables.
     output.mkdir(parents=True, exist_ok=True)
     event_predictions.to_csv(output / "ticket_event_features_and_predictions.csv", index=False)
     metrics.to_csv(output / "ticket_model_metrics_by_experiment.csv", index=False)
+    partial_pool_curves.to_parquet(output / "partial_pool_candidate_costs.parquet", index=False)
+    partial_pool_points.to_csv(output / "partial_pool_optimal_points.csv", index=False)
     conditional_curves.to_parquet(output / "conditional_candidate_costs.parquet", index=False)
     shifts.to_csv(output / "conditional_optimal_points.csv", index=False)
     overview.to_csv(output / "optimal_window_cop_rgb.csv", index=False)
@@ -565,6 +756,12 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
     plot_window_cop_rgb(
         overview,
         output.parent / "figures" / "figure_window_cop_rgb_overview",
+    )
+    render_representative_cost_publication(
+        loader,
+        points,
+        partial_pool_curves,
+        output.parent / "figures" / "cycles" / "representative_publication_cost.png",
     )
 
 
