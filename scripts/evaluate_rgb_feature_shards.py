@@ -35,16 +35,16 @@ def score_rows(frame: pd.DataFrame) -> dict[str, float]:
 
 def main() -> None:  # noqa: C901
     parser = argparse.ArgumentParser()
-    parser.add_argument("--shards", type=Path, default=Path("report/rgb_feature_shards/cycles"))
+    parser.add_argument("--shards", type=Path, default=Path("outputs/RGB特征缓存/手工特征/cycles"))
     parser.add_argument(
         "--candidates",
         type=Path,
-        default=Path("report/raw_optimal_defrost/source_data/candidate_cost_curves.parquet"),
+        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"),
     )
     parser.add_argument(
         "--label-balance",
         type=Path,
-        default=Path("report/rgb_cost_labels/label_balance.csv"),
+        default=Path("report/03_RGB标签与模型/成本标签/label_balance.csv"),
     )
     parser.add_argument("--camera-groups", nargs="+", choices=tuple(CAMERA_GROUPS), default=["all"])
     parser.add_argument(
@@ -63,7 +63,7 @@ def main() -> None:  # noqa: C901
         choices=("rgb", "time", "rgb_time"),
         default=["rgb", "time", "rgb_time"],
     )
-    parser.add_argument("--output", type=Path, default=Path("report/rgb_full_cohort"))
+    parser.add_argument("--output", type=Path, default=Path("report/03_RGB标签与模型/全量模态比较"))
     args = parser.parse_args()
     if any(name != "handcrafted" for name in args.representations) and set(args.modalities) != {
         "rgb"

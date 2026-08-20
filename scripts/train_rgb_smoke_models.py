@@ -361,7 +361,7 @@ def run(  # noqa: C901
 - Label: 1% pointwise empirical-cost regret.
 - Sampling: at most {maximum_per_group} evenly spaced frames per split × cycle × state × camera role.
 - Decode QA: {len(excluded)} unreadable sampled images were excluded from every model and recorded in `excluded_images.csv`; source files were not modified or deleted.
-- Split: fixed experiment-level split from `report/rgb_cost_labels/cycle_splits.csv`.
+- Split: fixed experiment-level split from `report/03_RGB标签与模型/成本标签/cycle_splits.csv`.
 - Models: {", ".join(chosen_models)}.
 - Scope: local-image engineering smoke test only. No hyperparameter search, repeated seeds, confidence intervals or cloud-cycle completion; do not use these metrics as publication evidence.
 """,
@@ -375,7 +375,7 @@ def main() -> None:
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path("report/rgb_cost_labels/image_cost_labels.parquet"),
+        default=Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet"),
     )
     parser.add_argument("--task", choices=("binary", "three"), default="three")
     parser.add_argument("--camera-group", choices=tuple(CAMERA_GROUPS), default="all")
@@ -383,7 +383,7 @@ def main() -> None:
     parser.add_argument("--maximum-per-group", type=int, default=12)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    output = args.output or Path("report/rgb_model_smoke") / f"{args.task}_{args.camera_group}"
+    output = args.output or Path("outputs/RGB模型冒烟测试") / f"{args.task}_{args.camera_group}"
     run(
         args.dataset,
         args.labels,

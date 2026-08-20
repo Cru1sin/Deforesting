@@ -44,9 +44,12 @@ def test_expanded_figures_export_editable_bundles(tmp_path) -> None:
         }
     )
 
-    plotter.plot_model_comparison(summary, tmp_path)
-    plotter.plot_concentration(optima, concentration, tmp_path)
+    figures = tmp_path / "图表"
+    plotter.plot_model_comparison(summary, figures)
+    plotter.plot_concentration(optima, concentration, figures)
 
     for name in ("figure_5_model_camera_comparison", "figure_6_time_visual_concentration"):
-        for suffix in (".svg", ".pdf", ".png", ".tiff"):
-            assert (tmp_path / f"{name}{suffix}").is_file()
+        for suffix in (".svg", ".pdf", ".png"):
+            assert (figures / f"{name}{suffix}").is_file()
+        assert not (figures / f"{name}.tiff").exists()
+    assert (tmp_path / "源数据" / "figure_5_model_comparison.csv").is_file()

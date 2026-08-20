@@ -498,12 +498,12 @@ def write_report(
         "- de Pater & Mitici, varying operating conditions 下的健康指标构造 (2023), https://doi.org/10.1016/j.engappai.2022.105582。",
         "- Zhou, Serban & Gebraeel, 含测量误差的退化轨迹建模 (2011), https://doi.org/10.1214/10-aoas448。",
     ]
-    (output / "README_CN.md").write_text("\n".join(lines), encoding="utf-8")
+    (output / "报告.md").write_text("\n".join(lines), encoding="utf-8")
 
 
 def run_analysis(input_dir: Path, output_dir: Path, raw_dir: Path | None = None) -> None:
-    source = output_dir / "source_data"
-    figures = output_dir / "figures" / "cycles"
+    source = output_dir / "源数据"
+    figures = output_dir / "图表" / "循环图"
     source.mkdir(parents=True, exist_ok=True)
     figures.mkdir(parents=True, exist_ok=True)
     loaded = load_cycles(input_dir)
@@ -514,7 +514,6 @@ def run_analysis(input_dir: Path, output_dir: Path, raw_dir: Path | None = None)
     metrics = score_curves(curves)
     ablation = prior_ablation(curves)
     order = aggregation_order_ablation(raw_dir)
-    curves.to_parquet(source / "normalized_degradation.parquet", index=False)
     metrics.to_csv(source / "method_metrics.csv", index=False)
     ablation.to_csv(source / "monotonic_prior_ablation.csv", index=False)
     order.to_csv(source / "aggregation_order_ablation.csv", index=False)

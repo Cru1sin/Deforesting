@@ -1,0 +1,493 @@
+{
+  "scope": {
+    "cycle_ids": "frost_cycle_000001-frost_cycle_000059",
+    "valid_cycles": 50,
+    "old_valid": 40,
+    "new_valid": 10,
+    "dates": 11,
+    "excluded_later_cycles": [
+      "frost_cycle_000060",
+      "frost_cycle_000061",
+      "frost_cycle_000062"
+    ]
+  },
+  "prospective_replication": {
+    "cycle_balanced_rmse": {
+      "frozen state law": 0.04516236682659628,
+      "frozen time law": 0.06755214225688651
+    },
+    "cycle_balanced_mae": {
+      "frozen state law": 0.034494318182616085,
+      "frozen time law": 0.05437716054108201
+    },
+    "dates": [
+      {
+        "date": "2026-07-28",
+        "model": "frozen state law",
+        "rmse": 0.04439157946409022,
+        "mae": 0.03263643231858056,
+        "cycles": 6
+      },
+      {
+        "date": "2026-07-28",
+        "model": "frozen time law",
+        "rmse": 0.06515112687229883,
+        "mae": 0.05164989088363885,
+        "cycles": 6
+      },
+      {
+        "date": "2026-07-29",
+        "model": "frozen state law",
+        "rmse": 0.04631854787035538,
+        "mae": 0.03728114697866938,
+        "cycles": 4
+      },
+      {
+        "date": "2026-07-29",
+        "model": "frozen time law",
+        "rmse": 0.07115366533376802,
+        "mae": 0.058468065027246746,
+        "cycles": 4
+      }
+    ],
+    "cycles_where_state_beats_time": 10
+  },
+  "state_selection": {
+    "new_cycle_errors": {
+      "approach temperature": {
+        "rmse": 0.05347555199390428,
+        "mae": 0.03906857698911757
+      },
+      "residual + coil": {
+        "rmse": 0.04383245453701938,
+        "mae": 0.03328996152071284
+      },
+      "residual + suction": {
+        "rmse": 0.04358409211926357,
+        "mae": 0.033075635795725866
+      },
+      "residual state": {
+        "rmse": 0.04432153872662241,
+        "mae": 0.032594667072032416
+      }
+    },
+    "new_refit_hinge_threshold_degC": 0.148463406044673,
+    "new_refit_hinge_slope": 0.01888840261064613,
+    "rate_replication": {
+      "5_current state": {
+        "rmse": 0.8614631107681859,
+        "mae": 0.5313701515867681
+      },
+      "5_state + rate": {
+        "rmse": 0.8376876082149918,
+        "mae": 0.5210788094344828
+      },
+      "10_current state": {
+        "rmse": 1.2182756991564623,
+        "mae": 0.8092238297433989
+      },
+      "10_state + rate": {
+        "rmse": 1.1604490917460353,
+        "mae": 0.7641937231398402
+      },
+      "20_current state": {
+        "rmse": 1.9154055785905348,
+        "mae": 1.4906716354136977
+      },
+      "20_state + rate": {
+        "rmse": 1.823463547774542,
+        "mae": 1.3650124732148046
+      }
+    }
+  },
+  "proxy_boundary": {
+    "evaporator_capacity_lineage": "heating_capacity - compressor_power",
+    "heating_capacity_internal_lineage_known": false,
+    "traceable_sensor_accuracy_available": false,
+    "empirical_repeatability_95_median": {
+      "cop": 0.01723540924071262,
+      "evaporator_capacity": 0.02564025864570596,
+      "heating_capacity": 0.016243310411246926,
+      "water_delta_temperature": 0.04594235998442602
+    },
+    "detectable_water_step_events": 2,
+    "candidate_water_step_events": 9,
+    "estimable_water_step_events": 4,
+    "not_estimable_water_step_events": 5,
+    "water_step_lags_minutes": [
+      2.0,
+      2.0
+    ]
+  },
+  "all_cycle_mapping": {
+    "D_COP_approach temperature": {
+      "rmse": 0.051363873639585785,
+      "mae": 0.03445600690316481
+    },
+    "D_COP_residual + coil": {
+      "rmse": 0.04116992918284881,
+      "mae": 0.03201102678845771
+    },
+    "D_COP_residual + context": {
+      "rmse": 0.03569253779615685,
+      "mae": 0.029029705526983515
+    },
+    "D_COP_residual + suction": {
+      "rmse": 0.040520792090788266,
+      "mae": 0.03209317243747906
+    },
+    "D_COP_residual state": {
+      "rmse": 0.04273094895095051,
+      "mae": 0.030773261649408242
+    },
+    "D_Q_approach temperature": {
+      "rmse": 0.050116101801168336,
+      "mae": 0.0346474354568808
+    },
+    "D_Q_residual + coil": {
+      "rmse": 0.04678705709798025,
+      "mae": 0.0381742125042779
+    },
+    "D_Q_residual + context": {
+      "rmse": 0.03864253637939413,
+      "mae": 0.03287164242742924
+    },
+    "D_Q_residual + suction": {
+      "rmse": 0.04683578220231688,
+      "mae": 0.03721376625540997
+    },
+    "D_Q_residual state": {
+      "rmse": 0.046471241591069815,
+      "mae": 0.03762079225089182
+    },
+    "D_Qe_proxy_approach temperature": {
+      "rmse": 0.08112683218783065,
+      "mae": 0.061325689622284386
+    },
+    "D_Qe_proxy_residual + coil": {
+      "rmse": 0.08021183819488208,
+      "mae": 0.06442510620916705
+    },
+    "D_Qe_proxy_residual + context": {
+      "rmse": 0.07413576368268718,
+      "mae": 0.06415701207815591
+    },
+    "D_Qe_proxy_residual + suction": {
+      "rmse": 0.07946166125390802,
+      "mae": 0.06248748314502964
+    },
+    "D_Qe_proxy_residual state": {
+      "rmse": 0.07944414408337823,
+      "mae": 0.06524751440279714
+    }
+  },
+  "all_cycle_dynamics": {
+    "D_Qe_proxy_5_direct short statistics": {
+      "rmse": 0.09331228720726847,
+      "mae": 0.07457689319290065
+    },
+    "D_Qe_proxy_5_structured short statistics": {
+      "rmse": 0.09306821410360695,
+      "mae": 0.07329946668220046
+    },
+    "D_Qe_proxy_10_direct short statistics": {
+      "rmse": 0.09833060394493057,
+      "mae": 0.07985168906959457
+    },
+    "D_Qe_proxy_10_structured short statistics": {
+      "rmse": 0.09791835767888002,
+      "mae": 0.07779699533085765
+    },
+    "D_Qe_proxy_20_direct short statistics": {
+      "rmse": 0.10926350784082815,
+      "mae": 0.09086960931908501
+    },
+    "D_Qe_proxy_20_structured short statistics": {
+      "rmse": 0.10824290719238797,
+      "mae": 0.08839928303902192
+    },
+    "D_Qe_proxy_30_direct short statistics": {
+      "rmse": 0.1244616073933546,
+      "mae": 0.10583837082069507
+    },
+    "D_Qe_proxy_30_structured short statistics": {
+      "rmse": 0.12366481253313852,
+      "mae": 0.10412459215560907
+    },
+    "z_5_current state": {
+      "rmse": 0.9435957491187086,
+      "mae": 0.5682139126626263
+    },
+    "z_5_linear extrapolation": {
+      "rmse": 1.0351667782780358,
+      "mae": 0.6254148688921894
+    },
+    "z_5_persistence": {
+      "rmse": 1.0990794572469296,
+      "mae": 0.6445343406478056
+    },
+    "z_5_raw 5-min history": {
+      "rmse": 0.9194925641084556,
+      "mae": 0.5427937768977649
+    },
+    "z_5_short statistics": {
+      "rmse": 0.9184749389130382,
+      "mae": 0.5386432281241034
+    },
+    "z_5_state + rate": {
+      "rmse": 0.9224179820464602,
+      "mae": 0.5471742844550302
+    },
+    "z_5_statistics + context": {
+      "rmse": 0.9237382059053009,
+      "mae": 0.5407501900360769
+    },
+    "z_10_current state": {
+      "rmse": 1.27152917846591,
+      "mae": 0.8847138482505087
+    },
+    "z_10_linear extrapolation": {
+      "rmse": 1.5336129137289984,
+      "mae": 1.0822249747437376
+    },
+    "z_10_persistence": {
+      "rmse": 1.6545971338647028,
+      "mae": 1.1417280819456255
+    },
+    "z_10_raw 5-min history": {
+      "rmse": 1.2182573048389342,
+      "mae": 0.8237445459359236
+    },
+    "z_10_short statistics": {
+      "rmse": 1.2152989585978051,
+      "mae": 0.8175985993507016
+    },
+    "z_10_state + rate": {
+      "rmse": 1.2211495191780912,
+      "mae": 0.8259957984332497
+    },
+    "z_10_statistics + context": {
+      "rmse": 1.2311539347872225,
+      "mae": 0.8283087170149415
+    },
+    "z_20_current state": {
+      "rmse": 1.9608650417424902,
+      "mae": 1.5606414435899316
+    },
+    "z_20_linear extrapolation": {
+      "rmse": 2.751665023504409,
+      "mae": 2.096707984684404
+    },
+    "z_20_persistence": {
+      "rmse": 2.8512829372369923,
+      "mae": 2.2031636773937335
+    },
+    "z_20_raw 5-min history": {
+      "rmse": 1.8714570538642181,
+      "mae": 1.436073056187081
+    },
+    "z_20_short statistics": {
+      "rmse": 1.8685306294202095,
+      "mae": 1.429406971346456
+    },
+    "z_20_state + rate": {
+      "rmse": 1.8742191664807073,
+      "mae": 1.4400295421384202
+    },
+    "z_20_statistics + context": {
+      "rmse": 1.9032973690593173,
+      "mae": 1.4540497478845407
+    },
+    "z_30_current state": {
+      "rmse": 2.5707733754580993,
+      "mae": 2.2180751863287216
+    },
+    "z_30_linear extrapolation": {
+      "rmse": 4.073014552658503,
+      "mae": 3.2432313463443885
+    },
+    "z_30_persistence": {
+      "rmse": 4.108256760976424,
+      "mae": 3.397691561496094
+    },
+    "z_30_raw 5-min history": {
+      "rmse": 2.4248850233517816,
+      "mae": 2.0016799127136697
+    },
+    "z_30_short statistics": {
+      "rmse": 2.4284573900537607,
+      "mae": 2.0089200105584157
+    },
+    "z_30_state + rate": {
+      "rmse": 2.419040979263393,
+      "mae": 1.998612802367877
+    },
+    "z_30_statistics + context": {
+      "rmse": 2.4771517381411177,
+      "mae": 2.0532186946903273
+    }
+  },
+  "cycle11": {
+    "rh_observed_fraction": 0.0,
+    "coil_minutes_above_zero": 7,
+    "claim": "elapsed time fails; reversible z and hysteresis remain unproven"
+  },
+  "formal_model": {
+    "scope": "frost_cycle_000001-frost_cycle_000059; status=valid",
+    "status_valid_cycles": 50,
+    "eligible_cycles": 49,
+    "eligible_cycle_ids": [
+      "frost_cycle_000003",
+      "frost_cycle_000004",
+      "frost_cycle_000006",
+      "frost_cycle_000007",
+      "frost_cycle_000008",
+      "frost_cycle_000012",
+      "frost_cycle_000013",
+      "frost_cycle_000014",
+      "frost_cycle_000015",
+      "frost_cycle_000017",
+      "frost_cycle_000018",
+      "frost_cycle_000019",
+      "frost_cycle_000020",
+      "frost_cycle_000021",
+      "frost_cycle_000023",
+      "frost_cycle_000024",
+      "frost_cycle_000026",
+      "frost_cycle_000027",
+      "frost_cycle_000028",
+      "frost_cycle_000029",
+      "frost_cycle_000030",
+      "frost_cycle_000031",
+      "frost_cycle_000032",
+      "frost_cycle_000033",
+      "frost_cycle_000034",
+      "frost_cycle_000035",
+      "frost_cycle_000036",
+      "frost_cycle_000037",
+      "frost_cycle_000039",
+      "frost_cycle_000040",
+      "frost_cycle_000041",
+      "frost_cycle_000042",
+      "frost_cycle_000043",
+      "frost_cycle_000044",
+      "frost_cycle_000045",
+      "frost_cycle_000046",
+      "frost_cycle_000047",
+      "frost_cycle_000048",
+      "frost_cycle_000049",
+      "frost_cycle_000050",
+      "frost_cycle_000051",
+      "frost_cycle_000052",
+      "frost_cycle_000053",
+      "frost_cycle_000054",
+      "frost_cycle_000055",
+      "frost_cycle_000056",
+      "frost_cycle_000057",
+      "frost_cycle_000058",
+      "frost_cycle_000059"
+    ],
+    "eligible_cycles_by_horizon": {
+      "5": 49,
+      "10": 49,
+      "20": 49
+    },
+    "calibration": "first 10 min after early stable proxy; inference starts after minute 10",
+    "primary_target": "future z_r, not evaporator_capacity",
+    "state_definition": "z_r = Te_normal(context) - Te",
+    "reference_model": {
+      "features": [
+        "ambient_temperature",
+        "water_in_temperature",
+        "water_flow",
+        "compressor_frequency",
+        "fan_speed",
+        "exv_opening"
+      ],
+      "center": [
+        -1.04,
+        45.745,
+        1.0655000000000001,
+        77.0,
+        400.0,
+        164.0
+      ],
+      "scale": [
+        2.8517084237280694,
+        1.4033461701970444,
+        0.22485536485336258,
+        9.98291206608385,
+        5.428219898047432,
+        14.895029168529424
+      ],
+      "coefficients": [
+        -8.491393983560489,
+        1.8886608647446677,
+        0.2223440856442636,
+        -0.07792362320140568,
+        -1.775566418192183,
+        0.09148760483247992,
+        0.47970498335161016
+      ]
+    },
+    "dynamics_models": {
+      "5": {
+        "features": [
+          "z_r",
+          "rate_5m"
+        ],
+        "center": [
+          4.431481059054902,
+          0.09109140246639248
+        ],
+        "scale": [
+          5.492914530449309,
+          0.13405380197256458
+        ],
+        "coefficients": [
+          4.980226050841519,
+          5.58881226817623,
+          0.18496296646162744
+        ]
+      },
+      "10": {
+        "features": [
+          "z_r",
+          "rate_5m"
+        ],
+        "center": [
+          4.145707490173648,
+          0.08948463843778308
+        ],
+        "scale": [
+          5.334683090341328,
+          0.13318330640643333
+        ],
+        "coefficients": [
+          5.211125521689291,
+          5.454798127465499,
+          0.3736159510669089
+        ]
+      },
+      "20": {
+        "features": [
+          "z_r",
+          "rate_5m"
+        ],
+        "center": [
+          3.5676773169744784,
+          0.08541876592820062
+        ],
+        "scale": [
+          4.999278258853628,
+          0.13447296502692824
+        ],
+        "coefficients": [
+          5.724556733835724,
+          5.134299817796287,
+          0.6054443691822402
+        ]
+      }
+    }
+  }
+}

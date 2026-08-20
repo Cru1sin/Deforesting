@@ -1,0 +1,31 @@
+target,state,state_label,form,rmse,mae,median_threshold,median_slope,held_out_dates
+D_Q,minute,Elapsed time,linear,0.14445005299170594,0.1095797192676487,0.0,0.0018912115939789234,10
+D_Q,minute,Elapsed time,hinge,0.16224904671570825,0.11311338214285889,4.828154166666668,0.0019498855858308445,10
+D_Q,state_evaporating_temperature,Evaporating-temperature deficit,linear,0.05666654086895801,0.04101942583548645,0.0,0.0261235790440107,10
+D_Q,state_evaporating_temperature,Evaporating-temperature deficit,hinge,0.05811253272898829,0.042897483853230736,-0.15716773258236688,0.025767029683758536,10
+D_Q,state_coil_temperature,Coil-temperature deficit,linear,0.06200803780388517,0.044357891153740815,0.0,0.030818329816433444,10
+D_Q,state_coil_temperature,Coil-temperature deficit,hinge,0.06305046477828609,0.04553953179882463,-0.003083652419055612,0.030817032546327,10
+D_Q,state_suction_temperature,Suction-temperature deficit,linear,0.06643890636115726,0.04672633148563114,0.0,0.01789885326307495,10
+D_Q,state_suction_temperature,Suction-temperature deficit,hinge,0.06674974663761826,0.04499134418916511,1.3991157014262592,0.01943980221135419,10
+D_Q,state_evaporator_inlet_temperature,Evaporator-inlet-temperature deficit,linear,0.07024155480118723,0.050464202195893405,0.0,0.03794408640347083,10
+D_Q,state_evaporator_inlet_temperature,Evaporator-inlet-temperature deficit,hinge,0.07135633136603593,0.052702733373868105,-0.15994087183535377,0.037215534556927776,10
+D_Q,state_plate_heat_exchanger_outlet_temperature,PHE-outlet-temperature deficit,linear,0.2290218423048819,0.16715600376472292,0.0,0.04055197970182275,10
+D_Q,state_plate_heat_exchanger_outlet_temperature,PHE-outlet-temperature deficit,hinge,0.22230858100332274,0.17915816984971283,-2.6922565480082383,0.029235796753105253,10
+D_Q,state_pressure_ratio,Pressure-ratio excess,linear,0.06040824118331838,0.045939100235212076,0.0,0.15553949882901724,10
+D_Q,state_pressure_ratio,Pressure-ratio excess,hinge,0.062016751220091086,0.04709512420237785,0.020680061805884803,0.15676450873732506,10
+D_COP,minute,Elapsed time,linear,0.10513993369312434,0.07916303877585996,0.0,0.0013654631283521804,10
+D_COP,minute,Elapsed time,hinge,0.1184779700208762,0.08027523306055095,9.454633333333335,0.0014580406219563073,10
+D_COP,state_evaporating_temperature,Evaporating-temperature deficit,linear,0.04362349470289311,0.03283217712906214,0.0,0.018906171528964063,10
+D_COP,state_evaporating_temperature,Evaporating-temperature deficit,hinge,0.04383479714263453,0.03284855723534614,0.08194518673150593,0.019025790041595242,10
+D_COP,state_coil_temperature,Coil-temperature deficit,linear,0.045220214174005326,0.034606596232257814,0.0,0.022451176966006823,10
+D_COP,state_coil_temperature,Coil-temperature deficit,hinge,0.045313379576786196,0.03454864541860718,0.10631510720700053,0.0226473943320696,10
+D_COP,state_suction_temperature,Suction-temperature deficit,linear,0.05931760425234572,0.04007723226681922,0.0,0.012730978550720536,10
+D_COP,state_suction_temperature,Suction-temperature deficit,hinge,0.05813953547722607,0.03775212797169415,2.171206488025404,0.014571203027700498,10
+D_COP,state_evaporator_inlet_temperature,Evaporator-inlet-temperature deficit,linear,0.04975905832417594,0.037839272886682006,0.0,0.02771239646617802,10
+D_COP,state_evaporator_inlet_temperature,Evaporator-inlet-temperature deficit,hinge,0.04996087539221007,0.037831180566889944,0.05893820101341313,0.027934488219078853,10
+D_COP,state_plate_heat_exchanger_outlet_temperature,PHE-outlet-temperature deficit,linear,0.16478057173314728,0.11803839495433378,0.0,0.039442423522456194,10
+D_COP,state_plate_heat_exchanger_outlet_temperature,PHE-outlet-temperature deficit,hinge,0.1601757316260816,0.12631415158991832,-2.6923055434204874,0.021953503606331245,10
+D_COP,state_pressure_ratio,Pressure-ratio excess,linear,0.04742233753627155,0.0362144111243522,0.0,0.1119272102345123,10
+D_COP,state_pressure_ratio,Pressure-ratio excess,hinge,0.047569729253248594,0.03565543388133111,0.06048627763163321,0.11481675560953072,10
+D_COP,state_evaporating_temperature+state_coil_temperature,Te deficit + coil deficit,two-variable linear,0.04420768988595301,0.031285766714831346,,,10
+D_COP,state_evaporating_temperature+state_pressure_ratio,Te deficit + pressure ratio,two-variable linear,0.04385014761937206,0.0317799165183485,,,10

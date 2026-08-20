@@ -1,0 +1,5 @@
+method,cycles,global_mean_rank_sum
+wavelet_offline,77,9.74025974025974
+savgol_70s,77,10.675324675324676
+adaptive_offline,76,12.473684210526315
+median_centered_60s,77,12.571428571428571

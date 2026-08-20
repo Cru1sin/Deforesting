@@ -1,0 +1,35 @@
+{
+  "scope": {
+    "catalog_positions": "0-48 inclusive",
+    "cycle_names": "frost_cycle_000001-frost_cycle_000049",
+    "valid_cycles": 40,
+    "experiment_dates": 10,
+    "cycles_over_30_minutes": 40
+  },
+  "normal_reference": {
+    "method": "leave-one-experiment-date-out early-window context model plus cycle offset",
+    "early_window_minutes": 10,
+    "dataset_baseline_managed": false
+  },
+  "primary_law": {
+    "target": "D_COP = 1 - COP/COP0(c,u)",
+    "state": "z = Te0(c,u) - Te",
+    "form": "D_COP = alpha * max(z-zc, 0)",
+    "threshold_degC": 0.10168269890562005,
+    "slope_per_degC": 0.019033817438837038,
+    "fit_rmse": 0.0429447685023024,
+    "bootstrap_threshold_95pct": [
+      -0.3222376108342611,
+      0.5165719215995473
+    ],
+    "bootstrap_slope_95pct": [
+      0.0183521707788565,
+      0.019699086804307736
+    ]
+  },
+  "rgb": {
+    "metadata_cycles": 38,
+    "local_raw_image_cycles": 1,
+    "panel_cycles": 40
+  }
+}

@@ -1,3 +1,0 @@
-model,split,accuracy,balanced_accuracy,macro_f1,macro_auroc,image_count,cycle_count
-color_rbf_svm,validation,0.75,0.8125,0.7482517482517483,0.8246527777777777,72,2
-color_rbf_svm,test,0.8583333333333333,0.8767361111111112,0.8573426573426574,0.8765190972222222,240,6

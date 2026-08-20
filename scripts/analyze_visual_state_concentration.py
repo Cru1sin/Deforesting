@@ -118,18 +118,20 @@ def analyze(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--shards", type=Path, default=Path("report/rgb_feature_shards/cycles"))
+    parser.add_argument("--shards", type=Path, default=Path("outputs/RGB特征缓存/手工特征/cycles"))
     parser.add_argument(
         "--candidates",
         type=Path,
-        default=Path("report/raw_optimal_defrost/source_data/candidate_cost_curves.parquet"),
+        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"),
     )
     parser.add_argument(
         "--optima",
         type=Path,
-        default=Path("report/raw_optimal_defrost/source_data/cycle_optimal_points.csv"),
+        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/cycle_optimal_points.csv"),
     )
-    parser.add_argument("--output", type=Path, default=Path("report/visual_state_concentration"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("report/03_RGB标签与模型/视觉状态集中性")
+    )
     args = parser.parse_args()
     analyze(args.shards, args.candidates, args.optima, args.output)
 

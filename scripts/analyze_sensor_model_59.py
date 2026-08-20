@@ -27,9 +27,9 @@ from frost_analysis.sensor_model import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "report" / "sensor_model_59"
-FIGURES = OUT / "figures"
-SOURCE = OUT / "source_data"
+OUT = ROOT / "report" / "01_制热量与退化" / "传感器模型_59循环"
+FIGURES = OUT / "图表"
+SOURCE = OUT / "源数据"
 
 EARLY_MINUTES = 10
 OLD_HINGE_THRESHOLD = 0.10168269890562005
@@ -837,7 +837,7 @@ def configure_plotting() -> None:
 
 
 def save_figure(fig: plt.Figure, name: str) -> None:
-    for extension, dpi in [("svg", 300), ("pdf", 300), ("png", 300), ("tiff", 600)]:
+    for extension, dpi in [("svg", 300), ("pdf", 300), ("png", 300)]:
         fig.savefig(
             FIGURES / f"{name}.{extension}",
             dpi=dpi,

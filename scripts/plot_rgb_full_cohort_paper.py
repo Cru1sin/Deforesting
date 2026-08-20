@@ -45,14 +45,13 @@ CAMERA_LABELS = {
 }
 
 
-def export(fig: plt.Figure, stem: Path, *, dpi: int) -> None:
+def export(fig: plt.Figure, stem: Path) -> None:
     stem.parent.mkdir(parents=True, exist_ok=True)
     svg = stem.with_suffix(".svg")
     fig.savefig(svg, bbox_inches="tight")
     svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
     fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
     fig.savefig(stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    fig.savefig(stem.with_suffix(".tiff"), dpi=dpi, bbox_inches="tight")
 
 
 def render_figures(
@@ -61,8 +60,6 @@ def render_figures(
     experiment_metrics: pd.DataFrame,
     predictions: pd.DataFrame,
     output: Path,
-    *,
-    dpi: int = 600,
 ) -> None:
     plt.rcParams.update(
         {
@@ -77,20 +74,20 @@ def render_figures(
             "pdf.fonttype": 42,
         }
     )
-    source = output / "source_data"
+    source = output.parent / "源数据"
     source.mkdir(parents=True, exist_ok=True)
     figure_3 = full_cohort_figure_3_sources(summary, deltas)
     for name, frame in figure_3.items():
         frame.to_csv(source / f"figure_3_{name}.csv", index=False)
-    _plot_figure_3(figure_3, output, dpi=dpi)
+    _plot_figure_3(figure_3, output)
 
     figure_4 = full_cohort_figure_4_sources(experiment_metrics, predictions)
     for name, frame in figure_4.items():
         frame.to_csv(source / f"figure_4_{name}.csv", index=False)
-    _plot_figure_4(figure_4, output, dpi=dpi)
+    _plot_figure_4(figure_4, output)
 
 
-def _plot_figure_3(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) -> None:
+def _plot_figure_3(sources: dict[str, pd.DataFrame], output: Path) -> None:
     performance = sources["camera_performance"]
     delta = sources["camera_deltas"]
     tradeoff = sources["threshold_tradeoff"]
@@ -201,11 +198,11 @@ def _plot_figure_3(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) 
 
     for label, axis in zip("abc", (ax_a, ax_b, ax_c), strict=True):
         axis.text(-0.14, 1.04, label, transform=axis.transAxes, fontsize=10, fontweight="bold")
-    export(fig, output / "figure_3_rgb_increment", dpi=dpi)
+    export(fig, output / "figure_3_rgb_increment")
     plt.close(fig)
 
 
-def _plot_figure_4(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) -> None:
+def _plot_figure_4(sources: dict[str, pd.DataFrame], output: Path) -> None:
     experiments = sources["experiment_metrics"]
     failures = sources["cycle_failures"].head(10).sort_values(
         "mean_misclassification_regret"
@@ -263,14 +260,16 @@ def _plot_figure_4(sources: dict[str, pd.DataFrame], output: Path, *, dpi: int) 
 
     for label, axis in zip("abc", (ax_a, ax_b, ax_c), strict=True):
         axis.text(-0.12, 1.04, label, transform=axis.transAxes, fontsize=10, fontweight="bold")
-    export(fig, output / "figure_4_failure_audit", dpi=dpi)
+    export(fig, output / "figure_4_failure_audit")
     plt.close(fig)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--results", type=Path, default=Path("report/rgb_full_cohort"))
-    parser.add_argument("--output", type=Path, default=Path("report/paper_figures"))
+    parser.add_argument(
+        "--results", type=Path, default=Path("report/03_RGB标签与模型/全量模态比较")
+    )
+    parser.add_argument("--output", type=Path, default=Path("report/04_论文图表/图表"))
     args = parser.parse_args()
     render_figures(
         pd.read_csv(args.results / "summary_metrics.csv"),

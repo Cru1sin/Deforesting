@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path("report/rgb_cost_labels/image_cost_labels.parquet"),
+        default=Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet"),
     )
     parser.add_argument("--state-column", default="cost_state_01pct")
     parser.add_argument("--splits", nargs="+", choices=("train", "validation", "test"))
@@ -48,7 +48,7 @@ def main() -> None:
         default=[],
     )
     parser.add_argument("--deep-batch-size", type=int, default=32)
-    parser.add_argument("--output", type=Path, default=Path("report/rgb_feature_shards"))
+    parser.add_argument("--output", type=Path, default=Path("outputs/RGB特征缓存/手工特征"))
     args = parser.parse_args()
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")

@@ -122,7 +122,7 @@ This stage reads image metadata only; it does not download, alter or delete clou
 - The 1% threshold has post-optimal images from {post_cycles.get("train", 0)}/{post_cycles.get("validation", 0)}/{post_cycles.get("test", 0)} train/validation/test cycles and is the primary model-demo candidate; 2% is retained as label sensitivity.
 - A no-download local demo can use {len(local)} eligible images, but its post-optimal class spans only {local_post_cycles.get("train", 0)}/{local_post_cycles.get("validation", 0)}/{local_post_cycles.get("test", 0)} train/validation/test cycles. It is an engineering smoke test, not publication evidence.
 """
-    (output_root / "README.md").write_text(summary, encoding="utf-8")
+    (output_root / "报告.md").write_text(summary, encoding="utf-8")
 
 
 def main() -> None:
@@ -131,9 +131,9 @@ def main() -> None:
     parser.add_argument(
         "--cost-source",
         type=Path,
-        default=Path("report/raw_optimal_defrost/source_data"),
+        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据"),
     )
-    parser.add_argument("--output", type=Path, default=Path("report/rgb_cost_labels"))
+    parser.add_argument("--output", type=Path, default=Path("report/03_RGB标签与模型/成本标签"))
     args = parser.parse_args()
     build_labels(args.dataset, args.cost_source, args.output)
 

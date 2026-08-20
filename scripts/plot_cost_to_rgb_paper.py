@@ -30,25 +30,24 @@ def export(fig: plt.Figure, stem: Path) -> None:
     svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
     fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
     fig.savefig(stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
-    fig.savefig(stem.with_suffix(".tiff"), dpi=600, bbox_inches="tight")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("report/paper_figures"))
+    parser.add_argument("--output", type=Path, default=Path("report/04_论文图表/图表"))
     args = parser.parse_args()
 
     curves = pd.read_parquet(
-        "report/raw_optimal_defrost/source_data/candidate_cost_curves.parquet"
+        "report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"
     )
     bands = pd.read_csv(
-        "report/raw_optimal_defrost/source_data/near_optimal_band_sensitivity.csv"
+        "report/02_经济除霜窗口/经验经济窗口/源数据/near_optimal_band_sensitivity.csv"
     )
-    balance = pd.read_csv("report/rgb_cost_labels/label_balance.csv")
-    splits = pd.read_csv("report/rgb_cost_labels/cycle_splits.csv")
+    balance = pd.read_csv("report/03_RGB标签与模型/成本标签/label_balance.csv")
+    splits = pd.read_csv("report/03_RGB标签与模型/成本标签/cycle_splits.csv")
     threshold_summary = regret_threshold_summary(bands, balance)
 
-    source = args.output / "source_data"
+    source = args.output.parent / "源数据"
     source.mkdir(parents=True, exist_ok=True)
     threshold_summary.to_csv(source / "figure_2_threshold_summary.csv", index=False)
     split_summary = (

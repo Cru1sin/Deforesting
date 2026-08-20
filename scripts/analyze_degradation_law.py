@@ -19,9 +19,9 @@ from frost_analysis.degradation_law import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "report" / "valid_cycle_degradation_0_48"
-FIGURES = OUT / "figures"
-SOURCE = OUT / "source_data"
+OUT = ROOT / "report" / "01_制热量与退化" / "退化规律_0至48循环"
+FIGURES = OUT / "图表"
+SOURCE = OUT / "源数据"
 
 CONTEXT = [
     "ambient_temperature",
@@ -456,7 +456,7 @@ def configure_plotting() -> None:
 
 
 def save_figure(fig: plt.Figure, name: str) -> None:
-    for suffix, dpi in [("svg", 300), ("pdf", 300), ("png", 300), ("tiff", 600)]:
+    for suffix, dpi in [("svg", 300), ("pdf", 300), ("png", 300)]:
         fig.savefig(FIGURES / f"{name}.{suffix}", dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 

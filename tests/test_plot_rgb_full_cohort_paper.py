@@ -72,14 +72,14 @@ def test_render_figures_exports_two_complete_bundles(tmp_path) -> None:
         }
     )
 
-    plotter.render_figures(
-        summary, deltas, experiment_metrics, predictions, tmp_path, dpi=72
-    )
+    figures = tmp_path / "图表"
+    plotter.render_figures(summary, deltas, experiment_metrics, predictions, figures)
 
     for figure in ("figure_3_rgb_increment", "figure_4_failure_audit"):
-        for suffix in (".svg", ".pdf", ".png", ".tiff"):
-            assert (tmp_path / f"{figure}{suffix}").is_file()
-    figure_3_svg = (tmp_path / "figure_3_rgb_increment.svg").read_text()
+        for suffix in (".svg", ".pdf", ".png"):
+            assert (figures / f"{figure}{suffix}").is_file()
+        assert not (figures / f"{figure}.tiff").exists()
+    figure_3_svg = (figures / "figure_3_rgb_increment.svg").read_text()
     assert "n=2" in figure_3_svg
     assert "all views" in figure_3_svg
-    assert (tmp_path / "source_data" / "figure_4_cycle_failures.csv").is_file()
+    assert (tmp_path / "源数据" / "figure_4_cycle_failures.csv").is_file()

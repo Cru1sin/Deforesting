@@ -157,13 +157,6 @@ def _save_figure(fig: plt.Figure, base: Path) -> None:
     fig.savefig(svg, bbox_inches="tight", facecolor="white")
     svg.write_text("\n".join(line.rstrip() for line in svg.read_text().splitlines()) + "\n")
     fig.savefig(base.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
-    fig.savefig(
-        base.with_suffix(".tiff"),
-        dpi=600,
-        bbox_inches="tight",
-        facecolor="white",
-        pil_kwargs={"compression": "tiff_lzw"},
-    )
     plt.close(fig)
 
 
@@ -185,7 +178,6 @@ def _plot_cycle(
     q_start_kw: float,
     next_stable_start: pd.Timestamp,
     q_end_kw: float,
-    output: Path,
     atlas: PdfPages | None = None,
 ) -> None:
     stable = pd.Timestamp(result["t_heating_stable"])
@@ -238,8 +230,6 @@ def _plot_cycle(
     boundary = "right-censored sensor end" if bool(result["is_censored"]) else "observed policy"
     fig.suptitle(f"{result['cycle_name']} · {result['cohort_tier']} · {boundary}", fontsize=8)
     fig.tight_layout()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=220, bbox_inches="tight", facecolor="white")
     if atlas is not None:
         atlas.savefig(fig, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -649,10 +639,10 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
     results = pd.DataFrame(result_rows)
     candidate_curves = pd.concat(curves, ignore_index=True) if curves else pd.DataFrame()
     band_sensitivity = pd.DataFrame(band_rows)
-    source = output_root / "source_data"
-    figures = output_root / "figures"
+    source = output_root / "源数据"
+    figures = output_root / "图表"
     source.mkdir(parents=True, exist_ok=True)
-    (figures / "cycles").mkdir(parents=True, exist_ok=True)
+    figures.mkdir(parents=True, exist_ok=True)
     anchor_table.to_csv(source / "clean_anchor_summary.csv", index=False)
     tickets.to_csv(source / "defrost_ticket_events.csv", index=False)
     results.to_csv(source / "cycle_optimal_points.csv", index=False)
@@ -695,7 +685,6 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
                 q_start_kw=float(anchors[name]["q_clean_kw"]),
                 next_stable_start=reference_end,
                 q_end_kw=q_end_kw,
-                output=figures / "cycles" / f"{name}.png",
                 atlas=atlas,
             )
 
@@ -758,17 +747,17 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
 
 ## 可追溯输出
 
-- `source_data/cycle_optimal_points.csv`：全部循环结果与无效原因。
-- `source_data/defrost_ticket_events.csv`：经验除霜门票分解。
-- `source_data/candidate_cost_curves.parquet`：每个候选时刻的成本曲线。
-- `source_data/clean_anchor_summary.csv`：clean anchor 与 COP。
-- `source_data/cohort_audit.csv`：队列纳入审计。
-- `source_data/empirical_policy_summary.csv`：经验门票和换算系数。
-- `source_data/near_optimal_band_sensitivity.csv`：1%、2%、5%、10% regret 阈值对应的 envelope 宽度与连续段数。
-- `figures/figure_1_empirical_optimal_defrost.*`：PNG/SVG/PDF/TIFF 主图。
-- `figures/cycles/`：每个有效循环一张原始曲线与成本曲线图。
+- `源数据/cycle_optimal_points.csv`：全部循环结果与无效原因。
+- `源数据/defrost_ticket_events.csv`：经验除霜门票分解。
+- `源数据/candidate_cost_curves.parquet`：每个候选时刻的成本曲线。
+- `源数据/clean_anchor_summary.csv`：clean anchor 与 COP。
+- `源数据/cohort_audit.csv`：队列纳入审计。
+- `源数据/empirical_policy_summary.csv`：经验门票和换算系数。
+- `源数据/near_optimal_band_sensitivity.csv`：1%、2%、5%、10% regret 阈值对应的 envelope 宽度与连续段数。
+- `图表/figure_1_empirical_optimal_defrost.*`：PNG/SVG/PDF 主图。
+- `图表/cycle_atlas.pdf`：全部有效循环的紧凑审阅图册。正式逐循环图只更新 Dataset 中已有的 `cycles/frost_cycle_*.png`，报告不保存副本。
 """
-    (output_root / "README_CN.md").write_text(summary, encoding="utf-8")
+    (output_root / "报告.md").write_text(summary, encoding="utf-8")
     figure_qa = f"""# Figure 1 QA contract
 
 - Core conclusion: under the observed fixed-duration defrost policy, raw-data renewal cost identifies an empirical optimum before the observed defrost in many complete cycles, but the broad near-optimal regions limit point-label precision.
@@ -777,18 +766,18 @@ def analyze(dataset_root: Path, output_root: Path) -> None:  # noqa: C901
 - Final size: 183 mm wide; 7.2 × 6.2 in working canvas.
 - n definition: {len(primary_results)} complete observed-policy cycles in the primary figure; {len(censored_results)} sensor-end right-censored cycles are sensitivity-only; {len(valid_tickets)} valid defrost/recovery tickets.
 - Center/spread: panel d reports all cycle values and a box plot (median, interquartile range, 1.5×IQR whiskers); no hypothesis test is claimed.
-- Source data: `source_data/cycle_optimal_points.csv`, `source_data/candidate_cost_curves.parquet`, and `source_data/defrost_ticket_events.csv`.
-- Editable exports: SVG text preserved; PDF uses TrueType fonts; TIFF is 600 dpi; PNG is 300 dpi.
+- Source data: `源数据/cycle_optimal_points.csv`, `源数据/candidate_cost_curves.parquet`, and `源数据/defrost_ticket_events.csv`.
+- Editable exports: SVG text preserved; PDF uses TrueType fonts; PNG is retained for review. TIFF is generated only at submission if required.
 - Image integrity: no microscopy or image manipulation in this figure; panel a uses unsmoothed original sensor points.
 - Representative cycle: {representative_name}, selected as the interior-minimum cycle nearest the cohort median advance.
 """
-    (output_root / "FIGURE_QA.md").write_text(figure_qa, encoding="utf-8")
+    (output_root / "图表质检.md").write_text(figure_qa, encoding="utf-8")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
-    parser.add_argument("--output", type=Path, default=Path("report/raw_optimal_defrost"))
+    parser.add_argument("--output", type=Path, default=Path("report/02_经济除霜窗口/经验经济窗口"))
     args = parser.parse_args()
     analyze(args.dataset, args.output)
 

@@ -41,18 +41,11 @@ mpl.rcParams.update(
 )
 
 
-def _save(fig: plt.Figure, base: Path, dpi: int = 600) -> None:
+def _save(fig: plt.Figure, base: Path) -> None:
     base.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(base.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
     fig.savefig(base.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
     fig.savefig(base.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(
-        base.with_suffix(".tiff"),
-        dpi=dpi,
-        bbox_inches="tight",
-        facecolor="white",
-        pil_kwargs={"compression": "tiff_lzw"},
-    )
     plt.close(fig)
 
 
@@ -61,7 +54,7 @@ def plot_model_comparison(summary: pd.DataFrame, output: Path) -> None:
     values["camera_group"] = pd.Categorical(values["camera_group"], CAMERA_ORDER, ordered=True)
     values["model"] = pd.Categorical(values["model"], MODEL_ORDER, ordered=True)
     values = values.sort_values(["camera_group", "model"])
-    source = output / "source_data"
+    source = output.parent / "源数据"
     source.mkdir(parents=True, exist_ok=True)
     values.to_csv(source / "figure_5_model_comparison.csv", index=False)
 
@@ -111,7 +104,7 @@ def plot_concentration(
         concentration["camera_group"], CAMERA_ORDER, ordered=True
     )
     concentration = concentration.sort_values("camera_group")
-    source = output / "source_data"
+    source = output.parent / "源数据"
     source.mkdir(parents=True, exist_ok=True)
     primary[["cycle_name", "minutes_from_stable", "minimum_location"]].to_csv(
         source / "figure_6_optimal_times.csv", index=False
@@ -185,19 +178,19 @@ def main() -> None:
     parser.add_argument(
         "--models",
         type=Path,
-        default=Path("report/rgb_model_comparison/summary_metrics.csv"),
+        default=Path("report/03_RGB标签与模型/五模型比较/summary_metrics.csv"),
     )
     parser.add_argument(
         "--optima",
         type=Path,
-        default=Path("report/raw_optimal_defrost/source_data/cycle_optimal_points.csv"),
+        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/cycle_optimal_points.csv"),
     )
     parser.add_argument(
         "--concentration",
         type=Path,
-        default=Path("report/visual_state_concentration/summary.csv"),
+        default=Path("report/03_RGB标签与模型/视觉状态集中性/summary.csv"),
     )
-    parser.add_argument("--output", type=Path, default=Path("report/paper_expansion/figures"))
+    parser.add_argument("--output", type=Path, default=Path("report/04_论文图表/图表"))
     args = parser.parse_args()
     plot_model_comparison(pd.read_csv(args.models), args.output)
     plot_concentration(pd.read_csv(args.optima), pd.read_csv(args.concentration), args.output)

@@ -14,7 +14,6 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from frost_analysis.heating_smoothing import (
-    METHODS,
     cost_method_ranking,
     global_method_ranking,
     recommend_methods,
@@ -50,12 +49,11 @@ def run_analysis(input_dir: Path, output_dir: Path) -> None:
     files = sorted(input_dir.glob("*.parquet"))
     if not files:
         raise ValueError(f"no cycle parquet files found in {input_dir}")
-    source_dir = output_dir / "source_data"
-    cycle_figure_dir = output_dir / "figures" / "cycles"
+    source_dir = output_dir / "源数据"
+    cycle_figure_dir = output_dir / "图表" / "循环图"
     source_dir.mkdir(parents=True, exist_ok=True)
     cycle_figure_dir.mkdir(parents=True, exist_ok=True)
 
-    curves: list[pd.DataFrame] = []
     metric_tables: list[pd.DataFrame] = []
     cycle_frames: list[tuple[str, pd.DataFrame]] = []
     for path in files:
@@ -64,17 +62,14 @@ def run_analysis(input_dir: Path, output_dir: Path) -> None:
             frame["cycle_name"] = path.stem
         smoothed = smooth_cycle(frame)
         metrics = score_methods(smoothed)
-        curves.append(_curve_columns(smoothed))
         metric_tables.append(metrics)
         cycle_frames.append((path.stem, smoothed))
 
-    curve_table = pd.concat(curves, ignore_index=True)
     metrics = pd.concat(metric_tables, ignore_index=True)
     recommendations = recommend_methods(metrics)
     summary = _method_summary(metrics)
     global_ranking = global_method_ranking(metrics)
     cost_ranking = cost_method_ranking(metrics)
-    curve_table.to_parquet(source_dir / "smoothed_curves.parquet", index=False)
     metrics.to_csv(source_dir / "method_metrics.csv", index=False)
     recommendations.to_csv(source_dir / "cycle_recommendations.csv", index=False)
     summary.to_csv(source_dir / "overall_method_summary.csv", index=False)
@@ -83,35 +78,14 @@ def run_analysis(input_dir: Path, output_dir: Path) -> None:
     highlighted_method = str(cost_ranking.iloc[0]["method"])
     for name, frame in cycle_frames:
         _plot_cycle(frame, cycle_figure_dir / f"{name}.png", highlighted_method)
-    _plot_overview(recommendations, output_dir / "figures" / "method_overview.png")
-    (output_dir / "README_CN.md").write_text(
+    _plot_overview(recommendations, output_dir / "图表" / "method_overview.png")
+    (output_dir / "报告.md").write_text(
         _report(
             files, metrics, recommendations, summary, global_ranking, cost_ranking
         ),
         encoding="utf-8",
     )
     print(f"Analyzed {len(files)} cycles; outputs: {output_dir}")
-
-
-def _curve_columns(frame: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        column
-        for column in (
-            "cycle_name",
-            "cycle_uid",
-            "experiment_date",
-            "timestamp",
-            "cycle_stage",
-            "cycle_elapsed_seconds",
-            "heating_capacity",
-            "water_heating_capacity_audit",
-            *METHODS,
-            "adaptive_median_window_seconds",
-            "adaptive_lowpass_tau_seconds",
-        )
-        if column in frame
-    ]
-    return frame[columns].copy()
 
 
 def _plot_cycle(frame: pd.DataFrame, output: Path, highlighted_method: str) -> None:
@@ -370,14 +344,13 @@ GitHub 候选中，[FilterPy](https://github.com/rlabbe/filterpy)（约 3.9k Sta
 
 ## 文件
 
-- `figures/cycles/*.png`：一个循环一张图；每张只画该循环结霜发展段的原始曲线、四种普通离线平滑和三种单调约束曲线，成本推荐曲线加粗。
-- `figures/method_overview.png`：结霜阶段推荐方法计数。
-- `source_data/smoothed_curves.parquet`：所有曲线数值，并包含每个阶段选中的自适应窗口参数。
-- `source_data/method_metrics.csv`：逐循环、逐阶段、逐方法指标。
-- `source_data/cycle_recommendations.csv`：逐循环离线/在线推荐。
-- `source_data/overall_method_summary.csv`：总体中位指标。
-- `source_data/global_method_ranking.csv`：统一离线方法的跨循环平均秩和。
-- `source_data/cost_method_ranking.csv`：供热缺口面积、能量、水侧形状和短时响应的成本导向排名。
+- `图表/循环图/*.png`：一个循环一张对比图。
+- `图表/method_overview.png`：结霜阶段推荐方法计数。
+- `源数据/method_metrics.csv`：逐循环、逐阶段、逐方法指标。
+- `源数据/cycle_recommendations.csv`：逐循环离线/在线推荐。
+- `源数据/overall_method_summary.csv`：总体中位指标。
+- `源数据/global_method_ranking.csv`：统一离线方法的跨循环平均秩和。
+- `源数据/cost_method_ranking.csv`：成本导向排名。大体量逐点曲线属于可再生缓存，不纳入报告目录。
 
 ## 与热泵测量文献的一致性
 
@@ -389,7 +362,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", type=Path, default=Path("dataset/cycles"))
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("report/heating_capacity_smoothing")
+        "--output-dir", type=Path, default=Path("report/01_制热量与退化/制热量平滑")
     )
     args = parser.parse_args()
     run_analysis(args.input_dir, args.output_dir)

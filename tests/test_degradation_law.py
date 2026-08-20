@@ -129,12 +129,12 @@ def test_condition_normalized_analysis_writes_cycle_level_outputs(tmp_path: Path
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert (output_dir / "source_data" / "normalized_degradation.parquet").is_file()
-    assert (output_dir / "source_data" / "method_metrics.csv").is_file()
-    assert (output_dir / "source_data" / "monotonic_prior_ablation.csv").is_file()
-    assert (output_dir / "source_data" / "reference_ridge_ablation.csv").is_file()
-    assert (output_dir / "source_data" / "reference_support_audit.csv").is_file()
-    metrics = pd.read_csv(output_dir / "source_data" / "method_metrics.csv")
+    assert not (output_dir / "源数据" / "normalized_degradation.parquet").exists()
+    assert (output_dir / "源数据" / "method_metrics.csv").is_file()
+    assert (output_dir / "源数据" / "monotonic_prior_ablation.csv").is_file()
+    assert (output_dir / "源数据" / "reference_ridge_ablation.csv").is_file()
+    assert (output_dir / "源数据" / "reference_support_audit.csv").is_file()
+    metrics = pd.read_csv(output_dir / "源数据" / "method_metrics.csv")
     assert "future_loss_increment_error_ratio" in metrics
-    assert (output_dir / "figures" / "cycles" / "cycle_1.png").is_file()
-    assert (output_dir / "README_CN.md").is_file()
+    assert (output_dir / "图表" / "循环图" / "cycle_1.png").is_file()
+    assert (output_dir / "报告.md").is_file()

@@ -520,13 +520,6 @@ def _save_figure(fig: plt.Figure, base: Path) -> None:
     fig.savefig(base.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
     fig.savefig(base.with_suffix(".pdf"), bbox_inches="tight", facecolor="white")
     fig.savefig(base.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
-    fig.savefig(
-        base.with_suffix(".tiff"),
-        dpi=600,
-        bbox_inches="tight",
-        facecolor="white",
-        pil_kwargs={"compression": "tiff_lzw"},
-    )
     plt.close(fig)
 
 
@@ -758,7 +751,7 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
         shifts["t_star_conditional"] - shifts["t_star"]
     ).dt.total_seconds() / 60
     # Stage 4: connect windows to COP and RGB evidence.
-    labels = pd.read_parquet("report/rgb_cost_labels/image_cost_labels.parquet")
+    labels = pd.read_parquet("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet")
     overview = build_window_overview(loader, points, labels, dataset)
 
     # Stage 5: write publication evidence from the same tables.
@@ -774,11 +767,11 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
         event_predictions,
         metrics,
         shifts,
-        output.parent / "figures" / "figure_ticket_cost_audit",
+        output.parent / "图表" / "figure_ticket_cost_audit",
     )
     plot_window_cop_rgb(
         overview,
-        output.parent / "figures" / "figure_window_cop_rgb_overview",
+        output.parent / "图表" / "figure_window_cop_rgb_overview",
     )
     render_all_cost_publications(
         loader,
@@ -788,7 +781,7 @@ def analyze(dataset: Path, source: Path, output: Path) -> None:
         loader,
         points,
         partial_pool_curves,
-        output.parent / "figures" / "cycles" / "representative_publication_cost.png",
+        output.parent / "图表" / "循环图" / "representative_publication_cost.png",
     )
 
 
@@ -796,10 +789,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument(
-        "--source", type=Path, default=Path("report/raw_optimal_defrost/source_data")
+        "--source", type=Path, default=Path("report/02_经济除霜窗口/经验经济窗口/源数据")
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("report/raw_optimal_defrost/evidence")
+        "--output", type=Path, default=Path("report/02_经济除霜窗口/经验经济窗口/证据")
     )
     args = parser.parse_args()
     analyze(args.dataset, args.source, args.output)

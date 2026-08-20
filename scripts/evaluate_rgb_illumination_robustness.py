@@ -213,7 +213,6 @@ def plot_summary(summary: pd.DataFrame, output: Path) -> None:
         ".svg": {},
         ".pdf": {},
         ".png": {"dpi": 300},
-        ".tiff": {"dpi": 600},
     }.items():
         fig.savefig(
             output / f"illumination_robustness{suffix}",
@@ -229,7 +228,7 @@ def main() -> None:
     parser.add_argument(
         "--shards",
         type=Path,
-        default=Path("report/rgb_multirepresentation_feature_shards_development/cycles"),
+        default=Path("outputs/RGB特征缓存/多表征开发集/cycles"),
     )
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument("--maximum-per-group", type=int, default=3)
@@ -237,7 +236,9 @@ def main() -> None:
     parser.add_argument(
         "--camera-groups", nargs="+", choices=CAMERA_GROUPS, default=["front", "all"]
     )
-    parser.add_argument("--output", type=Path, default=Path("report/rgb_low_light_stress"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("report/03_RGB标签与模型/低照度压力测试")
+    )
     args = parser.parse_args()
 
     paths = sorted(args.shards.glob("frost_cycle_*.parquet"))

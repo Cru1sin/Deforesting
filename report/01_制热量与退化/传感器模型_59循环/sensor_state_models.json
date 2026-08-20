@@ -1,0 +1,158 @@
+{
+  "scope": "frost_cycle_000001-frost_cycle_000059; status=valid",
+  "status_valid_cycles": 50,
+  "eligible_cycles": 49,
+  "eligible_cycle_ids": [
+    "frost_cycle_000003",
+    "frost_cycle_000004",
+    "frost_cycle_000006",
+    "frost_cycle_000007",
+    "frost_cycle_000008",
+    "frost_cycle_000012",
+    "frost_cycle_000013",
+    "frost_cycle_000014",
+    "frost_cycle_000015",
+    "frost_cycle_000017",
+    "frost_cycle_000018",
+    "frost_cycle_000019",
+    "frost_cycle_000020",
+    "frost_cycle_000021",
+    "frost_cycle_000023",
+    "frost_cycle_000024",
+    "frost_cycle_000026",
+    "frost_cycle_000027",
+    "frost_cycle_000028",
+    "frost_cycle_000029",
+    "frost_cycle_000030",
+    "frost_cycle_000031",
+    "frost_cycle_000032",
+    "frost_cycle_000033",
+    "frost_cycle_000034",
+    "frost_cycle_000035",
+    "frost_cycle_000036",
+    "frost_cycle_000037",
+    "frost_cycle_000039",
+    "frost_cycle_000040",
+    "frost_cycle_000041",
+    "frost_cycle_000042",
+    "frost_cycle_000043",
+    "frost_cycle_000044",
+    "frost_cycle_000045",
+    "frost_cycle_000046",
+    "frost_cycle_000047",
+    "frost_cycle_000048",
+    "frost_cycle_000049",
+    "frost_cycle_000050",
+    "frost_cycle_000051",
+    "frost_cycle_000052",
+    "frost_cycle_000053",
+    "frost_cycle_000054",
+    "frost_cycle_000055",
+    "frost_cycle_000056",
+    "frost_cycle_000057",
+    "frost_cycle_000058",
+    "frost_cycle_000059"
+  ],
+  "eligible_cycles_by_horizon": {
+    "5": 49,
+    "10": 49,
+    "20": 49
+  },
+  "calibration": "first 10 min after early stable proxy; inference starts after minute 10",
+  "primary_target": "future z_r, not evaporator_capacity",
+  "state_definition": "z_r = Te_normal(context) - Te",
+  "reference_model": {
+    "features": [
+      "ambient_temperature",
+      "water_in_temperature",
+      "water_flow",
+      "compressor_frequency",
+      "fan_speed",
+      "exv_opening"
+    ],
+    "center": [
+      -1.04,
+      45.745,
+      1.0655000000000001,
+      77.0,
+      400.0,
+      164.0
+    ],
+    "scale": [
+      2.8517084237280694,
+      1.4033461701970444,
+      0.22485536485336258,
+      9.98291206608385,
+      5.428219898047432,
+      14.895029168529424
+    ],
+    "coefficients": [
+      -8.491393983560489,
+      1.8886608647446677,
+      0.2223440856442636,
+      -0.07792362320140568,
+      -1.775566418192183,
+      0.09148760483247992,
+      0.47970498335161016
+    ]
+  },
+  "dynamics_models": {
+    "5": {
+      "features": [
+        "z_r",
+        "rate_5m"
+      ],
+      "center": [
+        4.431481059054902,
+        0.09109140246639248
+      ],
+      "scale": [
+        5.492914530449309,
+        0.13405380197256458
+      ],
+      "coefficients": [
+        4.980226050841519,
+        5.58881226817623,
+        0.18496296646162744
+      ]
+    },
+    "10": {
+      "features": [
+        "z_r",
+        "rate_5m"
+      ],
+      "center": [
+        4.145707490173648,
+        0.08948463843778308
+      ],
+      "scale": [
+        5.334683090341328,
+        0.13318330640643333
+      ],
+      "coefficients": [
+        5.211125521689291,
+        5.454798127465499,
+        0.3736159510669089
+      ]
+    },
+    "20": {
+      "features": [
+        "z_r",
+        "rate_5m"
+      ],
+      "center": [
+        3.5676773169744784,
+        0.08541876592820062
+      ],
+      "scale": [
+        4.999278258853628,
+        0.13447296502692824
+      ],
+      "coefficients": [
+        5.724556733835724,
+        5.134299817796287,
+        0.6054443691822402
+      ]
+    }
+  }
+}

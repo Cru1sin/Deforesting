@@ -246,14 +246,13 @@ def plot_learning_curves(summary: pd.DataFrame, output: Path) -> None:
         "Model performance and control loss versus independent training experiments",
         fontsize=8,
     )
-    source = output / "source_data"
+    source = output / "源数据"
     source.mkdir(parents=True, exist_ok=True)
     summary.to_csv(source / "figure_7_learning_curves.csv", index=False)
     for suffix, kwargs in {
         ".svg": {},
         ".pdf": {},
         ".png": {"dpi": 300},
-        ".tiff": {"dpi": 600},
     }.items():
         fig.savefig(
             output / f"figure_7_learning_curves{suffix}",
@@ -317,7 +316,6 @@ def plot_camera_grid(summary: pd.DataFrame, output: Path, metric: str, ylabel: s
         ".svg": {},
         ".pdf": {},
         ".png": {"dpi": 300},
-        ".tiff": {"dpi": 600},
     }.items():
         fig.savefig(
             base.with_suffix(suffix),
@@ -331,7 +329,7 @@ def plot_camera_grid(summary: pd.DataFrame, output: Path, metric: str, ylabel: s
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--shards", type=Path, default=Path("report/rgb_full_feature_shards/cycles")
+        "--shards", type=Path, default=Path("outputs/RGB特征缓存/全量手工特征/cycles")
     )
     parser.add_argument(
         "--camera-groups",
@@ -343,7 +341,9 @@ def main() -> None:
     parser.add_argument("--representation", choices=REPRESENTATIONS, default="handcrafted")
     parser.add_argument("--training-sizes", nargs="+", type=int, default=[2, 4, 6, 8, 10])
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--output", type=Path, default=Path("report/rgb_learning_curves"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("report/03_RGB标签与模型/九机位学习曲线")
+    )
     args = parser.parse_args()
     paths = sorted(args.shards.glob("frost_cycle_*.parquet"))
     if not paths:
