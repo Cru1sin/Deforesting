@@ -8,8 +8,10 @@ from torchvision import transforms
 
 from frost_analysis.rgb_deep_features import (
     add_embedding_columns,
+    cosine_similarity_rows,
     extract_embeddings,
     extract_representation_matrices,
+    illumination_transform,
 )
 
 
@@ -69,3 +71,51 @@ def test_extract_representation_matrices_keeps_representation_names(tmp_path) ->
 
     assert list(matrices) == ["tiny"]
     assert np.allclose(matrices["tiny"], [[1.0, 0.0, 0.0]])
+
+
+def test_illumination_transform_applies_named_brightness_shift() -> None:
+    image = Image.new("RGB", (256, 256), (128, 128, 128))
+
+    native = illumination_transform("native")(image)
+    dark = illumination_transform("dark_60pct")(image)
+    bright = illumination_transform("bright_140pct")(image)
+
+    assert dark.mean() < native.mean() < bright.mean()
+
+
+def test_illumination_transform_orders_gamma_underexposure() -> None:
+    image = Image.new("RGB", (256, 256), (128, 128, 128))
+
+    moderate = illumination_transform("gamma_1p8")(image)
+    severe = illumination_transform("gamma_2p2")(image)
+
+    assert severe.mean() < moderate.mean()
+
+
+def test_sensor_noise_stress_is_deterministic() -> None:
+    image = Image.new("RGB", (256, 256), (128, 128, 128))
+    transform = illumination_transform("gamma_2p2_sensor_noise")
+
+    first = transform(image)
+    second = transform(image)
+
+    assert torch.equal(first, second)
+    assert first.std() > illumination_transform("gamma_2p2")(image).std()
+
+
+def test_illumination_transform_rejects_unknown_condition() -> None:
+    try:
+        illumination_transform("unknown")
+    except ValueError as error:
+        assert "unknown" in str(error)
+    else:
+        raise AssertionError("unknown illumination condition was accepted")
+
+
+def test_cosine_similarity_rows_scores_identical_and_orthogonal_vectors() -> None:
+    first = np.asarray([[1.0, 0.0], [1.0, 0.0]])
+    second = np.asarray([[1.0, 0.0], [0.0, 1.0]])
+
+    scores = cosine_similarity_rows(first, second)
+
+    assert np.allclose(scores, [1.0, 0.0])
