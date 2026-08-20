@@ -22,6 +22,7 @@ def main() -> None:
         type=Path,
         default=Path("report/rgb_cost_labels/image_cost_labels.parquet"),
     )
+    parser.add_argument("--state-column", default="cost_state_01pct")
     parser.add_argument("--splits", nargs="+", choices=("train", "validation", "test"))
     parser.add_argument("--cycles", nargs="+")
     parser.add_argument("--maximum-per-group", type=int, default=12)
@@ -36,7 +37,7 @@ def main() -> None:
     args = parser.parse_args()
 
     labels = pd.read_parquet(args.labels)
-    labels["cost_state"] = labels["cost_state_01pct"]
+    labels["cost_state"] = labels[args.state_column]
     labels = labels.loc[
         labels["relative_regret"].notna()
         & labels["cost_state"].isin(args.cost_states)
