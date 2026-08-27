@@ -123,12 +123,12 @@ def main() -> None:
     parser.add_argument(
         "--curves",
         type=Path,
-        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"),
+        default=Path("output/test/成本函数/其他/经验经济窗口/源数据/candidate_cost_curves.parquet"),
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("report/03_RGB标签与模型/最优点六机位"),
+        default=Path("output/label/历史最优点六机位"),
     )
     parser.add_argument("--fetch-cloud", action="store_true")
     parser.add_argument("--cloud-root", type=Path)

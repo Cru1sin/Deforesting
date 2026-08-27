@@ -467,18 +467,18 @@ def main() -> None:
     parser.add_argument(
         "--mixed-run",
         type=Path,
-        default=Path("outputs/resnet50_binary/resnet50_binary_unit_latest_20260825"),
+        default=Path("output/model/resnet50_binary_20260825/resnet50_binary_unit_latest_20260825"),
     )
     parser.add_argument(
-        "--camera-root", type=Path, default=Path("outputs/resnet50_binary_camera_models")
+        "--camera-root", type=Path, default=Path("output/model/camera_models_20260827")
     )
     parser.add_argument(
         "--adaptation-root",
         type=Path,
-        default=Path("outputs/resnet50_binary_camera_adaptation"),
+        default=Path("output/model/camera_adaptation_20260827"),
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("report/03_RGB标签与模型/机位专用模型")
+        "--output", type=Path, default=Path("output/model/camera_models_20260827/论文分析")
     )
     args = parser.parse_args()
     render(args.mixed_run, args.camera_root, args.adaptation_root, args.output)

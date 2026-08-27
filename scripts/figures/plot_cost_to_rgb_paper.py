@@ -153,17 +153,17 @@ def plot_cost_to_rgb_evidence(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("report/04_论文图表/图表"))
+    parser.add_argument("--output", type=Path, default=Path("output/test/model/论文图表/图表"))
     args = parser.parse_args()
     plot_cost_to_rgb_evidence(
         pd.read_parquet(
-            "report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"
+            "output/test/成本函数/其他/经验经济窗口/源数据/candidate_cost_curves.parquet"
         ),
         pd.read_csv(
-            "report/02_经济除霜窗口/经验经济窗口/源数据/near_optimal_band_sensitivity.csv"
+            "output/test/成本函数/其他/经验经济窗口/源数据/near_optimal_band_sensitivity.csv"
         ),
-        pd.read_csv("report/03_RGB标签与模型/成本标签/label_balance.csv"),
-        pd.read_csv("report/03_RGB标签与模型/成本标签/cycle_splits.csv"),
+        pd.read_csv("output/label/cost_function_v1_binary/label_balance.csv"),
+        pd.read_csv("output/label/cost_function_v1_binary/cycle_splits.csv"),
         args.output,
     )
 

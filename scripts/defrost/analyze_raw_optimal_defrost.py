@@ -34,6 +34,7 @@ RAW_COLUMNS = [
     "water_flow",
     "water_in_temperature",
     "water_out_temperature",
+    "water_temperature_setpoint",
     "power_total",
     "heating_capacity",
     "cycle_stage",
@@ -51,6 +52,20 @@ RECOVERY_FRACTION = 0.9
 RECOVERY_SECONDS = 30
 MINIMUM_INTEGRATION_COVERAGE = 0.95
 FIXED_RECOVERY_ELECTRICITY_KWH = 0.279901897467
+OFFLINE_OBSERVED_RULE_PROTOCOL = "offline_counterfactual_observed_rule_duration"
+QD_TERMS = (
+    "intercept",
+    "water_in_temperature",
+    "water_out_temperature",
+    "rule_defrost_duration_minutes",
+    "coil_temperature",
+    "evaporating_pressure",
+    "water_in_temperature_squared",
+    "water_out_temperature_squared",
+    "rule_defrost_duration_minutes_squared",
+    "coil_temperature_squared",
+    "evaporating_pressure_squared",
+)
 PE_FOLD_COLUMNS = [
     "fold_intercept_kwh",
     "fold_linear_kwh_per_mpa",
@@ -375,6 +390,207 @@ def _candidate_pressure_features(
     }
 
 
+def _candidate_state_features(
+    frame: pd.DataFrame, end: pd.Timestamp, *, seconds: int = 60
+) -> dict[str, float]:
+    """Return candidate-available state medians from the strict pre-action window."""
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    window = frame.loc[
+        timestamps.ge(end - pd.Timedelta(seconds=seconds)) & timestamps.lt(end)
+    ]
+    result = {}
+    for column in (
+        "water_in_temperature",
+        "water_out_temperature",
+        "coil_temperature",
+        "water_temperature_setpoint",
+    ):
+        values = (
+            pd.to_numeric(window[column], errors="coerce").dropna()
+            if column in window
+            else pd.Series(dtype=float)
+        )
+        result[column] = float(values.median()) if not values.empty else np.nan
+    return result
+
+
+def _candidate_states_from_loader(
+    loader: DatasetLoader, cycle_name: str, candidate_times: pd.Series
+) -> pd.DataFrame:
+    """Load strict pre-action state medians for candidate timestamps."""
+    frame = loader.load_cycle_original(cycle_name, columns=RAW_COLUMNS)
+    rows = []
+    for candidate_time in pd.to_datetime(candidate_times, errors="coerce"):
+        rows.append(
+            {
+                "candidate_time": candidate_time,
+                **_candidate_state_features(frame, pd.Timestamp(candidate_time)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _observed_rule_duration_minutes(
+    loader: DatasetLoader, cycle_name: str, tickets: pd.DataFrame
+) -> float:
+    """Return the observed rule duration or reconstruct it from terminal T3."""
+    matches = tickets.loc[
+        tickets["cycle_name"].astype(str).eq(cycle_name),
+        "rule_defrost_duration_minutes",
+    ] if {"cycle_name", "rule_defrost_duration_minutes"}.issubset(tickets) else pd.Series(dtype=float)
+    finite = pd.to_numeric(matches, errors="coerce")
+    finite = finite[np.isfinite(finite)].unique()
+    if len(finite) == 1:
+        return float(finite[0])
+    if len(finite) > 1:
+        raise ValueError(f"multiple observed rule durations for {cycle_name}")
+
+    record = loader.get_cycle_record(cycle_name)
+    boundaries = record.get("boundaries", {})
+    start = _timestamp(record.get("defrost_start") or boundaries.get("defrost_start"))
+    end = _timestamp(record.get("defrost_end") or boundaries.get("defrost_end"))
+    if start is None or end is None or end <= start:
+        raise ValueError(f"cannot reconstruct observed rule duration for {cycle_name}")
+    raw = loader.load_cycle_original(
+        cycle_name, columns=["timestamp", "coil_temperature"]
+    ).copy()
+    raw["timestamp"] = pd.to_datetime(raw["timestamp"], errors="coerce").dt.floor("s")
+    raw["coil_temperature"] = pd.to_numeric(raw["coil_temperature"], errors="coerce")
+    raw = raw.loc[raw["timestamp"].ge(start) & raw["timestamp"].lt(end)]
+    raw = raw.dropna(subset=["timestamp"]).drop_duplicates("timestamp").set_index("timestamp")
+    grid = pd.date_range(start.ceil("s"), end.ceil("s"), freq="s", inclusive="left")
+    interpolation_index = raw.index.union(grid).sort_values()
+    t3 = raw["coil_temperature"].reindex(interpolation_index)
+    t3 = t3.interpolate(method="time", limit_area="inside").reindex(grid)
+    reached = np.flatnonzero(t3.ge(20).to_numpy())
+    if not len(reached):
+        raise ValueError(f"cannot reconstruct observed rule duration for {cycle_name}")
+    return min(int(reached[0]) + 40, 350) / 60
+
+
+def _recovery_terms(setpoint: float) -> tuple[float, float, float]:
+    """Return recovery duration, electricity, and heat for a supported setpoint."""
+    if float(setpoint) == 50.0:
+        return 9.0, 0.250930, 0.804970
+    if float(setpoint) == 55.0:
+        return 12.0, 0.395172, 1.146153
+    raise ValueError("water temperature setpoint must be 50 or 55 degC")
+
+
+def _read_qd_coefficients(source: Path | pd.DataFrame | pd.Series) -> pd.Series:
+    """Read the fixed defrost absorbed-heat polynomial coefficients."""
+    if isinstance(source, pd.Series):
+        coefficients = pd.to_numeric(source, errors="coerce")
+    else:
+        table = source.copy() if isinstance(source, pd.DataFrame) else pd.read_csv(source)
+        missing_columns = {"term", "coefficient"} - set(table)
+        if missing_columns:
+            raise ValueError(f"QD coefficients are missing columns: {sorted(missing_columns)}")
+        coefficients = pd.to_numeric(
+            table.set_index("term")["coefficient"], errors="coerce"
+        )
+    missing_terms = set(QD_TERMS) - set(coefficients.index)
+    if missing_terms:
+        raise ValueError(f"QD coefficients are missing terms: {sorted(missing_terms)}")
+    result = coefficients.loc[list(QD_TERMS)].astype(float)
+    if not np.isfinite(result).all():
+        raise ValueError("QD coefficients must be finite")
+    return result
+
+
+def _predict_qd(
+    candidates: pd.DataFrame,
+    coefficients: Path | pd.DataFrame | pd.Series,
+    *,
+    observed_rule_duration_minutes: float,
+) -> pd.Series:
+    """Predict absorbed heat with observed duration fixed for the cycle."""
+    beta = _read_qd_coefficients(coefficients)
+    state = {
+        "water_in_temperature": pd.to_numeric(
+            candidates["water_in_temperature"], errors="coerce"
+        ),
+        "water_out_temperature": pd.to_numeric(
+            candidates["water_out_temperature"], errors="coerce"
+        ),
+        "rule_defrost_duration_minutes": pd.Series(
+            float(observed_rule_duration_minutes), index=candidates.index
+        ),
+        "coil_temperature": pd.to_numeric(
+            candidates["coil_temperature"], errors="coerce"
+        ),
+        "evaporating_pressure": pd.to_numeric(
+            candidates["evaporating_pressure_mpa"], errors="coerce"
+        ),
+    }
+    prediction = pd.Series(float(beta["intercept"]), index=candidates.index)
+    for term, values in state.items():
+        prediction += float(beta[term]) * values
+        prediction += float(beta[f"{term}_squared"]) * values.pow(2)
+    return prediction
+
+
+def _audit_qd_support(
+    candidates: pd.DataFrame,
+    coefficients: Path | pd.DataFrame | pd.Series,
+    *,
+    observed_rule_duration_minutes: float,
+) -> pd.DataFrame:
+    """Audit QD input support without changing prediction eligibility."""
+    if isinstance(coefficients, pd.Series):
+        return pd.DataFrame(
+            {
+                "qd_supported": True,
+                "qd_outside_terms": "",
+                "qd_max_normalized_extrapolation": 0.0,
+            },
+            index=candidates.index,
+        )
+    table = coefficients.copy() if isinstance(coefficients, pd.DataFrame) else pd.read_csv(coefficients)
+    required = {"term", "training_min", "training_max"}
+    if missing := required - set(table):
+        raise ValueError(f"QD support is missing columns: {sorted(missing)}")
+    support = table.set_index("term")[["training_min", "training_max"]]
+    states = {
+        "water_in_temperature": pd.to_numeric(candidates["water_in_temperature"], errors="coerce"),
+        "water_out_temperature": pd.to_numeric(candidates["water_out_temperature"], errors="coerce"),
+        "rule_defrost_duration_minutes": pd.Series(float(observed_rule_duration_minutes), index=candidates.index),
+        "coil_temperature": pd.to_numeric(candidates["coil_temperature"], errors="coerce"),
+        "evaporating_pressure": pd.to_numeric(candidates["evaporating_pressure_mpa"], errors="coerce"),
+    }
+    outside_names = pd.Series([[] for _ in candidates.index], index=candidates.index)
+    maximum = pd.Series(0.0, index=candidates.index)
+    supported = pd.Series(True, index=candidates.index)
+    missing_any = pd.Series(False, index=candidates.index)
+    for term, values in states.items():
+        if term not in support.index:
+            raise ValueError(f"QD support is missing term: {term}")
+        lower, upper = pd.to_numeric(support.loc[term], errors="coerce")
+        span = float(upper - lower)
+        if not np.isfinite([lower, upper, span]).all() or span <= 0:
+            raise ValueError(f"QD support must be finite and increasing for {term}")
+        missing = values.isna()
+        outside = values.lt(lower) | values.gt(upper)
+        supported &= ~(missing | outside)
+        missing_any |= missing
+        outside_names.loc[missing] = outside_names.loc[missing].map(
+            lambda names, term=term: [*names, f"{term}:missing"]
+        )
+        outside_names.loc[outside] = outside_names.loc[outside].map(
+            lambda names, term=term: [*names, term]
+        )
+        distance = pd.concat([(lower - values).clip(lower=0), (values - upper).clip(lower=0)], axis=1).max(axis=1) / span
+        maximum = pd.concat([maximum, distance], axis=1).max(axis=1)
+    maximum.loc[missing_any] = np.nan
+    return pd.DataFrame(
+        {
+            "qd_supported": supported,
+            "qd_outside_terms": outside_names.map(",".join),
+            "qd_max_normalized_extrapolation": maximum,
+        }
+    )
+
+
 def _read_pe_folds(path: Path) -> pd.DataFrame:
     """Read one unique experiment-held-out Pe coefficient tuple per experiment."""
     source = pd.read_csv(path)
@@ -429,6 +645,254 @@ def _apply_pe_fold(candidates: pd.DataFrame, fold: pd.Series) -> pd.DataFrame:
     )
     values["optimization_eligible"] = values["integration_eligible"] & pe.notna()
     return values
+
+
+def _apply_cost_algorithm(
+    candidates: pd.DataFrame,
+    *,
+    algorithm: str,
+    setpoint: float | None = None,
+    observed_rule_duration_minutes: float | None = None,
+    qd_coefficients: Path | pd.DataFrame | pd.Series | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Compose the candidate-level V1 or offline-counterfactual V2 cost."""
+    if algorithm not in {"v1", "v2"}:
+        raise ValueError("algorithm must be 'v1' or 'v2'")
+    values = candidates.copy()
+    values["algorithm"] = algorithm
+    values["defrost_electricity_kwh"] = pd.to_numeric(
+        values["predicted_preparation_defrost_electricity_kwh"], errors="coerce"
+    )
+    if algorithm == "v1":
+        values["recovery_duration_minutes"] = np.nan
+        values["recovery_electricity_kwh"] = FIXED_RECOVERY_ELECTRICITY_KWH
+        values["defrost_absorbed_heat_kwh"] = 0.0
+        values["qd_supported"] = pd.Series(pd.NA, index=values.index, dtype="boolean")
+        values["qd_outside_terms"] = ""
+        values["qd_max_normalized_extrapolation"] = np.nan
+        values["recovery_heat_kwh"] = 0.0
+        values["user_heating_kwh"] = values["unit_heating_kwh"]
+        values["model_protocol"] = "loeo_pe_quadratic_fixed_recovery"
+        curve, optimum = optimize_cycle_cop_cost(
+            values,
+            defrost_recovery_electricity_kwh=(
+                values["defrost_electricity_kwh"]
+                + values["recovery_electricity_kwh"]
+            ),
+        )
+        curve["water_reference_inverse_cop"] = (
+            curve["cycle_electricity_kwh"] / curve["water_heating_kwh"]
+        )
+        water_minimum = curve["water_reference_inverse_cop"].where(
+            curve["optimization_eligible"].fillna(False)
+        ).min()
+        curve["water_reference_relative_regret"] = (
+            curve["water_reference_inverse_cop"] / water_minimum - 1.0
+        ).where(curve["optimization_eligible"].fillna(False))
+    else:
+        if (
+            setpoint is None
+            or observed_rule_duration_minutes is None
+            or qd_coefficients is None
+        ):
+            raise ValueError("v2 requires setpoint, observed rule duration, and QD coefficients")
+        recovery_duration, recovery_electricity, recovery_heat = _recovery_terms(
+            setpoint
+        )
+        values["water_temperature_setpoint"] = setpoint
+        values["observed_rule_defrost_duration_minutes"] = (
+            observed_rule_duration_minutes
+        )
+        values["recovery_duration_minutes"] = recovery_duration
+        values["recovery_electricity_kwh"] = recovery_electricity
+        values["defrost_absorbed_heat_kwh"] = _predict_qd(
+            values,
+            qd_coefficients,
+            observed_rule_duration_minutes=observed_rule_duration_minutes,
+        )
+        audit = _audit_qd_support(
+            values,
+            qd_coefficients,
+            observed_rule_duration_minutes=observed_rule_duration_minutes,
+        )
+        values[list(audit)] = audit
+        values["qd_eligible"] = np.isfinite(
+            values["defrost_absorbed_heat_kwh"]
+        ) & values["defrost_absorbed_heat_kwh"].gt(0)
+        predicted_cycle_heat = (
+            values["water_heating_kwh"]
+            - values["defrost_absorbed_heat_kwh"]
+            + recovery_heat
+        )
+        values["heat_balance_eligible"] = np.isfinite(
+            predicted_cycle_heat
+        ) & predicted_cycle_heat.gt(0)
+        values["optimization_eligible"] = values["optimization_eligible"].fillna(
+            False
+        ) & values["qd_eligible"] & values["heat_balance_eligible"]
+        values["recovery_heat_kwh"] = recovery_heat
+        values["user_heating_kwh"] = (
+            values["water_heating_kwh"] - values["defrost_absorbed_heat_kwh"]
+        )
+        values["model_protocol"] = OFFLINE_OBSERVED_RULE_PROTOCOL
+        curve, optimum = optimize_cycle_cop_cost(
+            values,
+            defrost_recovery_electricity_kwh=(
+                values["defrost_electricity_kwh"]
+                + values["recovery_electricity_kwh"]
+            ),
+            defrost_recovery_heat_kwh=values["recovery_heat_kwh"],
+        )
+    minimum = float(optimum["inverse_cop"])
+    curve["relative_regret"] = (curve["inverse_cop"] / minimum - 1.0).where(
+        curve["optimization_eligible"].fillna(False)
+    )
+    curve["near_optimal_1pct"] = curve["optimization_eligible"].fillna(
+        False
+    ) & curve["relative_regret"].le(0.01)
+    curve["near_optimal_5pct"] = curve["optimization_eligible"].fillna(
+        False
+    ) & curve["relative_regret"].le(0.05)
+    return curve, optimum
+
+
+def build_cost_function_table(  # noqa: C901
+    base: pd.DataFrame,
+    points: pd.DataFrame,
+    tickets: pd.DataFrame,
+    qd_coefficients: Path | pd.DataFrame | pd.Series,
+    loader: DatasetLoader,
+    algorithm: str,
+) -> pd.DataFrame:
+    """Build one auditable candidate-level cost table."""
+    if algorithm not in {"v1", "v2"}:
+        raise ValueError("algorithm must be 'v1' or 'v2'")
+    if points["cycle_name"].duplicated().any():
+        raise ValueError("points must contain one row per cycle")
+
+    state_columns = (
+        "water_in_temperature",
+        "water_out_temperature",
+        "coil_temperature",
+        "water_temperature_setpoint",
+    )
+    cost_columns = (
+        "defrost_electricity_kwh",
+        "recovery_duration_minutes",
+        "recovery_electricity_kwh",
+        "defrost_absorbed_heat_kwh",
+        "recovery_heat_kwh",
+        "user_heating_kwh",
+        "cycle_user_heating_kwh",
+        "cycle_electricity_kwh",
+        "inverse_cop",
+        "cycle_cop",
+        "relative_regret",
+        "near_optimal_1pct",
+        "near_optimal_5pct",
+        "water_reference_inverse_cop",
+        "water_reference_relative_regret",
+        "observed_rule_defrost_duration_minutes",
+        "qd_eligible",
+        "qd_supported",
+        "qd_outside_terms",
+        "qd_max_normalized_extrapolation",
+        "heat_balance_eligible",
+        "model_protocol",
+        "t_star",
+        "minimum_location",
+        "water_reference_t_star",
+    )
+    tables: list[pd.DataFrame] = []
+    values = base.copy()
+    values["candidate_time"] = pd.to_datetime(values["candidate_time"], errors="coerce")
+    for cycle_name, source in values.groupby("cycle_name", sort=False):
+        candidates = source.copy()
+        try:
+            kwargs: dict[str, object] = {}
+            if algorithm == "v2":
+                states = _candidate_states_from_loader(
+                    loader, str(cycle_name), candidates["candidate_time"]
+                ).set_index("candidate_time")
+                for column in state_columns:
+                    loaded = candidates["candidate_time"].map(states[column])
+                    if column not in candidates:
+                        candidates[column] = loaded
+                    else:
+                        candidates[column] = candidates[column].where(
+                            candidates[column].notna(), loaded
+                        )
+                setpoints = pd.to_numeric(
+                    candidates["water_temperature_setpoint"], errors="coerce"
+                )
+                kwargs = {
+                    "setpoint": float(setpoints.median()),
+                    "observed_rule_duration_minutes": _observed_rule_duration_minutes(
+                        loader, str(cycle_name), tickets
+                    ),
+                    "qd_coefficients": qd_coefficients,
+                }
+            curve, optimum = _apply_cost_algorithm(
+                candidates, algorithm=algorithm, **kwargs
+            )
+            curve["valid"] = True
+            curve["failure_reason"] = ""
+            curve["t_star"] = optimum["candidate_time"]
+            curve["minimum_location"] = optimum["minimum_location"]
+            if algorithm == "v1":
+                eligible = curve["optimization_eligible"].fillna(False)
+                water_index = curve["water_reference_inverse_cop"].where(eligible).idxmin()
+                curve["water_reference_t_star"] = curve.loc[
+                    water_index, "candidate_time"
+                ]
+            tables.append(curve)
+        except ValueError as exc:
+            failed = candidates.copy()
+            failed["algorithm"] = algorithm
+            failed["valid"] = False
+            failed["failure_reason"] = str(exc)
+            for column in cost_columns:
+                failed[column] = np.nan
+            tables.append(failed)
+
+    result = pd.concat(tables, ignore_index=True, sort=False) if tables else values
+    metadata_columns = [
+        "cycle_name",
+        "experiment_id",
+        "t_heating_stable",
+        "t_actual_preparation",
+        "t_RB",
+        "rb_status",
+        "trigger_type",
+        "actual_minutes_from_stable",
+    ]
+    metadata = points[[column for column in metadata_columns if column in points]].rename(
+        columns={"t_actual_preparation": "actual_preparation_time"}
+    )
+    result = result.drop(
+        columns=[column for column in metadata if column != "cycle_name" and column in result],
+        errors="ignore",
+    ).merge(metadata, on="cycle_name", how="left", validate="many_to_one", sort=False)
+    for column in (*state_columns, *cost_columns):
+        if column not in result:
+            result[column] = np.nan
+    result = result.sort_values(
+        ["cycle_name", "candidate_time"], kind="stable"
+    ).reset_index(drop=True)
+    if result.duplicated(["cycle_name", "candidate_time"]).any():
+        raise ValueError("cost function table has duplicate cycle/candidate rows")
+    return result
+
+
+def write_cost_function_csv(
+    table: pd.DataFrame, output_root: Path, algorithm: str
+) -> Path:
+    """Write one algorithm cost table."""
+    output_root = Path(output_root)
+    output_root.mkdir(parents=True, exist_ok=True)
+    path = output_root / f"cost_function_{algorithm}.csv"
+    table.to_csv(path, index=False)
+    return path
 
 
 def _candidate_eligibility_audit(candidates: pd.DataFrame) -> dict[str, float | int]:
@@ -600,6 +1064,7 @@ def _candidate_costs(
     rows: list[dict[str, object]] = []
     for index, candidate in enumerate(candidates):
         pressure_features = _candidate_pressure_features(pressure, candidate)
+        state_features = _candidate_state_features(frame, candidate)
         rows.append(
             {
                 "candidate_time": candidate,
@@ -629,6 +1094,7 @@ def _candidate_costs(
                     or unit_heat.iloc[index]["extrapolated_endpoint"]
                     or pressure_features["pe_endpoint_extrapolated"]
                 ),
+                **state_features,
                 **pressure_features,
             }
         )
@@ -2504,7 +2970,7 @@ Pe 关系只在真实 preparation 边界训练。把该关系迁移到任意候�
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
-    parser.add_argument("--output", type=Path, default=Path("report/02_经济除霜窗口/经验经济窗口"))
+    parser.add_argument("--output", type=Path, default=Path("output/test/成本函数/其他/经验经济窗口"))
     parser.add_argument("--figure-1e-only", action="store_true")
     args = parser.parse_args()
     if args.figure_1e_only:

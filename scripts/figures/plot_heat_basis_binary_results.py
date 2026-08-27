@@ -30,11 +30,11 @@ plt.rcParams.update(
 ROOT = Path(__file__).resolve().parents[2]
 RUNS = {
     basis: ROOT
-    / "outputs/resnet50_binary"
+    / "output/model/resnet50_binary_20260825"
     / f"resnet50_binary_{basis}_latest_20260825"
     for basis in ("water", "unit")
 }
-OUT = ROOT / "report/03_RGB标签与模型/热量口径二分类/图表"
+OUT = ROOT / "output/model/rgb_binary_results_latest/热量口径二分类/图表"
 SRC = OUT / "源数据"
 
 COLORS = {
@@ -94,15 +94,33 @@ def loss_resnet(basis):
     fig, ax = plt.subplots(figsize=(3.5, 2.45))
     for stage in ("head", "finetune"):
         d = df[df.stage == stage]
-        ax.plot(d.global_epoch, d.train_loss, marker="o", ms=3.2, lw=1.6,
-                color=COLORS[stage], label=stage.capitalize())
+        ax.plot(
+            d.global_epoch,
+            d.train_loss,
+            marker="o",
+            ms=3.2,
+            lw=1.6,
+            color=COLORS[stage],
+            label=stage.capitalize(),
+        )
     ax.axvline(5.5, color="#A8A8A8", lw=0.9, ls="--")
-    ax.text(5.5, ax.get_ylim()[1], "stage boundary", ha="center", va="bottom",
-            color=COLORS["neutral"], fontsize=6)
+    ax.text(
+        5.5,
+        ax.get_ylim()[1],
+        "stage boundary",
+        ha="center",
+        va="bottom",
+        color=COLORS["neutral"],
+        fontsize=6,
+    )
     ax.set(xlabel="Training epoch", ylabel="Cross-entropy loss", xticks=range(1, 11))
     ax.legend(loc="upper right")
-    source(df[["stage", "epoch", "global_epoch", "train_loss"]], name,
-           split="training", stage_boundary="between global epochs 5 and 6")
+    source(
+        df[["stage", "epoch", "global_epoch", "train_loss"]],
+        name,
+        split="training",
+        stage_boundary="between global epochs 5 and 6",
+    )
     save(fig, name)
 
 
@@ -112,8 +130,15 @@ def loss_fusion(basis):
     fig, ax = plt.subplots(figsize=(3.5, 2.45))
     for method in METHOD_LABEL:
         d = df[df.input == method]
-        ax.plot(d.epoch, d.train_loss, marker="o", ms=2.8, lw=1.45,
-                color=COLORS[method], label=METHOD_LABEL[method])
+        ax.plot(
+            d.epoch,
+            d.train_loss,
+            marker="o",
+            ms=2.8,
+            lw=1.45,
+            color=COLORS[method],
+            label=METHOD_LABEL[method],
+        )
     ax.set(xlabel="Training epoch", ylabel="Cross-entropy loss", xticks=range(1, 11))
     ax.legend()
     source(df[["input", "epoch", "train_loss"]], name, split="training")
@@ -122,8 +147,11 @@ def loss_fusion(basis):
 
 def metric_table():
     return pd.concat(
-        [pd.read_csv(RUNS[b] / "sensor_fusion/metrics.csv").assign(heat_basis=b)
-         for b in ("water", "unit")], ignore_index=True
+        [
+            pd.read_csv(RUNS[b] / "sensor_fusion/metrics.csv").assign(heat_basis=b)
+            for b in ("water", "unit")
+        ],
+        ignore_index=True,
     )
 
 
@@ -134,21 +162,38 @@ def macro_f1(split, number):
     x = np.arange(2)
     width = 0.23
     for i, method in enumerate(METHOD_LABEL):
-        vals = [df.loc[(df.heat_basis == b) & (df.input == method), "macro_f1"].iloc[0]
-                for b in ("water", "unit")]
-        bars = ax.bar(x + (i - 1) * width, vals, width, color=COLORS[method],
-                      label=METHOD_LABEL[method], edgecolor="white", linewidth=0.6)
+        vals = [
+            df.loc[(df.heat_basis == b) & (df.input == method), "macro_f1"].iloc[0]
+            for b in ("water", "unit")
+        ]
+        bars = ax.bar(
+            x + (i - 1) * width,
+            vals,
+            width,
+            color=COLORS[method],
+            label=METHOD_LABEL[method],
+            edgecolor="white",
+            linewidth=0.6,
+        )
         for bar, val in zip(bars, vals, strict=True):
-            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.003, f"{val:.3f}",
-                    ha="center", va="bottom", fontsize=5.5, rotation=90)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + 0.003,
+                f"{val:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=5.5,
+                rotation=90,
+            )
     low = max(0, df.macro_f1.min() - (0.035 if split == "test" else 0.06))
     ax.set_ylim(low, min(1.02, df.macro_f1.max() + 0.055))
     ax.set_xticks(x, ["Water-side heat", "Unit heat"])
     ax.set_ylabel("Macro-F1")
     ax.legend(ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.17), fontsize=6)
     subset = "full held-out test" if split == "test" else "held-out test, relative regret <= 1%"
-    source(df[["heat_basis", "input", "split", "images", "macro_f1"]], name,
-           evaluation_subset=subset)
+    source(
+        df[["heat_basis", "input", "split", "images", "macro_f1"]], name, evaluation_subset=subset
+    )
     save(fig, name)
 
 
@@ -159,21 +204,38 @@ def accuracy(split, number):
     x = np.arange(2)
     width = 0.23
     for i, method in enumerate(METHOD_LABEL):
-        vals = [df.loc[(df.heat_basis == b) & (df.input == method), "accuracy"].iloc[0]
-                for b in ("water", "unit")]
-        bars = ax.bar(x + (i - 1) * width, vals, width, color=COLORS[method],
-                      label=METHOD_LABEL[method], edgecolor="white", linewidth=0.6)
+        vals = [
+            df.loc[(df.heat_basis == b) & (df.input == method), "accuracy"].iloc[0]
+            for b in ("water", "unit")
+        ]
+        bars = ax.bar(
+            x + (i - 1) * width,
+            vals,
+            width,
+            color=COLORS[method],
+            label=METHOD_LABEL[method],
+            edgecolor="white",
+            linewidth=0.6,
+        )
         for bar, val in zip(bars, vals, strict=True):
-            ax.text(bar.get_x() + bar.get_width() / 2, val + 0.003, f"{val:.3f}",
-                    ha="center", va="bottom", fontsize=5.5, rotation=90)
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                val + 0.003,
+                f"{val:.3f}",
+                ha="center",
+                va="bottom",
+                fontsize=5.5,
+                rotation=90,
+            )
     low = max(0, df.accuracy.min() - (0.035 if split == "test" else 0.06))
     ax.set_ylim(low, min(1.02, df.accuracy.max() + 0.055))
     ax.set_xticks(x, ["Water-side heat", "Unit heat"])
     ax.set_ylabel("Accuracy")
     ax.legend(ncol=3, loc="upper center", bbox_to_anchor=(0.5, 1.17), fontsize=6)
     subset = "full held-out test" if split == "test" else "held-out test, relative regret <= 1%"
-    source(df[["heat_basis", "input", "split", "images", "accuracy"]], name,
-           evaluation_subset=subset)
+    source(
+        df[["heat_basis", "input", "split", "images", "accuracy"]], name, evaluation_subset=subset
+    )
     save(fig, name)
 
 
@@ -185,14 +247,16 @@ def sensor_gain(metric="macro_f1", number=7):
         for split in ("test", "near_1pct_test"):
             d = metrics.query("heat_basis == @basis and split == @split").set_index("input")
             for method in ("z_current", "z_current_slope"):
-                rows.append({
-                    "heat_basis": basis,
-                    "split": split,
-                    "input": method,
-                    f"delta_{metric}_vs_rgb_z": (
-                        d.loc[method, metric] - d.loc["rgb_z", metric]
-                    ),
-                })
+                rows.append(
+                    {
+                        "heat_basis": basis,
+                        "split": split,
+                        "input": method,
+                        f"delta_{metric}_vs_rgb_z": (
+                            d.loc[method, metric] - d.loc["rgb_z", metric]
+                        ),
+                    }
+                )
     df = pd.DataFrame(rows)
     groups = [(b, s) for b in ("water", "unit") for s in ("test", "near_1pct_test")]
     labels = ["Water\nfull", "Water\nnear 1%", "Unit\nfull", "Unit\nnear 1%"]
@@ -200,13 +264,27 @@ def sensor_gain(metric="macro_f1", number=7):
     x = np.arange(4)
     width = 0.32
     for i, method in enumerate(("z_current", "z_current_slope")):
-        vals = [df.loc[(df.heat_basis == b) & (df.split == s) & (df.input == method),
-                       f"delta_{metric}_vs_rgb_z"].iloc[0] for b, s in groups]
-        ax.bar(x + (i - 0.5) * width, vals, width, color=COLORS[method],
-               label=METHOD_LABEL[method], edgecolor="white", linewidth=0.6)
+        vals = [
+            df.loc[
+                (df.heat_basis == b) & (df.split == s) & (df.input == method),
+                f"delta_{metric}_vs_rgb_z",
+            ].iloc[0]
+            for b, s in groups
+        ]
+        ax.bar(
+            x + (i - 0.5) * width,
+            vals,
+            width,
+            color=COLORS[method],
+            label=METHOD_LABEL[method],
+            edgecolor="white",
+            linewidth=0.6,
+        )
     ax.axhline(0, color="#767676", lw=0.8)
     ax.set_xticks(x, labels)
-    ax.set_ylabel(rf"$\Delta$ {'Macro-F1' if metric == 'macro_f1' else 'accuracy'} vs RGB embedding")
+    ax.set_ylabel(
+        rf"$\Delta$ {'Macro-F1' if metric == 'macro_f1' else 'accuracy'} vs RGB embedding"
+    )
     ax.legend(ncol=2, loc="upper left")
     source(df, name, baseline="rgb_z within the same heat basis and evaluation subset")
     save(fig, name)
@@ -218,20 +296,42 @@ def training_history(basis, number):
     df["global_epoch"] = np.arange(1, len(df) + 1)
     fig, ax_loss = plt.subplots(figsize=(3.7, 2.55))
     ax_acc = ax_loss.twinx()
-    ax_loss.plot(df.global_epoch, df.train_loss, color=COLORS["rgb_z"], marker="o",
-                 ms=3.0, lw=1.5, label="Training loss")
-    ax_acc.plot(df.global_epoch, df.validation_accuracy, color=COLORS["z_current_slope"],
-                marker="s", ms=2.8, lw=1.5, label="Validation accuracy")
+    ax_loss.plot(
+        df.global_epoch,
+        df.train_loss,
+        color=COLORS["rgb_z"],
+        marker="o",
+        ms=3.0,
+        lw=1.5,
+        label="Training loss",
+    )
+    ax_acc.plot(
+        df.global_epoch,
+        df.validation_accuracy,
+        color=COLORS["z_current_slope"],
+        marker="s",
+        ms=2.8,
+        lw=1.5,
+        label="Validation accuracy",
+    )
     ax_loss.axvline(5.5, color="#A8A8A8", lw=0.8, ls="--")
     ax_loss.set(xlabel="Training epoch", ylabel="Cross-entropy loss", xticks=range(1, 11))
     ax_acc.set_ylabel("Validation accuracy")
     lines = [ax_loss.lines[0], ax_acc.lines[0]]
-    ax_loss.legend(lines, [line.get_label() for line in lines], ncol=2,
-                   loc="upper center", bbox_to_anchor=(0.5, 1.18))
+    ax_loss.legend(
+        lines,
+        [line.get_label() for line in lines],
+        ncol=2,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.18),
+    )
     ax_acc.spines["top"].set_visible(False)
-    source(df[["stage", "epoch", "global_epoch", "train_loss", "validation_accuracy"]],
-           name, split="training loss and held-out validation accuracy",
-           chen_analogue="Fig. 9; test accuracy by epoch was not logged")
+    source(
+        df[["stage", "epoch", "global_epoch", "train_loss", "validation_accuracy"]],
+        name,
+        split="training loss and held-out validation accuracy",
+        chen_analogue="Fig. 9; test accuracy by epoch was not logged",
+    )
     save(fig, name)
 
 
@@ -241,30 +341,46 @@ def camera_accuracy(basis, number):
     pred = pd.read_parquet(RUNS[basis] / "sensor_fusion/predictions.parquet")
     pred = pred[(pred.split == "test") & pred.input.isin(["rgb_z", method])].copy()
     pred["correct"] = pred.target.eq(pred.prediction.astype(int))
-    df = (pred.groupby(["camera_role", "input"], as_index=False)
-          .agg(accuracy=("correct", "mean"), images=("correct", "size")))
+    df = pred.groupby(["camera_role", "input"], as_index=False).agg(
+        accuracy=("correct", "mean"), images=("correct", "size")
+    )
     fig, ax = plt.subplots(figsize=(4.55, 2.65))
     x = np.arange(len(CAMERAS))
     width = 0.34
     for i, current in enumerate(("rgb_z", method)):
-        vals = [df.loc[(df.camera_role == camera) & (df.input == current), "accuracy"].iloc[0]
-                for camera in CAMERAS]
-        ax.bar(x + (i - 0.5) * width, vals, width, color=COLORS[current],
-               label=METHOD_LABEL[current], edgecolor="white", linewidth=0.6)
+        vals = [
+            df.loc[(df.camera_role == camera) & (df.input == current), "accuracy"].iloc[0]
+            for camera in CAMERAS
+        ]
+        ax.bar(
+            x + (i - 0.5) * width,
+            vals,
+            width,
+            color=COLORS[current],
+            label=METHOD_LABEL[current],
+            edgecolor="white",
+            linewidth=0.6,
+        )
     ax.set_ylim(max(0, df.accuracy.min() - 0.025), min(1.005, df.accuracy.max() + 0.012))
     ax.set_xticks(x, [CAMERA_LABEL[c] for c in CAMERAS], rotation=25, ha="right")
     ax.set_ylabel("Accuracy")
     ax.legend(ncol=2, loc="lower center")
-    source(df, name, split="full held-out test",
-           interpretation="descriptive camera comparison; not a causal angle or illumination test")
+    source(
+        df,
+        name,
+        split="full held-out test",
+        interpretation="descriptive camera comparison; not a causal angle or illumination test",
+    )
     save(fig, name)
 
 
 def confusion(basis, method, number, camera=None):
     suffix = f"_{camera}" if camera else ""
     name = f"{number:02d}_{basis}{suffix}_{method}_normalized_confusion"
-    pred = pd.read_parquet(RUNS[basis] / "sensor_fusion/predictions.parquet",
-                           columns=["camera_role", "split", "input", "target", "prediction"])
+    pred = pd.read_parquet(
+        RUNS[basis] / "sensor_fusion/predictions.parquet",
+        columns=["camera_role", "split", "input", "target", "prediction"],
+    )
     pred = pred[(pred["split"] == "test") & (pred["input"] == method)].copy()
     if camera:
         pred = pred[pred["camera_role"] == camera]
@@ -278,8 +394,15 @@ def confusion(basis, method, number, camera=None):
     for i in range(2):
         for j in range(2):
             val = norm.iloc[i, j]
-            ax.text(j, i, f"{val:.1%}\n(n={counts.iloc[i, j]:,})", ha="center", va="center",
-                    color="white" if val > 0.52 else "#272727", fontsize=7)
+            ax.text(
+                j,
+                i,
+                f"{val:.1%}\n(n={counts.iloc[i, j]:,})",
+                ha="center",
+                va="center",
+                color="white" if val > 0.52 else "#272727",
+                fontsize=7,
+            )
     ax.set_xticks([0, 1], ["Pre", "Post"])
     ax.set_yticks([0, 1], ["Pre", "Post"])
     ax.set(xlabel="Predicted class", ylabel="True class")
@@ -291,21 +414,41 @@ def confusion(basis, method, number, camera=None):
     out = counts.stack().rename("count").reset_index()
     out.columns = ["true_class", "predicted_class", "count"]
     out["row_proportion"] = [
-        norm.loc[i, j]
-        for i, j in zip(out.true_class, out.predicted_class, strict=True)
+        norm.loc[i, j] for i, j in zip(out.true_class, out.predicted_class, strict=True)
     ]
-    source(out, name, split="full held-out test", input=method, camera=camera or "all",
-           normalization="within true class")
+    source(
+        out,
+        name,
+        split="full held-out test",
+        input=method,
+        camera=camera or "all",
+        normalization="within true class",
+    )
     save(fig, name)
 
 
 def write_chen_figure_map():
     rows = [
         (8, "unsupported", "", "No K-means clustering or silhouette experiment."),
-        (9, "analogue", "14-15", "Training loss and validation accuracy are logged; epoch-wise test accuracy is not."),
-        (10, "analogue", "18-29", "Per-camera normalized confusion matrices for the best current models."),
+        (
+            9,
+            "analogue",
+            "14-15",
+            "Training loss and validation accuracy are logged; epoch-wise test accuracy is not.",
+        ),
+        (
+            10,
+            "analogue",
+            "18-29",
+            "Per-camera normalized confusion matrices for the best current models.",
+        ),
         (11, "unsupported", "", "Requires retraining on multiple labelled-sample budgets."),
-        (12, "descriptive analogue", "16-17", "Per-camera accuracy is available, but angle and illumination were not controlled."),
+        (
+            12,
+            "descriptive analogue",
+            "16-17",
+            "Per-camera accuracy is available, but angle and illumination were not controlled.",
+        ),
         (13, "unsupported", "", "No deployed monthly control experiment."),
         (14, "unsupported", "", "No deployed per-unit defrost control comparison."),
         (15, "unsupported", "", "Requires a matched conventional-CNN baseline retraining."),
@@ -323,12 +466,21 @@ def tstar_shift():
     columns = ["cycle_uid", "cycle_name", "camera_role", "image_time", "t_star", "target"]
     water = pd.read_parquet(RUNS["water"] / "manifest.parquet", columns=columns)
     unit = pd.read_parquet(RUNS["unit"] / "manifest.parquet", columns=columns)
-    times = (water.groupby("cycle_uid", as_index=False)
-             .agg(cycle_name=("cycle_name", "first"), water_t_star=("t_star", "first"))
-             .merge(unit.groupby("cycle_uid", as_index=False).agg(unit_t_star=("t_star", "first")),
-                    on="cycle_uid", validate="one_to_one"))
-    matched = water.merge(unit, on=["cycle_uid", "cycle_name", "camera_role", "image_time"],
-                          suffixes=("_water", "_unit"), validate="one_to_one")
+    times = (
+        water.groupby("cycle_uid", as_index=False)
+        .agg(cycle_name=("cycle_name", "first"), water_t_star=("t_star", "first"))
+        .merge(
+            unit.groupby("cycle_uid", as_index=False).agg(unit_t_star=("t_star", "first")),
+            on="cycle_uid",
+            validate="one_to_one",
+        )
+    )
+    matched = water.merge(
+        unit,
+        on=["cycle_uid", "cycle_name", "camera_role", "image_time"],
+        suffixes=("_water", "_unit"),
+        validate="one_to_one",
+    )
     matched["label_flipped"] = matched.target_water != matched.target_unit
     flips = (
         matched.groupby("cycle_uid")
@@ -353,8 +505,12 @@ def tstar_shift():
     ax.set_xlabel(r"$t^*_{unit} - t^*_{water}$ (min)")
     ax.set_ylabel("Local cycle")
     ax.margins(y=0.01)
-    source(times, name, snapshot="two 2026-08-25 manifests; exact local-frame match",
-           sign="positive means later unit-heat boundary")
+    source(
+        times,
+        name,
+        snapshot="two 2026-08-25 manifests; exact local-frame match",
+        sign="positive means later unit-heat boundary",
+    )
     save(fig, name)
 
 

@@ -129,9 +129,7 @@ def process_cycle_assets(  # noqa: C901
     """Process each cycle completely before its optional downloaded-image cleanup."""
     loader = DatasetLoader(dataset)
     metadata = loader.load_image_metadata()
-    labels = pd.read_parquet(labels_path).drop(
-        columns="cost_source_sha256", errors="ignore"
-    )
+    labels = pd.read_parquet(labels_path)
     curves = pd.read_parquet(curves_path)
     records = {
         str(record["cycle_name"]): record for record in read_catalog(dataset)["cycles"]
@@ -201,16 +199,16 @@ def main() -> None:
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet"),
+        default=Path("output/label/cost_function_v1_binary/image_cost_labels.parquet"),
     )
     parser.add_argument(
         "--curves",
         type=Path,
         default=Path(
-            "report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"
+            "output/test/成本函数/其他/经验经济窗口/源数据/candidate_cost_curves.parquet"
         ),
     )
-    parser.add_argument("--output", type=Path, default=Path("outputs/RGB循环事务"))
+    parser.add_argument("--output", type=Path, default=Path("output/test/model/RGB循环事务"))
     parser.add_argument("--cycles", nargs="+", required=True)
     parser.add_argument(
         "--backbones",

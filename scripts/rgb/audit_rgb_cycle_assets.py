@@ -236,11 +236,15 @@ def main() -> None:
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet"),
+        default=Path("output/label/cost_function_v1_binary/image_cost_labels.parquet"),
     )
-    parser.add_argument("--transaction-root", type=Path, default=Path("outputs/RGB循环事务"))
     parser.add_argument(
-        "--output", type=Path, default=Path("outputs/RGB循环事务/asset_audit")
+        "--transaction-root",
+        type=Path,
+        default=Path("output/test/model/RGB循环事务"),
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("output/test/model/RGB循环事务/asset_audit")
     )
     parser.add_argument("--strict", action="store_true")
     args = parser.parse_args()

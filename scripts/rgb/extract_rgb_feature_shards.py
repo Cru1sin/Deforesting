@@ -30,7 +30,7 @@ def main() -> None:  # noqa: C901
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet"),
+        default=Path("output/label/cost_function_v1_binary/image_cost_labels.parquet"),
     )
     parser.add_argument("--state-column", default="cost_state_01pct")
     parser.add_argument("--task", choices=("binary", "three"), default="binary")
@@ -57,7 +57,9 @@ def main() -> None:  # noqa: C901
     )
     parser.add_argument("--deep-batch-size", type=int, default=32)
     parser.add_argument("--overwrite", action="store_true")
-    parser.add_argument("--output", type=Path, default=Path("outputs/RGB特征缓存/手工特征"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("output/test/model/RGB特征缓存/手工特征")
+    )
     args = parser.parse_args()
 
     device = preferred_device()
@@ -72,7 +74,7 @@ def main() -> None:  # noqa: C901
             flush=True,
         )
 
-    labels = pd.read_parquet(args.labels).drop(columns="cost_source_sha256", errors="ignore")
+    labels = pd.read_parquet(args.labels)
     labels["cost_state"] = labels[args.state_column]
     labels = labels.loc[
         labels["relative_regret"].notna()

@@ -48,66 +48,6 @@ def test_write_task_shards_creates_finite_binary_and_three_class_targets(tmp_pat
     assert binary["target"].notna().all() and three["target"].notna().all()
 
 
-def test_process_drops_label_provenance_before_writing_shards(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    module = _module()
-    cycle_name = "frost_cycle_000001"
-    labels_path = tmp_path / "labels.parquet"
-    curves_path = tmp_path / "curves.parquet"
-    output = tmp_path / "output"
-    pd.DataFrame(
-        {
-            "cycle_name": [cycle_name],
-            "camera_role": [module.ROLE_ORDER[0]],
-            "relative_regret": [0.1],
-            "three_class_state_01pct": ["pre_optimal"],
-            "cost_source_sha256": ["label provenance only"],
-        }
-    ).to_parquet(labels_path)
-    pd.DataFrame({"cycle_name": [cycle_name]}).to_parquet(curves_path)
-    seen: dict[str, object] = {}
-
-    class Loader:
-        def load_image_metadata(self) -> pd.DataFrame:
-            return pd.DataFrame({"cycle_name": [cycle_name]})
-
-    def sample(rows, *args, **kwargs):  # type: ignore[no-untyped-def]
-        seen["columns"] = rows.columns.tolist()
-        return rows.assign(feature_000=1.0), pd.DataFrame()
-
-    monkeypatch.setattr(module, "DatasetLoader", lambda path: Loader())
-    monkeypatch.setattr(
-        module, "read_catalog", lambda path: {"cycles": [{"cycle_name": cycle_name}]}
-    )
-    monkeypatch.setattr(module, "preferred_device", lambda: None)
-    monkeypatch.setattr(
-        module, "materialize_cycle_images", lambda *args, **kwargs: nullcontext(tmp_path)
-    )
-    monkeypatch.setattr(module, "render_dataset", lambda *args, **kwargs: None)
-    monkeypatch.setattr(module, "_verify_panel", lambda *args: None)
-    monkeypatch.setattr(module, "build_optimal_view_manifest", lambda *args: pd.DataFrame())
-    monkeypatch.setattr(module, "copy_optimal_views", lambda *args: None)
-    monkeypatch.setattr(module, "cycle_feature_shard", sample)
-    monkeypatch.setattr(module, "_add_deep_features", lambda shard, *args, **kwargs: shard)
-
-    module.process_cycle_assets(
-        tmp_path,
-        labels_path,
-        curves_path,
-        output,
-        [cycle_name],
-        backbones=[],
-    )
-
-    assert "cost_source_sha256" not in seen["columns"]
-    for task in ("binary", "three"):
-        shard = pd.read_parquet(
-            output / "features" / task / "cycles" / f"{cycle_name}.parquet"
-        )
-        assert "cost_source_sha256" not in shard
-
-
 def test_copy_optimal_views_requires_and_exports_six_readable_images(tmp_path) -> None:
     module = _module()
     cycle_name = "frost_cycle_000001"

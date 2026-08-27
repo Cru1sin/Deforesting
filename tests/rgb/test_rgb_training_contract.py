@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from PIL import Image
 from torch import nn
 
 
@@ -590,12 +589,13 @@ def test_rgb_time_modality_excludes_future_cycle_end_progress() -> None:
     assert not any(
         "progress" in column for column in modalities["rgb_time"] if column.startswith("dinov2_")
     )
+    assert "rgb_state" not in modalities
+    assert "rgb_all_sensor" not in modalities
 
 
-@pytest.mark.parametrize("legacy_hash", [None, "legacy"], ids=["hashless", "legacy"])
 @pytest.mark.parametrize("wandb_project", [None, "rgb-test"], ids=["offline", "wandb"])
-def test_feature_evaluator_does_not_require_or_propagate_cost_source_hash(  # noqa: C901
-    tmp_path, monkeypatch, legacy_hash, wandb_project, capsys
+def test_feature_evaluator_runs_offline_and_with_wandb(  # noqa: C901
+    tmp_path, monkeypatch, wandb_project, capsys
 ) -> None:
     evaluate_path = Path("scripts/rgb/evaluate_rgb_feature_shards.py")
     spec = importlib.util.spec_from_file_location("rgb_feature_evaluation_no_hash", evaluate_path)
@@ -629,8 +629,6 @@ def test_feature_evaluator_does_not_require_or_propagate_cost_source_hash(  # no
                 }
             )
     features = pd.DataFrame(rows)
-    if legacy_hash is not None:
-        features["cost_source_sha256"] = legacy_hash
     features.to_parquet(shards / "features.parquet")
     candidate_path = tmp_path / "candidates.parquet"
     pd.DataFrame(candidates).to_parquet(candidate_path)
@@ -701,7 +699,6 @@ def test_feature_evaluator_does_not_require_or_propagate_cost_source_hash(  # no
     run_output = output / "runs" / "contract-run"
     predictions = pd.read_parquet(run_output / "predictions.parquet")
     assert len(predictions) == len(rows)
-    assert "cost_source_sha256" not in predictions
     progress = capsys.readouterr().out
     assert "3/3, OK=3, INVALID=0, FAILED=0" in progress
     if wandb_project:
@@ -830,52 +827,6 @@ def test_three_class_evaluator_selects_only_label_target_shards(tmp_path) -> Non
     assert selected == [shards / "cycle_target.parquet"]
 
 
-def test_feature_extractor_does_not_propagate_cost_source_hash(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    path = Path("scripts/rgb/extract_rgb_feature_shards.py")
-    spec = importlib.util.spec_from_file_location("rgb_feature_extraction_no_hash", path)
-    assert spec and spec.loader
-    extract = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(extract)
-    cycle = "frost_cycle_000001"
-    camera = tmp_path / "dataset" / "images" / cycle / "front"
-    camera.mkdir(parents=True)
-    rows = []
-    for index, state in enumerate(("pre_optimal", "post_optimal")):
-        name = f"{index}.png"
-        Image.new("RGB", (8, 8), (index * 255, 0, 0)).save(camera / name)
-        rows.append(
-            {
-                "cycle_name": cycle,
-                "camera_role": "front",
-                "file_name": name,
-                "image_time": pd.Timestamp("2026-01-01") + pd.Timedelta(minutes=index),
-                "relative_regret": 0.1,
-                "cost_state_01pct": state,
-                "cost_source_sha256": "label provenance only",
-            }
-        )
-    labels = tmp_path / "labels.parquet"
-    pd.DataFrame(rows).to_parquet(labels)
-    output = tmp_path / "features"
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "extract_rgb_feature_shards.py",
-            "--dataset",
-            str(tmp_path / "dataset"),
-            "--labels",
-            str(labels),
-            "--output",
-            str(output),
-        ],
-    )
-
-    extract.main()
-
-    shard = pd.read_parquet(output / "cycles" / f"{cycle}.parquet")
-    assert "cost_source_sha256" not in shard
-
-
 def test_summary_scores_are_na_when_no_fold_is_evaluable() -> None:
     evaluate_path = Path("scripts/rgb/evaluate_rgb_feature_shards.py")
     spec = importlib.util.spec_from_file_location("rgb_feature_evaluation_scores", evaluate_path)
@@ -917,3 +868,6 @@ def test_summary_scores_sort_multiclass_columns_by_numeric_class() -> None:
     scores = evaluate.score_rows(frame)
 
     assert scores["auroc"] == 1.0
+    assert scores["accuracy"] == 1.0
+    assert scores["macro_f1"] == 1.0
+    assert all(math.isnan(scores[name]) for name in ("positive_f1", "precision", "recall"))

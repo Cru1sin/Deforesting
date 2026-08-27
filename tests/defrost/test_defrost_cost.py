@@ -244,6 +244,94 @@ def test_cycle_cop_cost_broadcasts_rowwise_transient_ticket() -> None:
     assert optimum["candidate_time"] == pd.Timestamp("2026-01-01 03:00")
 
 
+def test_cycle_cop_cost_includes_defrost_recovery_heat_in_denominator() -> None:
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.to_datetime(
+                ["2026-01-01 02:00", "2026-01-01 01:00"]
+            ),
+            "heating_electricity_kwh": [4.0, 2.0],
+            "user_heating_kwh": [6.0, 0.0],
+        }
+    )
+
+    curve, _ = optimize_cycle_cop_cost(
+        candidates,
+        defrost_recovery_electricity_kwh=pd.Series([2.0, 1.0]),
+        defrost_recovery_heat_kwh=pd.Series([2.0, 4.0]),
+    )
+
+    assert curve["cycle_user_heating_kwh"].tolist() == [4.0, 8.0]
+    assert curve["inverse_cop"].tolist() == pytest.approx([0.75, 0.75])
+
+
+def test_cycle_cop_cost_accepts_scalar_defrost_recovery_heat() -> None:
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.to_datetime(["2026-01-01 01:00"]),
+            "heating_electricity_kwh": [2.0],
+            "user_heating_kwh": [4.0],
+        }
+    )
+
+    curve, _ = optimize_cycle_cop_cost(
+        candidates,
+        defrost_recovery_electricity_kwh=1.0,
+        defrost_recovery_heat_kwh=1.0,
+    )
+
+    assert curve.loc[0, "cycle_user_heating_kwh"] == 5.0
+    assert curve.loc[0, "inverse_cop"] == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize(
+    ("recovery_heat", "error"),
+    [
+        (-2.0, "positive user heating"),
+        (-3.0, "positive user heating"),
+        (np.nan, "finite energy"),
+        (np.inf, "finite energy"),
+    ],
+)
+def test_cycle_cop_cost_rejects_invalid_total_user_heat(
+    recovery_heat: float, error: str
+) -> None:
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.to_datetime(["2026-01-01 01:00"]),
+            "heating_electricity_kwh": [2.0],
+            "user_heating_kwh": [2.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match=error):
+        optimize_cycle_cop_cost(
+            candidates,
+            defrost_recovery_electricity_kwh=1.0,
+            defrost_recovery_heat_kwh=recovery_heat,
+        )
+
+
+def test_cycle_cop_cost_ignores_invalid_total_user_heat_when_ineligible() -> None:
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range("2026-01-01 01:00", periods=2, freq="h"),
+            "heating_electricity_kwh": [2.0, 3.0],
+            "user_heating_kwh": [4.0, 1.0],
+            "optimization_eligible": [True, False],
+        }
+    )
+
+    curve, _ = optimize_cycle_cop_cost(
+        candidates,
+        defrost_recovery_electricity_kwh=1.0,
+        defrost_recovery_heat_kwh=pd.Series([0.0, np.nan]),
+    )
+
+    assert pd.isna(curve.loc[1, "cycle_user_heating_kwh"])
+    assert curve.loc[0, "inverse_cop"] == pytest.approx(0.75)
+
+
 def test_cycle_cop_cost_resets_duplicate_indices_after_stable_sort() -> None:
     candidates = pd.DataFrame(
         {

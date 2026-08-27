@@ -29,10 +29,10 @@ plt.rcParams.update(
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-RUN = ROOT / "outputs/resnet50_binary/resnet50_binary_unit_latest_20260825"
-CAMERA_RUN_ROOT = ROOT / "outputs/resnet50_binary_camera_models"
-COST = ROOT / "report/02_经济除霜窗口/经验经济窗口/源数据"
-OUT = ROOT / "report/03_RGB标签与模型/热量口径二分类/图表/循环概率曲线"
+RUN = ROOT / "output/model/resnet50_binary_20260825/resnet50_binary_unit_latest_20260825"
+CAMERA_RUN_ROOT = ROOT / "output/model/camera_models_20260827"
+COST = ROOT / "output/test/成本函数/其他/经验经济窗口/源数据"
+OUT = ROOT / "output/model/rgb_binary_results_latest/热量口径二分类/图表/循环概率曲线"
 CAMERA_OUT = OUT.parent / "单机位模型循环概率曲线"
 SOURCE = OUT.parent / "源数据"
 THRESHOLD = 0.5

@@ -307,12 +307,14 @@ def optimize_cycle_cop_cost(
     candidates: pd.DataFrame,
     *,
     defrost_recovery_electricity_kwh: float | pd.Series,
+    defrost_recovery_heat_kwh: float | pd.Series = 0.0,
     near_optimal_fraction: float = 0.05,
     required_end_time: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Minimize full-cycle electricity per delivered heating energy."""
     curve = candidates.copy()
     curve["_transient_ticket_kwh"] = defrost_recovery_electricity_kwh
+    curve["_transient_recovery_heat_kwh"] = defrost_recovery_heat_kwh
     curve = curve.sort_values("candidate_time", kind="stable").reset_index(drop=True)
     if required_end_time is not None and (
         curve.empty
@@ -324,22 +326,31 @@ def optimize_cycle_cop_cost(
     )
     if not eligible.any():
         raise ValueError("no_supported_candidates")
-    energy_columns = curve.loc[
-        eligible, ["heating_electricity_kwh", "user_heating_kwh"]
-    ].to_numpy()
+    heating_electricity = curve.loc[eligible, "heating_electricity_kwh"]
     tickets = pd.to_numeric(curve["_transient_ticket_kwh"], errors="coerce")
-    if curve.empty or not np.isfinite(energy_columns).all() or not np.isfinite(
-        tickets.loc[eligible]
-    ).all():
+    recovery_heat = pd.to_numeric(
+        curve["_transient_recovery_heat_kwh"], errors="coerce"
+    )
+    curve["cycle_user_heating_kwh"] = curve["user_heating_kwh"] + recovery_heat
+    cycle_user_heating = curve.loc[eligible, "cycle_user_heating_kwh"]
+    if (
+        not np.isfinite(heating_electricity).all()
+        or not np.isfinite(tickets.loc[eligible]).all()
+        or not np.isfinite(cycle_user_heating).all()
+    ):
         raise ValueError("cycle COP requires finite energy values")
-    if curve.loc[eligible, "user_heating_kwh"].le(0).any():
+    if cycle_user_heating.le(0).any():
         raise ValueError("cycle COP requires positive user heating")
     curve["cycle_electricity_kwh"] = curve["heating_electricity_kwh"] + tickets
-    curve["inverse_cop"] = curve["cycle_electricity_kwh"] / curve["user_heating_kwh"]
+    curve["inverse_cop"] = (
+        curve["cycle_electricity_kwh"] / curve["cycle_user_heating_kwh"]
+    )
     if not np.isfinite(curve.loc[eligible, "inverse_cop"]).all():
         raise ValueError("cycle COP requires finite energy values")
     curve["cycle_cop"] = 1 / curve["inverse_cop"]
-    curve = curve.drop(columns="_transient_ticket_kwh")
+    curve = curve.drop(
+        columns=["_transient_ticket_kwh", "_transient_recovery_heat_kwh"]
+    )
     best_index = curve["inverse_cop"].where(eligible).idxmin()
     best_position = curve.index.get_loc(best_index)
     eligible_positions = np.flatnonzero(eligible.to_numpy())

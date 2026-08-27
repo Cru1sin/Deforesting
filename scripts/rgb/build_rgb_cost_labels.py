@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 from collections import Counter
@@ -36,34 +35,21 @@ CAMERA_GROUPS = {
 }
 
 
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def _write_labels_and_provenance(
     labels: pd.DataFrame,
     output_root: Path,
     cost_source: Path,
     audit: list[dict[str, object]],
 ) -> None:
-    source_sha256 = _sha256(cost_source)
-    labels = labels.assign(cost_source_sha256=source_sha256)
     output_root.mkdir(parents=True, exist_ok=True)
     labels_path = output_root / "image_cost_labels.parquet"
     labels.to_parquet(labels_path, index=False)
 
     repository = Path(__file__).resolve().parents[2]
-    code_paths = (
-        Path("src/frost_analysis/rgb_cost_labels.py"),
-        Path("scripts/rgb/build_rgb_cost_labels.py"),
-    )
     included = [row["cycle_name"] for row in audit if row["included"]]
     excluded = [row["cycle_name"] for row in audit if not row["included"]]
     provenance = {
         "cost_source": str(cost_source),
-        "cost_source_sha256": source_sha256,
-        "output_label_sha256": _sha256(labels_path),
-        "code_sha256": {str(path): _sha256(repository / path) for path in code_paths},
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "git_revision": subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -94,12 +80,11 @@ def _experiment_splits(experiments: list[str]) -> dict[str, str]:
     return {name: pattern[index % len(pattern)] for index, name in enumerate(sorted(experiments))}
 
 
-def build_labels(dataset_root: Path, cost_root: Path, output_root: Path) -> None:
+def build_labels(dataset_root: Path, cost_source: Path, output_root: Path) -> None:
     loader = DatasetLoader(dataset_root)
     metadata = loader.load_image_metadata()
     catalog = loader.list_cycles()
-    cost_source = cost_root / "candidate_cost_curves.parquet"
-    curves = pd.read_parquet(cost_source)
+    curves = pd.read_csv(cost_source) if cost_source.suffix.lower() == ".csv" else pd.read_parquet(cost_source)
     complete_cycles = complete_catalog_cycle_names(catalog)
     valid_cycles = complete_observed_cycle_names(catalog, curves)
     metadata = metadata.loc[
@@ -215,9 +200,9 @@ def main() -> None:
     parser.add_argument(
         "--cost-source",
         type=Path,
-        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据"),
+        default=Path("output/成本函数/cost_function_v1.csv"),
     )
-    parser.add_argument("--output", type=Path, default=Path("report/03_RGB标签与模型/成本标签"))
+    parser.add_argument("--output", type=Path, default=Path("output/label/cost_function_v1_binary"))
     args = parser.parse_args()
     build_labels(args.dataset, args.cost_source, args.output)
 

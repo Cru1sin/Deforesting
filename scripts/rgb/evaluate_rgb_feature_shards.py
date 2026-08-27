@@ -147,13 +147,16 @@ def build_modality_frames(scoped: pd.DataFrame, representation: str) -> dict[str
             result[f"{prefix}sensor_{column}"] = scoped[column]
         return result
 
-    return {
+    modalities = {
         "rgb": scoped,
         "time": time_only,
         "rgb_time": rgb_time,
-        "rgb_state": with_sensors(STATE_SENSORS),
-        "rgb_all_sensor": with_sensors(ALL_SENSORS),
     }
+    if set(STATE_SENSORS).issubset(scoped):
+        modalities["rgb_state"] = with_sensors(STATE_SENSORS)
+    if set(ALL_SENSORS).issubset(scoped):
+        modalities["rgb_all_sensor"] = with_sensors(ALL_SENSORS)
+    return modalities
 
 
 def add_causal_sensor_features(
@@ -165,7 +168,7 @@ def add_causal_sensor_features(
     if missing:
         raise ValueError(f"missing sensor cycles: {', '.join(missing)}")
     columns = ["cycle_name", "timestamp", *ALL_SENSORS]
-    sensors = pd.concat((pd.read_parquet(path, columns=columns) for path in paths))
+    sensors = pd.concat(pd.read_parquet(path, columns=columns) for path in paths)
     sensors["sensor_timestamp"] = pd.to_datetime(sensors.pop("timestamp"), format="mixed")
     result = pd.merge_asof(
         images.assign(image_time=pd.to_datetime(images["image_time"], format="mixed")).sort_values(
@@ -195,7 +198,15 @@ def score_rows(frame: pd.DataFrame) -> dict[str, float]:
         frame = frame.loc[frame["fold_evaluable"]]
     if frame.empty or frame["target"].nunique() < 2:
         return dict.fromkeys(
-            ("accuracy", "balanced_accuracy", "macro_f1", "positive_f1", "precision", "recall", "auroc"),
+            (
+                "accuracy",
+                "balanced_accuracy",
+                "macro_f1",
+                "positive_f1",
+                "precision",
+                "recall",
+                "auroc",
+            ),
             float("nan"),
         )
     score_columns = sorted(
@@ -210,38 +221,94 @@ def score_rows(frame: pd.DataFrame) -> dict[str, float]:
         )
     except ValueError:
         auroc = float("nan")
+    binary = frame["target"].nunique() == 2
     return {
         "accuracy": accuracy_score(frame["target"], frame["predicted_target"]),
         "balanced_accuracy": balanced_accuracy_score(frame["target"], frame["predicted_target"]),
         "macro_f1": f1_score(frame["target"], frame["predicted_target"], average="macro"),
-        "positive_f1": f1_score(frame["target"], frame["predicted_target"], pos_label=1),
-        "precision": precision_score(
-            frame["target"], frame["predicted_target"], pos_label=1, zero_division=0
+        "positive_f1": (
+            f1_score(frame["target"], frame["predicted_target"], pos_label=1)
+            if binary
+            else float("nan")
         ),
-        "recall": recall_score(
-            frame["target"], frame["predicted_target"], pos_label=1, zero_division=0
+        "precision": (
+            precision_score(
+                frame["target"], frame["predicted_target"], pos_label=1, zero_division=0
+            )
+            if binary
+            else float("nan")
+        ),
+        "recall": (
+            recall_score(
+                frame["target"], frame["predicted_target"], pos_label=1, zero_division=0
+            )
+            if binary
+            else float("nan")
         ),
         "auroc": auroc,
     }
 
 
+def _experiment_scores(predictions: pd.DataFrame) -> pd.DataFrame:
+    if predictions["target"].nunique() == 2:
+        return experiment_prediction_metrics(predictions)
+    rows = []
+    for experiment, values in predictions.groupby("experiment_id", sort=True):
+        scores = score_rows(values)
+        evaluable = pd.notna(scores["accuracy"])
+        recalls = (
+            recall_score(
+                values["target"],
+                values["predicted_target"],
+                labels=sorted(values["target"].unique()),
+                average=None,
+                zero_division=0,
+            )
+            if evaluable
+            else [float("nan")] * 3
+        )
+        incorrect_regret = values["relative_regret"].where(
+            values["target"].ne(values["predicted_target"]), 0.0
+        )
+        rows.append(
+            {
+                "experiment_id": experiment,
+                "evaluable": evaluable,
+                "recall_before": recalls[0],
+                "recall_within": recalls[1],
+                "recall_after": recalls[-1],
+                **scores,
+                "balanced_misclassification_regret": incorrect_regret.groupby(
+                    values["target"]
+                ).mean().mean(),
+                "image_count": len(values),
+                "cycle_count": values["cycle_name"].nunique(),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _parse_args():  # type: ignore[no-untyped-def]
     parser = argparse.ArgumentParser()
-    parser.add_argument("--shards", type=Path, default=Path("outputs/RGB特征缓存/手工特征/cycles"))
+    parser.add_argument(
+        "--shards",
+        type=Path,
+        default=Path("output/test/model/RGB特征缓存/手工特征/cycles"),
+    )
     parser.add_argument(
         "--candidates",
         type=Path,
-        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet"),
+        default=Path("output/test/成本函数/其他/经验经济窗口/源数据/candidate_cost_curves.parquet"),
     )
     parser.add_argument(
         "--label-balance",
         type=Path,
-        default=Path("report/03_RGB标签与模型/成本标签/label_balance.csv"),
+        default=Path("output/label/cost_function_v1_binary/label_balance.csv"),
     )
     parser.add_argument(
         "--labels",
         type=Path,
-        default=Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet"),
+        default=Path("output/label/cost_function_v1_binary/image_cost_labels.parquet"),
     )
     parser.add_argument("--camera-groups", nargs="+", choices=tuple(CAMERA_GROUPS), default=["all"])
     parser.add_argument("--task", choices=("binary", "near_binary", "three"), default="binary")
@@ -266,7 +333,7 @@ def _parse_args():  # type: ignore[no-untyped-def]
     parser.add_argument("--run-id")
     parser.add_argument("--wandb-project")
     parser.add_argument("--wandb-run-name")
-    parser.add_argument("--output", type=Path, default=Path("report/03_RGB标签与模型/全量模态比较"))
+    parser.add_argument("--output", type=Path, default=Path("output/model/rgb_full_cohort_latest"))
     return parser.parse_args()
 
 
@@ -348,7 +415,7 @@ def _write_summaries(store, predictions, ledger, plan, cohort_audit, input_audit
         )
         retained = values["sample_retained_fraction"].iat[0]
         coverage = values["eligible_image_coverage"].iat[0]
-        held = experiment_prediction_metrics(values)
+        held = _experiment_scores(values)
         for column, value in metadata.items():
             held[column] = value
         experiment_rows.append(held)
@@ -523,8 +590,6 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
     ]
     features = pd.concat(
         (pd.read_parquet(path, columns=columns) for path in paths), ignore_index=True
-    ).drop(
-        columns="cost_source_sha256", errors="ignore"
     )
     cohort_audit = audit_holdout_cohort(features)
     features["target"] = (
@@ -619,7 +684,9 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
                 else (
                     len(camera_rows) / int(labels["relative_regret"].notna().sum())
                     if args.task == "near_binary"
-                    else three_class_eligible_image_coverage(labels, candidates, CAMERA_GROUPS[camera])
+                    else three_class_eligible_image_coverage(
+                        labels, candidates, CAMERA_GROUPS[camera]
+                    )
                 )
             )
             metadata = {
@@ -713,7 +780,12 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
         if args.task == "near_binary":
             if set(ledger["modality"]) != {"rgb", "rgb_state", "rgb_all_sensor"}:
                 raise ValueError("near-binary run requires exactly three sensor-fusion inputs")
-            if predictions.groupby(["modality", "held_out_experiment"])["target"].nunique().ne(2).any():
+            if (
+                predictions.groupby(["modality", "held_out_experiment"])["target"]
+                .nunique()
+                .ne(2)
+                .any()
+            ):
                 raise ValueError("each near-binary fold must contain both classes")
         _write_summaries(store, predictions, ledger, plan, cohort_audit, sensor_audit)
         store.mark_complete()

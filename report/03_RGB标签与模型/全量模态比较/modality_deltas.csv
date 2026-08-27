@@ -1,3 +1,0 @@
-representation,model,camera_group,regret_threshold,comparison,metric,estimate,lower,upper,experiment_count,evaluable_experiment_count
-handcrafted,logistic,all,0.01,rgb_minus_time,balanced_accuracy,0.012199407159887368,-0.0752113402238524,0.09672366739404116,14,12
-handcrafted,logistic,all,0.01,rgb_minus_time,balanced_misclassification_regret,-0.00011837930653983723,-0.0024260966287451436,0.002312511922486673,14,12

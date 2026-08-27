@@ -231,7 +231,7 @@ def main() -> None:
     parser.add_argument(
         "--shards",
         type=Path,
-        default=Path("outputs/RGB特征缓存/多表征开发集/cycles"),
+        default=Path("output/test/model/RGB特征缓存/多表征开发集/cycles"),
     )
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument("--maximum-per-group", type=int, default=3)
@@ -243,7 +243,7 @@ def main() -> None:
         "--camera-groups", nargs="+", choices=CAMERA_GROUPS, default=["front", "all"]
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("report/03_RGB标签与模型/低照度压力测试")
+        "--output", type=Path, default=Path("output/test/model/低照度压力测试")
     )
     args = parser.parse_args()
 

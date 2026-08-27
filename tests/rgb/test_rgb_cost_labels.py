@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -277,14 +276,14 @@ def test_build_writes_complete_provenance_and_preserves_other_outputs(
             "optimization_eligible": [True] * 6,
             "is_censored": [False, False, False, False, True, False],
         }
-    ).to_parquet(cost_root / "candidate_cost_curves.parquet", index=False)
-    cost_source = cost_root / "candidate_cost_curves.parquet"
+    ).to_csv(cost_root / "cost_function_v1.csv", index=False)
+    cost_source = cost_root / "cost_function_v1.csv"
     output = tmp_path / "output"
     output.mkdir()
     (output / "cycle_splits.csv").write_text("keep split edits\n")
     (output / "报告.md").write_text("keep report edits\n")
 
-    build.build_labels(tmp_path / "dataset", cost_root, output)
+    build.build_labels(tmp_path / "dataset", cost_source, output)
 
     provenance = json.loads((output / "label_provenance.json").read_text())
     records = {row["cycle_name"]: row for row in provenance["cycles"]["records"]}
@@ -310,21 +309,18 @@ def test_build_writes_complete_provenance_and_preserves_other_outputs(
         "no_current_curve": 1,
         "no_interpolatable_image_times": 1,
     }
-    source_sha256 = hashlib.sha256(cost_source.read_bytes()).hexdigest()
     labels_path = output / "image_cost_labels.parquet"
     labels = pd.read_parquet(labels_path)
-    assert labels["cost_source_sha256"].eq(source_sha256).all()
-    assert provenance["cost_source_sha256"] == source_sha256
-    assert provenance["output_label_sha256"] == hashlib.sha256(
-        labels_path.read_bytes()
-    ).hexdigest()
+    assert "cost_source_sha256" not in labels
+    assert provenance["cost_source"] == str(cost_source)
+    assert not {
+        "cost_source_sha256",
+        "output_label_sha256",
+        "code_sha256",
+    } & set(provenance)
     assert provenance["thresholds"] == list(build.THRESHOLDS)
     assert provenance["git_revision"]
     assert provenance["generated_at_utc"].endswith("+00:00")
-    assert set(provenance["code_sha256"]) == {
-        "src/frost_analysis/rgb_cost_labels.py",
-        "scripts/rgb/build_rgb_cost_labels.py",
-    }
     assert (output / "cycle_splits.csv").read_text() == "keep split edits\n"
     assert (output / "报告.md").read_text() == "keep report edits\n"
 
@@ -367,7 +363,9 @@ def test_build_raises_domain_error_when_no_labels_are_supported(
     output = tmp_path / "output"
 
     with pytest.raises(RuntimeError, match="^no supported RGB labels$"):
-        build.build_labels(tmp_path / "dataset", cost_root, output)
+        build.build_labels(
+            tmp_path / "dataset", cost_root / "candidate_cost_curves.parquet", output
+        )
     assert not (output / "image_cost_labels.parquet").exists()
 
 

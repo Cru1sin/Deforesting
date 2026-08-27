@@ -178,19 +178,19 @@ def main() -> None:
     parser.add_argument(
         "--models",
         type=Path,
-        default=Path("report/03_RGB标签与模型/五模型比较/summary_metrics.csv"),
+        default=Path("output/test/model/五模型比较/summary_metrics.csv"),
     )
     parser.add_argument(
         "--optima",
         type=Path,
-        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/cycle_optimal_points.csv"),
+        default=Path("output/test/成本函数/其他/经验经济窗口/源数据/cycle_optimal_points.csv"),
     )
     parser.add_argument(
         "--concentration",
         type=Path,
-        default=Path("report/03_RGB标签与模型/视觉状态集中性/summary.csv"),
+        default=Path("output/test/model/视觉状态集中性/summary.csv"),
     )
-    parser.add_argument("--output", type=Path, default=Path("report/04_论文图表/图表"))
+    parser.add_argument("--output", type=Path, default=Path("output/test/model/论文图表/图表"))
     args = parser.parse_args()
     plot_model_comparison(pd.read_csv(args.models), args.output)
     plot_concentration(pd.read_csv(args.optima), pd.read_csv(args.concentration), args.output)

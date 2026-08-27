@@ -1,8 +1,0 @@
-method,cycles,cost_mean_rank_sum
-savgol_70s,77,14.727272727272727
-wavelet_offline,77,15.61038961038961
-nearly_isotonic_offline,77,17.064935064935064
-adaptive_offline,76,18.907894736842106
-median_centered_60s,77,21.194805194805195
-wavelet_monotonic_offline,77,24.4025974025974
-robust_monotone_offline,77,26.636363636363637

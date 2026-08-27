@@ -362,7 +362,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", type=Path, default=Path("dataset/cycles"))
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("report/01_制热量与退化/制热量平滑")
+        "--output-dir", type=Path, default=Path("output/test/成本函数/其他/01_制热量与退化/制热量平滑")
     )
     args = parser.parse_args()
     run_analysis(args.input_dir, args.output_dir)

@@ -22,8 +22,8 @@ from frost_analysis.rgb_cost_labels import assign_image_cost_states
 from frost_analysis.rgb_deep_features import preferred_device
 from frost_analysis.rgb_evaluation import CAMERA_GROUPS
 
-DEFAULT_CANDIDATES = Path("report/02_经济除霜窗口/经验经济窗口/源数据/candidate_cost_curves.parquet")
-DEFAULT_LABELS = Path("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet")
+DEFAULT_CANDIDATES = Path("output/test/成本函数/其他/经验经济窗口/源数据/candidate_cost_curves.parquet")
+DEFAULT_LABELS = Path("output/label/cost_function_v1_binary/image_cost_labels.parquet")
 
 
 class ImageRows(Dataset):
@@ -400,7 +400,9 @@ def main() -> None:
     parser.add_argument("--finetune-lr", type=float, default=1e-4)
     parser.add_argument("--adapt-lr", type=float, default=1e-5)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--output", type=Path, default=Path("outputs/resnet50_binary"))
+    parser.add_argument(
+        "--output", type=Path, default=Path("output/test/model/resnet50_binary_smoke")
+    )
     parser.add_argument("--limit-per-split", type=int, default=0, help=argparse.SUPPRESS)
     run(parser.parse_args())
 

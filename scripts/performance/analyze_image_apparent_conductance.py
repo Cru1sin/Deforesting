@@ -9,6 +9,7 @@ from frost_analysis.dataset_loader import DatasetLoader
 from frost_analysis.evaporator_ua import analyze_evaporator_ua
 
 ROOT = Path(__file__).resolve().parents[2]
+OUT = ROOT / "output/test/成本函数/其他/表观导热分析_cycles_020_030"
 
 
 def main() -> None:
@@ -18,7 +19,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=ROOT / "outputs" / "evaporator_ua_cycles_020_030",
+        default=OUT,
     )
     args = parser.parse_args()
     if args.start > args.end:

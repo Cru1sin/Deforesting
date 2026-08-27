@@ -97,10 +97,10 @@ def main() -> None:
     parser.add_argument(
         "--policy",
         type=Path,
-        default=Path("report/02_经济除霜窗口/经验经济窗口/源数据/empirical_policy_summary.csv"),
+        default=Path("output/test/成本函数/其他/经验经济窗口/源数据/empirical_policy_summary.csv"),
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("report/02_经济除霜窗口/cycle11_域外审计")
+        "--output", type=Path, default=Path("output/test/成本函数/其他/cycle11_域外审计")
     )
     args = parser.parse_args()
     analyze(args.dataset, args.policy, args.output)

@@ -405,7 +405,7 @@ def plot_camera_grid(summary: pd.DataFrame, output: Path, metric: str, ylabel: s
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--shards", type=Path, default=Path("outputs/RGB特征缓存/全量手工特征/cycles")
+        "--shards", type=Path, default=Path("output/test/model/RGB特征缓存/全量手工特征/cycles")
     )
     parser.add_argument(
         "--camera-groups",
@@ -419,7 +419,7 @@ def main() -> None:
     parser.add_argument("--training-sizes", nargs="+", type=int, default=[2, 4, 6, 8, 10])
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument(
-        "--output", type=Path, default=Path("report/03_RGB标签与模型/九机位学习曲线")
+        "--output", type=Path, default=Path("output/test/model/九机位学习曲线")
     )
     args = parser.parse_args()
     args.models = args.models or list(
@@ -430,9 +430,7 @@ def main() -> None:
     paths = sorted(args.shards.glob("*.parquet"))
     if not paths:
         raise SystemExit("no full feature shards")
-    features = pd.concat((pd.read_parquet(path) for path in paths), ignore_index=True).drop(
-        columns="cost_source_sha256", errors="ignore"
-    )
+    features = pd.concat((pd.read_parquet(path) for path in paths), ignore_index=True)
     if args.task == "binary":
         features = features.loc[features["relative_regret"].gt(0.01)].copy()
     features["target"] = map_cost_state_targets(features["cost_state"], args.task)

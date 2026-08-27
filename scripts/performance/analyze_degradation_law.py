@@ -19,7 +19,7 @@ from frost_analysis.degradation_law import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "report" / "01_制热量与退化" / "退化规律_0至48循环"
+OUT = ROOT / "output/test/成本函数/其他/01_制热量与退化/退化规律_0至48循环"
 FIGURES = OUT / "图表"
 SOURCE = OUT / "源数据"
 

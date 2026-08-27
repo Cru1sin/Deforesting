@@ -1261,8 +1261,8 @@ def test_rule_only_main_calls_only_ticket_evidence_writer(
     assert calls == [
         (
             Path("dataset"),
-            Path("report/02_经济除霜窗口/经验经济窗口/源数据"),
-            Path("report/02_经济除霜窗口/经验经济窗口/证据"),
+            Path("output/test/成本函数/其他/经验经济窗口/源数据"),
+            Path("output/test/成本函数/其他/经验经济窗口/证据"),
         )
     ]
 

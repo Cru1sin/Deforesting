@@ -1505,3 +1505,259 @@ def test_cycle_plot_distinguishes_pe_and_integration_ineligibility(
         "Insufficient integration coverage",
     }
     original_close(figure)
+
+
+def test_candidate_costs_use_only_pre_candidate_state_window() -> None:
+    analysis = _analysis_module()
+    stable = pd.Timestamp("2026-01-01")
+    candidate = stable + pd.Timedelta(minutes=10)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(stable, periods=602, freq="s"),
+            "power_total": 3.6,
+            "q_heating_kw": 7.2,
+            "q_unit_kw": 6.0,
+            "evaporating_pressure": 0.3,
+            "water_in_temperature": 40.0,
+            "water_out_temperature": 45.0,
+            "coil_temperature": -8.0,
+            "water_temperature_setpoint": 50.0,
+        }
+    )
+    frame.loc[frame["timestamp"].ge(candidate), [
+        "evaporating_pressure",
+        "water_in_temperature",
+        "water_out_temperature",
+        "coil_temperature",
+        "water_temperature_setpoint",
+    ]] = 999.0
+
+    row = analysis._candidate_costs(
+        frame,
+        stable_start=stable,
+        candidate_end=candidate,
+        q_start_kw=7.2,
+        next_stable_start=stable + pd.Timedelta(minutes=20),
+        q_end_kw=7.2,
+        lambda_q=0.5,
+    ).iloc[0]
+
+    assert row["evaporating_pressure_mpa"] == pytest.approx(0.3)
+    assert row["water_in_temperature"] == pytest.approx(40.0)
+    assert row["water_out_temperature"] == pytest.approx(45.0)
+    assert row["coil_temperature"] == pytest.approx(-8.0)
+    assert row["water_temperature_setpoint"] == pytest.approx(50.0)
+
+
+def test_recovery_terms_are_fixed_by_supported_setpoint() -> None:
+    analysis = _analysis_module()
+
+    assert analysis._recovery_terms(50) == pytest.approx((9.0, 0.250930, 0.804970))
+    assert analysis._recovery_terms(55) == pytest.approx((12.0, 0.395172, 1.146153))
+    with pytest.raises(ValueError, match="50 or 55"):
+        analysis._recovery_terms(52)
+    with pytest.raises(ValueError, match="50 or 55"):
+        analysis._recovery_terms(50.00001)
+
+
+def test_qd_prediction_uses_linear_and_squared_candidate_state(tmp_path: Path) -> None:
+    analysis = _analysis_module()
+    terms = {
+        "intercept": 1.0,
+        "water_in_temperature": 0.1,
+        "water_out_temperature": 0.2,
+        "rule_defrost_duration_minutes": 0.3,
+        "coil_temperature": 0.4,
+        "evaporating_pressure": 0.5,
+        "water_in_temperature_squared": 0.01,
+        "water_out_temperature_squared": 0.02,
+        "rule_defrost_duration_minutes_squared": 0.03,
+        "coil_temperature_squared": 0.04,
+        "evaporating_pressure_squared": 0.05,
+    }
+    coefficients = pd.DataFrame(
+        {"term": list(terms), "coefficient": list(terms.values())}
+    )
+    path = tmp_path / "qd.csv"
+    coefficients.to_csv(path, index=False)
+    candidates = pd.DataFrame(
+        {
+            "water_in_temperature": [2.0],
+            "water_out_temperature": [3.0],
+            "coil_temperature": [4.0],
+            "evaporating_pressure_mpa": [0.5],
+        }
+    )
+
+    predicted = analysis._predict_qd(
+        candidates,
+        analysis._read_qd_coefficients(path),
+        observed_rule_duration_minutes=5.0,
+    )
+    expected = 1 + 0.1 * 2 + 0.2 * 3 + 0.3 * 5 + 0.4 * 4 + 0.5 * 0.5
+    expected += 0.01 * 2**2 + 0.02 * 3**2 + 0.03 * 5**2
+    expected += 0.04 * 4**2 + 0.05 * 0.5**2
+
+    assert predicted.iloc[0] == pytest.approx(expected)
+    assert predicted.iloc[0] > 0
+
+
+def test_apply_cost_algorithm_composes_v1_and_offline_v2() -> None:
+    analysis = _analysis_module()
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range("2026-01-01 00:10", periods=2, freq="min"),
+            "heating_electricity_kwh": [1.0, 1.5],
+            "water_heating_kwh": [5.0, 7.0],
+            "unit_heating_kwh": [4.0, 8.0],
+            "predicted_preparation_defrost_electricity_kwh": [0.2, 0.3],
+            "water_in_temperature": [2.0, 2.0],
+            "water_out_temperature": [3.0, 3.0],
+            "coil_temperature": [4.0, 4.0],
+            "evaporating_pressure_mpa": [0.5, 0.5],
+            "optimization_eligible": [True, True],
+        }
+    )
+    v1, _ = analysis._apply_cost_algorithm(candidates, algorithm="v1")
+
+    ticket = candidates["predicted_preparation_defrost_electricity_kwh"] + 0.279901897467
+    assert v1["user_heating_kwh"].tolist() == [4.0, 8.0]
+    assert v1["inverse_cop"].tolist() == pytest.approx(
+        ((candidates["heating_electricity_kwh"] + ticket) / candidates["unit_heating_kwh"]).tolist()
+    )
+    assert v1["water_reference_inverse_cop"].tolist() == pytest.approx(
+        (
+            (candidates["heating_electricity_kwh"] + ticket)
+            / candidates["water_heating_kwh"]
+        ).tolist()
+    )
+
+    qd_coefficients = pd.Series(
+        {
+            "intercept": 0.5,
+            "water_in_temperature": 0.0,
+            "water_out_temperature": 0.0,
+            "rule_defrost_duration_minutes": 0.0,
+            "coil_temperature": 0.0,
+            "evaporating_pressure": 0.0,
+            "water_in_temperature_squared": 0.0,
+            "water_out_temperature_squared": 0.0,
+            "rule_defrost_duration_minutes_squared": 0.0,
+            "coil_temperature_squared": 0.0,
+            "evaporating_pressure_squared": 0.0,
+        }
+    )
+    v2, _ = analysis._apply_cost_algorithm(
+        candidates,
+        algorithm="v2",
+        setpoint=50,
+        observed_rule_duration_minutes=5.0,
+        qd_coefficients=qd_coefficients,
+    )
+
+    assert v2["defrost_absorbed_heat_kwh"].tolist() == pytest.approx([0.5, 0.5])
+    assert v2["cycle_user_heating_kwh"].tolist() == pytest.approx(
+        (candidates["water_heating_kwh"] - 0.5 + 0.804970).tolist()
+    )
+    assert v2["cycle_electricity_kwh"].tolist() == pytest.approx(
+        (
+            candidates["heating_electricity_kwh"]
+            + candidates["predicted_preparation_defrost_electricity_kwh"]
+            + 0.250930
+        ).tolist()
+    )
+    assert set(v2["model_protocol"]) == {
+        "offline_counterfactual_observed_rule_duration"
+    }
+    with pytest.raises(ValueError, match="v1.*v2"):
+        analysis._apply_cost_algorithm(candidates, algorithm="legacy")
+
+
+def test_v2_keeps_invalid_qd_candidates_for_audit_but_out_of_optimization() -> None:
+    analysis = _analysis_module()
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range("2026-01-01 00:10", periods=3, freq="min"),
+            "heating_electricity_kwh": [1.0, 1.1, 1.2],
+            "water_heating_kwh": [5.0, 5.0, 5.0],
+            "unit_heating_kwh": [4.0, 4.0, 4.0],
+            "predicted_preparation_defrost_electricity_kwh": [0.2, 0.2, 0.2],
+            "water_in_temperature": [0.0, 1.0, np.nan],
+            "water_out_temperature": [3.0, 3.0, 3.0],
+            "coil_temperature": [4.0, 4.0, 4.0],
+            "evaporating_pressure_mpa": [0.5, 0.5, 0.5],
+            "optimization_eligible": [True, True, True],
+        }
+    )
+    coefficients = pd.Series(0.0, index=analysis.QD_TERMS)
+    coefficients["intercept"] = 1.0
+    coefficients["water_in_temperature"] = -1.0
+
+    curve, optimum = analysis._apply_cost_algorithm(
+        candidates,
+        algorithm="v2",
+        setpoint=50,
+        observed_rule_duration_minutes=5.0,
+        qd_coefficients=coefficients,
+    )
+
+    assert curve["qd_eligible"].tolist() == [True, False, False]
+    assert curve["optimization_eligible"].tolist() == [True, False, False]
+    assert curve["defrost_absorbed_heat_kwh"].iloc[1] == pytest.approx(0.0)
+    assert pd.isna(curve["defrost_absorbed_heat_kwh"].iloc[2])
+    assert curve["relative_regret"].notna().tolist() == [True, False, False]
+    assert optimum["candidate_time"] == candidates.iloc[0]["candidate_time"]
+
+
+def test_v1_reference_regrets_are_only_reported_for_eligible_candidates() -> None:
+    analysis = _analysis_module()
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range("2026-01-01 00:10", periods=2, freq="min"),
+            "heating_electricity_kwh": [1.0, 1.1],
+            "water_heating_kwh": [5.0, 9.0],
+            "unit_heating_kwh": [4.0, 8.0],
+            "predicted_preparation_defrost_electricity_kwh": [0.2, 0.2],
+            "optimization_eligible": [True, False],
+        }
+    )
+
+    curve, _ = analysis._apply_cost_algorithm(candidates, algorithm="v1")
+
+    assert curve["relative_regret"].notna().tolist() == [True, False]
+    assert curve["water_reference_relative_regret"].notna().tolist() == [True, False]
+
+
+def test_v2_excludes_nonpositive_total_heat_without_losing_valid_candidate() -> None:
+    analysis = _analysis_module()
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range("2026-01-01 00:10", periods=2, freq="min"),
+            "heating_electricity_kwh": [1.0, 1.1],
+            "water_heating_kwh": [5.0, 5.0],
+            "unit_heating_kwh": [4.0, 4.0],
+            "predicted_preparation_defrost_electricity_kwh": [0.2, 0.2],
+            "water_in_temperature": [0.0, 1.0],
+            "water_out_temperature": [3.0, 3.0],
+            "coil_temperature": [4.0, 4.0],
+            "evaporating_pressure_mpa": [0.5, 0.5],
+            "optimization_eligible": [True, True],
+        }
+    )
+    coefficients = pd.Series(0.0, index=analysis.QD_TERMS)
+    coefficients["intercept"] = 0.5
+    coefficients["water_in_temperature"] = 10.0
+
+    curve, optimum = analysis._apply_cost_algorithm(
+        candidates,
+        algorithm="v2",
+        setpoint=50,
+        observed_rule_duration_minutes=5.0,
+        qd_coefficients=coefficients,
+    )
+
+    assert curve["qd_eligible"].tolist() == [True, True]
+    assert curve["heat_balance_eligible"].tolist() == [True, False]
+    assert curve["optimization_eligible"].tolist() == [True, False]
+    assert curve["relative_regret"].notna().tolist() == [True, False]
+    assert optimum["candidate_time"] == candidates.iloc[0]["candidate_time"]

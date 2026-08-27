@@ -27,7 +27,7 @@ from frost_analysis.sensor_model import (
 )
 
 ROOT = Path(__file__).resolve().parents[2]
-OUT = ROOT / "report" / "01_制热量与退化" / "传感器模型_59循环"
+OUT = ROOT / "output/test/成本函数/其他/01_制热量与退化/传感器模型_59循环"
 FIGURES = OUT / "图表"
 SOURCE = OUT / "源数据"
 

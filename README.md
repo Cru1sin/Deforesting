@@ -24,6 +24,10 @@ quantities, and baseline residuals.
 - `scripts/rgb/`: RGB assets, labels, features, training, and evaluation.
 - `scripts/figures/`: manuscript and report figures.
 - `tests/`: the same domain layout, with shared setup in `tests/conftest.py`.
+- `output/成本函数/`: published cost CSVs, cycle plots, and comparisons.
+- `output/label/` and `output/model/`: formal RGB labels and model runs.
+- `output/test/`: exploratory cost analyses, historical model experiments, and caches.
+- `report/`: human-readable Markdown reports only.
 
 Read the project in this order:
 
@@ -36,9 +40,18 @@ Read the project in this order:
 Run commands from the repository root, for example:
 
 ```bash
+uv run python scripts/defrost/cost_function.py --algorithm v1 v2 --output output/成本函数
+uv run python scripts/figures/plot_cost_function_comparison.py --help
+uv run python scripts/figures/plot_cost_function_comparison.py --cost v1=output/成本函数/cost_function_v1.csv v2=output/成本函数/cost_function_v2.csv --output output/成本函数
+uv run python scripts/rgb/build_rgb_cost_labels.py --help
 uv run python scripts/defrost/analyze_raw_optimal_defrost.py --help
 uv run pytest tests/defrost/test_defrost_cost.py
 ```
+
+The formal cost run writes `cost_function_v1.csv`, `cost_function_v2.csv`,
+three 69-cycle PNG sets, and the v1/v2/RB comparisons under
+`output/成本函数/`. Formal v1 and v2 binary RGB labels live under
+`output/label/`; report documents remain Markdown-only.
 
 ## Dataset
 
@@ -64,7 +77,7 @@ Analyze a schema v3 Dataset:
 python -m frost_analysis evidence \
   --dataset dataset \
   --config configs/evidence.yaml \
-  --output outputs/evidence/frost_cycle_evidence_v2_3
+  --output output/test/成本函数/其他/历史证据/frost_cycle_evidence_v2_3
 ```
 
 Evidence reads cycles only through `DatasetLoader` and never writes inside the

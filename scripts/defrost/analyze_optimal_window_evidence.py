@@ -4384,7 +4384,7 @@ def analyze(
         shifts["t_star_conditional"] - shifts["t_star"]
     ).dt.total_seconds() / 60
     # Stage 4: connect windows to COP and RGB evidence.
-    labels = pd.read_parquet("report/03_RGB标签与模型/成本标签/image_cost_labels.parquet")
+    labels = pd.read_parquet("output/label/cost_function_v1_binary/image_cost_labels.parquet")
     overview = build_window_overview(loader, points, labels, dataset)
 
     # Stage 5: write publication evidence from the same tables.
@@ -4466,10 +4466,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument(
-        "--source", type=Path, default=Path("report/02_经济除霜窗口/经验经济窗口/源数据")
+        "--source", type=Path, default=Path("output/test/成本函数/其他/经验经济窗口/源数据")
     )
     parser.add_argument(
-        "--output", type=Path, default=Path("report/02_经济除霜窗口/经验经济窗口/证据")
+        "--output", type=Path, default=Path("output/test/成本函数/其他/经验经济窗口/证据")
     )
     parser.add_argument("--cloud-root", type=Path, default=None)
     only = parser.add_mutually_exclusive_group()
