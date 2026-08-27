@@ -71,6 +71,8 @@ _RGB_PANEL_FONT = next(
     "DejaVu Sans",
 )
 _RGB_PANEL_MAX_OFFSET = pd.Timedelta(minutes=2)
+RGB_CAMERA_ORDER = ("top", "top_close", "left", "left_close", "front", "extreme")
+RGB_PANEL_MAX_OFFSET = _RGB_PANEL_MAX_OFFSET
 
 
 def build_rgb_panel_targets(
@@ -418,17 +420,343 @@ def render_cycle_publication(
     plt.close(figure)
 
 
+def match_decision_rgb_images(
+    metadata: pd.DataFrame,
+    images: pd.DataFrame,
+    targets: Mapping[str, object],
+    *,
+    max_offset: pd.Timedelta = RGB_PANEL_MAX_OFFSET,
+) -> pd.DataFrame:
+    """Match the nearest physical front frame to each causal decision time.
+
+    Metadata is kept separate from the physically materialized images so that a
+    missing local file is reported instead of silently being treated as missing
+    metadata.  The same two-minute limit as the existing RGB panel is used.
+    """
+    metadata = metadata.loc[
+        metadata.get("camera_role", pd.Series(dtype=str)).astype(str).eq("front")
+    ].copy()
+    if not metadata.empty:
+        metadata["image_time"] = pd.to_datetime(metadata["image_time"], errors="coerce")
+        metadata = metadata.dropna(subset=["image_time"]).sort_values(
+            ["image_time", "file_name"], kind="stable"
+        )
+    physical = images.loc[
+        images.get("camera_role", pd.Series(dtype=str)).astype(str).eq("front")
+    ].copy()
+    physical_by_name = {
+        str(row["file_name"]): Path(cast(Any, row["path"]))
+        for _, row in physical.iterrows()
+        if "file_name" in row and "path" in row
+    }
+    rows: list[dict[str, object]] = []
+    for target_type in ("rb", "optimal"):
+        raw_target = targets.get(target_type)
+        target_time = pd.to_datetime(raw_target, errors="coerce")
+        target_time = pd.NaT if pd.isna(target_time) else pd.Timestamp(target_time)
+        if pd.isna(target_time):
+            rows.append(
+                {
+                    "target_type": target_type,
+                    "target_time": pd.NaT,
+                    "image_time": pd.NaT,
+                    "offset_seconds": np.nan,
+                    "file_name": "",
+                    "image_path": "",
+                    "available": False,
+                    "status": (
+                        "rb_right_censored" if target_type == "rb" else "no_valid_optimal"
+                    ),
+                }
+            )
+            continue
+        if metadata.empty:
+            rows.append(
+                {
+                    "target_type": target_type,
+                    "target_time": target_time,
+                    "image_time": pd.NaT,
+                    "offset_seconds": np.nan,
+                    "file_name": "",
+                    "image_path": "",
+                    "available": False,
+                    "status": "front_metadata_missing",
+                }
+            )
+            continue
+        distance = (metadata["image_time"] - target_time).abs()
+        nearest = metadata.loc[distance.idxmin()]
+        image_time = pd.Timestamp(nearest["image_time"])
+        offset_seconds = float(abs((image_time - target_time).total_seconds()))
+        file_name = str(nearest.get("file_name", ""))
+        path = physical_by_name.get(file_name)
+        if offset_seconds > max_offset.total_seconds():
+            status = "offset_exceeds_2min"
+            available = False
+            image_path = ""
+        elif path is None or not path.is_file():
+            status = "physical_image_missing"
+            available = False
+            image_path = ""
+        else:
+            status = "matched"
+            available = True
+            image_path = str(path)
+        rows.append(
+            {
+                "target_type": target_type,
+                "target_time": target_time,
+                "image_time": image_time,
+                "offset_seconds": offset_seconds,
+                "file_name": file_name,
+                "image_path": image_path,
+                "available": available,
+                "status": status,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def cost_curve_optimal_time(
+    cost_curve: pd.DataFrame,
+    origin: pd.Timestamp,
+    stage_spans: list[tuple[str, float, float]],
+) -> pd.Timestamp | None:
+    """Return the same eligible minimum used by ``_plot_cost_panel``."""
+    curve = cost_curve.copy()
+    if "candidate_time" not in curve:
+        return None
+    curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
+    curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
+    metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
+    if metric not in curve:
+        return None
+    curve[metric] = pd.to_numeric(curve[metric], errors="coerce")
+    frost_spans = [
+        (left, right) for stage, left, right in stage_spans if stage == "frost_development"
+    ]
+    is_frost = pd.Series(False, index=curve.index)
+    for left, right in frost_spans:
+        is_frost |= curve["minutes"].ge(left) & curve["minutes"].le(right)
+    curve = curve.loc[is_frost & curve["minutes"].notna()].copy()
+    eligible = (
+        curve["optimization_eligible"].fillna(False).astype(bool)
+        if "optimization_eligible" in curve
+        else pd.Series(True, index=curve.index)
+    )
+    curve.loc[~eligible, metric] = np.nan
+    values = curve.loc[eligible, metric].dropna()
+    if values.empty:
+        return None
+    return pd.Timestamp(curve.loc[values.idxmin(), "candidate_time"])
+
+
+def render_decision_publication(
+    cycle_frame: pd.DataFrame,
+    cycle_record: Mapping[str, object],
+    cost_curve: pd.DataFrame,
+    decision_images: Mapping[str, Mapping[str, object]],
+    output_path: Path,
+    *,
+    optimal_label: str = "Economic optimum",
+    cost_label: str = "Cycle inverse COP [-]",
+    full_candidate_domain: bool = False,
+) -> None:
+    """Render two decision frames above the reusable COP, water and cost panels."""
+    frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = frame.dropna(subset=["timestamp"])
+    origin = pd.Timestamp(frame["timestamp"].min())
+    minutes = (frame["timestamp"] - origin).dt.total_seconds() / 60.0
+    stage_spans = _stage_spans(frame, minutes)
+    duration = max(float(minutes.max()), 1.0)
+    boundaries = cycle_record.get("boundaries")
+    boundaries = boundaries if isinstance(boundaries, Mapping) else cycle_record
+    stable = pd.to_datetime(boundaries.get("stable_heating_start"), errors="coerce")
+    stable = pd.NaT if pd.isna(stable) else pd.Timestamp(stable)
+    baseline_start = pd.to_datetime(boundaries.get("baseline_start"), errors="coerce")
+    baseline_end = pd.to_datetime(boundaries.get("baseline_end"), errors="coerce")
+    baseline_left = (
+        (pd.Timestamp(baseline_start) - origin).total_seconds() / 60.0
+        if not pd.isna(baseline_start)
+        else np.nan
+    )
+    baseline_right = (
+        (pd.Timestamp(baseline_end) - origin).total_seconds() / 60.0
+        if not pd.isna(baseline_end)
+        else np.nan
+    )
+
+    figure = plt.figure(figsize=(7.2, 8.25), dpi=300)
+    grid = figure.add_gridspec(
+        4,
+        2,
+        height_ratios=[2.15, 0.92, 1.05, 1.08],
+        hspace=0.62,
+        wspace=0.08,
+    )
+    image_axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 1])]
+    image_specs = (("rb", "RB trigger"), ("optimal", optimal_label))
+    for axis, (target_type, label) in zip(image_axes, image_specs, strict=True):
+        info = decision_images.get(target_type, {})
+        _plot_decision_image(axis, info, label, origin, stable)
+
+    panel_axes = [
+        figure.add_subplot(grid[1, :]),
+        figure.add_subplot(grid[2, :]),
+        figure.add_subplot(grid[3, :]),
+    ]
+    _plot_cycle_panel(
+        panel_axes[0],
+        frame,
+        minutes,
+        ("cop",),
+        "COP [-]",
+        stage_spans,
+        [],
+        baseline_left,
+        baseline_right,
+    )
+    _plot_cycle_panel(
+        panel_axes[1],
+        frame,
+        minutes,
+        ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
+        "Water temperature [degC]",
+        stage_spans,
+        [],
+        baseline_left,
+        baseline_right,
+    )
+    curve = cost_curve if cost_curve is not None else pd.DataFrame()
+    _plot_cost_panel(
+        panel_axes[2],
+        curve,
+        origin,
+        stage_spans,
+        cost_label=cost_label,
+        full_candidate_domain=full_candidate_domain,
+    )
+    for axis in panel_axes:
+        axis.set_xlim(0.0, duration)
+    _plot_decision_markers(panel_axes, decision_images, origin)
+    labels = panel_axes[2].get_legend_handles_labels()
+    if labels[0]:
+        panel_axes[2].legend(
+            *labels,
+            frameon=False,
+            fontsize=6.5,
+            loc="lower left",
+            bbox_to_anchor=(0, 1.01),
+            ncol=min(len(labels[0]), 4),
+        )
+    cycle_name = str(cycle_record.get("cycle_name", cycle_record.get("cycle_id", "Cycle")))
+    figure.suptitle(cycle_name, x=0.08, ha="left", fontsize=10, fontweight="bold")
+    panel_axes[-1].set_xlabel("Time from cycle start [min]", fontsize=8)
+    figure.subplots_adjust(left=0.14, right=0.98, bottom=0.06, top=0.92)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+
+
+def _plot_decision_image(
+    axis: Any,
+    info: Mapping[str, object],
+    label: str,
+    origin: pd.Timestamp,
+    stable: pd.Timestamp,
+) -> None:
+    path_value = info.get("image_path", info.get("path", ""))
+    path = Path(str(path_value)) if path_value else None
+    available = bool(info.get("available")) and path is not None and path.is_file()
+    axis.set_xticks([])
+    axis.set_yticks([])
+    if available:
+        axis.imshow(np.rot90(plt.imread(path)), aspect="auto")
+    else:
+        axis.set_facecolor("#ECEFF1")
+        status = str(info.get("status", "unavailable")).replace("_", " ")
+        axis.text(
+            0.5,
+            0.5,
+            f"RGB unavailable\n{status}",
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+            fontsize=8,
+            color="#59636E",
+        )
+    for spine in axis.spines.values():
+        spine.set_visible(True)
+        spine.set_color("#2E7D5B" if label.startswith("RB") else "#E28E2C")
+        spine.set_linewidth(1.0)
+    image_time = pd.to_datetime(info.get("image_time"), errors="coerce")
+    if available and not pd.isna(image_time):
+        cycle_minutes = (pd.Timestamp(image_time) - origin).total_seconds() / 60.0
+        stable_minutes = (
+            (pd.Timestamp(image_time) - stable).total_seconds() / 60.0
+            if not pd.isna(stable)
+            else np.nan
+        )
+        stable_text = (
+            f"stable +{stable_minutes:.1f} min"
+            if np.isfinite(stable_minutes)
+            else "stable n/a"
+        )
+        title = (
+            f"{label}\n"
+            f"image {pd.Timestamp(image_time):%H:%M:%S} · cycle +{cycle_minutes:.1f} min · "
+            f"{stable_text} · Δ {float(info.get('offset_seconds', np.nan)):.1f} s"
+        )
+    else:
+        title = (
+            f"{label}\nRGB unavailable · "
+            f"{str(info.get('status', 'unavailable')).replace('_', ' ')}"
+        )
+    axis.set_title(title, fontsize=7.2, pad=5, loc="left")
+
+
+def _plot_decision_markers(
+    axes: list[Any],
+    decision_images: Mapping[str, Mapping[str, object]],
+    origin: pd.Timestamp,
+) -> None:
+    markers = (
+        ("rb", "RB RGB frame", "#2E7D5B"),
+        ("optimal", "Optimal RGB frame", "#E28E2C"),
+    )
+    for target_type, label, color in markers:
+        info = decision_images.get(target_type, {})
+        image_time = pd.to_datetime(info.get("image_time"), errors="coerce")
+        if not bool(info.get("available")) or pd.isna(image_time):
+            continue
+        x = (pd.Timestamp(image_time) - origin).total_seconds() / 60.0
+        for axis_index, axis in enumerate(axes):
+            axis.axvline(
+                x,
+                color=color,
+                linestyle=":",
+                linewidth=0.9,
+                label=label if axis_index == len(axes) - 1 else "_nolegend_",
+                zorder=4,
+            )
+
+
 def _plot_cost_panel(
     axis: Any,
     cost_curve: pd.DataFrame,
     origin: pd.Timestamp,
     stage_spans: list[tuple[str, float, float]],
+    *,
+    cost_label: str = "Cycle inverse COP [-]",
+    full_candidate_domain: bool = False,
 ) -> None:
     """Plot empirical cost only where the cycle is in frost development."""
     curve = cost_curve.copy()
     curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
     curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
-    curve["renewal_cost_kw"] = pd.to_numeric(curve["renewal_cost_kw"], errors="coerce")
+    metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
+    curve[metric] = pd.to_numeric(curve[metric], errors="coerce")
     frost_spans = [
         (left, right)
         for stage, left, right in stage_spans
@@ -437,44 +765,95 @@ def _plot_cost_panel(
     is_frost = pd.Series(False, index=curve.index)
     for left, right in frost_spans:
         is_frost |= curve["minutes"].ge(left) & curve["minutes"].lt(right)
-    curve = curve.loc[is_frost].dropna(subset=["minutes", "renewal_cost_kw"])
+    curve = curve.loc[
+        curve["minutes"].notna() & (True if full_candidate_domain else is_frost)
+    ].copy()
+    curve["_raw_metric"] = curve[metric]
+    eligible = (
+        curve["optimization_eligible"].fillna(False).astype(bool)
+        if "optimization_eligible" in curve
+        else pd.Series(True, index=curve.index)
+    )
+    pe_supported = (
+        curve["pe_supported"].fillna(False).astype(bool)
+        if "pe_supported" in curve
+        else curve["support_status"].eq("supported")
+        if "support_status" in curve
+        else eligible.copy()
+    )
+    integration_eligible = (
+        curve["integration_eligible"].fillna(False).astype(bool)
+        if "integration_eligible" in curve
+        else eligible | ~pe_supported
+    )
+    outside_pe = ~pe_supported
+    insufficient_integration = pe_supported & ~integration_eligible
+    interpolated_gap = (
+        curve["candidate_in_interpolated_gap"].fillna(False).astype(bool)
+        if "candidate_in_interpolated_gap" in curve
+        else pd.Series(False, index=curve.index)
+    )
+    extrapolated_endpoint = (
+        curve["candidate_in_extrapolated_endpoint"].fillna(False).astype(bool)
+        if "candidate_in_extrapolated_endpoint" in curve
+        else pd.Series(False, index=curve.index)
+    )
+    curve.loc[~eligible, metric] = np.nan
 
     _shade_cycle_stages(axis, stage_spans, [])
-    if curve.empty:
-        axis.text(0.5, 0.5, "No frosting cost candidates", transform=axis.transAxes, ha="center")
+    if curve.loc[eligible, metric].dropna().empty:
+        axis.text(
+            0.5,
+            0.5,
+            "No optimization-eligible candidates",
+            transform=axis.transAxes,
+            ha="center",
+        )
     else:
         axis.plot(
             curve["minutes"],
-            curve["renewal_cost_kw"],
+            curve[metric],
             color="#3775BA",
             linewidth=1.25,
-            label="Empirical cost",
+            label="Cycle inverse COP" if metric == "inverse_cop" else "Empirical cost",
         )
-        minimum_index = curve["renewal_cost_kw"].idxmin()
+        minimum_index = curve.loc[eligible, metric].idxmin()
         minimum_x = float(curve.loc[minimum_index, "minutes"])
-        axis.axvline(minimum_x, color="#E28E2C", linewidth=1.05, label="Minimum")
+        axis.axvline(
+            minimum_x,
+            color="#E28E2C",
+            linewidth=1.05,
+            label="Minimum",
+            zorder=4,
+        )
         regret = (
             pd.to_numeric(curve["relative_regret"], errors="coerce")
             if "relative_regret" in curve
-            else curve["renewal_cost_kw"] / curve["renewal_cost_kw"].min() - 1.0
+            else curve[metric] / curve[metric].min() - 1.0
         )
-        near = curve.loc[regret.le(0.01)]
-        if not near.empty:
+        near = eligible & regret.le(0.05)
+        groups = near.ne(near.shift(fill_value=False)).cumsum()
+        for segment_index, (_, segment) in enumerate(
+            curve.loc[near].groupby(groups[near], sort=False), start=1
+        ):
             axis.axvspan(
-                float(near["minutes"].min()),
-                float(near["minutes"].max()),
+                float(segment["minutes"].min()),
+                float(segment["minutes"].max()),
                 color="#E28E2C",
                 alpha=0.18,
-                label="1% window",
+                label=f"5% near-optimal segment {segment_index}",
                 zorder=0.2,
             )
-        location = (
-            "left boundary"
-            if minimum_index == curve.index[0]
-            else "right boundary"
-            if minimum_index == curve.index[-1]
-            else "interior"
-        )
+        if "minimum_location" in curve:
+            location = str(curve.loc[minimum_index, "minimum_location"]).replace("_", " ")
+        else:
+            location = (
+                "left boundary"
+                if minimum_index == curve.index[0]
+                else "right boundary"
+                if minimum_index == curve.index[-1]
+                else "interior"
+            )
         axis.text(
             0.01,
             0.95,
@@ -486,16 +865,44 @@ def _plot_cost_panel(
             color="#4B5563",
         )
 
-    defrost_starts = [left for stage, left, _ in stage_spans if stage == "defrost"]
-    if defrost_starts:
+    _plot_cost_quality_markers(
+        axis,
+        curve,
+        outside_pe,
+        insufficient_integration,
+        interpolated_gap,
+        extrapolated_endpoint,
+    )
+
+    _plot_rb_trigger(axis, curve, origin, metric, eligible)
+
+    preparation = (
+        pd.to_datetime(curve["actual_preparation_time"], errors="coerce").dropna()
+        if "actual_preparation_time" in curve
+        else pd.Series(dtype="datetime64[ns]")
+    )
+    if not preparation.empty:
         axis.axvline(
-            defrost_starts[0],
+            (pd.Timestamp(preparation.iloc[0]) - origin).total_seconds() / 60.0,
             color="#777777",
             linewidth=0.9,
             linestyle="--",
-            label="Observed defrost",
+            label="Observed preparation",
         )
-    axis.set_ylabel("Renewal cost [kW-eq.]", fontsize=8)
+    else:
+        defrost_starts = [left for stage, left, _ in stage_spans if stage == "defrost"]
+        if defrost_starts:
+            axis.axvline(
+                defrost_starts[0],
+                color="#777777",
+                linewidth=0.9,
+                linestyle="--",
+                label="Observed defrost",
+            )
+    axis.set_ylabel(
+        cost_label if metric == "inverse_cop" else "Renewal cost [kW-eq.]",
+        fontsize=8,
+    )
     axis.grid(axis="x", alpha=0.12)
     if axis.lines:
         handle_count = len(axis.get_legend_handles_labels()[0])
@@ -508,9 +915,108 @@ def _plot_cost_panel(
         )
 
 
+def _plot_cost_quality_markers(
+    axis: Any,
+    curve: pd.DataFrame,
+    outside_pe: pd.Series,
+    insufficient_integration: pd.Series,
+    interpolated_gap: pd.Series,
+    extrapolated_endpoint: pd.Series,
+) -> None:
+    valid_metric = curve["_raw_metric"].notna()
+    marker_specs = (
+        (outside_pe, 11, "x", {"linewidths": 0.65, "color": "#A7ADB3"}, "Outside Pe support", 3),
+        (
+            insufficient_integration,
+            13,
+            "+",
+            {"linewidths": 0.75, "color": "#C66A00"},
+            "Insufficient integration coverage",
+            3,
+        ),
+        (
+            interpolated_gap,
+            16,
+            "s",
+            {"facecolors": "none", "edgecolors": "#9AA0A6", "linewidths": 0.65},
+            "Internal-gap interpolation",
+            2,
+        ),
+        (
+            extrapolated_endpoint,
+            18,
+            "D",
+            {"facecolors": "none", "edgecolors": "#76528F", "linewidths": 0.7},
+            "Endpoint linear extrapolation",
+            2,
+        ),
+    )
+    for mask, size, marker, style, label, zorder in marker_specs:
+        visible = mask & valid_metric
+        if visible.any():
+            x = curve.loc[visible, "minutes"]
+            y = curve.loc[visible, "_raw_metric"]
+        elif mask.any():
+            # Keep the diagnostic label when the corresponding cost is NaN.
+            x = []
+            y = []
+        else:
+            continue
+        axis.scatter(
+            x,
+            y,
+            s=size,
+            marker=marker,
+            label=label,
+            zorder=zorder,
+            **style,
+        )
+
+
+def _plot_rb_trigger(
+    axis: Any,
+    curve: pd.DataFrame,
+    origin: pd.Timestamp,
+    metric: str,
+    eligible: pd.Series,
+) -> None:
+    """Mark the recorded first RB trigger without changing its causal timestamp."""
+    if "rb_status" not in curve or "t_RB" not in curve:
+        return
+    status = curve["rb_status"].dropna().astype(str)
+    rb_times = pd.to_datetime(curve["t_RB"], errors="coerce").dropna()
+    if status.empty or status.iloc[0] != "triggered" or rb_times.empty:
+        return
+    rb_time = pd.Timestamp(rb_times.iloc[0])
+    axis.axvline(
+        (rb_time - origin).total_seconds() / 60.0,
+        color="#2E7D5B",
+        linewidth=0.9,
+        linestyle="--",
+        label="RB trigger",
+        zorder=2.5,
+    )
+    valid_cost = eligible & curve[metric].notna()
+    if valid_cost.any():
+        nearest = (curve.loc[valid_cost, "candidate_time"] - rb_time).abs().idxmin()
+        if abs(curve.loc[nearest, "candidate_time"] - rb_time) > pd.Timedelta(minutes=0.51):
+            return
+        axis.scatter(
+            curve.loc[nearest, "minutes"],
+            curve.loc[nearest, metric],
+            s=18,
+            color="#2E7D5B",
+            label="Nearest eligible cost",
+            zorder=3.5,
+        )
+
+
 def _plot_stage_ribbon(axis: Any, spans: list[tuple[str, float, float]]) -> None:
+    minimum_label_width = max((end for _stage, _start, end in spans), default=0.0) * 0.05
     for stage, start, end in spans:
         axis.axvspan(start, end, color=_STAGE_COLORS.get(stage, "#BDBDBD"))
+        if end - start < minimum_label_width:
+            continue
         axis.text(
             (start + end) / 2,
             0.5,

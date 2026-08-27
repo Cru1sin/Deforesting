@@ -11,8 +11,10 @@ from PIL import Image, ImageEnhance
 from torch import nn
 from torchvision import transforms
 from torchvision.models import (
+    ConvNeXt_Tiny_Weights,
     EfficientNet_B0_Weights,
     MobileNet_V3_Small_Weights,
+    convnext_tiny,
     efficientnet_b0,
     mobilenet_v3_small,
 )
@@ -22,6 +24,9 @@ DEEP_REPRESENTATIONS = (
     "efficientnet",
     "mobilenet_v3_small",
     "repvit_m0_9",
+    "convnext_tiny",
+    "dinov3",
+    "siglip2",
 )
 IMAGE_TRANSFORM = transforms.Compose(
     [
@@ -31,6 +36,15 @@ IMAGE_TRANSFORM = transforms.Compose(
         transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
     ]
 )
+
+
+def preferred_device() -> torch.device:
+    """Use the fastest available torch accelerator."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def illumination_transform(name: str):  # type: ignore[no-untyped-def]
@@ -118,11 +132,10 @@ def extract_representation_matrices(
     }
 
 
-def load_frozen_extractors(names: list[str]) -> dict[str, tuple[nn.Module, object]]:
-    """Load the locked pretrained image encoders used by the shared benchmark."""
-    extractors = {}
-    if "dinov2" in names:
-        extractors["dinov2"] = (
+def load_frozen_extractor(name: str) -> tuple[nn.Module, object]:
+    """Load one pretrained image encoder so callers can bound accelerator memory."""
+    if name == "dinov2":
+        return (
             torch.hub.load(
                 "facebookresearch/dinov2",
                 "dinov2_vits14",
@@ -132,24 +145,44 @@ def load_frozen_extractors(names: list[str]) -> dict[str, tuple[nn.Module, objec
             ),
             IMAGE_TRANSFORM,
         )
-    if "efficientnet" in names:
+    if name == "efficientnet":
         model = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
         model.classifier = nn.Identity()
-        extractors["efficientnet"] = (model, IMAGE_TRANSFORM)
-    if "mobilenet_v3_small" in names:
+        return model, IMAGE_TRANSFORM
+    if name == "mobilenet_v3_small":
         model = mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.DEFAULT)
         model.classifier = nn.Identity()
-        extractors["mobilenet_v3_small"] = (model, IMAGE_TRANSFORM)
-    if "repvit_m0_9" in names:
+        return model, IMAGE_TRANSFORM
+    if name == "repvit_m0_9":
         try:
             import timm
         except ImportError as error:
             raise RuntimeError("repvit_m0_9 requires the ml extra with timm") from error
-        extractors["repvit_m0_9"] = (
+        return (
             timm.create_model("repvit_m0_9.dist_450e_in1k", pretrained=True, num_classes=0),
             IMAGE_TRANSFORM,
         )
-    return extractors
+    if name == "convnext_tiny":
+        weights = ConvNeXt_Tiny_Weights.DEFAULT
+        model = convnext_tiny(weights=weights)
+        model.classifier[-1] = nn.Identity()
+        return model, weights.transforms()
+    if name in {"dinov3", "siglip2"}:
+        import timm
+
+        model_id = {
+            "dinov3": "vit_small_patch16_dinov3.lvd1689m",
+            "siglip2": "vit_base_patch16_siglip_224.v2_webli",
+        }[name]
+        model = timm.create_model(model_id, pretrained=True, num_classes=0)
+        config = timm.data.resolve_model_data_config(model)
+        return model, timm.data.create_transform(**config)
+    raise ValueError(f"unknown deep representation: {name}")
+
+
+def load_frozen_extractors(names: list[str]) -> dict[str, tuple[nn.Module, object]]:
+    """Compatibility helper; streaming callers should load one extractor at a time."""
+    return {name: load_frozen_extractor(name) for name in names}
 
 
 def add_embedding_columns(shard: pd.DataFrame, matrices: dict[str, np.ndarray]) -> pd.DataFrame:

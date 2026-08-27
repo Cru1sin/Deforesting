@@ -26,6 +26,18 @@ def cycle_assets(cycle_name: str) -> dict[str, str]:
     }
 
 
+def following_cycle_names(catalog: pd.DataFrame) -> dict[str, str]:
+    """Map each cycle to the immediately following cycle in the same experiment."""
+    ordered = catalog.sort_values(["experiment_id", "start_time"], kind="stable")
+    names = ordered["cycle_name"].astype(str).tolist()
+    experiments = ordered.set_index("cycle_name")["experiment_id"]
+    return {
+        current: following
+        for current, following in zip(names, names[1:], strict=False)
+        if experiments.loc[current] == experiments.loc[following]
+    }
+
+
 def read_manifest(dataset_dir: Path) -> dict[str, Any]:
     """Read and validate the small Dataset-level manifest."""
     payload = _read_object(dataset_dir / MANIFEST_FILENAME)

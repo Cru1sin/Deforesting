@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
+DEFAULT_MAXIMUM_PER_GROUP = 48
+
 
 def selected_names(requested: str, available: tuple[str, ...]) -> tuple[str, ...]:
     """Return all model names or the one explicitly requested."""

@@ -15,6 +15,31 @@ cycle/stage labels. `Process` only produces the 10-second scientific time
 series: resampled values, bounded missing handling, derived physical
 quantities, and baseline residuals.
 
+## Code map
+
+- `src/frost_analysis/`: reusable scientific calculations and the command-line interface.
+- `scripts/data/`: data checks and uploads.
+- `scripts/performance/`: heating-performance and degradation analyses.
+- `scripts/defrost/`: defrost cost and optimal-window analyses.
+- `scripts/rgb/`: RGB assets, labels, features, training, and evaluation.
+- `scripts/figures/`: manuscript and report figures.
+- `tests/`: the same domain layout, with shared setup in `tests/conftest.py`.
+
+Read the project in this order:
+
+1. **CLI / Dataset:** start with `src/frost_analysis/__main__.py` and the dataset modules in `src/frost_analysis/`.
+2. **Performance:** continue with `scripts/performance/` for heating and degradation analyses.
+3. **Economic defrost:** read `scripts/defrost/` for the cost model and optimal window.
+4. **RGB:** read `scripts/rgb/` for image preparation, labels, training, and evaluation.
+5. **Figures:** finish with `scripts/figures/` to see how results become report and manuscript figures.
+
+Run commands from the repository root, for example:
+
+```bash
+uv run python scripts/defrost/analyze_raw_optimal_defrost.py --help
+uv run pytest tests/defrost/test_defrost_cost.py
+```
+
 ## Dataset
 
 Add experiment dates in order:

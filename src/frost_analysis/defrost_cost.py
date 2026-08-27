@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 
@@ -71,6 +72,148 @@ def integrate_energy_kwh(
     return float(energy), coverage
 
 
+def integrate_energy_curve_kwh(
+    timestamps: pd.Series | pd.DatetimeIndex,
+    power_kw: pd.Series,
+    candidate_times: pd.Series | pd.DatetimeIndex | list[pd.Timestamp],
+    *,
+    maximum_gap_seconds: float = 5.0,
+    bridge_internal_gaps: bool = False,
+    extrapolate_endpoints: bool = False,
+) -> pd.DataFrame:
+    """Return gap-aware cumulative energy and coverage at many candidate times."""
+    raw = pd.DataFrame(
+        {
+            "time": pd.to_datetime(timestamps, errors="coerce"),
+            "power": pd.to_numeric(power_kw, errors="coerce"),
+        }
+    )
+    raw_time = pd.DatetimeIndex(raw["time"].dropna().sort_values().drop_duplicates())
+    observed = raw.dropna().sort_values("time").drop_duplicates("time")
+    candidates = pd.DatetimeIndex(pd.to_datetime(candidate_times, errors="coerce"))
+    if observed.empty or raw_time.empty:
+        return pd.DataFrame(
+            {
+                "energy_kwh": 0.0,
+                "coverage": 0.0,
+                "bridged_internal_gap": False,
+                "extrapolated_endpoint": False,
+            },
+            index=range(len(candidates)),
+        )
+    endpoint_rows = np.zeros(len(raw), dtype=bool)
+    endpoint_ranges: list[tuple[pd.Timestamp, pd.Timestamp, bool]] = []
+    if extrapolate_endpoints and len(observed) >= 2:
+        first_observed_time = pd.Timestamp(observed["time"].iloc[0])
+        last_observed_time = pd.Timestamp(observed["time"].iloc[-1])
+        observed_time = observed["time"].astype("int64").to_numpy(dtype=float)
+        observed_power = observed["power"].to_numpy(dtype=float)
+        left_slope = (observed_power[1] - observed_power[0]) / (
+            observed_time[1] - observed_time[0]
+        )
+        right_slope = (observed_power[-1] - observed_power[-2]) / (
+            observed_time[-1] - observed_time[-2]
+        )
+        raw_time_ns = raw["time"].astype("int64").to_numpy(dtype=float)
+        left = raw["time"].lt(observed["time"].iloc[0]) & raw["power"].isna()
+        right = raw["time"].gt(observed["time"].iloc[-1]) & raw["power"].isna()
+        raw.loc[left, "power"] = observed_power[0] + left_slope * (
+            raw_time_ns[left.to_numpy()] - observed_time[0]
+        )
+        raw.loc[right, "power"] = observed_power[-1] + right_slope * (
+            raw_time_ns[right.to_numpy()] - observed_time[-1]
+        )
+        endpoint_rows = (left | right).to_numpy()
+        if left.any():
+            endpoint_ranges.append((pd.Timestamp(raw_time[0]), first_observed_time, False))
+        if right.any():
+            endpoint_ranges.append((last_observed_time, pd.Timestamp(raw_time[-1]), True))
+        observed = raw.dropna().sort_values("time").drop_duplicates("time")
+    dt = observed["time"].diff().dt.total_seconds()
+    short = dt.gt(0) & dt.le(maximum_gap_seconds)
+    bridged = bridge_internal_gaps & dt.gt(maximum_gap_seconds)
+    valid = short | bridged
+    increments = (
+        (observed["power"] + observed["power"].shift()) / 2 * dt / 3600
+    ).where(valid, 0.0)
+    energy = increments.cumsum().to_numpy()
+    covered_seconds = dt.where(valid, 0.0).cumsum().to_numpy()
+    observed_index = pd.DatetimeIndex(observed["time"])
+    positions = observed_index.searchsorted(candidates, side="right") - 1
+    raw_positions = raw_time.searchsorted(candidates, side="right") - 1
+    safe_positions = np.maximum(positions, 0)
+    spans = np.where(
+        raw_positions >= 0,
+        (raw_time[np.maximum(raw_positions, 0)] - raw_time[0]).total_seconds(),
+        0.0,
+    )
+    cumulative = np.where(positions >= 0, energy[safe_positions], 0.0)
+    covered = np.where(positions >= 0, covered_seconds[safe_positions], 0.0)
+    bridged_candidates = np.zeros(len(candidates), dtype=bool)
+    extrapolated_candidates = np.zeros(len(candidates), dtype=bool)
+    if bridge_internal_gaps:
+        candidate_ns = candidates.view("i8")
+        observed_ns = observed_index.view("i8")
+        next_positions = positions + 1
+        bridged_segments = bridged.to_numpy()
+        inside = (
+            (positions >= 0)
+            & (next_positions < len(observed_index))
+            & (candidate_ns > observed_ns[np.maximum(positions, 0)])
+            & (candidate_ns < observed_ns[np.minimum(next_positions, len(observed_index) - 1)])
+            & bridged_segments[np.minimum(next_positions, len(observed_index) - 1)]
+        )
+        left = np.maximum(positions, 0)
+        right = np.minimum(next_positions, len(observed_index) - 1)
+        partial_seconds = np.where(
+            inside,
+            (candidate_ns - observed_ns[left]) / 1e9,
+            0.0,
+        )
+        segment_seconds = dt.to_numpy()[right]
+        left_power = observed["power"].to_numpy()[left]
+        right_power = observed["power"].to_numpy()[right]
+        fraction = np.divide(
+            partial_seconds,
+            segment_seconds,
+            out=np.zeros_like(partial_seconds),
+            where=segment_seconds > 0,
+        )
+        partial_power = left_power + (right_power - left_power) * fraction
+        cumulative += np.where(
+            inside,
+            (left_power + partial_power) / 2 * partial_seconds / 3600,
+            0.0,
+        )
+        covered += partial_seconds
+        bridged_candidates = inside.copy()
+        for gap_index in np.flatnonzero(bridged_segments):
+            bridged_candidates |= (
+                (candidate_ns > observed_ns[gap_index - 1])
+                & (candidate_ns < observed_ns[gap_index])
+            )
+        spans = np.where(
+            candidates >= raw_time[0],
+            (candidates - raw_time[0]).total_seconds(),
+            0.0,
+        )
+    if extrapolate_endpoints and endpoint_rows.any():
+        for left, right, right_inclusive in endpoint_ranges:
+            if right_inclusive:
+                extrapolated_candidates |= (candidates > left) & (candidates <= right)
+            else:
+                extrapolated_candidates |= (candidates >= left) & (candidates < right)
+    coverage = np.divide(covered, spans, out=np.zeros_like(covered), where=spans > 0)
+    return pd.DataFrame(
+        {
+            "energy_kwh": cumulative,
+            "coverage": coverage,
+            "bridged_internal_gap": bridged_candidates,
+            "extrapolated_endpoint": extrapolated_candidates,
+        }
+    )
+
+
 def find_recovery_time(
     timestamps: pd.Series | pd.DatetimeIndex,
     heating_kw: pd.Series,
@@ -126,6 +269,108 @@ def optimize_renewal_cost(
     optimum.update(
         {
             "minimum_location": location,
+            "near_opt_start": near["candidate_time"].min(),
+            "near_opt_end": near["candidate_time"].max(),
+        }
+    )
+    return curve, optimum
+
+
+def _candidate_eligibility_masks(
+    curve: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series, pd.Series, bool]:
+    """Resolve Pe support, integration, and joint eligibility with legacy defaults."""
+    has_pe_support = "pe_supported" in curve
+    if has_pe_support:
+        pe_supported = curve["pe_supported"].fillna(False).astype(bool)
+    elif "optimization_eligible" in curve:
+        pe_supported = curve["optimization_eligible"].fillna(False).astype(bool)
+    else:
+        pe_supported = pd.Series(True, index=curve.index)
+    if "integration_eligible" in curve:
+        integration_eligible = curve["integration_eligible"].fillna(False).astype(bool)
+    elif has_pe_support and "optimization_eligible" in curve:
+        integration_eligible = (
+            curve["optimization_eligible"].fillna(False).astype(bool) | ~pe_supported
+        )
+    else:
+        integration_eligible = pd.Series(True, index=curve.index)
+    eligible = (
+        curve["optimization_eligible"].fillna(False).astype(bool)
+        if "optimization_eligible" in curve
+        else pe_supported & integration_eligible
+    )
+    return pe_supported, integration_eligible, eligible, has_pe_support
+
+
+def optimize_cycle_cop_cost(
+    candidates: pd.DataFrame,
+    *,
+    defrost_recovery_electricity_kwh: float | pd.Series,
+    near_optimal_fraction: float = 0.05,
+    required_end_time: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Minimize full-cycle electricity per delivered heating energy."""
+    curve = candidates.copy()
+    curve["_transient_ticket_kwh"] = defrost_recovery_electricity_kwh
+    curve = curve.sort_values("candidate_time", kind="stable").reset_index(drop=True)
+    if required_end_time is not None and (
+        curve.empty
+        or pd.to_datetime(curve["candidate_time"]).max() < pd.Timestamp(required_end_time)
+    ):
+        raise ValueError("candidate domain does not reach the observed defrost boundary")
+    pe_supported, integration_eligible, eligible, has_pe_support = (
+        _candidate_eligibility_masks(curve)
+    )
+    if not eligible.any():
+        raise ValueError("no_supported_candidates")
+    energy_columns = curve.loc[
+        eligible, ["heating_electricity_kwh", "user_heating_kwh"]
+    ].to_numpy()
+    tickets = pd.to_numeric(curve["_transient_ticket_kwh"], errors="coerce")
+    if curve.empty or not np.isfinite(energy_columns).all() or not np.isfinite(
+        tickets.loc[eligible]
+    ).all():
+        raise ValueError("cycle COP requires finite energy values")
+    if curve.loc[eligible, "user_heating_kwh"].le(0).any():
+        raise ValueError("cycle COP requires positive user heating")
+    curve["cycle_electricity_kwh"] = curve["heating_electricity_kwh"] + tickets
+    curve["inverse_cop"] = curve["cycle_electricity_kwh"] / curve["user_heating_kwh"]
+    if not np.isfinite(curve.loc[eligible, "inverse_cop"]).all():
+        raise ValueError("cycle COP requires finite energy values")
+    curve["cycle_cop"] = 1 / curve["inverse_cop"]
+    curve = curve.drop(columns="_transient_ticket_kwh")
+    best_index = curve["inverse_cop"].where(eligible).idxmin()
+    best_position = curve.index.get_loc(best_index)
+    eligible_positions = np.flatnonzero(eligible.to_numpy())
+    if best_position == eligible_positions[-1]:
+        if best_position == len(curve) - 1:
+            location = "right_observed"
+        elif pe_supported.iloc[best_position + 1 :].any():
+            location = "right_integration_limited"
+        else:
+            location = "right_support_limited"
+    elif best_position == eligible_positions[0]:
+        location = "left_boundary"
+    else:
+        location = "interior"
+    minimum = float(curve.loc[best_index, "inverse_cop"])
+    near = curve.loc[
+        eligible & curve["inverse_cop"].le((1 + near_optimal_fraction) * minimum)
+    ]
+    optimum = curve.loc[best_index].to_dict()
+    optimum.update(
+        {
+            "minimum_location": location,
+            "left_support_removed": bool(
+                (~pe_supported.iloc[: eligible_positions[0]]).any()
+            ),
+            "left_integration_removed": bool(
+                (
+                    pe_supported.iloc[: eligible_positions[0]]
+                    & ~integration_eligible.iloc[: eligible_positions[0]]
+                ).any()
+            ),
             "near_opt_start": near["candidate_time"].min(),
             "near_opt_end": near["candidate_time"].max(),
         }
@@ -201,9 +446,12 @@ def build_partial_pool_curves(
 ) -> pd.DataFrame:
     """Recompute historical candidate costs with experiment-calibrated ticket terms."""
     estimates = partial_pool_group_estimates(events)
-    result = curves.merge(
-        catalog[["cycle_name", "experiment_id"]], on="cycle_name", how="left"
-    ).merge(estimates, on="experiment_id", how="left")
+    result = curves.copy()
+    if "experiment_id" not in result:
+        result = result.merge(
+            catalog[["cycle_name", "experiment_id"]], on="cycle_name", how="left"
+        )
+    result = result.merge(estimates, on="experiment_id", how="left")
     result["partial_pool_cost"] = result["partial_pool_cost"].fillna(
         events["equivalent_cost_kwh"].mean()
     )
