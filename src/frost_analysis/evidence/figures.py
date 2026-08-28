@@ -16,7 +16,7 @@ from matplotlib.colors import ListedColormap
 from matplotlib.figure import Figure
 from numpy.typing import NDArray
 
-from ..dataset_loader import DatasetLoader
+from ..dataset import DatasetLoader
 from .contracts import EvidenceBundle
 from .metrics import observed_mask
 from .settings import EvidenceSettings

@@ -6,8 +6,10 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-from frost_analysis.config import find_project_root
-from frost_analysis.dataset import (
+from frost_analysis.dataset import DatasetLoader
+from frost_analysis.dataset.check import validate_dataset
+from frost_analysis.dataset.config import find_project_root
+from frost_analysis.dataset.core import (
     add_dataset,
     aggregate_original,
     edit_dataset,
@@ -16,8 +18,6 @@ from frost_analysis.dataset import (
     render_dataset,
     review_cycle,
 )
-from frost_analysis.dataset_loader import DatasetLoader
-from frost_analysis.dataset_validation import validate_dataset
 from frost_analysis.evidence import EvidenceSettings, build_evidence, write_evidence
 
 
@@ -105,7 +105,7 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
         print(add_dataset(arguments.input_dir, arguments.dataset))
         return 0
     if arguments.dataset_command == "replace":
-        from frost_analysis.dataset import replace_dataset
+        from frost_analysis.dataset.core import replace_dataset
 
         print(replace_dataset(arguments.input_dir, arguments.dataset))
         return 0
