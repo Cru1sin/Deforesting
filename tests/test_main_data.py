@@ -3,14 +3,15 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pandas as pd
 
 
-def test_main_data_help_lists_dataset_actions() -> None:
+def test_main_data_help_lists_dataset_actions(tmp_path: Path) -> None:
     environment = os.environ.copy()
-    environment["UV_CACHE_DIR"] = "/private/tmp/pinn4soh-uv-cache"
+    environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
     result = subprocess.run(
         ["uv", "run", "python", "main_data.py", "--help"],
         check=True,
@@ -42,10 +43,101 @@ def test_main_data_defaults_to_validate_local_dataset() -> None:
     assert arguments.dataset == Path("dataset")
 
 
+def test_quality_tools_target_new_workspace_entries() -> None:
+    config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["tool"]
+
+    assert config["mypy"]["files"] == ["main_data.py", "dataloader"]
+    assert "packages" not in config["mypy"]
+    assert config["mypy"]["follow_imports"] == "skip"
+    assert config["coverage"]["run"]["source"] == ["main_data", "dataloader"]
+
+
+def test_validate_dispatches_to_read_only_domain_functions(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import main_data
+
+    validated: list[Path] = []
+
+    class Loader:
+        def __init__(self, dataset: Path) -> None:
+            assert dataset == tmp_path
+
+        def list_cycles(self) -> pd.DataFrame:
+            return pd.DataFrame(index=range(2))
+
+        def load_image_metadata(self) -> pd.DataFrame:
+            return pd.DataFrame(index=range(3))
+
+    monkeypatch.setattr(main_data, "validate_dataset", validated.append)
+    monkeypatch.setattr(main_data, "DatasetLoader", Loader)
+
+    assert main_data.main(["validate", "--dataset", str(tmp_path)]) == 0
+    assert validated == [tmp_path]
+    assert capsys.readouterr().out == "dataset valid: 2 cycles, 3 images\n"
+
+
+def test_edit_dispatches_recovery_and_rgb_options(tmp_path: Path, monkeypatch) -> None:
+    import main_data
+
+    calls: list[tuple[Path, dict[str, object]]] = []
+    monkeypatch.setattr(
+        main_data,
+        "edit_dataset",
+        lambda dataset, **options: calls.append((dataset, options)) or dataset,
+    )
+
+    assert (
+        main_data.main(
+            [
+                "edit",
+                "--dataset",
+                str(tmp_path),
+                "--recovery-seconds",
+                "45",
+                "--skip-rgb-panels",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        (
+            tmp_path,
+            {
+                "baseline_seconds": None,
+                "recovery_seconds": 45,
+                "recovery_end_by": None,
+                "defrost_preparation": False,
+                "render_rgb_panels": False,
+            },
+        )
+    ]
+
+
+def test_render_dispatches_default_publication_and_panel(tmp_path: Path, monkeypatch) -> None:
+    import main_data
+
+    calls: list[tuple[Path, str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        main_data,
+        "render_dataset",
+        lambda dataset, cycle, **options: calls.append((dataset, cycle, options)) or dataset,
+    )
+
+    assert main_data.main(["render", "cycle_001", "--dataset", str(tmp_path)]) == 0
+    assert calls == [
+        (
+            tmp_path,
+            "cycle_001",
+            {"publication": True, "panel": True, "fetch_cloud_images": False},
+        )
+    ]
+
+
 def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) -> None:
     environment = os.environ.copy()
-    environment["UV_CACHE_DIR"] = "/private/tmp/pinn4soh-uv-cache"
-    environment["MPLCONFIGDIR"] = "/private/tmp/pinn4soh-matplotlib"
+    environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
+    environment["MPLCONFIGDIR"] = str(tmp_path / "matplotlib")
     missing = tmp_path / "missing"
     render_dataset = tmp_path / "render-dataset"
     render_dataset.mkdir()

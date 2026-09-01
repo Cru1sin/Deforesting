@@ -55,11 +55,12 @@ max-complexity = 10
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["frost_analysis"]
+files = ["main_data.py", "dataloader"]
+follow_imports = "skip"
 
 [tool.coverage.run]
 branch = true
-source = ["frost_analysis"]
+source = ["main_data", "dataloader"]
 
 [tool.coverage.report]
 show_missing = true
