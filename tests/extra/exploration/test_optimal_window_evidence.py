@@ -1183,6 +1183,82 @@ def test_preparation_inclusive_events_move_preparation_from_features_to_target()
     assert audit.set_index("cycle_name").loc["missing_boundary", "status"] == "excluded"
 
 
+@pytest.mark.parametrize(
+    ("water_out_temperature", "expected_kwh"),
+    [(35.0, 0.09675), (25.0, -0.09675)],
+)
+def test_preparation_events_integrate_signed_water_heat(
+    water_out_temperature: float, expected_kwh: float
+) -> None:
+    module = _module()
+
+    class Loader:
+        @staticmethod
+        def load_cycle_original(_cycle: str, columns: list[str]) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2026-01-01", periods=122, freq="s"),
+                    "power_total": 2.0,
+                    "coil_temperature": -5.0,
+                    "water_flow": 1.0,
+                    "water_in_temperature": 30.0,
+                    "water_out_temperature": water_out_temperature,
+                }
+            ).reindex(columns=columns)
+
+    tickets = pd.DataFrame(
+        {"cycle_name": ["cycle"], "experiment_id": ["experiment"]}
+    )
+    catalog = pd.DataFrame(
+        {
+            "cycle_name": ["cycle"],
+            "defrost_preparation_start": ["2026-01-01 00:01:00"],
+            "defrost_start": ["2026-01-01 00:02:00"],
+            "defrost_end": ["2026-01-01 00:02:02"],
+            "baseline_start": [None],
+            "baseline_end": [None],
+        }
+    )
+
+    events, _ = module.build_preparation_inclusive_events(Loader(), tickets, catalog)
+
+    assert events.loc[0, "preparation_signed_heat_kwh"] == pytest.approx(expected_kwh)
+
+
+def test_preparation_heat_models_leave_out_whole_experiments() -> None:
+    module = _module()
+    events = pd.DataFrame(
+        {
+            "cycle_name": ["a1", "a2", "b1", "b2", "c1", "c2"],
+            "experiment_id": ["a", "a", "b", "b", "c", "c"],
+            "preparation_signed_heat_kwh": [-0.2, -0.1, 0.1, 0.2, 0.3, 0.4],
+            "water_in_temperature": [30, 31, 32, 33, 34, 35],
+            "water_out_temperature": [29, 30, 33, 34, 36, 37],
+            "preparation_duration_minutes": [1, 1, 2, 2, 3, 3],
+            "t3_prepreparation_c": [-8, -7, -6, -5, -4, -3],
+            "evaporating_pressure": [0.30, 0.31, 0.32, 0.33, 0.34, 0.35],
+        }
+    )
+
+    summary, predictions = module.evaluate_preparation_heat_models(events)
+
+    held_a = predictions.loc[
+        predictions["experiment_id"].eq("a")
+        & predictions["model"].eq("train_mean")
+    ]
+    assert held_a["predicted_heat_kwh"].eq(0.25).all()
+    assert set(summary["model"]) == {
+        "train_mean",
+        "water",
+        "water_duration",
+        "water_duration_t3_pe",
+        "water_duration_t3_pe_squared",
+    }
+    assert summary["event_count"].eq(len(events)).all()
+    assert summary["experiment_count"].eq(3).all()
+    assert predictions.groupby("model").size().eq(len(events)).all()
+
+
 def test_defrost_rule_predictions_leave_out_experiment_and_keep_recovery_separate() -> None:
     module = _module()
     events = pd.DataFrame(
@@ -1513,6 +1589,90 @@ def test_conditional_curve_returns_window_and_earliest_minimum() -> None:
     assert result["t_star_conditional"] == pd.Timestamp("2026-01-01 00:01:00")
     assert result["near_opt_start_conditional"] == pd.Timestamp("2026-01-01 00:01:00")
     assert result["near_opt_end_conditional"] == pd.Timestamp("2026-01-01 00:02:00")
+
+
+def test_component_optimum_recomputes_cost_with_strict_joint_support() -> None:
+    module = _module()
+    candidates = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range("2026-01-01", periods=3, freq="1min"),
+            "heating_electricity_kwh": [1.0, 1.5, 2.0],
+            "water_heating_kwh": [1.0, 3.0, 5.0],
+            "integration_eligible": [True, True, True],
+            "pe_supported": [True, True, True],
+            "qd_supported": [False, True, True],
+            "t_star": pd.Timestamp("1999-01-01"),
+        }
+    )
+
+    curve, point = module._recompute_component_optimum(
+        candidates,
+        ed_kwh=pd.Series([0.0, 0.0, 0.0]),
+        qprep_kwh=pd.Series([0.0, 0.0, 0.0]),
+        qd_kwh=pd.Series([0.0, 0.0, 0.0]),
+        recovery_electricity_kwh=0.0,
+        recovery_heat_kwh=0.0,
+    )
+
+    assert point["candidate_time"] == pd.Timestamp("2026-01-01 00:02:00")
+    assert curve["optimization_eligible"].tolist() == [False, True, True]
+    assert point["candidate_time"] != candidates.loc[0, "t_star"]
+
+
+def test_renewal_water_table_flags_a_fully_extrapolated_cycle() -> None:
+    module = _module()
+    candidates = pd.DataFrame(
+        {
+            "cycle_name": ["cycle"] * 2,
+            "candidate_time": pd.date_range("2026-01-01", periods=2, freq="1min"),
+            "heating_electricity_kwh": [1.0, 2.0],
+            "water_heating_kwh": [3.0, 5.0],
+            "defrost_electricity_kwh": [0.1, 0.1],
+            "revised_qprep_kwh": [0.1, 0.1],
+            "revised_qd_kwh": [0.2, 0.2],
+            "integration_eligible": True,
+            "pe_supported": True,
+            "qd_supported": True,
+            "qprep_supported": False,
+        }
+    )
+
+    result = module._renewal_water_table(candidates)
+
+    assert not result["abstain"].any()
+    assert result["inverse_cop"].notna().all()
+    assert result["optimization_eligible"].all()
+    assert not result["model_supported"].any()
+    assert not result["t_star_model_supported"].any()
+
+
+def test_renewal_water_table_marks_but_keeps_extrapolated_candidates() -> None:
+    module = _module()
+    candidates = pd.DataFrame(
+        {
+            "cycle_name": ["cycle"] * 3,
+            "candidate_time": pd.date_range("2026-01-01", periods=3, freq="1min"),
+            "heating_electricity_kwh": [1.0, 2.0, 3.0],
+            "water_heating_kwh": [2.0, 4.0, 6.0],
+            "defrost_electricity_kwh": [0.1] * 3,
+            "revised_qprep_kwh": [0.1] * 3,
+            "revised_qd_kwh": [0.2] * 3,
+            "integration_eligible": True,
+            "pe_supported": True,
+            "qd_supported": True,
+            "qprep_supported": [False, True, True],
+        }
+    )
+
+    result = module._renewal_water_table(candidates)
+
+    assert not result["abstain"].any()
+    assert result["valid"].all()
+    assert result["optimization_eligible"].all()
+    assert result["model_supported"].tolist() == [False, True, True]
+    assert result["inverse_cop"].notna().all()
+    assert result["t_star"].notna().all()
+    assert result["relative_regret"].notna().all()
 
 
 def test_candidate_features_skip_failed_curves_without_valid_stable_start(

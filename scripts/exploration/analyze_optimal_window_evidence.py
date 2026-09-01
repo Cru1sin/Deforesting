@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -23,9 +25,16 @@ from sklearn.preprocessing import StandardScaler
 
 from frost_analysis.cost.core import (
     build_partial_pool_curves,
+    count_true_runs,
     integrate_energy_kwh,
     leave_one_event_out_partial_pool,
+    optimize_cycle_cop_cost,
     water_side_heating_kw,
+)
+from frost_analysis.cost.selected import (
+    PREPARATION_HEAT_COEFFICIENTS,
+    QD_COEFFICIENTS,
+    QD_SUPPORT,
 )
 from frost_analysis.dataset.core import render_publication_asset
 from frost_analysis.dataset.images import (
@@ -249,6 +258,22 @@ PREPARATION_NETWORK_HIDDEN_LAYERS = (4,)
 PREPARATION_NETWORK_RIDGE_ALPHA = 1.0
 PREPARATION_NETWORK_MLP_ALPHA = 1.0
 PREPARATION_NETWORK_SEED = 20260821
+PREPARATION_HEAT_FEATURES = {
+    "train_mean": [],
+    "water": ["water_in_temperature", "water_out_temperature"],
+    "water_duration": [
+        "water_in_temperature",
+        "water_out_temperature",
+        "preparation_duration_minutes",
+    ],
+    "water_duration_t3_pe": [
+        "water_in_temperature",
+        "water_out_temperature",
+        "preparation_duration_minutes",
+        "t3_prepreparation_c",
+        "evaporating_pressure",
+    ],
+}
 
 mpl.rcParams.update(
     {
@@ -1550,7 +1575,14 @@ def build_preparation_inclusive_events(  # noqa: C901
         )
         target = frame.reindex(
             pd.date_range(preparation_start, periods=duration_s, freq="s")
-        )[["power_total"]].apply(pd.to_numeric, errors="coerce").interpolate(
+        )[
+            [
+                "power_total",
+                "water_flow",
+                "water_in_temperature",
+                "water_out_temperature",
+            ]
+        ].apply(pd.to_numeric, errors="coerce").interpolate(
             method="time", limit_area="inside"
         )
         window = frame.reindex(
@@ -1632,6 +1664,15 @@ def build_preparation_inclusive_events(  # noqa: C901
             )
 
         power = target["power_total"].to_numpy(dtype=float)
+        preparation = target.iloc[:preparation_duration_s]
+        water_complete = preparation[
+            ["water_flow", "water_in_temperature", "water_out_temperature"]
+        ].notna().all().all()
+        preparation_signed_heat_kwh = (
+            float(water_side_heating_kw(preparation).sum() / 3600.0)
+            if water_complete
+            else np.nan
+        )
         event_rows.append(
             {
                 "cycle_name": event.cycle_name,
@@ -1641,9 +1682,13 @@ def build_preparation_inclusive_events(  # noqa: C901
                 "defrost_end": end,
                 "inclusive_duration_minutes": duration_s / 60.0,
                 "preparation_duration_s": preparation_duration_s,
+                "preparation_duration_minutes": preparation_duration_s / 60.0,
                 "inclusive_energy_kwh": power.sum() / 3600.0,
                 "preparation_energy_kwh": power[:preparation_duration_s].sum()
                 / 3600.0,
+                "preparation_signed_heat_kwh": preparation_signed_heat_kwh,
+                "water_in_temperature": median("water_in_temperature"),
+                "water_out_temperature": median("water_out_temperature"),
                 "t3_prepreparation_c": window["coil_temperature"].median(),
                 "coil_temperature_slope_per_min": slope(
                     window["coil_temperature"]
@@ -1902,6 +1947,79 @@ def evaluate_preparation_network(
     return pd.DataFrame(summary_rows), predictions
 
 
+def evaluate_preparation_heat_models(
+    events: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Predict signed preparation-stage water heat with experiment-held-out Ridge."""
+    target = "preparation_signed_heat_kwh"
+    feature_sets = dict(PREPARATION_HEAT_FEATURES)
+    base_features = feature_sets["water_duration_t3_pe"]
+    squared_features = [f"{feature}_squared" for feature in base_features]
+    feature_sets["water_duration_t3_pe_squared"] = [
+        *base_features,
+        *squared_features,
+    ]
+    events = events.loc[events[target].notna()].copy()
+    for feature in base_features:
+        events[f"{feature}_squared"] = events[feature].pow(2)
+
+    rows = []
+    for experiment in sorted(events["experiment_id"].unique()):
+        train = events.loc[~events["experiment_id"].eq(experiment)]
+        test = events.loc[events["experiment_id"].eq(experiment)]
+        for model, features in feature_sets.items():
+            predicted = _ridge_predict(train, test, features, target)
+            for row_index, (_, event) in enumerate(test.iterrows()):
+                rows.append(
+                    {
+                        "cycle_name": event["cycle_name"],
+                        "experiment_id": experiment,
+                        "model": model,
+                        "selected_features": ";".join(features),
+                        "actual_heat_kwh": event[target],
+                        "predicted_heat_kwh": predicted[row_index],
+                    }
+                )
+    predictions = pd.DataFrame(rows)
+    baseline = predictions.loc[predictions["model"].eq("train_mean")]
+    baseline_error = baseline["predicted_heat_kwh"] - baseline["actual_heat_kwh"]
+    baseline_mse = float(baseline_error.pow(2).mean())
+    baseline_experiment_mse = baseline_error.pow(2).groupby(
+        baseline["experiment_id"]
+    ).mean()
+    summary_rows = []
+    for model, values in predictions.groupby("model", sort=False):
+        error = values["predicted_heat_kwh"] - values["actual_heat_kwh"]
+        experiment_mse = error.pow(2).groupby(values["experiment_id"]).mean()
+        summary_rows.append(
+            {
+                "model": model,
+                "selected_features": values["selected_features"].iloc[0],
+                "event_count": len(values),
+                "experiment_count": values["experiment_id"].nunique(),
+                "mse_kwh2": error.pow(2).mean(),
+                "rmse_kwh": float(np.sqrt(error.pow(2).mean())),
+                "mae_kwh": error.abs().mean(),
+                "bias_kwh": error.mean(),
+                "macro_experiment_mse_kwh2": experiment_mse.mean(),
+                "improvement_vs_train_mean_pct": 100.0
+                * (baseline_mse - error.pow(2).mean())
+                / baseline_mse,
+                "improved_experiment_count": int(
+                    experiment_mse.lt(baseline_experiment_mse).sum()
+                ),
+                "negative_prediction_count": int(
+                    values["predicted_heat_kwh"].lt(0).sum()
+                ),
+            }
+        )
+    summary = pd.DataFrame(summary_rows)
+    summary["selected_best_event_mse"] = summary["mse_kwh2"].eq(
+        summary["mse_kwh2"].min()
+    )
+    return summary, predictions
+
+
 def write_preparation_inclusive_sensor_evidence(
     dataset: Path, output: Path
 ) -> pd.DataFrame:
@@ -2061,6 +2179,166 @@ def write_preparation_inclusive_sensor_evidence(
     )
     network_predictions.to_csv(
         output / "preparation_inclusive_network_predictions.csv", index=False
+    )
+    return summary
+
+
+def preparation_heat_model_coefficients(
+    events: pd.DataFrame, selected_model: str
+) -> pd.DataFrame:
+    """Fit descriptive full-cohort Ridge models and expose raw-unit coefficients."""
+    target = "preparation_signed_heat_kwh"
+    feature_sets = dict(PREPARATION_HEAT_FEATURES)
+    base_features = feature_sets["water_duration_t3_pe"]
+    feature_sets["water_duration_t3_pe_squared"] = [
+        *base_features,
+        *(f"{feature}_squared" for feature in base_features),
+    ]
+    values = events.loc[events[target].notna()].copy()
+    for feature in base_features:
+        values[f"{feature}_squared"] = values[feature].pow(2)
+
+    rows = []
+    for model_name, features in feature_sets.items():
+        if not features:
+            rows.append(
+                {
+                    "model": model_name,
+                    "term": "intercept",
+                    "coefficient": values[target].mean(),
+                    "training_min": np.nan,
+                    "training_max": np.nan,
+                    "selected_best_event_mse": model_name == selected_model,
+                }
+            )
+            continue
+        model = make_pipeline(
+            SimpleImputer(strategy="median"), StandardScaler(), Ridge(alpha=1.0)
+        ).fit(values[features], values[target])
+        scaler = model.named_steps["standardscaler"]
+        ridge = model.named_steps["ridge"]
+        coefficients = ridge.coef_ / scaler.scale_
+        intercept = ridge.intercept_ - np.dot(coefficients, scaler.mean_)
+        rows.append(
+            {
+                "model": model_name,
+                "term": "intercept",
+                "coefficient": intercept,
+                "training_min": np.nan,
+                "training_max": np.nan,
+                "selected_best_event_mse": model_name == selected_model,
+            }
+        )
+        rows.extend(
+            {
+                "model": model_name,
+                "term": feature,
+                "coefficient": coefficient,
+                "training_min": values[feature].min(),
+                "training_max": values[feature].max(),
+                "selected_best_event_mse": model_name == selected_model,
+            }
+            for feature, coefficient in zip(features, coefficients, strict=True)
+        )
+    return pd.DataFrame(rows)
+
+
+def write_preparation_heat_evidence(dataset: Path, output: Path) -> pd.DataFrame:
+    """Fit and plot signed water heat from preparation start to defrost start."""
+    loader = DatasetLoader(dataset)
+    catalog = loader.list_cycles()
+    boundaries = catalog[["defrost_preparation_start", "defrost_start"]].apply(
+        pd.to_datetime, errors="coerce", format="mixed"
+    )
+    candidates = catalog.loc[
+        catalog["status"].eq("valid") & boundaries.notna().all(axis=1),
+        ["cycle_name", "experiment_id"],
+    ]
+    events, audit = build_preparation_inclusive_events(loader, candidates, catalog)
+    unavailable = events["preparation_signed_heat_kwh"].isna()
+    excluded_cycles = events.loc[unavailable, "cycle_name"]
+    audit.loc[audit["cycle_name"].isin(excluded_cycles), ["status", "reason"]] = [
+        "excluded",
+        "incomplete_preparation_water_heat",
+    ]
+    model_events = events.loc[~unavailable].reset_index(drop=True)
+    summary, predictions = evaluate_preparation_heat_models(model_events)
+    selected_model = str(
+        summary.sort_values("mse_kwh2", kind="stable").iloc[0]["model"]
+    )
+
+    output.mkdir(parents=True, exist_ok=True)
+    audit.merge(events, on="cycle_name", how="left").to_csv(
+        output / "preparation_heat_events.csv", index=False
+    )
+    predictions.to_csv(output / "preparation_heat_predictions.csv", index=False)
+    summary.to_csv(output / "preparation_heat_model_comparison.csv", index=False)
+    preparation_heat_model_coefficients(model_events, selected_model).to_csv(
+        output / "preparation_heat_model_coefficients.csv", index=False
+    )
+
+    labels = {
+        "train_mean": "Training-fold mean",
+        "water": "Inlet + outlet water temperature",
+        "water_duration": "Water temperatures + preparation duration",
+        "water_duration_t3_pe": "Water temperatures + duration + T3 + Pe",
+        "water_duration_t3_pe_squared": "Five inputs + individual squared terms",
+    }
+    comparison = summary.copy()
+    comparison["group_id"] = "A"
+    comparison["group_title"] = "Which causal inputs predict preparation-stage heat?"
+    comparison["target"] = "signed preparation-stage water heat"
+    comparison["method_id"] = comparison["model"]
+    comparison["method_label"] = comparison["model"].map(labels)
+    comparison["method_role"] = np.where(
+        comparison["model"].eq(selected_model),
+        "selected_deployable",
+        np.where(comparison["model"].eq("train_mean"), "baseline", "comparison"),
+    )
+    comparison = comparison.rename(
+        columns={
+            "mse_kwh2": "event_mse_kwh2",
+            "macro_experiment_mse_kwh2": "macro_mse_kwh2",
+        }
+    )
+    baseline = comparison.loc[comparison["model"].eq("train_mean")].iloc[0]
+    comparison["event_relative_mse_pct"] = (
+        100 * comparison["event_mse_kwh2"] / baseline["event_mse_kwh2"]
+    )
+    comparison["macro_relative_mse_pct"] = (
+        100 * comparison["macro_mse_kwh2"] / baseline["macro_mse_kwh2"]
+    )
+    plot_defrost_energy_method_comparison(
+        comparison,
+        output.parent / "图表" / "figure_preparation_heat_method_comparison",
+        title="Held-out models quantify signed preparation-stage water heat",
+        height_mm=88,
+    )
+
+    fit = predictions.loc[predictions["model"].eq(selected_model)].rename(
+        columns={
+            "actual_heat_kwh": "actual_energy_kwh",
+            "predicted_heat_kwh": "loeo_predicted_energy_kwh",
+        }
+    )
+    fit["loeo_residual_kwh"] = (
+        fit["loeo_predicted_energy_kwh"] - fit["actual_energy_kwh"]
+    )
+    fit["absolute_loeo_residual_kwh"] = fit["loeo_residual_kwh"].abs()
+    fit["label_largest_residual"] = False
+    fit.loc[
+        fit["absolute_loeo_residual_kwh"].nlargest(min(5, len(fit))).index,
+        "label_largest_residual",
+    ] = True
+    fit.to_csv(output / "preparation_heat_cycle_fit_source.csv", index=False)
+    plot_pe_linear_cycle_fit(
+        fit,
+        output.parent / "图表" / "figure_preparation_heat_cycle_fit",
+        parity=True,
+        prediction_label=labels[selected_model],
+        title="The selected model predicts signed preparation-stage water heat",
+        x_label="Observed signed preparation-stage water heat [kWh]",
+        y_label="LOEO-predicted signed preparation-stage water heat [kWh]",
     )
     return summary
 
@@ -3461,6 +3739,8 @@ def plot_pe_linear_cycle_fit(
     parity: bool = False,
     prediction_label: str = "Pe-quadratic Ridge LOEO prediction",
     title: str | None = None,
+    x_label: str | None = None,
+    y_label: str | None = None,
 ) -> None:
     """Plot paired observed and LOEO predictions against Pe or an identity line."""
     observed_color = "#777777"
@@ -3557,8 +3837,12 @@ def plot_pe_linear_cycle_fit(
         linewidth=0.9,
         zorder=4,
     )
-    labeled = source.loc[source["label_largest_residual"]].sort_values(
-        "actual_energy_kwh"
+    labeled = (
+        source.iloc[0:0]
+        if parity
+        else source.loc[source["label_largest_residual"]].sort_values(
+            "actual_energy_kwh"
+        )
     )
     spacing = max(np.ptp(source["actual_energy_kwh"]) * 0.025, 0.0024)
     label_x = labeled[x_column].max() + max(np.ptp(source[x_column]) * 0.03, 0.012)
@@ -3659,14 +3943,20 @@ def plot_pe_linear_cycle_fit(
     if title:
         fig.text(0.02, 0.98, title, fontsize=9, fontweight="bold", va="top")
     axis.set_xlabel(
-        "Observed active-defrost absorbed heat [kWh]"
-        if parity
-        else "Median Pe in 60 s before preparation [MPa]"
+        x_label
+        or (
+            "Observed active-defrost absorbed heat [kWh]"
+            if parity
+            else "Median Pe in 60 s before preparation [MPa]"
+        )
     )
     axis.set_ylabel(
-        "Predicted active-defrost absorbed heat [kWh]"
-        if parity
-        else "Preparation-inclusive energy [kWh]"
+        y_label
+        or (
+            "Predicted active-defrost absorbed heat [kWh]"
+            if parity
+            else "Preparation-inclusive energy [kWh]"
+        )
     )
     axis.grid(color="#E5E9EC", lw=0.5)
     axis.set_axisbelow(True)
@@ -3870,6 +4160,707 @@ def _save_figure(
             facecolor="white",
         )
     plt.close(fig)
+
+
+def _recompute_component_optimum(
+    candidates: pd.DataFrame,
+    *,
+    ed_kwh: float | pd.Series,
+    qprep_kwh: float | pd.Series,
+    qd_kwh: float | pd.Series,
+    recovery_electricity_kwh: float | pd.Series,
+    recovery_heat_kwh: float | pd.Series,
+    heat_column: str = "water_heating_kwh",
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    """Recompute one component-defined optimum under the joint support rule."""
+    values = candidates.copy()
+    values["user_heating_kwh"] = values[heat_column] + qprep_kwh - qd_kwh
+    delivered = pd.to_numeric(
+        values["user_heating_kwh"] + recovery_heat_kwh, errors="coerce"
+    )
+    values["optimization_eligible"] = (
+        values["integration_eligible"].fillna(False).astype(bool)
+        & values["pe_supported"].fillna(False).astype(bool)
+        & values["qd_supported"].fillna(False).astype(bool)
+        & (
+            values["qprep_supported"].fillna(False).astype(bool)
+            if "qprep_supported" in values
+            else True
+        )
+        & np.isfinite(delivered)
+        & delivered.gt(0)
+    )
+    return optimize_cycle_cop_cost(
+        values,
+        defrost_recovery_electricity_kwh=pd.to_numeric(ed_kwh, errors="coerce")
+        + recovery_electricity_kwh,
+        defrost_recovery_heat_kwh=recovery_heat_kwh,
+    )
+
+
+def _candidate_qd_components(curves: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    """Predict candidate duration from T3 by LOEO Ridge, then candidate QD."""
+    parts = []
+    for experiment, test in curves.groupby("experiment_id", sort=False):
+        train = events.loc[~events["experiment_id"].eq(experiment)].rename(
+            columns={"coil_temperature": "candidate_t3"}
+        )
+        values = test.copy()
+        values["predicted_rule_duration_minutes"] = _ridge_predict(
+            train,
+            values.rename(columns={"coil_temperature": "candidate_t3"}),
+            ["candidate_t3"],
+            "rule_defrost_duration_minutes",
+        )
+        values["predicted_rule_duration_minutes"] = values[
+            "predicted_rule_duration_minutes"
+        ].clip(
+            train["rule_defrost_duration_minutes"].min(),
+            train["rule_defrost_duration_minutes"].max(),
+        )
+        parts.append(values)
+    result = pd.concat(parts, ignore_index=True)
+    states = {
+        "water_in_temperature": pd.to_numeric(
+            result["water_in_temperature"], errors="coerce"
+        ),
+        "water_out_temperature": pd.to_numeric(
+            result["water_out_temperature"], errors="coerce"
+        ),
+        "rule_defrost_duration_minutes": pd.to_numeric(
+            result["predicted_rule_duration_minutes"], errors="coerce"
+        ),
+        "coil_temperature": pd.to_numeric(result["coil_temperature"], errors="coerce"),
+        "evaporating_pressure": pd.to_numeric(
+            result["evaporating_pressure_mpa"], errors="coerce"
+        ),
+    }
+    prediction = pd.Series(QD_COEFFICIENTS["intercept"], index=result.index)
+    supported = pd.Series(True, index=result.index)
+    for term, values in states.items():
+        prediction += QD_COEFFICIENTS[term] * values
+        prediction += QD_COEFFICIENTS[f"{term}_squared"] * values.pow(2)
+        lower, upper = QD_SUPPORT[term]
+        supported &= values.between(lower, upper, inclusive="both")
+    result["revised_qd_kwh"] = prediction
+    result["qd_supported"] = supported & np.isfinite(prediction)
+    return result
+
+
+def _renewal_water_table(revised: pd.DataFrame) -> pd.DataFrame:
+    """Evaluate the full cost domain and retain empirical-support diagnostics."""
+    tables = []
+    for _cycle_name, values in revised.groupby("cycle_name", sort=True):
+        values = values.sort_values("candidate_time", kind="stable").reset_index(
+            drop=True
+        )
+        support_columns = values[["pe_supported", "qd_supported", "qprep_supported"]]
+        model_supported = support_columns.fillna(False).all(axis=1)
+        extrapolated = values.copy()
+        extrapolated[list(support_columns)] = True
+        try:
+            curve, point = _recompute_component_optimum(
+                extrapolated,
+                ed_kwh=extrapolated["defrost_electricity_kwh"],
+                qprep_kwh=extrapolated["revised_qprep_kwh"],
+                qd_kwh=extrapolated["revised_qd_kwh"],
+                recovery_electricity_kwh=0.0,
+                recovery_heat_kwh=0.0,
+            )
+            curve[list(support_columns)] = support_columns.to_numpy()
+            curve["model_supported"] = model_supported.to_numpy()
+            eligible = curve["optimization_eligible"].fillna(False).astype(bool)
+            curve["inverse_cop"] = curve["inverse_cop"].where(eligible)
+            curve["candidate_domain_complete"] = eligible.all()
+            minimum = curve["inverse_cop"].min()
+            curve["relative_regret"] = (curve["inverse_cop"] / minimum - 1).where(
+                eligible
+            )
+            curve["near_optimal_1pct"] = eligible & curve["relative_regret"].le(0.01)
+            curve["near_optimal_5pct"] = eligible & curve["relative_regret"].le(0.05)
+            curve["t_star"] = point["candidate_time"]
+            optimum_index = curve["inverse_cop"].where(eligible).idxmin()
+            curve["t_star_model_supported"] = bool(
+                curve.loc[optimum_index, "model_supported"]
+            )
+            curve["abstain"] = False
+        except ValueError:
+            curve = values.copy()
+            curve["optimization_eligible"] = False
+            curve["candidate_domain_complete"] = False
+            curve["model_supported"] = model_supported
+            for column in (
+                "inverse_cop",
+                "relative_regret",
+                "cycle_cop",
+                "cycle_electricity_kwh",
+                "cycle_user_heating_kwh",
+            ):
+                curve[column] = np.nan
+            curve["near_optimal_1pct"] = False
+            curve["near_optimal_5pct"] = False
+            curve["t_star"] = pd.NaT
+            curve["t_star_model_supported"] = False
+            curve["abstain"] = True
+        curve["pe_support_status"] = curve.get("support_status", "")
+        curve["support_status"] = np.select(
+            [
+                ~curve["integration_eligible"].fillna(False),
+                ~curve["pe_supported"].fillna(False),
+                ~curve["qd_supported"].fillna(False),
+                ~curve["qprep_supported"].fillna(False),
+                ~curve["optimization_eligible"].fillna(False),
+            ],
+            ["integration", "Pe", "QD", "Qprep", "nonpositive_heat"],
+            default="supported",
+        )
+        curve["algorithm"] = "renewal_water"
+        curve["valid"] = ~curve["abstain"]
+        tables.append(curve)
+    return pd.concat(tables, ignore_index=True)
+
+
+def _plot_component_attribution(source: pd.DataFrame, output: Path) -> None:
+    source = source.loc[~source["stage"].isin({"heating_only", "recovery_none"})]
+    labels = list(dict.fromkeys(source["label"]))
+    shifts = [source.loc[source["label"].eq(label), "shift_minutes"].dropna() for label in labels]
+    fig, axis = plt.subplots(figsize=(7.2, 3.7))
+    axis.boxplot(shifts, tick_labels=labels, showfliers=False)
+    axis.axhline(0, color="#555555", lw=0.8)
+    axis.set_ylabel("Cycle optimum shift [min]")
+    axis.tick_params(axis="x", rotation=28)
+    axis.grid(axis="y", color="#E5E9EC", lw=0.5)
+    fig.tight_layout()
+    _save_figure(fig, output)
+
+
+def _plot_model_selection(summary: pd.DataFrame, output: Path) -> None:
+    columns = [
+        "closed_control_volume",
+        "consistent_heat_boundary",
+        "causal_candidate_inputs",
+        "support_constrained",
+        "action_dependent_reset_model",
+        "median_1pct_span_minutes",
+        "median_5pct_span_minutes",
+        "multiple_1pct_segments_fraction",
+        "median_eligible_candidate_fraction",
+        "bootstrap_within_5min_fraction",
+    ]
+    raw = summary[columns]
+    matrix = raw.astype(float).fillna(0)
+    for column in columns[5:]:
+        width = matrix[column].max() - matrix[column].min()
+        matrix[column] = (
+            (matrix[column] - matrix[column].min()) / width if width > 0 else 0
+        )
+    for column in (
+        "median_1pct_span_minutes",
+        "median_5pct_span_minutes",
+        "multiple_1pct_segments_fraction",
+    ):
+        matrix[column] = 1 - matrix[column]
+    fig, axis = plt.subplots(figsize=(7.2, 4.4))
+    axis.imshow(matrix, cmap="Blues", vmin=0, vmax=1, aspect="auto")
+    axis.set_xticks(range(len(columns)), [name.replace("_", "\n") for name in columns])
+    axis.set_yticks(range(len(summary)), summary["model"])
+    axis.tick_params(axis="x", labelsize=6.2)
+    for row in range(len(summary)):
+        for column, name in enumerate(columns):
+            value = raw.iloc[row][name]
+            label = (
+                "Y" if value is True
+                else "N" if value is False
+                else "—" if pd.isna(value)
+                else f"{float(value):.2g}"
+            )
+            axis.text(column, row, label, ha="center", va="center", fontsize=5.8)
+    row = int(summary.index[summary["recommended"]][0])
+    axis.add_patch(
+        plt.Rectangle(
+            (-0.5, row - 0.5), len(columns), 1, fill=False, edgecolor="#D95F02", lw=1.5
+        )
+    )
+    fig.tight_layout()
+    _save_figure(fig, output)
+
+
+def write_renewal_water_evidence(
+    dataset: Path, table: pd.DataFrame, output: Path
+) -> None:
+    """Export the complete extrapolation-marked curve and canonical figures."""
+    output.mkdir(parents=True, exist_ok=True)
+    csv_path = output / "cost_function_renewal_water.csv"
+    table.to_csv(csv_path, index=False)
+    base = [
+        sys.executable,
+        "scripts/cost/plot.py",
+        "--dataset",
+        str(dataset),
+        "--output",
+        str(output),
+    ]
+    subprocess.run([*base, "--cost", f"renewal={csv_path}"], check=True)
+    subprocess.run(
+        [
+            *base,
+            "--cost",
+            f"renewal={csv_path}",
+            "v1=output/成本函数/cost_function_v1.csv",
+            "v2.2=output/test/成本函数/cost_function_v2.2.csv",
+            "v2.5=output/test/成本函数/cost_function_v2.5.csv",
+            "--comparison-only",
+        ],
+        check=True,
+    )
+
+
+def write_cost_selection_evidence(  # noqa: C901
+    output: Path, *, dataset: Path = Path("dataset"), bootstraps: int = 400
+) -> None:
+    """Compare cost models without reusing published optimum columns."""
+    root = Path("output/test/成本函数")
+    old_root = Path("output/成本函数")
+
+    def read_cost(path: Path) -> pd.DataFrame:
+        values = pd.read_csv(path)
+        values["candidate_time"] = pd.to_datetime(
+            values["candidate_time"], errors="coerce", format="mixed"
+        )
+        return values
+
+    v25 = read_cost(root / "cost_function_v2.5.csv")
+    revised = _candidate_qd_components(
+        v25,
+        pd.read_csv(
+            root / "QD模型/经验经济窗口/证据/defrost_absorbed_heat_cycle_fit_source.csv"
+        ),
+    )
+    prep_ranges = pd.read_csv(
+        root / "准备阶段供热量/经验经济窗口/证据/preparation_heat_model_coefficients.csv"
+    ).loc[lambda frame: frame["model"].eq("water_duration")].set_index("term")
+    prep_median = revised.drop_duplicates("cycle_name").groupby(
+        "water_temperature_setpoint"
+    )["preparation_duration_minutes"].median()
+    revised["preparation_duration_ts_median"] = revised[
+        "water_temperature_setpoint"
+    ].map(prep_median)
+    revised["revised_qprep_kwh"] = (
+        PREPARATION_HEAT_COEFFICIENTS["intercept"]
+        + PREPARATION_HEAT_COEFFICIENTS["water_in_temperature"]
+        * pd.to_numeric(revised["water_in_temperature"], errors="coerce")
+        + PREPARATION_HEAT_COEFFICIENTS["water_out_temperature"]
+        * pd.to_numeric(revised["water_out_temperature"], errors="coerce")
+        + PREPARATION_HEAT_COEFFICIENTS["preparation_duration_minutes"]
+        * revised["preparation_duration_ts_median"]
+    )
+    revised["qprep_supported"] = True
+    for term, source in (
+        ("water_in_temperature", "water_in_temperature"),
+        ("water_out_temperature", "water_out_temperature"),
+        ("preparation_duration_minutes", "preparation_duration_ts_median"),
+    ):
+        revised["qprep_supported"] &= pd.to_numeric(
+            revised[source], errors="coerce"
+        ).between(
+            prep_ranges.loc[term, "training_min"],
+            prep_ranges.loc[term, "training_max"],
+            inclusive="both",
+        )
+
+    v22 = read_cost(root / "cost_function_v2.2.csv")
+
+    rows: list[dict[str, object]] = []
+    points: dict[tuple[str, str], pd.Timestamp] = {}
+    for cycle_name, current_strict in revised.groupby("cycle_name", sort=True):
+        current_strict = current_strict.reset_index(drop=True)
+        stable = v22.loc[v22["cycle_name"].eq(cycle_name)].reset_index(drop=True)
+        current = current_strict.copy()
+        for frame in (current, stable):
+            original = frame["optimization_eligible"].fillna(False).astype(bool)
+            frame["integration_eligible"] = original
+            frame["pe_supported"] = True
+            frame["qd_supported"] = True
+            frame["qprep_supported"] = True
+        zero_c = pd.Series(0.0, index=current.index)
+        zero_s = pd.Series(0.0, index=stable.index)
+        stages = {
+            "heating_only": (current, zero_c, zero_c, zero_c, zero_c, zero_c),
+            "plus_ed": (
+                current, current["defrost_electricity_kwh"], zero_c, zero_c, zero_c, zero_c
+            ),
+            "plus_qprep": (
+                current,
+                current["defrost_electricity_kwh"],
+                current["preparation_heat_kwh"],
+                zero_c,
+                zero_c,
+                zero_c,
+            ),
+            "plus_negative_qd": (
+                current,
+                current["defrost_electricity_kwh"],
+                current["preparation_heat_kwh"],
+                current["defrost_absorbed_heat_kwh"],
+                zero_c,
+                zero_c,
+            ),
+            "recovery_none": (
+                stable,
+                stable["defrost_electricity_kwh"],
+                stable["preparation_heat_kwh"],
+                stable["defrost_absorbed_heat_kwh"],
+                zero_s,
+                zero_s,
+            ),
+            "recovery_ts_mean": (
+                stable,
+                stable["defrost_electricity_kwh"],
+                stable["preparation_heat_kwh"],
+                stable["defrost_absorbed_heat_kwh"],
+                stable["recovery_electricity_kwh"],
+                stable["recovery_heat_kwh"],
+            ),
+            "recovery_current_observed": (
+                current,
+                current["defrost_electricity_kwh"],
+                current["preparation_heat_kwh"],
+                current["defrost_absorbed_heat_kwh"],
+                zero_c,
+                zero_c,
+            ),
+            "prep_duration_ts_median": (
+                current,
+                current["defrost_electricity_kwh"],
+                current["revised_qprep_kwh"],
+                current["defrost_absorbed_heat_kwh"],
+                zero_c,
+                zero_c,
+            ),
+            "candidate_t3_qd_revised": (
+                current,
+                current["defrost_electricity_kwh"],
+                current["revised_qprep_kwh"],
+                current["revised_qd_kwh"],
+                zero_c,
+                zero_c,
+            ),
+            "strict_support": (
+                current_strict,
+                current_strict["defrost_electricity_kwh"],
+                current_strict["revised_qprep_kwh"],
+                current_strict["revised_qd_kwh"],
+                0.0,
+                0.0,
+            ),
+        }
+        for stage, (frame, ed, qprep, qd, recovery_e, recovery_q) in stages.items():
+            try:
+                _, point = _recompute_component_optimum(
+                    frame,
+                    ed_kwh=ed,
+                    qprep_kwh=qprep,
+                    qd_kwh=qd,
+                    recovery_electricity_kwh=recovery_e,
+                    recovery_heat_kwh=recovery_q,
+                )
+                optimum = pd.Timestamp(point["candidate_time"])
+                points[(cycle_name, stage)] = optimum
+            except ValueError:
+                optimum = pd.NaT
+            rows.append({"cycle_name": cycle_name, "stage": stage, "t_star": optimum})
+
+    attribution = pd.DataFrame(rows)
+    references = {
+        "heating_only": "heating_only",
+        "plus_ed": "heating_only",
+        "plus_qprep": "plus_ed",
+        "plus_negative_qd": "plus_qprep",
+        "recovery_none": "recovery_none",
+        "recovery_ts_mean": "recovery_none",
+        "recovery_current_observed": "recovery_ts_mean",
+        "prep_duration_ts_median": "recovery_current_observed",
+        "candidate_t3_qd_revised": "prep_duration_ts_median",
+        "strict_support": "candidate_t3_qd_revised",
+    }
+    labels = {
+        "heating_only": "Heating only",
+        "plus_ed": "+ ED",
+        "plus_qprep": "+ Qprep",
+        "plus_negative_qd": "+ negative QD",
+        "recovery_none": "Recovery: none",
+        "recovery_ts_mean": "Recovery: Ts mean",
+        "recovery_current_observed": "Recovery: observed",
+        "prep_duration_ts_median": "Prep duration: Ts median",
+        "candidate_t3_qd_revised": "Candidate T3 duration/QD",
+        "strict_support": "Strict joint support",
+    }
+    attribution["reference_stage"] = attribution["stage"].map(references)
+    attribution["label"] = attribution["stage"].map(labels)
+    attribution["reference_t_star"] = [
+        points.get((row.cycle_name, row.reference_stage), pd.NaT)
+        for row in attribution.itertuples()
+    ]
+    attribution["shift_minutes"] = (
+        pd.to_datetime(attribution["t_star"])
+        - pd.to_datetime(attribution["reference_t_star"])
+    ).dt.total_seconds() / 60
+    attribution["status"] = np.where(attribution["t_star"].notna(), "estimated", "abstain")
+
+    model_paths = {
+        "V1": old_root / "cost_function_v1.csv",
+        "V2": old_root / "cost_function_v2.csv",
+        **{
+            f"V2.{number}": root / f"cost_function_v2.{number}.csv"
+            for number in range(1, 7)
+        },
+    }
+    diagnostics: list[dict[str, object]] = []
+    for model, path in model_paths.items():
+        for cycle_name, values in read_cost(path).groupby("cycle_name", sort=True):
+            values = values.sort_values("candidate_time").reset_index(drop=True)
+            eligible = (
+                values["optimization_eligible"].fillna(False).astype(bool)
+                & np.isfinite(values["inverse_cop"])
+            )
+            costs = values["inverse_cop"].where(eligible)
+            optimum = costs.idxmin()
+            minimum = costs.loc[optimum]
+            row: dict[str, object] = {
+                "model": model,
+                "cycle_name": cycle_name,
+                "t_star": values.loc[optimum, "candidate_time"],
+                "eligible_candidate_fraction": eligible.mean(),
+            }
+            for fraction in (0.01, 0.05):
+                near_mask = eligible & costs.le((1 + fraction) * minimum)
+                near = pd.to_datetime(values.loc[near_mask, "candidate_time"])
+                row[f"near_{int(fraction * 100)}pct_span_minutes"] = (
+                    near.max() - near.min()
+                ).total_seconds() / 60
+                row[f"multiple_{int(fraction * 100)}pct_segments"] = (
+                    count_true_runs(near_mask) > 1
+                )
+            diagnostics.append(row)
+
+    renewal_water = _renewal_water_table(revised)
+    revised_curves: dict[str, pd.DataFrame] = {}
+    for cycle_name, curve in renewal_water.groupby("cycle_name", sort=True):
+        curve = curve.reset_index(drop=True)
+        eligible = curve["optimization_eligible"].fillna(False).astype(bool)
+        if bool(curve["abstain"].iloc[0]):
+            diagnostics.append(
+                {
+                    "model": "V2.5 revised",
+                    "cycle_name": cycle_name,
+                    "t_star": pd.NaT,
+                    "eligible_candidate_fraction": eligible.mean(),
+                    "near_1pct_span_minutes": np.nan,
+                    "near_5pct_span_minutes": np.nan,
+                    "multiple_1pct_segments": np.nan,
+                    "multiple_5pct_segments": np.nan,
+                }
+            )
+            continue
+        revised_curves[cycle_name] = curve
+        costs = curve["inverse_cop"].where(eligible)
+        minimum = costs.min()
+        row = {
+            "model": "V2.5 revised",
+            "cycle_name": cycle_name,
+            "t_star": curve["t_star"].iloc[0],
+            "eligible_candidate_fraction": eligible.mean(),
+            "model_support_fraction": curve["model_supported"].mean(),
+            "t_star_model_supported": curve["t_star_model_supported"].iloc[0],
+        }
+        for fraction in (0.01, 0.05):
+            near_mask = eligible & costs.le((1 + fraction) * minimum)
+            near = pd.to_datetime(curve.loc[near_mask, "candidate_time"])
+            row[f"near_{int(fraction * 100)}pct_span_minutes"] = (
+                near.max() - near.min()
+            ).total_seconds() / 60
+            row[f"multiple_{int(fraction * 100)}pct_segments"] = (
+                count_true_runs(near_mask) > 1
+            )
+        diagnostics.append(row)
+    diagnostics_frame = pd.DataFrame(diagnostics)
+
+    ed = pd.read_csv(
+        root / "ED模型/经验经济窗口/证据/preparation_inclusive_network_predictions.csv"
+    ).loc[lambda frame: frame["model"].eq("pe_quadratic_ridge")]
+    residuals = {
+        "ed": (ed["predicted_energy_kwh"] - ed["actual_energy_kwh"]).dropna().to_numpy(),
+        "qprep": pd.read_csv(
+            root
+            / "准备阶段供热量/经验经济窗口/证据/preparation_heat_cycle_fit_source.csv"
+        )["loeo_residual_kwh"].dropna().to_numpy(),
+        "qd": pd.read_csv(
+            root / "QD模型/经验经济窗口/证据/defrost_absorbed_heat_cycle_fit_source.csv"
+        )["loeo_residual_kwh"].dropna().to_numpy(),
+    }
+    residuals = {name: values - np.median(values) for name, values in residuals.items()}
+    rng = np.random.default_rng(20260830)
+    uncertainty_rows: list[dict[str, object]] = []
+    for cycle_name, curve in revised_curves.items():
+        nominal = pd.Timestamp(
+            diagnostics_frame.loc[
+                diagnostics_frame["model"].eq("V2.5 revised")
+                & diagnostics_frame["cycle_name"].eq(cycle_name),
+                "t_star",
+            ].iloc[0]
+        )
+        numerator = (
+            curve["heating_electricity_kwh"].to_numpy()[None, :]
+            + curve["defrost_electricity_kwh"].to_numpy()[None, :]
+            + rng.choice(residuals["ed"], (bootstraps, 1))
+        )
+        denominator = (
+            curve["water_heating_kwh"].to_numpy()[None, :]
+            + curve["revised_qprep_kwh"].to_numpy()[None, :]
+            + rng.choice(residuals["qprep"], (bootstraps, 1))
+            - curve["revised_qd_kwh"].to_numpy()[None, :]
+            - rng.choice(residuals["qd"], (bootstraps, 1))
+        )
+        eligible = curve["optimization_eligible"].fillna(False).to_numpy(
+            dtype=bool
+        )[None, :] & np.isfinite(denominator) & (denominator > 0)
+        costs = np.where(eligible, numerator / denominator, np.inf)
+        valid_draw = eligible.any(axis=1)
+        indices = np.argmin(costs[valid_draw], axis=1)
+        times = pd.to_datetime(curve["candidate_time"]).to_numpy()[indices]
+        minutes = times.astype("datetime64[s]").astype(np.int64) / 60
+        nominal_minutes = nominal.timestamp() / 60
+        uncertainty_rows.append(
+            {
+                "model": "V2.5 revised",
+                "cycle_name": cycle_name,
+                "bootstrap_count": bootstraps,
+                "valid_bootstrap_count": int(valid_draw.sum()),
+                "nominal_t_star": nominal,
+                "bootstrap_t_star_p05": pd.to_datetime(
+                    np.quantile(minutes, 0.05) * 60, unit="s"
+                ),
+                "bootstrap_t_star_median": pd.to_datetime(
+                    np.quantile(minutes, 0.5) * 60, unit="s"
+                ),
+                "bootstrap_t_star_p95": pd.to_datetime(
+                    np.quantile(minutes, 0.95) * 60, unit="s"
+                ),
+                "bootstrap_iqr_minutes": (
+                    np.quantile(minutes, 0.75) - np.quantile(minutes, 0.25)
+                ),
+                "within_5min_fraction": (np.abs(minutes - nominal_minutes) <= 5).mean(),
+            }
+        )
+    for cycle_name in sorted(set(revised["cycle_name"]) - set(revised_curves)):
+        uncertainty_rows.append(
+            {
+                "model": "V2.5 revised",
+                "cycle_name": cycle_name,
+                "bootstrap_count": bootstraps,
+                "valid_bootstrap_count": 0,
+                "nominal_t_star": pd.NaT,
+                "bootstrap_t_star_p05": pd.NaT,
+                "bootstrap_t_star_median": pd.NaT,
+                "bootstrap_t_star_p95": pd.NaT,
+                "bootstrap_iqr_minutes": np.nan,
+                "within_5min_fraction": np.nan,
+            }
+        )
+    uncertainty = pd.DataFrame(uncertainty_rows)
+    uncertainty["status"] = np.where(
+        uncertainty["valid_bootstrap_count"].gt(0), "estimated", "abstain"
+    )
+
+    gates = {
+        "V1": (False, False, True, False),
+        "V2": (True, False, False, False),
+        "V2.1": (True, False, False, False),
+        "V2.2": (True, True, False, False),
+        "V2.3": (False, True, False, False),
+        "V2.4": (True, True, False, False),
+        "V2.5": (True, True, False, False),
+        "V2.6": (True, False, False, False),
+        "V2.5 revised": (True, True, True, False),
+    }
+    summary_rows: list[dict[str, object]] = []
+    for model, values in diagnostics_frame.groupby("model", sort=False):
+        hard = gates[model]
+        stability = uncertainty if model == "V2.5 revised" else pd.DataFrame()
+        support_fractions = values.get(
+            "model_support_fraction", pd.Series(dtype=float)
+        ).dropna()
+        supported_optima = values.get(
+            "t_star_model_supported", pd.Series(dtype=float)
+        ).dropna()
+        summary_rows.append(
+            {
+                "model": model,
+                "closed_control_volume": hard[0],
+                "consistent_heat_boundary": hard[1],
+                "causal_candidate_inputs": hard[2],
+                "support_constrained": hard[3],
+                "action_dependent_reset_model": False,
+                "passes_offline_renewal_gates": all(hard),
+                "passes_online_smdp_gates": False,
+                "common_cycle_count": values["cycle_name"].nunique(),
+                "eligible_cycle_count": values["t_star"].notna().sum(),
+                "median_1pct_span_minutes": values["near_1pct_span_minutes"].median(),
+                "median_5pct_span_minutes": values["near_5pct_span_minutes"].median(),
+                "multiple_1pct_segments_fraction": values[
+                    "multiple_1pct_segments"
+                ].mean(),
+                "multiple_5pct_segments_fraction": values[
+                    "multiple_5pct_segments"
+                ].mean(),
+                "median_eligible_candidate_fraction": values[
+                    "eligible_candidate_fraction"
+                ].median(),
+                "median_model_support_fraction": (
+                    support_fractions.median()
+                    if not support_fractions.empty
+                    else np.nan
+                ),
+                "supported_optimum_fraction": (
+                    supported_optima.mean() if not supported_optima.empty else np.nan
+                ),
+                "bootstrap_within_5min_fraction": (
+                    stability["within_5min_fraction"].median()
+                    if not stability.empty
+                    else np.nan
+                ),
+                "median_bootstrap_iqr_minutes": (
+                    stability["bootstrap_iqr_minutes"].median()
+                    if not stability.empty
+                    else np.nan
+                ),
+                "recommended": model == "V2.5 revised",
+                "interpretation": (
+                    "Complete offline renewal curve with extrapolated segments marked; "
+                    "not an online SMDP."
+                    if model == "V2.5 revised"
+                    else ""
+                ),
+            }
+        )
+    summary = pd.DataFrame(summary_rows).sort_values(
+        ["recommended", "passes_offline_renewal_gates"],
+        ascending=False,
+        kind="stable",
+    ).reset_index(drop=True)
+
+    output.mkdir(parents=True, exist_ok=True)
+    renewal_water.to_csv(output / "renewal_water_support_audit.csv", index=False)
+    attribution.to_csv(output / "component_attribution.csv", index=False)
+    summary.to_csv(output / "model_selection_summary.csv", index=False)
+    uncertainty.to_csv(output / "uncertainty_stability.csv", index=False)
+    _plot_component_attribution(attribution, output / "figure_component_attribution")
+    _plot_model_selection(summary, output / "figure_model_selection")
+    write_renewal_water_evidence(
+        dataset,
+        renewal_water,
+        Path("output/test/成本函数/闭合循环水侧成本"),
+    )
 
 
 def plot_recovery_start_states(events: pd.DataFrame, output: Path) -> None:
@@ -4462,7 +5453,7 @@ def render_unit_cost_publications(
     )
 
 
-def main() -> None:
+def main() -> None:  # noqa: C901
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument(
@@ -4479,11 +5470,17 @@ def main() -> None:
     only.add_argument("--duration-t3-energy-only", action="store_true")
     only.add_argument("--predefrost-sensor-only", action="store_true")
     only.add_argument("--preparation-inclusive-sensor-only", action="store_true")
+    only.add_argument("--preparation-heat-only", action="store_true")
     only.add_argument("--energy-method-comparison-only", action="store_true")
     only.add_argument("--pe-linear-cycle-fit-only", action="store_true")
     only.add_argument("--unit-publications-only", action="store_true")
+    only.add_argument("--cost-selection-only", action="store_true")
     args = parser.parse_args()
-    if args.recovery_only:
+    if args.cost_selection_only:
+        write_cost_selection_evidence(
+            Path("output/test/成本函数/模型筛选"), dataset=args.dataset
+        )
+    elif args.recovery_only:
         write_recovery_evidence(args.dataset, args.source, args.output)
     elif args.unit_publications_only:
         render_unit_cost_publications(
@@ -4493,6 +5490,8 @@ def main() -> None:
         write_pe_linear_cycle_fit(args.output)
     elif args.energy_method_comparison_only:
         write_defrost_energy_method_comparison(args.output)
+    elif args.preparation_heat_only:
+        write_preparation_heat_evidence(args.dataset, args.output)
     elif args.preparation_inclusive_sensor_only:
         write_preparation_inclusive_sensor_evidence(args.dataset, args.output)
     elif args.predefrost_sensor_only:

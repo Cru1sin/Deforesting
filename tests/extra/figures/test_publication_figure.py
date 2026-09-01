@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -118,6 +120,10 @@ def test_cop_panel_focuses_normal_range_without_inset() -> None:
     frame = pd.DataFrame(
         {
             "cop": [30.0, 8.0, 3.8, 3.4, 3.0, 4.2],
+            "water_flow": [1.0] * 6,
+            "power_total": [1.161] * 6,
+            "water_in_temperature": [0.0] * 6,
+            "water_out_temperature": [30.0, 8.0, 3.8, 3.4, 3.0, -15.0],
             "cycle_stage": [
                 "recovery",
                 "recovery",
@@ -134,7 +140,7 @@ def test_cop_panel_focuses_normal_range_without_inset() -> None:
         axis,
         frame,
         minutes,
-        ("cop",),
+        ("cop", "water_cop"),
         "COP [-]",
         [("recovery", 0.0, 2.0), ("frost_development", 2.0, 5.0), ("defrost", 5.0, 6.0)],
         [],
@@ -143,5 +149,78 @@ def test_cop_panel_focuses_normal_range_without_inset() -> None:
     )
 
     assert axis.child_axes == []
+    assert axis.get_ylim()[0] > 0.0
     assert axis.get_ylim()[1] < 10.0
+    plt.close(figure)
+
+
+def test_cost_panel_display_extension_does_not_change_formal_minimum() -> None:
+    from frost_analysis.figures.visualization import _plot_cost_panel
+
+    start = pd.Timestamp("2026-01-01")
+    curve = pd.DataFrame(
+        {
+            "candidate_time": start + pd.to_timedelta([1, 2, 3], unit="min"),
+            "inverse_cop": [0.5, 0.4, np.nan],
+            "optimization_eligible": [True, True, False],
+            "model_supported": [True, True, False],
+            "display_only_inverse_cop": [np.nan, np.nan, 0.1],
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _plot_cost_panel(
+        axis,
+        curve,
+        start,
+        [("frost_development", 0.0, 4.0)],
+        full_candidate_domain=True,
+        display_metric="display_only_inverse_cop",
+        minimum_label="Diagnostic/raw minimum",
+    )
+
+    raw_minimum = next(
+        line for line in axis.lines if line.get_label() == "Diagnostic/raw minimum"
+    )
+    extension = next(
+        line
+        for line in axis.lines
+        if line.get_label() == "Unsupported model extension, display only"
+    )
+    assert list(raw_minimum.get_xdata()) == [2.0, 2.0]
+    assert np.allclose(extension.get_ydata(), [np.nan, np.nan, 0.1], equal_nan=True)
+    plt.close(figure)
+
+
+def test_cost_panel_does_not_mark_unknown_model_support_as_unsupported() -> None:
+    from frost_analysis.figures.visualization import _plot_cost_panel
+
+    start = pd.Timestamp("2026-01-01")
+    curve = pd.DataFrame(
+        {
+            "candidate_time": start + pd.to_timedelta([1, 2, 3], unit="min"),
+            "inverse_cop": [0.5, 0.6, 0.4],
+            "optimization_eligible": [True, True, True],
+            "model_supported": pd.Series([True, False, np.nan], dtype=object),
+        }
+    )
+    figure, axis = plt.subplots()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        _plot_cost_panel(
+            axis,
+            curve,
+            start,
+            [("frost_development", 0.0, 4.0)],
+            full_candidate_domain=True,
+        )
+
+    unsupported = next(
+        item
+        for item in axis.collections
+        if item.get_label() == "Outside empirical-model support"
+    )
+    assert unsupported.get_offsets().tolist() == [[2.0, 0.6]]
+    assert any("support unknown" in text.get_text() for text in axis.texts)
     plt.close(figure)

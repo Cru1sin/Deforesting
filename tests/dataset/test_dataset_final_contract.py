@@ -443,9 +443,29 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
         assert (available / "front" / "rb.jpg").read_bytes() == b"rb-image"
         assert not (available / "front" / "unused.jpg").exists()
 
-    assert [command[1] for command in calls] == ["lsf", "cat", "cat"]
+    local = tmp_path / "dataset" / "images" / cycle_name
+    assert (local / "front" / "rb.jpg").read_bytes() == b"rb-image"
+
+    with dataset_images.materialize_cycle_image_members(
+        tmp_path / "dataset",
+        cycle_name,
+        ["rb.jpg", "unused.jpg"],
+        fetch_cloud=True,
+        minimum_free_gib=0,
+    ) as available:
+        assert available == local
+        assert (available / "front" / "unused.jpg").read_bytes() == b"unused-image"
+
+    assert [command[1] for command in calls] == [
+        "lsf",
+        "cat",
+        "cat",
+        "lsf",
+        "cat",
+        "cat",
+    ]
     assert not any(command[1] == "copyto" for command in calls)
-    assert all("--count" in command for command in calls[1:])
+    assert all("--count" in command for command in calls if command[1] == "cat")
 
 
 def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:

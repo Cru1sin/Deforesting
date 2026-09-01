@@ -195,7 +195,7 @@ def test_publication_cost_panel_preserves_support_holes_and_preparation_boundary
     axis = next(axis for axis in plt.gcf().axes if axis.get_ylabel() == "Cycle inverse COP [-]")
     curve = next(line for line in axis.lines if line.get_label() == "Cycle inverse COP")
     assert np.isnan(curve.get_ydata()[2])
-    assert len([patch for patch in axis.patches if str(patch.get_label()).startswith("5%")]) == 2
+    assert len([patch for patch in axis.patches if str(patch.get_label()).startswith("1%")]) == 1
     assert {line.get_label() for line in axis.lines} >= {
         "Minimum",
         "Observed preparation",
@@ -205,6 +205,41 @@ def test_publication_cost_panel_preserves_support_holes_and_preparation_boundary
         "Insufficient integration coverage",
     }
     original_close(plt.gcf())
+
+
+def test_publication_cost_panel_marks_extrapolation_without_breaking_the_curve() -> None:
+    from frost_analysis.figures.visualization import _plot_cost_panel
+
+    times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
+    cost = pd.DataFrame(
+        {
+            "candidate_time": times,
+            "inverse_cop": [0.55, 0.50, 0.48, 0.49],
+            "relative_regret": [0.15, 0.04, 0.0, 0.02],
+            "optimization_eligible": True,
+            "integration_eligible": True,
+            "model_supported": [False, True, True, False],
+        }
+    )
+    figure, axis = plt.subplots()
+
+    _plot_cost_panel(
+        axis,
+        cost,
+        times[0],
+        [("frost_development", 0.0, 4.0)],
+        full_candidate_domain=True,
+    )
+
+    curve = next(line for line in axis.lines if line.get_label() == "Cycle inverse COP")
+    assert np.isfinite(curve.get_ydata()).all()
+    extrapolated = next(
+        collection
+        for collection in axis.collections
+        if collection.get_label() == "Outside empirical-model support"
+    )
+    assert extrapolated.get_offsets()[:, 0].tolist() == [0.0, 3.0]
+    plt.close(figure)
 
 
 def test_publication_cost_panel_marks_triggered_rb_at_nearest_valid_cost(
@@ -655,6 +690,8 @@ def test_render_decision_publication_has_rgb_and_three_aligned_time_panels(
             "timestamp": times,
             "cycle_stage": ["recovery", *(["frost_development"] * 4), "defrost"],
             "cop": [2.2, 2.1, 2.0, 1.9, 1.8, 1.0],
+            "water_flow": [0.5] * 6,
+            "power_total": [1.2] * 6,
             "water_in_temperature": [30.0] * 6,
             "water_out_temperature": [35.0] * 6,
             "water_temperature_setpoint": [35.0] * 6,
@@ -712,10 +749,18 @@ def test_render_decision_publication_has_rgb_and_three_aligned_time_panels(
         "Water temperature [degC]",
         "Cycle inverse COP [-]",
     }
+    cop_lines = {line.get_label(): line for line in figure.axes[2].lines}
+    assert set(cop_lines) >= {"Refrigerant-side COP", "Water-side COP"}
+    assert cop_lines["Water-side COP"].get_ydata()[0] == pytest.approx(
+        1.161 * 0.5 * 5 / 1.2
+    )
     for axis in figure.axes[2:]:
         assert {line.get_color() for line in axis.lines} >= {"#2E7D5B", "#E28E2C"}
     assert figure.axes[0].get_title(loc="left").startswith("RB trigger")
     assert figure.axes[1].get_title() == ""
+    cost_labels = figure.axes[-1].get_legend_handles_labels()[1]
+    assert "1% near-optimal segment 1" in cost_labels
+    assert not any(label.startswith("5% near-optimal") for label in cost_labels)
     original_close(figure)
 
 

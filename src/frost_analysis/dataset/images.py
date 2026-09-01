@@ -229,14 +229,11 @@ def materialize_cycle_image_members(
     cloud_root: Path | None = None,
     minimum_free_gib: float = 50,
 ) -> Iterator[Path]:
-    """Materialize selected ``front`` JPEGs from a ZIP using range reads."""
+    """Retain selected ``front`` JPEGs from a ZIP using range reads."""
     if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
         raise ValueError(f"invalid cycle name: {cycle_name}")
     images_root = Path(dataset_dir).resolve() / "images"
     cycle_dir = images_root / cycle_name
-    if cycle_dir.is_dir() or not fetch_cloud:
-        yield cycle_dir
-        return
     names = sorted({str(name) for name in file_names if str(name)})
     if not names:
         yield cycle_dir
@@ -248,6 +245,10 @@ def materialize_cycle_image_members(
         for name in names
     ):
         raise ValueError("unsafe requested ZIP member name")
+    names = [name for name in names if not (cycle_dir / "front" / name).is_file()]
+    if not names or not fetch_cloud:
+        yield cycle_dir
+        return
 
     archive_name = f"{cycle_name}.zip"
     default_cloud = cloud_root is None
@@ -305,26 +306,28 @@ def materialize_cycle_image_members(
         f"extracting selected images from {archive_name}",
         minimum_free_gib,
     )
-    with TemporaryDirectory(prefix=f".{cycle_name}-", dir=images_root) as temporary:
-        extracted = Path(temporary) / cycle_name / "front"
-        extracted.mkdir(parents=True)
-        for name, member in zip(names, members, strict=True):
-            assert member is not None
-            target = extracted / name
-            data = _read_zip_member(
+    front = cycle_dir / "front"
+    front.mkdir(parents=True, exist_ok=True)
+    for name, member in zip(names, members, strict=True):
+        assert member is not None
+        target = front / name
+        temporary = target.with_suffix(f"{target.suffix}.part")
+        temporary.write_bytes(
+            _read_zip_member(
                 archive,
                 member,
                 archive_size=archive_size,
                 remote=remote,
                 transferred=transferred,
             )
-            target.write_bytes(data)
-        print(
-            f"[images] range materialized {len(names)} member(s) for {cycle_name}: "
-            f"{transferred[0]} bytes in {time.monotonic() - started:.2f}s",
-            flush=True,
         )
-        yield extracted.parent
+        temporary.replace(target)
+    print(
+        f"[images] range retained {len(names)} member(s) for {cycle_name}: "
+        f"{transferred[0]} bytes in {time.monotonic() - started:.2f}s",
+        flush=True,
+    )
+    yield cycle_dir
 
 
 @contextmanager

@@ -15,6 +15,7 @@ import pandas as pd
 from matplotlib import font_manager
 from matplotlib.patches import Rectangle
 
+from frost_analysis.cost.core import water_side_heating_kw
 from frost_analysis.dataset.images import RGB_PANEL_MAX_OFFSET
 
 _PANELS = (
@@ -23,7 +24,7 @@ _PANELS = (
         ("heating_capacity", "evaporator_capacity", "compressor_power", "power_total"),
         "Capacity / power [kW]",
     ),
-    (("cop",), "COP [-]"),
+    (("cop", "water_cop"), "COP [-]"),
     (
         ("water_in_temperature", "water_out_temperature", "water_temperature_setpoint"),
         "Water temperature [degC]",
@@ -41,6 +42,7 @@ _COLORS = {
     "compressor_power": "#4D4D4D",
     "power_total": "#7884B4",
     "cop": "#009E73",
+    "water_cop": "#0072B2",
     "ambient_temperature": "#374151",
     "water_in_temperature": "#E69F00",
     "water_out_temperature": "#CC79A7",
@@ -72,6 +74,8 @@ _RGB_PANEL_FONT = next(
     ),
     "DejaVu Sans",
 )
+
+
 def build_rgb_panel_targets(
     cycle_record: Mapping[str, object], cycle_frame: pd.DataFrame
 ) -> list[dict[str, object]]:
@@ -105,10 +109,7 @@ def build_rgb_panel_targets(
         defrost_start if has_defrost and defrost_start is not None else end
     )
     frost_valid = (
-        has_frost
-        and frost_start is not None
-        and frost_end is not None
-        and frost_end > frost_start
+        has_frost and frost_start is not None and frost_end is not None and frost_end > frost_start
     )
 
     def slot(label: str, target: pd.Timestamp | None, enabled: bool = True) -> dict[str, object]:
@@ -117,8 +118,7 @@ def build_rgb_panel_targets(
     frost_targets: list[pd.Timestamp | None]
     if frost_valid and frost_start is not None and frost_end is not None:
         frost_targets = [
-            frost_start + fraction * (frost_end - frost_start)
-            for fraction in (0.25, 0.5, 0.75)
+            frost_start + fraction * (frost_end - frost_start) for fraction in (0.25, 0.5, 0.75)
         ]
     else:
         frost_targets = [None, None, None]
@@ -127,9 +127,7 @@ def build_rgb_panel_targets(
         slot(_RGB_PANEL_LABELS[1], stable_start, has_recovery and stable_start is not None),
         *(
             slot(label, target, frost_valid)
-            for label, target in zip(
-                _RGB_PANEL_LABELS[2:5], frost_targets, strict=True
-            )
+            for label, target in zip(_RGB_PANEL_LABELS[2:5], frost_targets, strict=True)
         ),
         slot(_RGB_PANEL_LABELS[5], defrost_start, has_defrost and defrost_start is not None),
         slot(
@@ -357,9 +355,7 @@ def render_cycle_publication(
         for start, end in (sensor_intervals or {}).get("missing", [])
     ]
 
-    for axis, (channels, label) in zip(
-        axes[1 : 1 + len(_PANELS)], _PANELS, strict=True
-    ):
+    for axis, (channels, label) in zip(axes[1 : 1 + len(_PANELS)], _PANELS, strict=True):
         _plot_cycle_panel(
             axis,
             frame,
@@ -461,9 +457,7 @@ def match_decision_rgb_images(
                     "file_name": "",
                     "image_path": "",
                     "available": False,
-                    "status": (
-                        "rb_right_censored" if target_type == "rb" else "no_valid_optimal"
-                    ),
+                    "status": ("rb_right_censored" if target_type == "rb" else "no_valid_optimal"),
                 }
             )
             continue
@@ -558,6 +552,9 @@ def render_decision_publication(
     optimal_label: str = "Economic optimum",
     cost_label: str = "Cycle inverse COP [-]",
     full_candidate_domain: bool = False,
+    display_metric: str | None = None,
+    minimum_label: str = "Minimum",
+    minimum_support_label: str | None = None,
 ) -> None:
     """Render two decision frames above the reusable COP, water and cost panels."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
@@ -607,7 +604,7 @@ def render_decision_publication(
         panel_axes[0],
         frame,
         minutes,
-        ("cop",),
+        ("cop", "water_cop"),
         "COP [-]",
         stage_spans,
         [],
@@ -633,10 +630,13 @@ def render_decision_publication(
         stage_spans,
         cost_label=cost_label,
         full_candidate_domain=full_candidate_domain,
+        display_metric=display_metric,
+        minimum_label=minimum_label,
+        minimum_support_label=minimum_support_label,
     )
     for axis in panel_axes:
         axis.set_xlim(0.0, duration)
-    _plot_decision_markers(panel_axes, decision_images, origin)
+    _plot_decision_markers(panel_axes, decision_images, origin, optimal_label)
     labels = panel_axes[2].get_legend_handles_labels()
     if labels[0]:
         panel_axes[2].legend(
@@ -696,9 +696,7 @@ def _plot_decision_image(
             else np.nan
         )
         stable_text = (
-            f"stable +{stable_minutes:.1f} min"
-            if np.isfinite(stable_minutes)
-            else "stable n/a"
+            f"stable +{stable_minutes:.1f} min" if np.isfinite(stable_minutes) else "stable n/a"
         )
         title = (
             f"{label}\n"
@@ -707,8 +705,7 @@ def _plot_decision_image(
         )
     else:
         title = (
-            f"{label}\nRGB unavailable · "
-            f"{str(info.get('status', 'unavailable')).replace('_', ' ')}"
+            f"{label}\nRGB unavailable · {str(info.get('status', 'unavailable')).replace('_', ' ')}"
         )
     axis.set_title(title, fontsize=7.2, pad=5, loc="left")
 
@@ -717,10 +714,11 @@ def _plot_decision_markers(
     axes: list[Any],
     decision_images: Mapping[str, Mapping[str, object]],
     origin: pd.Timestamp,
+    optimal_label: str,
 ) -> None:
     markers = (
         ("rb", "RB RGB frame", "#2E7D5B"),
-        ("optimal", "Optimal RGB frame", "#E28E2C"),
+        ("optimal", f"{optimal_label} RGB frame", "#E28E2C"),
     )
     for target_type, label, color in markers:
         info = decision_images.get(target_type, {})
@@ -739,7 +737,7 @@ def _plot_decision_markers(
             )
 
 
-def _plot_cost_panel(
+def _plot_cost_panel(  # noqa: C901
     axis: Any,
     cost_curve: pd.DataFrame,
     origin: pd.Timestamp,
@@ -747,6 +745,9 @@ def _plot_cost_panel(
     *,
     cost_label: str = "Cycle inverse COP [-]",
     full_candidate_domain: bool = False,
+    display_metric: str | None = None,
+    minimum_label: str = "Minimum",
+    minimum_support_label: str | None = None,
 ) -> None:
     """Plot empirical cost only where the cycle is in frost development."""
     curve = cost_curve.copy()
@@ -755,9 +756,7 @@ def _plot_cost_panel(
     metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
     curve[metric] = pd.to_numeric(curve[metric], errors="coerce")
     frost_spans = [
-        (left, right)
-        for stage, left, right in stage_spans
-        if stage == "frost_development"
+        (left, right) for stage, left, right in stage_spans if stage == "frost_development"
     ]
     is_frost = pd.Series(False, index=curve.index)
     for left, right in frost_spans:
@@ -766,6 +765,10 @@ def _plot_cost_panel(
         curve["minutes"].notna() & (True if full_candidate_domain else is_frost)
     ].copy()
     curve["_raw_metric"] = curve[metric]
+    if display_metric is not None:
+        if display_metric not in curve:
+            raise ValueError(f"missing display-only metric: {display_metric}")
+        curve[display_metric] = pd.to_numeric(curve[display_metric], errors="coerce")
     eligible = (
         curve["optimization_eligible"].fillna(False).astype(bool)
         if "optimization_eligible" in curve
@@ -778,12 +781,21 @@ def _plot_cost_panel(
         if "support_status" in curve
         else eligible.copy()
     )
+    if "model_supported" in curve:
+        support_state = curve["model_supported"].astype("boolean")
+        model_supported = support_state.eq(True).fillna(False)
+        outside_support = support_state.eq(False).fillna(False)
+        outside_support_label = "Outside empirical-model support"
+    else:
+        support_state = None
+        model_supported = pe_supported
+        outside_support = ~model_supported
+        outside_support_label = "Outside Pe support"
     integration_eligible = (
         curve["integration_eligible"].fillna(False).astype(bool)
         if "integration_eligible" in curve
         else eligible | ~pe_supported
     )
-    outside_pe = ~pe_supported
     insufficient_integration = pe_supported & ~integration_eligible
     interpolated_gap = (
         curve["candidate_in_interpolated_gap"].fillna(False).astype(bool)
@@ -820,7 +832,7 @@ def _plot_cost_panel(
             minimum_x,
             color="#E28E2C",
             linewidth=1.05,
-            label="Minimum",
+            label=minimum_label,
             zorder=4,
         )
         regret = (
@@ -828,7 +840,7 @@ def _plot_cost_panel(
             if "relative_regret" in curve
             else curve[metric] / curve[metric].min() - 1.0
         )
-        near = eligible & regret.le(0.05)
+        near = eligible & regret.le(0.01)
         groups = near.ne(near.shift(fill_value=False)).cumsum()
         for segment_index, (_, segment) in enumerate(
             curve.loc[near].groupby(groups[near], sort=False), start=1
@@ -838,7 +850,7 @@ def _plot_cost_panel(
                 float(segment["minutes"].max()),
                 color="#E28E2C",
                 alpha=0.18,
-                label=f"5% near-optimal segment {segment_index}",
+                label=f"1% near-optimal segment {segment_index}",
                 zorder=0.2,
             )
         if "minimum_location" in curve:
@@ -851,21 +863,77 @@ def _plot_cost_panel(
                 if minimum_index == curve.index[-1]
                 else "interior"
             )
+        if minimum_support_label is not None:
+            support_text = minimum_support_label
+        elif support_state is not None:
+            minimum_support = support_state.loc[minimum_index]
+            support_text = (
+                "support unknown"
+                if pd.isna(minimum_support)
+                else "within support"
+                if bool(minimum_support)
+                else "extrapolated"
+            )
         axis.text(
             0.01,
             0.95,
-            f"Minimum: {location}",
+            (
+                f"Minimum: {location} · "
+                f"{support_text}"
+                if minimum_support_label is not None or support_state is not None
+                else f"Minimum: {location}"
+            ),
             transform=axis.transAxes,
             ha="left",
             va="top",
             fontsize=7,
             color="#4B5563",
         )
+        decision_time = pd.to_datetime(
+            curve.get("t_star", pd.Series(dtype=object)).iloc[:1], errors="coerce"
+        )
+        if not decision_time.empty and pd.notna(decision_time.iloc[0]):
+            decision_index = (curve["candidate_time"] - decision_time.iloc[0]).abs().idxmin()
+            if decision_index != minimum_index:
+                axis.axvline(
+                    float(curve.loc[decision_index, "minutes"]),
+                    color="#B64A50",
+                    linestyle="--",
+                    linewidth=1.05,
+                    label="Selected decision",
+                    zorder=4,
+                )
+                status = str(curve.get("decision_status", pd.Series(["near-optimal"])).iloc[0])
+                axis.text(
+                    0.01,
+                    0.87,
+                    f"Decision: {status.replace('_', ' ')} · "
+                    f"+{100 * float(regret.loc[decision_index]):.2f}%",
+                    transform=axis.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=7,
+                    color="#B64A50",
+                )
+
+    if display_metric is not None and curve[display_metric].notna().any():
+        axis.plot(
+            curve["minutes"],
+            curve[display_metric],
+            color="#A69AA8",
+            linestyle="--",
+            linewidth=0.8,
+            marker=".",
+            markersize=2.5,
+            alpha=0.75,
+            label="Unsupported model extension, display only",
+        )
 
     _plot_cost_quality_markers(
         axis,
         curve,
-        outside_pe,
+        outside_support,
+        outside_support_label,
         insufficient_integration,
         interpolated_gap,
         extrapolated_endpoint,
@@ -915,14 +983,22 @@ def _plot_cost_panel(
 def _plot_cost_quality_markers(
     axis: Any,
     curve: pd.DataFrame,
-    outside_pe: pd.Series,
+    outside_support: pd.Series,
+    outside_support_label: str,
     insufficient_integration: pd.Series,
     interpolated_gap: pd.Series,
     extrapolated_endpoint: pd.Series,
 ) -> None:
     valid_metric = curve["_raw_metric"].notna()
     marker_specs = (
-        (outside_pe, 11, "x", {"linewidths": 0.65, "color": "#A7ADB3"}, "Outside Pe support", 3),
+        (
+            outside_support,
+            11,
+            "x",
+            {"linewidths": 0.65, "color": "#A7ADB3"},
+            outside_support_label,
+            3,
+        ),
         (
             insufficient_integration,
             13,
@@ -1130,10 +1206,19 @@ def _plot_cycle_panel(
             ncol=len(axis.lines),
             columnspacing=1.2,
         )
-    if channels == ("cop",):
-        values = _observed_values(frame, "cop")
+    if "cop" in channels:
+        values = pd.concat([_observed_values(frame, channel) for channel in channels], axis=1)
         stage = frame.get("cycle_stage", pd.Series(index=frame.index, dtype="string"))
-        normal = values.mask(stage.astype("string").eq("recovery")).dropna()
+        frost = stage.astype("string").eq("frost_development")
+        normal = (
+            (
+                values.where(frost, axis=0)
+                if frost.any()
+                else values.mask(stage.astype("string").eq("recovery"), axis=0)
+            )
+            .stack()
+            .dropna()
+        )
         if not normal.empty:
             lower = float(normal.min())
             upper = float(normal.max())
@@ -1142,6 +1227,10 @@ def _plot_cycle_panel(
 
 
 def _display_label(channel: str) -> str:
+    if channel == "cop":
+        return "Refrigerant-side COP"
+    if channel == "water_cop":
+        return "Water-side COP"
     if channel == "environment_relative_humidity":
         return "Relative Humidity"
     return channel.replace("_", " ").title()
@@ -1157,9 +1246,7 @@ def _shade_cycle_stages(
             start,
             end,
             facecolor=(
-                "#76528F"
-                if stage == "defrost_preparation"
-                else _STAGE_COLORS.get(stage, "#D9DEE5")
+                "#76528F" if stage == "defrost_preparation" else _STAGE_COLORS.get(stage, "#D9DEE5")
             ),
             alpha=0.20 if stage == "defrost_preparation" else 0.10,
             edgecolor="none",
@@ -1179,6 +1266,20 @@ def _shade_cycle_stages(
 
 
 def _observed_values(frame: pd.DataFrame, channel: str) -> pd.Series[Any]:
+    if channel == "water_cop":
+        dependencies = (
+            "water_flow",
+            "water_in_temperature",
+            "water_out_temperature",
+            "power_total",
+        )
+        if not set(dependencies) <= set(frame):
+            return pd.Series(np.nan, index=frame.index, dtype=float)
+        observed = pd.concat(
+            [_observed_values(frame, dependency) for dependency in dependencies], axis=1
+        )
+        power = observed.iloc[:, -1].where(observed.iloc[:, -1].gt(0))
+        return water_side_heating_kw(frame).mask(observed.isna().any(axis=1)).div(power)
     if channel not in frame:
         return pd.Series(np.nan, index=frame.index, dtype=float)
     values = pd.to_numeric(frame[channel], errors="coerce")
@@ -1188,9 +1289,7 @@ def _observed_values(frame: pd.DataFrame, channel: str) -> pd.Series[Any]:
     return values.replace([np.inf, -np.inf], np.nan)
 
 
-def _stage_spans(
-    frame: pd.DataFrame, minutes: pd.Series[Any]
-) -> list[tuple[str, float, float]]:
+def _stage_spans(frame: pd.DataFrame, minutes: pd.Series[Any]) -> list[tuple[str, float, float]]:
     if "cycle_stage" not in frame or frame.empty:
         return []
     step = float(minutes.diff().dropna().median()) if len(minutes) > 1 else 0.0
