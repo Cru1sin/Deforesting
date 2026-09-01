@@ -15,8 +15,8 @@ import pandas as pd
 from matplotlib import font_manager
 from matplotlib.patches import Rectangle
 
-from frost_analysis.cost.core import water_side_heating_kw
-from frost_analysis.dataset.images import RGB_PANEL_MAX_OFFSET
+from ..cost.core import water_side_heating_kw
+from ..dataset.images import RGB_PANEL_MAX_OFFSET
 
 _PANELS = (
     (("compressor_frequency", "compressor_frequency_setpoint"), "Compressor frequency [Hz]"),

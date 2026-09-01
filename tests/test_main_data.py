@@ -42,6 +42,60 @@ def test_main_data_defaults_to_validate_local_dataset() -> None:
     assert arguments.dataset == Path("dataset")
 
 
+def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) -> None:
+    environment = os.environ.copy()
+    environment["UV_CACHE_DIR"] = "/private/tmp/pinn4soh-uv-cache"
+    environment["MPLCONFIGDIR"] = "/private/tmp/pinn4soh-matplotlib"
+    missing = tmp_path / "missing"
+    render_dataset = tmp_path / "render-dataset"
+    render_dataset.mkdir()
+    (render_dataset / "cycle_catalog.json").write_text(
+        json.dumps(
+            {
+                "cycles": [
+                    {
+                        "cycle_name": "cycle_001",
+                        "experiment_id": "experiment_001",
+                        "assets": {"parquet": "cycles/cycle_001.parquet"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    commands = (
+        [
+            "uv",
+            "run",
+            "python",
+            "main_data.py",
+            "edit",
+            "--dataset",
+            str(missing),
+            "--baseline-seconds",
+            "60",
+        ],
+        [
+            "uv",
+            "run",
+            "python",
+            "main_data.py",
+            "render",
+            "cycle_001",
+            "--dataset",
+            str(render_dataset),
+            "--publication",
+        ],
+    )
+
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, env=environment, text=True)
+        assert result.returncode != 0
+        assert "ModuleNotFoundError" not in result.stderr
+        assert "FileNotFoundError" in result.stderr
+
+
 def test_dataset_loader_reads_catalog_from_absolute_path_without_writing(tmp_path: Path) -> None:
     from dataloader.dataloader import DatasetLoader
 

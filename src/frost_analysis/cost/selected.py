@@ -7,8 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from frost_analysis.dataset.loader import DatasetLoader
-
+from ..dataset.loader import DatasetLoader
 from .core import integrate_energy_kwh, optimize_cycle_cop_cost, water_side_heating_kw
 
 MINIMUM_INTEGRATION_COVERAGE = 0.95
