@@ -1,6 +1,7 @@
 """Dataset image collection and coverage operations."""
 
 from src.frost_analysis.dataset.images import (
+    RGB_CAMERA_ORDER,
     build_rgb_coverage_intervals,
     collect_cycle_images,
     copy_image,
@@ -15,6 +16,7 @@ from src.frost_analysis.dataset.images import (
 )
 
 __all__ = [
+    "RGB_CAMERA_ORDER",
     "build_rgb_coverage_intervals",
     "collect_cycle_images",
     "copy_image",
