@@ -46,10 +46,15 @@ def test_main_data_defaults_to_validate_local_dataset() -> None:
 def test_quality_tools_target_new_workspace_entries() -> None:
     config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["tool"]
 
-    assert config["mypy"]["files"] == ["main_data.py", "dataloader"]
+    assert config["mypy"]["files"] == ["main_data.py", "main_cost.py", "dataloader", "cost"]
     assert "packages" not in config["mypy"]
     assert config["mypy"]["follow_imports"] == "skip"
-    assert config["coverage"]["run"]["source"] == ["main_data", "dataloader"]
+    assert config["coverage"]["run"]["source"] == [
+        "main_data",
+        "main_cost",
+        "dataloader",
+        "cost",
+    ]
 
 
 def test_validate_dispatches_to_read_only_domain_functions(

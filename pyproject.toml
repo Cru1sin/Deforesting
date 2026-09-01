@@ -55,12 +55,12 @@ max-complexity = 10
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["main_data.py", "dataloader"]
+files = ["main_data.py", "main_cost.py", "dataloader", "cost"]
 follow_imports = "skip"
 
 [tool.coverage.run]
 branch = true
-source = ["main_data", "dataloader"]
+source = ["main_data", "main_cost", "dataloader", "cost"]
 
 [tool.coverage.report]
 show_missing = true
