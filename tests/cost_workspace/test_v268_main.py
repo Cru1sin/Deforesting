@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 import main_cost
+from cost.fit_v2_6_8 import load_artifacts
 
 
 def _events() -> pd.DataFrame:
@@ -101,13 +102,21 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
     recipe = json.loads((run / "recipe.json").read_text())
     assert recipe == main_cost.cost_function_v2_6_8.DEFAULT_RECIPE
     assert artifact["fit_variant"] == "review_a"
-    assert set(artifact["models"]) == {
+    model_names = {
         "experiment_mean",
         "ticket_ridge_static5",
         "ticket_ridge_physical6",
         "ticket_ridge_dynamic8",
     }
-    assert not (Path(main_cost.__file__).parent / "cost/params/ticket_ridge_models.json").exists()
+    assert set(artifact["models"]) == model_names
+    promoted = load_artifacts()
+    assert set(promoted["models"]) == model_names
+    for model_name in model_names - {"experiment_mean"}:
+        for target in ("energy", "heat"):
+            folds = promoted["models"][model_name][target]["folds"]
+            assert folds
+            assert all(fold["training_standardized_references"] for fold in folds.values())
+            assert all("support_threshold" in fold for fold in folds.values())
     validation = pd.read_csv(run / "validation.csv")
     assert len(validation) == 8 * 4 + 1
 
