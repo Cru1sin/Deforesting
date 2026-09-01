@@ -40,6 +40,7 @@ def heating_heat(frame: pd.DataFrame, boundaries: pd.DataFrame, basis: str) -> p
     return pd.DataFrame(
         {
             "heating_heat_kwh": curve["energy_kwh"].to_numpy(),
+            "heating_heat_legacy_bridged_kwh": curve["legacy_bridged_energy_kwh"].to_numpy(),
             "heating_heat_coverage": coverage.to_numpy(),
             "heating_heat_supported": supported.to_numpy(),
             "heating_heat_model": model,
@@ -65,19 +66,25 @@ def zero_transition_heat(count: int) -> pd.DataFrame:
     )
 
 
-def _strict_states(frame: pd.DataFrame, end: pd.Timestamp) -> dict[str, float]:
+def _strict_states(frame: pd.DataFrame, end: pd.Timestamp) -> tuple[dict[str, float], bool]:
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
     window = frame.loc[timestamps.ge(end - pd.Timedelta(seconds=60)) & timestamps.lt(end)]
     result = {}
+    complete_seconds = []
     for column in (
         "water_in_temperature",
         "water_out_temperature",
         "coil_temperature",
         "evaporating_pressure",
     ):
-        values = pd.to_numeric(window[column], errors="coerce").dropna()
+        values = pd.to_numeric(window[column], errors="coerce")
+        finite = pd.DataFrame(
+            {"timestamp": timestamps.loc[window.index].dt.floor("s"), column: values}
+        )
+        complete_seconds.append(len(finite.dropna().drop_duplicates("timestamp")))
+        values = values.dropna()
         result[column] = float(values.median()) if not values.empty else float("nan")
-    return result
+    return result, min(complete_seconds) >= 48
 
 
 def _rule_duration(frame: pd.DataFrame, record: Mapping[str, object]) -> float:
@@ -112,9 +119,11 @@ def transition_heat_v2_5(
         events["defrost_start"] - events["defrost_preparation_start"]
     ).total_seconds() / 60
     duration = _rule_duration(frame, record)
-    states = pd.DataFrame(
-        [_strict_states(frame, pd.Timestamp(value)) for value in boundaries["candidate_time"]]
-    )
+    state_rows = [
+        _strict_states(frame, pd.Timestamp(value)) for value in boundaries["candidate_time"]
+    ]
+    states = pd.DataFrame([values for values, _ in state_rows])
+    state_window_supported = pd.Series([supported for _, supported in state_rows])
     states["preparation_duration_minutes"] = preparation_duration
     states["rule_defrost_duration_minutes"] = duration
     qprep_features = qprep_model["feature_order"]
@@ -138,7 +147,9 @@ def transition_heat_v2_5(
     for name, limits in qd_model["support"].items():
         qd_supported &= states[name].between(float(limits[0]), float(limits[1]))
     signed_qd = -qd
-    supported = qprep_supported & qd_supported & qprep.gt(0) & signed_qd.le(0)
+    supported = (
+        state_window_supported & qprep_supported & qd_supported & qprep.gt(0) & signed_qd.le(0)
+    )
     result = states.rename(columns={"evaporating_pressure": "qd_evaporating_pressure_mpa"})
     result["transition_heat_kwh"] = qprep + signed_qd
     result["preparation_heat_kwh"] = qprep
@@ -146,8 +157,13 @@ def transition_heat_v2_5(
     result["recovery_heat_kwh"] = 0.0
     result["qprep_supported"] = qprep_supported
     result["qd_supported"] = qd_supported
+    result["state_window_supported"] = state_window_supported
     result["QT_supported"] = supported
     result["transition_heat_model"] = "linear_qprep_plus_signed_quadratic_qd"
     result["transition_heat_rule"] = "strict_pre_action_window_[tau-60s,tau)"
-    result["transition_heat_status"] = np.where(supported, "supported", "outside_support")
+    result["transition_heat_status"] = np.select(
+        [~state_window_supported, supported],
+        ["incomplete", "supported"],
+        default="outside_support",
+    )
     return result

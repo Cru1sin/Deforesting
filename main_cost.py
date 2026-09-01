@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from cost import cost_function_v1, cost_function_v2_5
+from cost.boundaries import catalog_exclusion_reason, clean_anchor_exclusion_reason
 from cost.cost_curve import transition_semantics, validate_recipe
 from cost.energy_models import load_parameters
 from dataloader import DatasetLoader
@@ -91,10 +92,11 @@ def _run_directory(output_root: Path, recipe: dict[str, object]) -> Path:
     return output_root / "cost" / name
 
 
-def _cycle_names(loader: Any, requested: list[str] | None) -> list[str]:
-    available = [
-        str(value) for value in loader.list_cycles(statuses={"valid"})["cycle_name"].tolist()
-    ]
+def _cycle_names(
+    loader: Any, requested: list[str] | None, parameter_experiments: set[str]
+) -> list[str]:
+    catalog = loader.list_cycles(statuses={"valid"})
+    available = [str(value) for value in catalog["cycle_name"].tolist()]
     if requested is None or not requested:
         selected = available
     else:
@@ -102,9 +104,56 @@ def _cycle_names(loader: Any, requested: list[str] | None) -> list[str]:
         if missing:
             raise ValueError(f"unknown or invalid cycles: {', '.join(missing)}")
         selected = requested
+    records = {str(row["cycle_name"]): row.to_dict() for _, row in catalog.iterrows()}
+    eligible = []
+    for cycle_name in selected:
+        reason = catalog_exclusion_reason(records[cycle_name], parameter_experiments)
+        if reason is not None:
+            if requested:
+                raise ValueError(f"{cycle_name} excluded: {reason}")
+            continue
+        eligible.append(cycle_name)
+    if not eligible:
+        raise ValueError("no metadata-eligible cycles selected")
+    return eligible
+
+
+def _clean_anchor_cycles(
+    loader: Any, cycles: list[str], *, explicit: bool
+) -> tuple[list[str], int]:
+    selected = []
+    columns = [
+        "timestamp",
+        "water_flow",
+        "water_in_temperature",
+        "water_out_temperature",
+        "power_total",
+    ]
+    for cycle_name in cycles:
+        frame = loader.load_cycle_original(cycle_name, columns=columns)
+        reason = clean_anchor_exclusion_reason(frame, loader.get_cycle_record(cycle_name))
+        if reason is not None:
+            if explicit:
+                raise ValueError(f"{cycle_name} excluded: {reason}")
+            continue
+        selected.append(cycle_name)
     if not selected:
-        raise ValueError("no valid cycles selected")
-    return selected
+        raise ValueError("no cycles pass the raw clean-anchor gate")
+    return selected, len(cycles) - len(selected)
+
+
+def _validate_cycle_artifact_names(table: pd.DataFrame) -> None:
+    for value in table["cycle_name"]:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or value in {".", ".."}
+            or Path(value).is_absolute()
+            or Path(value).name != value
+            or "/" in value
+            or "\\" in value
+        ):
+            raise ValueError(f"unsafe cycle name for artifact: {value!r}")
 
 
 def compare_results(
@@ -172,11 +221,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     if run.exists() and not args.overwrite:
         raise FileExistsError(f"run directory exists; pass --overwrite: {run}")
     loader = DatasetLoader(args.dataset)
-    cycles = _cycle_names(loader, args.cycles)
-    experiments = {str(loader.get_cycle_record(cycle)["experiment_id"]) for cycle in cycles}
-    missing_parameters = sorted(experiments - parameters["pe_quadratic"].keys())
-    if missing_parameters:
-        raise ValueError(f"missing Pe parameters: {', '.join(missing_parameters)}")
+    cycles = _cycle_names(loader, args.cycles, set(parameters["pe_quadratic"]))
     if (
         recipe["transition_energy_model"] == "pe_quadratic_plus_fixed_recovery"
         and "fixed_recovery_electricity_kwh" not in parameters["v1"]
@@ -193,11 +238,16 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
         raise ValueError("V2.5 transition heat parameters are incomplete")
     if args.dry_run:
         print(
-            f"Dry-run OK: recipe, parameters, variant, output, and {len(cycles)} cycle(s) checked"
+            "Dry-run OK: recipe, parameters, variant, output, and "
+            f"{len(cycles)} metadata-eligible cycle(s) checked; "
+            "raw clean-anchor gate deferred"
         )
         return 0
 
+    cycles, anchor_excluded = _clean_anchor_cycles(loader, cycles, explicit=bool(args.cycles))
+    print(f"Selected {len(cycles)} cycle(s); excluded {anchor_excluded} by raw clean-anchor gate")
     table = module.calculate(loader, cycles, recipe)
+    _validate_cycle_artifact_names(table)
     run.mkdir(parents=True, exist_ok=True)
     table.to_csv(run / "cost.csv", index=False)
     cycles_dir = run / "cycles"

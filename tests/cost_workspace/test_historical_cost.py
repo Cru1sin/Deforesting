@@ -6,12 +6,32 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import main_cost
 from cost.cost_function_v1 import calculate_cycle as calculate_v1
 from cost.cost_function_v2_5 import calculate_cycle as calculate_v25
+from cost.energy_models import load_parameters
 from dataloader import DatasetLoader
 
 ORIGINAL_ROOT = Path("/Users/cruisin/Documents/DeforestingSensor")
 CYCLE = "frost_cycle_000070"
+
+
+def test_real_dataset_frozen_science_cohort_is_69() -> None:
+    dataset = ORIGINAL_ROOT / "dataset"
+    if not dataset.exists():
+        pytest.skip("read-only original Dataset integration assets are unavailable")
+    loader = DatasetLoader(dataset)
+    metadata_cycles = main_cost._cycle_names(  # noqa: SLF001
+        loader, None, set(load_parameters()["pe_quadratic"])
+    )
+    selected, excluded = main_cost._clean_anchor_cycles(  # noqa: SLF001
+        loader, metadata_cycles, explicit=False
+    )
+
+    assert len(metadata_cycles) == 70
+    assert len(selected) == 69
+    assert excluded == 1
+    assert "frost_cycle_000005" not in selected
 
 
 @pytest.mark.parametrize(
@@ -38,11 +58,8 @@ def test_dataset_native_curve_matches_historical_selected_output(
         pd.to_datetime(historical["candidate_time"], format="mixed").to_numpy(),
     )
     comparisons = {
-        "heating_energy_kwh": "heating_electricity_kwh",
-        "heating_heat_kwh": heat_column,
         "defrost_energy_kwh": "defrost_electricity_kwh",
         "recovery_energy_kwh": "recovery_electricity_kwh",
-        "inverse_cop": "inverse_cop",
     }
     if name == "v2.5":
         comparisons.update(
@@ -53,5 +70,22 @@ def test_dataset_native_curve_matches_historical_selected_output(
         )
     for current, old in comparisons.items():
         assert np.allclose(result[current], historical[old], rtol=0, atol=5e-13)
+    assert np.allclose(
+        result["heating_energy_legacy_bridged_kwh"],
+        historical["heating_electricity_kwh"],
+        rtol=0,
+        atol=5e-13,
+    )
+    assert np.allclose(
+        result["heating_heat_legacy_bridged_kwh"],
+        historical[heat_column],
+        rtol=0,
+        atol=5e-13,
+    )
+    assert not np.allclose(result["heating_energy_kwh"], historical["heating_electricity_kwh"])
+    if name == "v1":
+        assert np.allclose(result["heating_heat_kwh"], historical[heat_column], rtol=0, atol=5e-13)
+    else:
+        assert not np.allclose(result["heating_heat_kwh"], historical[heat_column])
     assert result.loc[result["is_optimum"], "candidate_time"].tolist() == [optimum]
     assert pd.Timestamp(historical["t_star"].iloc[0]) == optimum
