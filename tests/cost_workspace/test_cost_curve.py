@@ -9,10 +9,20 @@ from cost.cost_curve import build_cost_curve, validate_recipe
 def _recipe(**changes: object) -> dict[str, object]:
     recipe: dict[str, object] = {
         "base_cost": "v1",
+        "version": "v1",
         "variant": None,
+        "label_eligible": True,
         "heat_basis": "unit",
         "event_scope": "stable_heating_start_to_actual_preparation",
         "heating_start_rule": "stable_heating_start",
+        "candidate_start_rule": "stable_heating_start_plus_10_minutes",
+        "candidate_end_rule": "observed_defrost_preparation_start",
+        "candidate_cadence": "1_minute_plus_exact_endpoint",
+        "state_window": "[tau-60s,tau)",
+        "transition_scope": "preparation_defrost_recovery",
+        "transition_window": "candidate_state_at_tau",
+        "transition_provenance": "candidate_time_state_plus_fixed_recovery",
+        "decision_rule": "supported_argmin_inverse_cop",
         "heating_energy_model": "measured_total_power",
         "heating_heat_model": "measured_unit_heat",
         "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
@@ -48,6 +58,7 @@ def test_component_override_requires_a_named_variant() -> None:
 
     recipe = _recipe(variant="trial", transition_heat_model="linear_qprep_plus_signed_quadratic_qd")
     assert validate_recipe(recipe)["variant"] == "trial"
+    assert validate_recipe(recipe)["label_eligible"] is False
 
 
 def test_variant_still_rejects_unknown_or_incompatible_parameters() -> None:
@@ -96,8 +107,9 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
     et = pd.DataFrame(
         {
             "transition_energy_kwh": [0.0, 0.0, 0.0, 0.0],
-            "defrost_electricity_kwh": 0.0,
-            "recovery_electricity_kwh": 0.0,
+            "preparation_energy_kwh": 0.0,
+            "defrost_energy_kwh": 0.0,
+            "recovery_energy_kwh": 0.0,
             "ET_supported": [True, True, True, True],
             "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
             "transition_energy_rule": "strict_pre_action_60s",
@@ -128,6 +140,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
     assert result["near_optimal_5pct"].tolist() == [False, True, False, False]
     assert result["base_cost"].eq("v1").all()
     assert result["variant"].isna().all()
+    assert result["label_eligible"].all()
 
 
 def test_build_cost_curve_rejects_positive_defrost_heat() -> None:

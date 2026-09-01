@@ -53,10 +53,20 @@ class FakeDataset:
 def test_default_recipes_are_canonical_and_explicit() -> None:
     assert V1_RECIPE == {
         "base_cost": "v1",
+        "version": "v1",
         "variant": None,
+        "label_eligible": True,
         "heat_basis": "unit",
         "event_scope": "stable_heating_start_to_actual_preparation",
         "heating_start_rule": "stable_heating_start",
+        "candidate_start_rule": "stable_heating_start_plus_10_minutes",
+        "candidate_end_rule": "observed_defrost_preparation_start",
+        "candidate_cadence": "1_minute_plus_exact_endpoint",
+        "state_window": "[tau-60s,tau)",
+        "transition_scope": "preparation_defrost_recovery",
+        "transition_window": "candidate_state_at_tau",
+        "transition_provenance": "candidate_time_state_plus_fixed_recovery",
+        "decision_rule": "supported_argmin_inverse_cop",
         "heating_energy_model": "measured_total_power",
         "heating_heat_model": "measured_unit_heat",
         "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
@@ -65,6 +75,14 @@ def test_default_recipes_are_canonical_and_explicit() -> None:
     assert V25_RECIPE["base_cost"] == "v2.5"
     assert V25_RECIPE["heat_basis"] == "water"
     assert V25_RECIPE["event_scope"] == "heating_start_to_actual_preparation"
+    assert V25_RECIPE["candidate_start_rule"] == "stable_heating_start_plus_10_minutes"
+    assert V25_RECIPE["candidate_end_rule"] == "observed_defrost_preparation_start"
+    assert V25_RECIPE["candidate_cadence"] == "1_minute_plus_exact_endpoint"
+    assert V25_RECIPE["state_window"] == "[tau-60s,tau)"
+    assert V25_RECIPE["decision_rule"] == "supported_argmin_inverse_cop"
+    assert V25_RECIPE["label_eligible"] is False
+    assert "observed_preparation_and_defrost_durations" in str(V25_RECIPE["transition_window"])
+    assert "offline_diagnostic" in str(V25_RECIPE["transition_provenance"])
 
 
 def test_version_module_rejects_recipe_from_another_base_cost() -> None:
@@ -81,9 +99,21 @@ def test_v1_single_cycle_uses_stable_unit_heat_fixed_recovery_and_zero_qt() -> N
     assert first["candidate_elapsed_minutes"] == 10.0
     assert first["heating_energy_kwh"] == pytest.approx(1.0)
     assert first["heating_heat_kwh"] == pytest.approx(2.0)
-    assert first["recovery_electricity_kwh"] == 0.279901897467
+    assert first["preparation_energy_kwh"] == 0.0
+    assert first["recovery_energy_kwh"] == 0.279901897467
     assert first["transition_heat_kwh"] == 0.0
     assert first["base_cost"] == "v1"
+    assert first["label_eligible"]
+    assert first["heating_energy_rule"] == "stable_heating_start"
+    assert first["heating_heat_rule"] == "stable_heating_start"
+    assert {
+        "preparation_energy_kwh",
+        "defrost_energy_kwh",
+        "recovery_energy_kwh",
+        "preparation_heat_kwh",
+        "defrost_heat_kwh",
+        "recovery_heat_kwh",
+    } <= set(result)
     assert result["supported"].all()
     assert result["is_optimum"].sum() == 1
 
@@ -95,11 +125,15 @@ def test_v25_single_cycle_uses_cycle_start_water_heat_and_signed_qd() -> None:
     assert first["candidate_elapsed_minutes"] == 12.0
     assert first["heating_energy_kwh"] == pytest.approx(1.2)
     assert first["heating_heat_kwh"] == pytest.approx(1.161)
-    assert first["recovery_electricity_kwh"] == 0.0
+    assert first["preparation_energy_kwh"] == 0.0
+    assert first["recovery_energy_kwh"] == 0.0
     assert first["recovery_heat_kwh"] == 0.0
     assert first["defrost_heat_kwh"] <= 0.0
     assert first["transition_heat_kwh"] == (
         first["preparation_heat_kwh"] + first["defrost_heat_kwh"]
     )
     assert first["base_cost"] == "v2.5"
+    assert not first["label_eligible"]
+    assert first["heating_energy_rule"] == "heating_start"
+    assert first["heating_heat_rule"] == "heating_start"
     assert result["is_optimum"].sum() == 1

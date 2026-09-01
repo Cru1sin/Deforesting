@@ -14,18 +14,38 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
     base = value.get("base_cost")
     canonical = {
         "v1": {
+            "version": "v1",
+            "label_eligible": True,
             "heat_basis": "unit",
             "event_scope": "stable_heating_start_to_actual_preparation",
             "heating_start_rule": "stable_heating_start",
+            "candidate_start_rule": "stable_heating_start_plus_10_minutes",
+            "candidate_end_rule": "observed_defrost_preparation_start",
+            "candidate_cadence": "1_minute_plus_exact_endpoint",
+            "state_window": "[tau-60s,tau)",
+            "transition_scope": "preparation_defrost_recovery",
+            "transition_window": "candidate_state_at_tau",
+            "transition_provenance": "candidate_time_state_plus_fixed_recovery",
+            "decision_rule": "supported_argmin_inverse_cop",
             "heating_energy_model": "measured_total_power",
             "heating_heat_model": "measured_unit_heat",
             "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
             "transition_heat_model": "zero_transition_heat",
         },
         "v2.5": {
+            "version": "v2.5",
+            "label_eligible": False,
             "heat_basis": "water",
             "event_scope": "heating_start_to_actual_preparation",
             "heating_start_rule": "heating_start",
+            "candidate_start_rule": "stable_heating_start_plus_10_minutes",
+            "candidate_end_rule": "observed_defrost_preparation_start",
+            "candidate_cadence": "1_minute_plus_exact_endpoint",
+            "state_window": "[tau-60s,tau)",
+            "transition_scope": "preparation_defrost_recovery",
+            "transition_window": "observed_preparation_and_defrost_durations",
+            "transition_provenance": "offline_diagnostic_future_boundary_observed_durations",
+            "decision_rule": "supported_argmin_inverse_cop",
             "heating_energy_model": "measured_total_power",
             "heating_heat_model": "measured_water_heat",
             "transition_energy_model": "pe_quadratic",
@@ -48,10 +68,28 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
             "heating_start_to_actual_preparation",
         },
         "heating_start_rule": {"stable_heating_start", "heating_start"},
+        "candidate_start_rule": {"stable_heating_start_plus_10_minutes"},
+        "candidate_end_rule": {"observed_defrost_preparation_start"},
+        "candidate_cadence": {"1_minute_plus_exact_endpoint"},
+        "state_window": {"[tau-60s,tau)"},
+        "transition_scope": {"preparation_defrost_recovery"},
+        "transition_window": {
+            "candidate_state_at_tau",
+            "observed_preparation_and_defrost_durations",
+        },
+        "transition_provenance": {
+            "candidate_time_state_plus_fixed_recovery",
+            "offline_diagnostic_future_boundary_observed_durations",
+        },
+        "decision_rule": {"supported_argmin_inverse_cop"},
     }
     for key, choices in domains.items():
         if value[key] not in choices:
             raise ValueError(f"unknown {key.replace('_', ' ')}")
+    if value["version"] != base:
+        raise ValueError("version must match base_cost")
+    if not isinstance(value["label_eligible"], bool):
+        raise ValueError("label_eligible must be Boolean")
     allowed = {
         "heating_energy_model": {"measured_total_power"},
         "heating_heat_model": {"measured_unit_heat", "measured_water_heat"},
@@ -71,7 +109,9 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
     if value["event_scope"] != expected_scope:
         raise ValueError("event scope and start rule are incompatible")
     differences = {
-        key for key, expected in canonical[str(base)].items() if value.get(key) != expected
+        key
+        for key, expected in canonical[str(base)].items()
+        if key != "label_eligible" and value.get(key) != expected
     }
     variant = value.get("variant")
     if not variant:
@@ -87,6 +127,10 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
             raise ValueError("component override requires a named variant")
     if not differences and variant:
         raise ValueError("canonical recipe cannot set variant")
+    if variant:
+        value["label_eligible"] = False
+    elif value["label_eligible"] != canonical[str(base)]["label_eligible"]:
+        raise ValueError("canonical label_eligible status cannot be changed")
     if variant is not None and (not isinstance(variant, str) or not variant.strip()):
         raise ValueError("variant must be a non-empty string")
     return value
@@ -126,8 +170,9 @@ def build_cost_curve(  # noqa: C901
     if "defrost_heat_kwh" in curve and curve["defrost_heat_kwh"].gt(0).any():
         raise ValueError("defrost_heat_kwh must be signed and non-positive")
     for column in (
-        "defrost_electricity_kwh",
-        "recovery_electricity_kwh",
+        "preparation_energy_kwh",
+        "defrost_energy_kwh",
+        "recovery_energy_kwh",
         "preparation_heat_kwh",
         "defrost_heat_kwh",
         "recovery_heat_kwh",
@@ -164,4 +209,5 @@ def build_cost_curve(  # noqa: C901
     curve["near_optimal_5pct"] = curve["optimization_eligible"] & curve["relative_regret"].le(0.05)
     curve["base_cost"] = checked["base_cost"]
     curve["variant"] = checked["variant"]
+    curve["label_eligible"] = checked["label_eligible"]
     return curve

@@ -40,8 +40,8 @@ def test_dataset_native_curve_matches_historical_selected_output(
     comparisons = {
         "heating_energy_kwh": "heating_electricity_kwh",
         "heating_heat_kwh": heat_column,
-        "defrost_electricity_kwh": "defrost_electricity_kwh",
-        "recovery_electricity_kwh": "recovery_electricity_kwh",
+        "defrost_energy_kwh": "defrost_electricity_kwh",
+        "recovery_energy_kwh": "recovery_electricity_kwh",
         "inverse_cop": "inverse_cop",
     }
     if name == "v2.5":

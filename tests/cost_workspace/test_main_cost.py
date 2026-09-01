@@ -28,6 +28,7 @@ def test_dry_run_checks_recipe_output_and_cycle_count_without_time_series(
 
     status = main_cost.main(
         [
+            "--action",
             "calculate",
             "--cost",
             "v1",
@@ -59,7 +60,17 @@ def test_dry_run_loads_empirical_parameters(
     )
 
     with pytest.raises(ValueError, match="bad empirical parameters"):
-        main_cost.main(["calculate", "--cost", "v1", "--output-root", str(tmp_path), "--dry-run"])
+        main_cost.main(
+            [
+                "--action",
+                "calculate",
+                "--cost",
+                "v1",
+                "--output-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
 
 
 def test_dry_run_checks_selected_experiment_has_parameters(
@@ -73,7 +84,17 @@ def test_dry_run_checks_selected_experiment_has_parameters(
     )
 
     with pytest.raises(ValueError, match="exp_20260714"):
-        main_cost.main(["calculate", "--cost", "v1", "--output-root", str(tmp_path), "--dry-run"])
+        main_cost.main(
+            [
+                "--action",
+                "calculate",
+                "--cost",
+                "v1",
+                "--output-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
 
 
 def test_existing_canonical_and_variant_run_directories_require_overwrite(
@@ -84,7 +105,15 @@ def test_existing_canonical_and_variant_run_directories_require_overwrite(
     canonical.mkdir(parents=True)
     with pytest.raises(FileExistsError, match="overwrite"):
         main_cost.main(
-            ["calculate", "--cost", "v1", "--output-root", str(tmp_path / "output"), "--dry-run"]
+            [
+                "--action",
+                "calculate",
+                "--cost",
+                "v1",
+                "--output-root",
+                str(tmp_path / "output"),
+                "--dry-run",
+            ]
         )
 
     variant = tmp_path / "output" / "cost" / "v1__water_trial"
@@ -92,6 +121,7 @@ def test_existing_canonical_and_variant_run_directories_require_overwrite(
     with pytest.raises(FileExistsError, match="overwrite"):
         main_cost.main(
             [
+                "--action",
                 "calculate",
                 "--cost",
                 "v1",
@@ -109,39 +139,46 @@ def test_existing_canonical_and_variant_run_directories_require_overwrite(
 
 
 def test_fit_is_explicitly_reserved(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main_cost.main(["fit"]) == 2
+    assert main_cost.main(["--action", "fit"]) == 2
     assert "V2.6.8 fit not migrated yet" in capsys.readouterr().err
+
+
+def test_action_is_a_required_option_not_a_positional() -> None:
+    parser = main_cost.build_parser()
+
+    assert parser.parse_args(["--action", "calculate"]).action == "calculate"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["calculate"])
 
 
 def test_calculate_writes_cost_command_and_recipe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     class Module:
-        DEFAULT_RECIPE = {
-            "base_cost": "v1",
-            "variant": None,
-            "heat_basis": "unit",
-            "event_scope": "stable_heating_start_to_actual_preparation",
-            "heating_start_rule": "stable_heating_start",
-            "heating_energy_model": "measured_total_power",
-            "heating_heat_model": "measured_unit_heat",
-            "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
-            "transition_heat_model": "zero_transition_heat",
-        }
+        DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
 
         @staticmethod
         def calculate(*_: object) -> pd.DataFrame:
-            return pd.DataFrame({"cycle_name": ["cycle_a"], "inverse_cop": [0.5]})
+            return pd.DataFrame({"cycle_name": ["cycle_a", "cycle_b"], "inverse_cop": [0.5, 0.6]})
 
     monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: MetadataOnlyDataset())
     monkeypatch.setitem(main_cost.COST_MODULES, "v1", Module)
     output = tmp_path / "output"
 
-    assert main_cost.main(["calculate", "--cost", "v1", "--output-root", str(output)]) == 0
+    assert (
+        main_cost.main(["--action", "calculate", "--cost", "v1", "--output-root", str(output)]) == 0
+    )
 
     run = output / "cost" / "v1"
     assert (run / "cost.csv").exists()
     assert (run / "command.txt").exists()
+    assert (run / "cycles/cycle_a.csv").exists()
+    assert (run / "cycles/cycle_b.csv").exists()
+    assert (
+        (run / "command.txt")
+        .read_text()
+        .startswith("uv run python main_cost.py --action calculate")
+    )
     assert json.loads((run / "recipe.json").read_text())["heat_basis"] == "unit"
 
 

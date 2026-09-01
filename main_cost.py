@@ -30,7 +30,7 @@ COST_MODULES: dict[str, ModuleType] = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("calculate", "compare", "fit"))
+    parser.add_argument("--action", required=True, choices=("calculate", "fit", "compare"))
     parser.add_argument("--cost", choices=tuple(COST_MODULES), default="v1")
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument("--cycles", nargs="*")
@@ -145,7 +145,7 @@ def compare_results(
     return figure, path
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     arguments = list(argv) if argv is not None else sys.argv[1:]
     args = build_parser().parse_args(arguments)
     if args.action == "fit":
@@ -197,11 +197,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     table = module.calculate(loader, cycles, recipe)
     run.mkdir(parents=True, exist_ok=True)
     table.to_csv(run / "cost.csv", index=False)
+    cycles_dir = run / "cycles"
+    cycles_dir.mkdir(exist_ok=True)
+    for cycle_name, cycle in table.groupby("cycle_name", sort=False):
+        cycle.to_csv(cycles_dir / f"{cycle_name}.csv", index=False)
     (run / "recipe.json").write_text(
         json.dumps(recipe, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     (run / "command.txt").write_text(
-        shlex.join(["main_cost.py", *arguments]) + "\n", encoding="utf-8"
+        shlex.join(["uv", "run", "python", "main_cost.py", *arguments]) + "\n",
+        encoding="utf-8",
     )
     print(f"Cost result written: {run}")
     return 0

@@ -51,6 +51,7 @@ def build_candidate_boundaries(loader: Any, cycle_name: str, start_rule: str) ->
                 (candidate - integration_start).total_seconds() / 60 for candidate in candidates
             ],
             "integration_start": integration_start,
+            "integration_start_rule": start_rule,
             "actual_preparation_time": end,
         }
     )

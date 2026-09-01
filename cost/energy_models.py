@@ -9,8 +9,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.frost_analysis.cost.core import integrate_energy_curve_kwh
-
 MINIMUM_COVERAGE = 0.95
 
 
@@ -26,19 +24,13 @@ def load_parameters() -> dict[str, Any]:
 def heating_energy(frame: pd.DataFrame, boundaries: pd.DataFrame) -> pd.DataFrame:
     """Integrate measured total power from the recipe's heating boundary."""
     start = pd.Timestamp(boundaries["integration_start"].iloc[0])
-    end = pd.Timestamp(boundaries["candidate_time"].max())
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    source = frame.loc[timestamps.ge(start) & timestamps.le(end)]
-    curve = integrate_energy_curve_kwh(
-        source["timestamp"],
-        pd.to_numeric(source["power_total"], errors="coerce"),
+    curve = integrate_heating_curve(
+        frame["timestamp"],
+        pd.to_numeric(frame["power_total"], errors="coerce"),
         boundaries["candidate_time"],
-        bridge_internal_gaps=True,
-        extrapolate_endpoints=True,
+        start,
     )
-    coverage = _anchored_coverage(
-        source["timestamp"], start, boundaries["candidate_time"], curve["coverage"]
-    )
+    coverage = curve["coverage"]
     supported = coverage.ge(MINIMUM_COVERAGE)
     return pd.DataFrame(
         {
@@ -46,27 +38,45 @@ def heating_energy(frame: pd.DataFrame, boundaries: pd.DataFrame) -> pd.DataFram
             "heating_energy_coverage": coverage.to_numpy(),
             "heating_energy_supported": supported.to_numpy(),
             "heating_energy_model": "measured_total_power",
-            "heating_energy_rule": str(boundaries["integration_start"].iloc[0]),
+            "heating_energy_rule": str(boundaries["integration_start_rule"].iloc[0]),
             "heating_energy_status": np.where(supported, "supported", "incomplete"),
         }
     )
 
 
-def _anchored_coverage(
+def integrate_heating_curve(
     timestamps: pd.Series,
-    start: pd.Timestamp,
+    power_kw: pd.Series,
     candidates: pd.Series,
-    coverage: pd.Series,
-) -> pd.Series:
-    valid = pd.to_datetime(timestamps, errors="coerce").dropna()
-    if valid.empty:
-        return pd.Series(0.0, index=coverage.index)
-    first = max(pd.Timestamp(valid.min()), start)
-    candidate_times = pd.to_datetime(candidates, errors="coerce")
-    required = (candidate_times - start).dt.total_seconds()
-    observed = (candidate_times - first).dt.total_seconds().clip(lower=0)
-    fraction = observed.div(required).where(required.gt(0), 0.0).clip(upper=1)
-    return coverage.reset_index(drop=True) * fraction.reset_index(drop=True)
+    start: pd.Timestamp,
+) -> pd.DataFrame:
+    """Causally integrate each candidate using only valid signal observations through tau."""
+    raw = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps, errors="coerce"),
+            "power_kw": pd.to_numeric(power_kw, errors="coerce"),
+        }
+    ).sort_values("timestamp", kind="stable")
+    raw = raw.drop_duplicates("timestamp", keep="last")
+    rows = []
+    for candidate in pd.to_datetime(candidates, errors="coerce"):
+        values = raw.loc[raw["timestamp"].ge(start) & raw["timestamp"].le(candidate)].dropna()
+        dt = values["timestamp"].diff().dt.total_seconds()
+        valid = dt.gt(0)
+        energy = (
+            ((values["power_kw"] + values["power_kw"].shift()) / 2 * dt / 3600)
+            .where(valid, 0.0)
+            .sum()
+        )
+        required = (pd.Timestamp(candidate) - start).total_seconds()
+        covered = dt.where(valid, 0.0).sum()
+        rows.append(
+            {
+                "energy_kwh": float(energy),
+                "coverage": float(covered / required) if required > 0 else 0.0,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _strict_pressure(frame: pd.DataFrame, end: pd.Timestamp) -> float:
@@ -112,8 +122,9 @@ def transition_energy(
     return pd.DataFrame(
         {
             "transition_energy_kwh": defrost + recovery,
-            "defrost_electricity_kwh": defrost,
-            "recovery_electricity_kwh": recovery,
+            "preparation_energy_kwh": 0.0,
+            "defrost_energy_kwh": defrost,
+            "recovery_energy_kwh": recovery,
             "evaporating_pressure_mpa": pe,
             "pe_quadratic_intercept_kwh": coefficients[0],
             "pe_quadratic_linear_kwh_per_mpa": coefficients[1],

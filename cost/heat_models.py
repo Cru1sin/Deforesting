@@ -7,10 +7,8 @@ from collections.abc import Mapping
 import numpy as np
 import pandas as pd
 
-from src.frost_analysis.cost.core import integrate_energy_curve_kwh
-
 from .boundaries import cycle_boundaries
-from .energy_models import MINIMUM_COVERAGE, _anchored_coverage, load_parameters
+from .energy_models import MINIMUM_COVERAGE, integrate_heating_curve, load_parameters
 
 
 def heating_heat(frame: pd.DataFrame, boundaries: pd.DataFrame, basis: str) -> pd.DataFrame:
@@ -31,22 +29,13 @@ def heating_heat(frame: pd.DataFrame, boundaries: pd.DataFrame, basis: str) -> p
     else:
         raise ValueError("heat basis must be unit or water")
     start = pd.Timestamp(boundaries["integration_start"].iloc[0])
-    end = pd.Timestamp(boundaries["candidate_time"].max())
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    selected = timestamps.ge(start) & timestamps.le(end)
-    curve = integrate_energy_curve_kwh(
-        frame.loc[selected, "timestamp"],
-        power.loc[selected],
+    curve = integrate_heating_curve(
+        frame["timestamp"],
+        power,
         boundaries["candidate_time"],
-        bridge_internal_gaps=True,
-        extrapolate_endpoints=True,
-    )
-    coverage = _anchored_coverage(
-        frame.loc[selected, "timestamp"],
         start,
-        boundaries["candidate_time"],
-        curve["coverage"],
     )
+    coverage = curve["coverage"]
     supported = coverage.ge(MINIMUM_COVERAGE)
     return pd.DataFrame(
         {
@@ -54,7 +43,7 @@ def heating_heat(frame: pd.DataFrame, boundaries: pd.DataFrame, basis: str) -> p
             "heating_heat_coverage": coverage.to_numpy(),
             "heating_heat_supported": supported.to_numpy(),
             "heating_heat_model": model,
-            "heating_heat_rule": str(boundaries["integration_start"].iloc[0]),
+            "heating_heat_rule": str(boundaries["integration_start_rule"].iloc[0]),
             "heating_heat_status": np.where(supported, "supported", "incomplete"),
         }
     )

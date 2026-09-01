@@ -96,8 +96,9 @@ def test_transition_energy_uses_strict_pre_action_window_and_frozen_fold() -> No
 
     expected_ed = 0.109160437898849 - 0.0524311159925975 * 0.3 - 0.2089549607749103 * 0.3**2
     assert result["evaporating_pressure_mpa"].iloc[0] == pytest.approx(0.3)
-    assert result["defrost_electricity_kwh"].iloc[0] == pytest.approx(expected_ed)
-    assert result["recovery_electricity_kwh"].iloc[0] == pytest.approx(0.279901897467)
+    assert result["preparation_energy_kwh"].iloc[0] == 0
+    assert result["defrost_energy_kwh"].iloc[0] == pytest.approx(expected_ed)
+    assert result["recovery_energy_kwh"].iloc[0] == pytest.approx(0.279901897467)
     assert result["transition_energy_kwh"].iloc[0] == pytest.approx(expected_ed + 0.279901897467)
     assert result["ET_supported"].iloc[0]
 
@@ -130,6 +131,66 @@ def test_heating_coverage_is_anchored_to_declared_integration_start() -> None:
 
     assert energy["heating_energy_coverage"].iloc[0] == pytest.approx(7 / 12)
     assert heat["heating_heat_coverage"].iloc[0] == pytest.approx(7 / 12)
+    assert not energy["heating_energy_supported"].iloc[0]
+    assert not heat["heating_heat_supported"].iloc[0]
+
+
+def test_later_signal_sample_cannot_change_an_earlier_candidate() -> None:
+    start = pd.Timestamp("2026-01-01")
+    boundaries = pd.DataFrame(
+        {
+            "candidate_time": [start + pd.Timedelta(seconds=30), start + pd.Timedelta(seconds=40)],
+            "integration_start": start,
+            "integration_start_rule": "heating_start",
+        }
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": [start, start + pd.Timedelta(seconds=40)],
+            "power_total": [1.0, 2.0],
+            "heating_capacity": [3.0, 4.0],
+        }
+    )
+    changed = frame.copy()
+    changed.loc[1, ["power_total", "heating_capacity"]] = [200.0, 400.0]
+
+    before_eh = heating_energy(frame, boundaries)
+    after_eh = heating_energy(changed, boundaries)
+    before_qh = heating_heat(frame, boundaries, "unit")
+    after_qh = heating_heat(changed, boundaries, "unit")
+
+    assert before_eh["heating_energy_kwh"].iloc[0] == after_eh["heating_energy_kwh"].iloc[0]
+    assert before_qh["heating_heat_kwh"].iloc[0] == after_qh["heating_heat_kwh"].iloc[0]
+
+
+def test_channel_leading_nans_are_uncovered_and_not_extrapolated() -> None:
+    start = pd.Timestamp("2026-01-01")
+    timestamps = pd.date_range(start, periods=61, freq="s")
+    missing = timestamps < start + pd.Timedelta(seconds=30)
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "power_total": pd.Series(6.0, index=range(61)).mask(missing),
+            "water_flow": pd.Series(1.0, index=range(61)).mask(missing),
+            "water_in_temperature": 40.0,
+            "water_out_temperature": 45.0,
+        }
+    )
+    boundaries = pd.DataFrame(
+        {
+            "candidate_time": [start + pd.Timedelta(seconds=60)],
+            "integration_start": start,
+            "integration_start_rule": "heating_start",
+        }
+    )
+
+    energy = heating_energy(frame, boundaries)
+    heat = heating_heat(frame, boundaries, "water")
+
+    assert energy["heating_energy_kwh"].iloc[0] == pytest.approx(6 * 30 / 3600)
+    assert heat["heating_heat_kwh"].iloc[0] == pytest.approx(1.161 * 5 * 30 / 3600)
+    assert energy["heating_energy_coverage"].iloc[0] == pytest.approx(0.5)
+    assert heat["heating_heat_coverage"].iloc[0] == pytest.approx(0.5)
     assert not energy["heating_energy_supported"].iloc[0]
     assert not heat["heating_heat_supported"].iloc[0]
 
