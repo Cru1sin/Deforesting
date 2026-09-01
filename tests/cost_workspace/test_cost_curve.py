@@ -3,7 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from cost.cost_curve import build_cost_curve, validate_recipe
+from cost.cost_curve import build_cost_curve
+from cost.cost_function_v1 import validate_recipe
 
 
 def _recipe(**changes: object) -> dict[str, object]:
@@ -69,10 +70,11 @@ def test_component_override_requires_a_named_variant() -> None:
     assert validate_recipe(recipe)["variant"] == "trial"
     assert validate_recipe(recipe)["label_eligible"] is False
 
-    with pytest.raises(ValueError, match="metadata"):
-        validate_recipe(
-            _recipe(variant="trial", transition_heat_model="linear_qprep_plus_signed_quadratic_qd")
-        )
+    normalized = validate_recipe(
+        _recipe(variant="trial", transition_heat_model="linear_qprep_plus_signed_quadratic_qd")
+    )
+    assert normalized["transition_window"] == "observed_preparation_and_defrost_durations"
+    assert normalized["transition_provenance"].endswith("_plus_fixed_recovery")
 
 
 @pytest.mark.parametrize(

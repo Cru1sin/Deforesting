@@ -22,8 +22,6 @@ INTEGRAL_SAMPLING_CONVENTION = (
 RAW_COLUMNS = (
     "timestamp",
     "power_total",
-    "compressor_power",
-    "heating_capacity",
     "water_flow",
     "water_in_temperature",
     "water_out_temperature",
@@ -41,12 +39,7 @@ def timestamp(value: object) -> pd.Timestamp | None:
 
 
 def catalog(loader: Any, *, valid_only: bool = False) -> pd.DataFrame:
-    try:
-        values = loader.list_cycles(statuses={"valid"} if valid_only else None).copy()
-    except TypeError:
-        values = loader.list_cycles().copy()
-        if valid_only and "status" in values:
-            values = values.loc[values["status"].eq("valid")]
+    values = loader.list_cycles(statuses={"valid"} if valid_only else None).copy()
     for column in (
         "start_time",
         "heating_start",
@@ -125,14 +118,17 @@ def window_audit(
     duration = max((end - start).total_seconds(), 0.0)
     covered = float(dt.where(short, 0.0).sum() + hold)
     gaps = dt.dropna()
+    first = observed["timestamp"].min() if not observed.empty else pd.NaT
+    leading = (
+        max((pd.Timestamp(first) - start).total_seconds(), 0.0) if pd.notna(first) else float("inf")
+    )
     maximum_gap = (
-        float(max(gaps.max(), trailing))
+        float(max(gaps.max(), leading, trailing))
         if not gaps.empty
-        else float(trailing)
+        else float(max(leading, trailing))
         if last_row is not None
         else float("inf")
     )
-    first = observed["timestamp"].min() if not observed.empty else pd.NaT
     last = observed["timestamp"].max() if not observed.empty else pd.NaT
     start_fresh = pd.notna(first) and abs((first - start).total_seconds()) <= 30
     end_fresh = pd.notna(last) and abs((end - last).total_seconds()) <= 30
@@ -310,7 +306,11 @@ def build_event_table(loader: Any) -> pd.DataFrame:  # noqa: C901
     rows: list[dict[str, object]] = []
     real = values.loc[
         values["defrost_preparation_start"].notna()
-        | values["cycle_name"].astype(str).eq("frost_cycle_000012")
+        | (
+            values["status"].eq("valid")
+            & values["defrost_start"].notna()
+            & values["defrost_end"].notna()
+        )
     ]
     boundary_names = ("heating_start", "defrost_preparation_start", "defrost_start", "defrost_end")
     for _, record in real.iterrows():
@@ -384,15 +384,14 @@ def build_event_table(loader: Any) -> pd.DataFrame:  # noqa: C901
     return pd.DataFrame(rows)
 
 
-def candidate_cohort(loader: Any, _parameter_experiments: set[str]) -> tuple[list[str], int]:
+def candidate_cohort(loader: Any, parameter_experiments: set[str]) -> tuple[list[str], int]:
     """Apply catalog metadata and raw clean-anchor gates without external tables."""
     selected: list[str] = []
     rows = 0
     values = catalog(loader, valid_only=True)
-    catalog_experiments = set(values["experiment_id"].astype(str))
     for _, record in values.iterrows():
         record_dict = cast(dict[str, object], record.to_dict())
-        if catalog_exclusion_reason(record_dict, catalog_experiments) is not None:
+        if catalog_exclusion_reason(record_dict, parameter_experiments) is not None:
             continue
         name = str(record["cycle_name"])
         frame = loader.load_cycle_original(

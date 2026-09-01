@@ -51,8 +51,8 @@ def _events() -> pd.DataFrame:
 
 def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: object())
-    monkeypatch.setattr(main_cost.cost_function_v2_6_8, "build_event_table", lambda _: _events())
-    monkeypatch.setattr(main_cost.cost_function_v2_6_8, "candidate_cohort", lambda *_: (["a_0"], 6))
+    monkeypatch.setattr(main_cost, "build_event_table", lambda _: _events())
+    monkeypatch.setattr(main_cost, "candidate_cohort", lambda *_: (["a_0"], 6))
     monkeypatch.setattr(
         main_cost.cost_function_v2_6_8,
         "calculate_cycle",
@@ -98,6 +98,9 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
         "params_candidate.json",
     }
     artifact = json.loads((run / "params_candidate.json").read_text())
+    recipe = json.loads((run / "recipe.json").read_text())
+    assert recipe == main_cost.cost_function_v2_6_8.DEFAULT_RECIPE
+    assert artifact["fit_variant"] == "review_a"
     assert set(artifact["models"]) == {
         "experiment_mean",
         "ticket_ridge_static5",

@@ -130,7 +130,9 @@ def _inner_macro_mse(
         model = fit_weighted_ridge(train, features, target, alpha=alpha)
         residual = test[target].to_numpy(dtype=float) - model.predict(test)
         losses.append(float(np.mean(np.square(residual))))
-    return float(np.mean(losses)) if losses else float("inf")
+    if not losses:
+        raise ValueError("no evaluable inner LOEO folds")
+    return float(np.mean(losses))
 
 
 def fit_outcome_fold(
@@ -274,7 +276,7 @@ def build_validation_table(events: pd.DataFrame, artifacts: dict[str, Any]) -> p
     return pd.DataFrame(rows)
 
 
-def _five_minute_runs(times: pd.Series, selected: pd.Series) -> pd.Series:
+def five_minute_support_runs(times: pd.Series, selected: pd.Series) -> pd.Series:
     result = pd.Series(False, index=selected.index)
     chosen = np.flatnonzero(selected.to_numpy(dtype=bool))
     if not chosen.size:
@@ -358,7 +360,9 @@ def bootstrap_minima(
                 & np.isfinite(inverse)
             )
             for cycle_name, curve in candidates.groupby("cycle_name", sort=False):
-                eligible = _five_minute_runs(curve["candidate_time"], curve["bootstrap_base"])
+                eligible = five_minute_support_runs(
+                    curve["candidate_time"], curve["bootstrap_base"]
+                )
                 if eligible.any():
                     position = curve.index[
                         eligible

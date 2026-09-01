@@ -27,17 +27,17 @@ def _raw_frame(start: pd.Timestamp, periods: int = 601) -> pd.DataFrame:
 
 
 def test_half_open_integral_excludes_right_boundary_and_does_not_bridge_gap() -> None:
-    from cost.cost_function_v2_6_8 import _window_audit
+    from cost.v2_6_8_data import window_audit
 
     start = pd.Timestamp("2026-01-01")
     frame = _raw_frame(start, 61)
     frame.loc[60, "power_total"] = 100.0
     end = start + pd.Timedelta(seconds=60)
-    audit = _window_audit(frame, start, end, "power_total")
+    audit = window_audit(frame, start, end, "power_total")
     assert audit["energy"] == pytest.approx(2 * 60 / 3600)
 
     gapped = frame.drop(index=range(11, 50))
-    audit = _window_audit(gapped, start, end, "power_total")
+    audit = window_audit(gapped, start, end, "power_total")
     assert audit["energy"] == pytest.approx(2 * 20 / 3600)
     assert not audit["valid"]
 
@@ -59,21 +59,32 @@ def test_features_are_strictly_pre_action_and_require_counts() -> None:
 
 
 def test_signed_water_heat_is_not_clipped() -> None:
-    from cost.cost_function_v2_6_8 import _window_audit
+    from cost.v2_6_8_data import window_audit
 
     start = pd.Timestamp("2026-01-01")
     frame = _raw_frame(start, 61)
     frame["water_out_temperature"] = 34.0
-    result = _window_audit(frame, start, start + pd.Timedelta(seconds=60), "water_heat")
+    result = window_audit(frame, start, start + pd.Timedelta(seconds=60), "water_heat")
     assert result["energy"] < 0
 
 
+def test_window_maximum_gap_includes_leading_window_gap() -> None:
+    from cost.v2_6_8_data import window_audit
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 61).iloc[25:]
+
+    result = window_audit(frame, start, start + pd.Timedelta(seconds=60), "power_total")
+
+    assert result["maximum_gap_seconds"] == 25
+
+
 def test_fixed9_candidates_start_at_heating_plus_ten_and_keep_exact_end() -> None:
-    from cost.cost_function_v2_6_8 import build_candidate_boundaries_v268
+    from cost.v2_6_8_data import build_candidate_boundaries
 
     heating = pd.Timestamp("2026-01-01")
     preparation = heating + pd.Timedelta(minutes=12, seconds=30)
-    result = build_candidate_boundaries_v268("cycle", "experiment", heating, preparation)
+    result = build_candidate_boundaries("cycle", "experiment", heating, preparation)
     assert result["integration_start"].iloc[0] == heating + pd.Timedelta(minutes=9)
     assert result["candidate_time"].tolist() == [
         heating + pd.Timedelta(minutes=10),
@@ -146,14 +157,12 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
                 "defrost_preparation_start": heating + pd.Timedelta(minutes=15),
             }
 
-        def load_cycle_original(
-            self, _: str, *, columns: list[str] | None = None
-        ) -> pd.DataFrame:
+        def load_cycle_original(self, _: str, *, columns: list[str] | None = None) -> pd.DataFrame:
             return pd.DataFrame({"timestamp": [heating]})
 
     monkeypatch.setattr(
         module,
-        "_candidate_integral_table",
+        "candidate_integral_table",
         lambda _frame, _start, candidates, quantity: pd.DataFrame(
             {"energy": 1.0 if quantity == "power_total" else 3.0, "valid": True},
             index=range(len(candidates)),
@@ -209,8 +218,8 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
     assert result["transition_heat_kwh"].eq(2.0).all()
 
 
-def test_event_audit_retains_cycle_012_missing_preparation() -> None:
-    from cost.cost_function_v2_6_8 import build_event_table
+def test_event_audit_retains_any_defrost_with_missing_preparation() -> None:
+    from cost.v2_6_8_data import build_event_table
 
     class Loader:
         def list_cycles(self, **_: object) -> pd.DataFrame:
@@ -218,8 +227,9 @@ def test_event_audit_retains_cycle_012_missing_preparation() -> None:
             return pd.DataFrame(
                 [
                     {
-                        "cycle_name": "frost_cycle_000012",
+                        "cycle_name": "arbitrary_defrost_name",
                         "experiment_id": "exp",
+                        "status": "valid",
                         "start_time": start,
                         "heating_start": start,
                         "defrost_preparation_start": pd.NaT,
@@ -229,6 +239,7 @@ def test_event_audit_retains_cycle_012_missing_preparation() -> None:
                     {
                         "cycle_name": "following",
                         "experiment_id": "exp",
+                        "status": "invalid",
                         "start_time": start + pd.Timedelta(minutes=11),
                         "heating_start": start + pd.Timedelta(minutes=11),
                         "defrost_preparation_start": pd.NaT,
@@ -239,7 +250,99 @@ def test_event_audit_retains_cycle_012_missing_preparation() -> None:
             )
 
     result = build_event_table(Loader())
-    assert result["cycle_name"].tolist() == ["frost_cycle_000012"]
+    assert result["cycle_name"].tolist() == ["arbitrary_defrost_name"]
     assert result["event_invalid_reason"].iloc[0] == "missing_defrost_preparation_start"
     assert pd.notna(result["defrost_start"].iloc[0])
     assert pd.notna(result["defrost_end"].iloc[0])
+
+
+def test_candidate_cohort_excludes_experiments_without_parameter_folds() -> None:
+    from cost.v2_6_8_data import candidate_cohort
+
+    start = pd.Timestamp("2026-01-01")
+
+    class Loader:
+        def list_cycles(self, **_: object) -> pd.DataFrame:
+            rows = []
+            for index, experiment in enumerate(("with_fold", "missing_fold")):
+                heating = start + pd.Timedelta(hours=index)
+                rows.append(
+                    {
+                        "cycle_name": experiment,
+                        "experiment_id": experiment,
+                        "status": "valid",
+                        "start_time": heating,
+                        "heating_start": heating,
+                        "stable_heating_start": heating + pd.Timedelta(minutes=9),
+                        "defrost_preparation_start": heating + pd.Timedelta(minutes=15),
+                        "defrost_start": heating + pd.Timedelta(minutes=16),
+                        "defrost_end": heating + pd.Timedelta(minutes=18),
+                    }
+                )
+            return pd.DataFrame(rows)
+
+        def load_cycle_original(
+            self, cycle_name: str, *, columns: list[str] | None = None
+        ) -> pd.DataFrame:
+            heating = start + pd.Timedelta(hours=int(cycle_name == "missing_fold"), minutes=9)
+            frame = pd.DataFrame(
+                {
+                    "timestamp": pd.date_range(heating, periods=60, freq="s"),
+                    "water_flow": 1.0,
+                    "water_in_temperature": 40.0,
+                    "water_out_temperature": 45.0,
+                    "power_total": 2.0,
+                }
+            )
+            return frame if columns is None else frame[columns]
+
+    assert candidate_cohort(Loader(), {"with_fold"}) == (["with_fold"], 6)
+
+
+def test_catalog_does_not_retry_loader_type_errors() -> None:
+    from cost.v2_6_8_data import catalog
+
+    class Loader:
+        calls = 0
+
+        def list_cycles(self, **_: object) -> pd.DataFrame:
+            self.calls += 1
+            raise TypeError("loader bug")
+
+    loader = Loader()
+    with pytest.raises(TypeError, match="loader bug"):
+        catalog(loader)
+    assert loader.calls == 1
+
+
+def test_v268_raw_columns_exclude_unused_power_channels() -> None:
+    from cost.v2_6_8_data import RAW_COLUMNS
+
+    assert "compressor_power" not in RAW_COLUMNS
+    assert "heating_capacity" not in RAW_COLUMNS
+
+
+def test_calculate_loads_one_artifact_for_multiple_cycles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cost import cost_function_v2_6_8 as module
+
+    artifact = {"models": {}}
+    calls = 0
+
+    def load():
+        nonlocal calls
+        calls += 1
+        return artifact
+
+    def calculate_cycle(_loader, cycle_name, _recipe, artifacts=None):
+        assert artifacts is artifact
+        return pd.DataFrame({"cycle_name": [cycle_name]})
+
+    monkeypatch.setattr(module, "load_artifacts", load)
+    monkeypatch.setattr(module, "calculate_cycle", calculate_cycle)
+
+    result = module.calculate(object(), ["a", "b"])
+
+    assert calls == 1
+    assert result["cycle_name"].tolist() == ["a", "b"]

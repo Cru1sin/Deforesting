@@ -94,6 +94,7 @@ def test_implicit_calculation_applies_raw_clean_anchor_gate(
 ) -> None:
     class Module:
         DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+        validate_recipe = staticmethod(main_cost.cost_function_v1.validate_recipe)
 
         @staticmethod
         def calculate(_: object, cycles: list[str], __: object) -> pd.DataFrame:
@@ -288,6 +289,7 @@ def test_calculate_writes_cost_command_and_recipe(
 ) -> None:
     class Module:
         DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+        validate_recipe = staticmethod(main_cost.cost_function_v1.validate_recipe)
 
         @staticmethod
         def calculate(*_: object) -> pd.DataFrame:
@@ -324,6 +326,7 @@ def test_strict_protocol_dry_run_requires_named_variant_and_records_selection(
 ) -> None:
     class Module:
         DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+        validate_recipe = staticmethod(main_cost.cost_function_v1.validate_recipe)
 
         @staticmethod
         def calculate(_: object, cycles: list[str], __: object) -> pd.DataFrame:
@@ -368,6 +371,7 @@ def test_overwrite_removes_stale_per_cycle_csvs(
 ) -> None:
     class Module:
         DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+        validate_recipe = staticmethod(main_cost.cost_function_v1.validate_recipe)
 
         @staticmethod
         def calculate(_: object, cycles: list[str], __: object) -> pd.DataFrame:
@@ -429,6 +433,7 @@ def test_variant_recipe_metadata_matches_selected_transition_models(
 
     class Module:
         DEFAULT_RECIPE = source.DEFAULT_RECIPE
+        validate_recipe = staticmethod(source.validate_recipe)
 
         @staticmethod
         def calculate(*_: object) -> pd.DataFrame:
@@ -483,6 +488,7 @@ def test_cycle_artifact_name_must_be_a_safe_basename(
 
     class Module:
         DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+        validate_recipe = staticmethod(main_cost.cost_function_v1.validate_recipe)
 
         @staticmethod
         def calculate(*_: object) -> pd.DataFrame:

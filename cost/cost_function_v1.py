@@ -12,7 +12,7 @@ from typing import Any
 import pandas as pd
 
 from .boundaries import build_candidate_boundaries
-from .cost_curve import build_cost_curve, validate_recipe
+from .cost_curve import build_cost_curve
 from .energy_models import heating_energy, transition_energy
 from .heat_models import heating_heat, transition_heat_v2_5, zero_transition_heat
 
@@ -41,13 +41,90 @@ DEFAULT_RECIPE: dict[str, object] = {
 }
 
 
+def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
+    """Validate only recipe combinations implemented by the V1 executor."""
+    value = dict(recipe)
+    if value.keys() != DEFAULT_RECIPE.keys():
+        missing = DEFAULT_RECIPE.keys() - value.keys()
+        issue = (
+            f"missing parameters: {sorted(missing)}"
+            if missing
+            else (f"unexpected parameters: {sorted(value.keys() - DEFAULT_RECIPE.keys())}")
+        )
+        raise ValueError(f"recipe is {issue}")
+    if value["base_cost"] != "v1" or value["version"] != "v1":
+        raise ValueError("V1 module requires base_cost and version v1")
+    variant = value["variant"]
+    if variant is not None and (not isinstance(variant, str) or not variant.strip()):
+        raise ValueError("variant must be a non-empty string")
+    if (value["heat_basis"], value["heating_heat_model"]) not in {
+        ("unit", "measured_unit_heat"),
+        ("water", "measured_water_heat"),
+    }:
+        raise ValueError("heat basis and heating heat model are incompatible")
+    choices = {
+        "integration_protocol": {"historical_reconstruction", "strict_causal"},
+        "state_protocol": {"historical_interpolation", "strict_causal"},
+        "transition_energy_model": {"pe_quadratic_plus_fixed_recovery", "pe_quadratic"},
+        "transition_heat_model": {
+            "zero_transition_heat",
+            "linear_qprep_plus_signed_quadratic_qd",
+        },
+    }
+    invalid = next((key for key, allowed in choices.items() if value[key] not in allowed), None)
+    if invalid:
+        raise ValueError(f"v1 does not implement {invalid.replace('_', ' ')}={value[invalid]}")
+    fixed_recovery = value["transition_energy_model"] == "pe_quadratic_plus_fixed_recovery"
+    observed = value["transition_heat_model"] == "linear_qprep_plus_signed_quadratic_qd"
+    value["transition_window"] = (
+        "observed_preparation_and_defrost_durations" if observed else "candidate_state_at_tau"
+    )
+    value["transition_provenance"] = (
+        "offline_diagnostic_future_boundary_observed_durations"
+        + ("_plus_fixed_recovery" if fixed_recovery else "")
+        if observed
+        else "candidate_time_state_plus_fixed_recovery"
+        if fixed_recovery
+        else "candidate_time_state"
+    )
+    optional = {
+        *choices,
+        "heat_basis",
+        "heating_heat_model",
+        "transition_window",
+        "transition_provenance",
+    }
+    fixed_changes = {
+        key
+        for key in DEFAULT_RECIPE.keys() - optional - {"variant", "label_eligible"}
+        if value[key] != DEFAULT_RECIPE[key]
+    }
+    if fixed_changes:
+        names = ", ".join(key.replace("_", " ") for key in sorted(fixed_changes))
+        raise ValueError(f"v1 does not implement {names} override")
+    differences = {
+        key
+        for key in DEFAULT_RECIPE.keys() - {"variant", "label_eligible"}
+        if value[key] != DEFAULT_RECIPE[key]
+    }
+    if bool(differences) != (variant is not None):
+        message = (
+            "component override requires a named variant"
+            if differences
+            else ("canonical recipe cannot set variant")
+        )
+        raise ValueError(message)
+    if variant is None and value["label_eligible"] is not True:
+        raise ValueError("canonical label_eligible status cannot be changed")
+    value["label_eligible"] = variant is None
+    return value
+
+
 def calculate_cycle(
     loader: Any, cycle_name: str, recipe: Mapping[str, object] | None = None
 ) -> pd.DataFrame:
     """Calculate one V1 or named V1-based variant curve from Dataset raw data."""
     checked = validate_recipe(DEFAULT_RECIPE if recipe is None else recipe)
-    if checked["base_cost"] != "v1":
-        raise ValueError("V1 module requires base_cost v1")
     frame = loader.load_cycle_original(cycle_name)
     record = loader.get_cycle_record(cycle_name)
 

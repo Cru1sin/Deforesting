@@ -8,43 +8,17 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .cost_curve import validate_recipe
-from .fit_v2_6_8 import load_artifacts, predict_independent_targets
+from .fit_v2_6_8 import (
+    five_minute_support_runs,
+    load_artifacts,
+    predict_independent_targets,
+)
 from .v2_6_8_data import (
     RAW_COLUMNS,
-    build_event_table,
-    candidate_cohort,
-    event_outcomes,
+    build_candidate_boundaries,
+    candidate_integral_table,
     pre_action_features,
-)
-from .v2_6_8_data import (
-    sorted_time_slice as _sorted_time_slice,
-)
-from .v2_6_8_data import (
-    window_audit as _window_audit,
-)
-
-__all__ = [
-    "DEFAULT_RECIPE",
-    "_sorted_time_slice",
-    "_window_audit",
-    "build_candidate_boundaries_v268",
-    "build_event_table",
-    "calculate",
-    "calculate_cycle",
-    "candidate_cohort",
-    "event_outcomes",
-    "finalize_v268_curve",
-    "pre_action_features",
-]
-from .v2_6_8_data import (
-    build_candidate_boundaries as build_candidate_boundaries_v268,
-)
-from .v2_6_8_data import (
-    candidate_integral_table as _candidate_integral_table,
-)
-from .v2_6_8_data import (
-    timestamp as _timestamp,
+    timestamp,
 )
 
 Q_MIN_KWH = 0.01
@@ -76,26 +50,60 @@ DEFAULT_RECIPE: dict[str, object] = {
 }
 
 
-def _long_support_runs(times: pd.Series, selected: pd.Series) -> pd.Series:
-    """Retain connected supported runs spanning at least five actual minutes."""
-    result = pd.Series(False, index=selected.index)
-    chosen = np.flatnonzero(selected.to_numpy(dtype=bool))
-    if not chosen.size:
-        return result
-    parsed = pd.to_datetime(times, errors="coerce")
-    breaks = np.flatnonzero(
-        (np.diff(chosen) != 1)
-        | (
-            parsed.iloc[chosen[1:]].to_numpy() - parsed.iloc[chosen[:-1]].to_numpy()
-            > np.timedelta64(90, "s")
+def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
+    """Validate only recipe combinations implemented by the V2.6.8 executor."""
+    value = dict(recipe)
+    if value.keys() != DEFAULT_RECIPE.keys():
+        missing = DEFAULT_RECIPE.keys() - value.keys()
+        issue = (
+            f"missing parameters: {sorted(missing)}"
+            if missing
+            else (f"unexpected parameters: {sorted(value.keys() - DEFAULT_RECIPE.keys())}")
         )
+        raise ValueError(f"recipe is {issue}")
+    if value["base_cost"] != "v2.6.8" or value["version"] != "v2.6.8":
+        raise ValueError("V2.6.8 module requires base_cost and version v2.6.8")
+    variant = value["variant"]
+    if variant is not None and (not isinstance(variant, str) or not variant.strip()):
+        raise ValueError("variant must be a non-empty string")
+    models = {
+        "experiment_mean",
+        "ticket_ridge_static5",
+        "ticket_ridge_physical6",
+        "ticket_ridge_dynamic8",
+    }
+    invalid = next(
+        (
+            key
+            for key in ("transition_energy_model", "transition_heat_model")
+            if value[key] not in models
+        ),
+        None,
     )
-    starts, ends = np.r_[0, breaks + 1], np.r_[breaks, len(chosen) - 1]
-    for left, right in zip(starts, ends, strict=True):
-        positions = chosen[left : right + 1]
-        if parsed.iloc[positions[-1]] - parsed.iloc[positions[0]] >= pd.Timedelta(minutes=5):
-            result.iloc[positions] = True
-    return result
+    if invalid:
+        raise ValueError(f"v2.6.8 does not implement {invalid.replace('_', ' ')}={value[invalid]}")
+    allowed_overrides = {"transition_energy_model", "transition_heat_model"}
+    fixed_changes = {
+        key
+        for key in DEFAULT_RECIPE.keys() - allowed_overrides - {"variant", "label_eligible"}
+        if value[key] != DEFAULT_RECIPE[key]
+    }
+    if fixed_changes:
+        raise ValueError(f"v2.6.8 does not implement recipe override(s): {sorted(fixed_changes)}")
+    value["transition_scope"] = DEFAULT_RECIPE["transition_scope"]
+    value["transition_window"] = DEFAULT_RECIPE["transition_window"]
+    value["transition_provenance"] = DEFAULT_RECIPE["transition_provenance"]
+    differences = {key for key in allowed_overrides if value[key] != DEFAULT_RECIPE[key]}
+    if bool(differences) != (variant is not None):
+        message = (
+            "component override requires a named variant"
+            if differences
+            else ("canonical recipe cannot set variant")
+        )
+        raise ValueError(message)
+    if value["label_eligible"] is not False:
+        raise ValueError("V2.6.8 label_eligible status cannot be changed")
+    return value
 
 
 def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
@@ -115,7 +123,7 @@ def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
     result["model_supported"] = result["ET_supported"].fillna(False) & result[
         "QT_supported"
     ].fillna(False)
-    result["continuous_support"] = _long_support_runs(result["candidate_time"], base)
+    result["continuous_support"] = five_minute_support_runs(result["candidate_time"], base)
     result["optimization_eligible"] = base & result["continuous_support"]
     result["diagnostic_minimum"] = pd.NaT
     for percent in (1, 5):
@@ -125,7 +133,7 @@ def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
     eligible = result["optimization_eligible"]
     if eligible.any():
         optimum = int(result.index[eligible & inverse.eq(inverse.loc[eligible].min())][0])
-        optimum_time = _timestamp(result.loc[optimum, "candidate_time"])
+        optimum_time = timestamp(result.loc[optimum, "candidate_time"])
         assert optimum_time is not None
         result["diagnostic_minimum"] = optimum_time
         for percent in (1, 5):
@@ -166,12 +174,12 @@ def calculate_cycle(
     record = loader.get_cycle_record(cycle_name)
     nested = record.get("boundaries")
     boundary_source = nested if isinstance(nested, Mapping) else record
-    heating = _timestamp(boundary_source.get("heating_start"))
-    preparation = _timestamp(boundary_source.get("defrost_preparation_start"))
+    heating = timestamp(boundary_source.get("heating_start"))
+    preparation = timestamp(boundary_source.get("defrost_preparation_start"))
     if heating is None or preparation is None:
         raise ValueError(f"V2.6.8 boundaries are incomplete for {cycle_name}")
 
-    boundary = build_candidate_boundaries_v268(
+    boundary = build_candidate_boundaries(
         cycle_name, str(record["experiment_id"]), heating, preparation
     )
     frame = loader.load_cycle_original(cycle_name, columns=list(RAW_COLUMNS)).copy()
@@ -180,16 +188,16 @@ def calculate_cycle(
     candidates = [pd.Timestamp(value) for value in boundary["candidate_time"]]
     start = pd.Timestamp(boundary["integration_start"].iloc[0])
 
-    eh_audit = _candidate_integral_table(frame, start, candidates, "power_total")
+    eh_audit = candidate_integral_table(frame, start, candidates, "power_total")
     eh = pd.DataFrame(
         {"heating_energy_kwh": eh_audit["energy"], "heating_energy_supported": eh_audit["valid"]}
     )
-    qh_audit = _candidate_integral_table(frame, start, candidates, "water_heat")
+    qh_audit = candidate_integral_table(frame, start, candidates, "water_heat")
     qh = pd.DataFrame(
         {"heating_heat_kwh": qh_audit["energy"], "heating_heat_supported": qh_audit["valid"]}
     )
     features = pre_action_features(frame, candidates, heating)
-    source = dict(artifacts or load_artifacts())
+    source = dict(load_artifacts() if artifacts is None else artifacts)
     energy_model = source["models"][str(checked["transition_energy_model"])]["energy"]
     heat_model = source["models"][str(checked["transition_heat_model"])]["heat"]
     transition = predict_independent_targets(
@@ -218,5 +226,6 @@ def calculate(
     loader: Any, cycle_names: Sequence[str], recipe: Mapping[str, object] | None = None
 ) -> pd.DataFrame:
     """Calculate V2.6.8 curves for the requested Dataset-native cohort."""
-    tables = [calculate_cycle(loader, name, recipe) for name in cycle_names]
+    artifact = load_artifacts()
+    tables = [calculate_cycle(loader, name, recipe, artifact) for name in cycle_names]
     return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()

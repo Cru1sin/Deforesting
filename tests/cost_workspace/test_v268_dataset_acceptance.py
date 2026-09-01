@@ -9,6 +9,7 @@ import pytest
 
 import main_cost
 from cost import cost_function_v2_6_8
+from cost.v2_6_8_data import candidate_cohort
 from dataloader import DatasetLoader
 
 
@@ -50,7 +51,7 @@ def test_current_dataset_freezes_v268_review_counts_and_outcomes(tmp_path: Path)
 
     loader = DatasetLoader(dataset)
     experiments = set(events.loc[events["event_valid"], "experiment_id"].astype(str))
-    cohort, candidate_rows = cost_function_v2_6_8.candidate_cohort(loader, experiments)
+    cohort, candidate_rows = candidate_cohort(loader, experiments)
     cohort_experiments = {
         str(loader.get_cycle_record(cycle_name)["experiment_id"]) for cycle_name in cohort
     }

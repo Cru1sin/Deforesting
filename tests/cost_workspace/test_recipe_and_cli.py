@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import main_cost
-from cost.cost_curve import validate_recipe
+from cost.cost_function_v2_6_8 import validate_recipe
 from main_cost import build_parser
 
 
@@ -49,6 +49,44 @@ def test_cli_lists_ticket_feature_models_and_v268() -> None:
     assert expected <= set(actions["transition_energy_model"].choices)
     assert expected <= set(actions["transition_heat_model"].choices)
     assert "v2.6.8" in actions["cost"].choices
+
+
+def test_cli_accepts_explicit_v268_fixed9_defaults_without_creating_variant() -> None:
+    args = build_parser().parse_args(
+        [
+            "--action",
+            "calculate",
+            "--cost",
+            "v2.6.8",
+            "--event-scope",
+            "fixed_post_defrost_9min_to_actual_preparation",
+            "--heating-start-rule",
+            "fixed_post_defrost_9min",
+        ]
+    )
+
+    assert main_cost._recipe(main_cost.cost_function_v2_6_8, args) == (
+        main_cost.cost_function_v2_6_8.DEFAULT_RECIPE
+    )
+
+
+def test_main_recipe_delegates_validation_to_selected_module() -> None:
+    called = False
+
+    class Module:
+        DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+
+        @staticmethod
+        def validate_recipe(recipe):
+            nonlocal called
+            called = True
+            return dict(recipe)
+
+    args = build_parser().parse_args(["--action", "calculate", "--cost", "v1"])
+
+    main_cost._recipe(Module, args)
+
+    assert called
 
 
 def test_v268_canonical_is_cli_defaults_and_overrides_require_variant() -> None:

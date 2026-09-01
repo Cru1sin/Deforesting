@@ -10,14 +10,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-import numpy as np
 import pandas as pd
 
 from cost import cost_function_v1, cost_function_v2_5, cost_function_v2_6_8
 from cost.boundaries import catalog_exclusion_reason, clean_anchor_exclusion_reason
-from cost.cost_curve import transition_semantics, validate_recipe
 from cost.energy_models import load_parameters
 from cost.fit_v2_6_8 import (
     MODEL_FEATURES,
@@ -28,8 +26,8 @@ from cost.fit_v2_6_8 import (
     fit_outcome_fold,
     load_artifacts,
     mean_outcome_artifact,
-    predict_from_artifact,
 )
+from cost.v2_6_8_data import build_event_table, candidate_cohort
 from dataloader import DatasetLoader
 
 if TYPE_CHECKING:
@@ -65,9 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "stable_heating_start_to_actual_preparation",
             "heating_start_to_actual_preparation",
+            "fixed_post_defrost_9min_to_actual_preparation",
         ),
     )
-    parser.add_argument("--heating-start-rule", choices=("stable_heating_start", "heating_start"))
+    parser.add_argument(
+        "--heating-start-rule",
+        choices=("stable_heating_start", "heating_start", "fixed_post_defrost_9min"),
+    )
     parser.add_argument(
         "--integration-protocol", choices=("historical_reconstruction", "strict_causal")
     )
@@ -119,10 +121,7 @@ def _recipe(module: Any, args: argparse.Namespace) -> dict[str, object]:
     ):
         if argument is not None:
             recipe[key] = argument
-    recipe.update(
-        transition_semantics(recipe["transition_energy_model"], recipe["transition_heat_model"])
-    )
-    return validate_recipe(recipe)
+    return cast(dict[str, object], module.validate_recipe(recipe))
 
 
 def _run_directory(output_root: Path, recipe: dict[str, object]) -> Path:
@@ -261,7 +260,7 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
             )
 
     loader = DatasetLoader(args.dataset)
-    events = cost_function_v2_6_8.build_event_table(loader)
+    events = build_event_table(loader)
     valid = events.loc[events["event_valid"].fillna(False)].copy()
     if valid.empty:
         raise ValueError("V2.6.8 fit has no valid observed events")
@@ -294,7 +293,6 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
             "experiment_mean": mean_models,
         },
     }
-    memory: dict[str, dict[str, dict[str, Any]]] = {}
     for model_name, features in MODEL_FEATURES.items():
         energy_folds = {}
         heat_folds = {}
@@ -313,23 +311,9 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
             ),
             "heat": assemble_target_artifact("Q_T_observed_kwh", features, heat_folds, heat_full),
         }
-        memory[model_name] = {"energy": energy_folds, "heat": heat_folds}
-
-    for model_name, targets in memory.items():
-        for heldout in experiments:
-            heldout_rows = valid.loc[valid["experiment_id"].astype(str).eq(heldout)]
-            for target_name in ("energy", "heat"):
-                expected = targets[target_name][heldout].predict(heldout_rows)
-                replay = predict_from_artifact(
-                    artifact["models"][model_name][target_name], heldout_rows, heldout
-                )["prediction"].to_numpy()
-                if not np.allclose(expected, replay, rtol=1e-9, atol=1e-12):
-                    raise ValueError(
-                        f"artifact replay mismatch: {model_name}/{target_name}/{heldout}"
-                    )
 
     validation = build_validation_table(events, artifact)
-    cohort, candidate_rows = cost_function_v2_6_8.candidate_cohort(loader, set(experiments))
+    cohort, candidate_rows = candidate_cohort(loader, set(experiments))
     curves = pd.concat(
         [
             cost_function_v2_6_8.calculate_cycle(
@@ -342,7 +326,6 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     dynamic = artifact["models"]["ticket_ridge_dynamic8"]
     bootstrap = bootstrap_minima(curves, events, dynamic["energy"], dynamic["heat"])
     recipe = dict(cost_function_v2_6_8.DEFAULT_RECIPE)
-    recipe["fit_variant"] = str(args.variant)
     run.mkdir(parents=True, exist_ok=True)
     (run / "command.txt").write_text(
         "uv run python main_cost.py " + shlex.join(arguments) + "\n", encoding="utf-8"
@@ -351,9 +334,8 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     events.to_csv(run / "events.csv", index=False)
     validation.to_csv(run / "validation.csv", index=False)
     bootstrap.to_csv(run / "bootstrap.csv", index=False)
-    candidate = {key: value for key, value in artifact.items() if not key.startswith("_")}
     (run / "params_candidate.json").write_text(
-        json.dumps(candidate, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8"
+        json.dumps(artifact, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8"
     )
     print(
         f"Fit candidate written: {run}; {len(valid)} valid event(s), "

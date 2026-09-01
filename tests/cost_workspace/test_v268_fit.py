@@ -44,6 +44,15 @@ def test_heldout_targets_cannot_change_fold_model_or_alpha() -> None:
     np.testing.assert_allclose(before.ridge.coef_, after.ridge.coef_)
 
 
+def test_nested_loeo_fails_closed_when_three_experiments_leave_no_inner_fold() -> None:
+    from cost.fit_v2_6_8 import fit_outcome_fold
+
+    events = _events().loc[lambda frame: frame["experiment_id"].isin(["a", "b", "c"])]
+
+    with pytest.raises(ValueError, match="no evaluable inner LOEO folds"):
+        fit_outcome_fold(events, "c", ("x",), "E_T_observed_kwh")
+
+
 def test_experiment_mean_api_builds_one_target_model_without_outer_folds() -> None:
     from cost.fit_v2_6_8 import mean_outcome_artifact
 
