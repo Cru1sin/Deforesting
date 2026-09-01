@@ -110,6 +110,7 @@ def build_candidate_boundaries(loader: Any, cycle_name: str, start_rule: str) ->
             ],
             "integration_start": integration_start,
             "integration_start_rule": start_rule,
+            "stable_heating_start": events["stable_heating_start"],
             "actual_preparation_time": end,
         }
     )

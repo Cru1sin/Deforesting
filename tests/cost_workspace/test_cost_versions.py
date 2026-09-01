@@ -59,6 +59,8 @@ def test_default_recipes_are_canonical_and_explicit() -> None:
         "heat_basis": "unit",
         "event_scope": "stable_heating_start_to_actual_preparation",
         "heating_start_rule": "stable_heating_start",
+        "integration_protocol": "historical_reconstruction",
+        "state_protocol": "historical_interpolation",
         "candidate_start_rule": "stable_heating_start_plus_10_minutes",
         "candidate_end_rule": "observed_defrost_preparation_start",
         "candidate_cadence": "1_minute_plus_exact_endpoint",
@@ -75,6 +77,8 @@ def test_default_recipes_are_canonical_and_explicit() -> None:
     assert V25_RECIPE["base_cost"] == "v2.5"
     assert V25_RECIPE["heat_basis"] == "water"
     assert V25_RECIPE["event_scope"] == "heating_start_to_actual_preparation"
+    assert V25_RECIPE["integration_protocol"] == "historical_reconstruction"
+    assert V25_RECIPE["state_protocol"] == "historical_interpolation"
     assert V25_RECIPE["candidate_start_rule"] == "stable_heating_start_plus_10_minutes"
     assert V25_RECIPE["candidate_end_rule"] == "observed_defrost_preparation_start"
     assert V25_RECIPE["candidate_cadence"] == "1_minute_plus_exact_endpoint"
@@ -104,8 +108,12 @@ def test_v1_single_cycle_uses_stable_unit_heat_fixed_recovery_and_zero_qt() -> N
     assert first["transition_heat_kwh"] == 0.0
     assert first["base_cost"] == "v1"
     assert first["label_eligible"]
-    assert first["heating_energy_rule"] == "stable_heating_start"
-    assert first["heating_heat_rule"] == "stable_heating_start"
+    assert first["heating_energy_rule"] == (
+        "offline_historical_reconstruction_bridged_internal_gaps_"
+        "endpoint_extrapolation_from_stable_heating_start"
+    )
+    assert first["heating_heat_rule"] == first["heating_energy_rule"]
+    assert first["transition_energy_rule"] == ("offline_historical_interpolation_[tau-60s,tau)")
     assert {
         "preparation_energy_kwh",
         "defrost_energy_kwh",
@@ -134,6 +142,57 @@ def test_v25_single_cycle_uses_cycle_start_water_heat_and_signed_qd() -> None:
     )
     assert first["base_cost"] == "v2.5"
     assert not first["label_eligible"]
-    assert first["heating_energy_rule"] == "heating_start"
-    assert first["heating_heat_rule"] == "heating_start"
+    assert first["heating_energy_rule"] == (
+        "offline_historical_reconstruction_stable_block_bridged_internal_gaps_"
+        "endpoint_extrapolation_plus_bridged_observed_heating_start_prefix"
+    )
+    assert first["heating_heat_rule"] == first["heating_energy_rule"]
+    assert first["transition_energy_rule"] == ("offline_historical_interpolation_[tau-60s,tau)")
+    assert first["transition_heat_rule"] == first["transition_energy_rule"]
     assert result["is_optimum"].sum() == 1
+
+
+def test_strict_mixed_variant_is_causal_and_label_ineligible() -> None:
+    recipe = dict(V1_RECIPE)
+    recipe.update(variant="strict_state", state_protocol="strict_causal")
+    result = calculate_v1(FakeDataset(), "cycle_a", recipe)
+
+    assert not result["label_eligible"].any()
+    assert result["heating_energy_rule"].str.startswith("offline_historical").all()
+    assert result["transition_energy_rule"].eq("strict_causal_[tau-60s,tau)").all()
+
+
+def test_strict_integration_variant_threads_through_v1_pipeline() -> None:
+    dataset = FakeDataset()
+    gap = dataset.frame["timestamp"].between(
+        "2026-01-01 00:03:00",
+        "2026-01-01 00:03:10",
+    )
+    dataset.frame = dataset.frame.loc[~gap]
+    recipe = dict(V1_RECIPE)
+    recipe.update(variant="strict_integration", integration_protocol="strict_causal")
+
+    result = calculate_v1(dataset, "cycle_a", recipe)
+
+    assert not result["label_eligible"].any()
+    assert (
+        result["heating_energy_rule"]
+        .eq("strict_causal_gap_aware_5s_from_stable_heating_start")
+        .all()
+    )
+    assert result["heating_energy_kwh"].equals(result["strict_heating_energy_kwh"])
+    assert result["heating_heat_kwh"].equals(result["strict_heating_heat_kwh"])
+
+
+def test_v25_strict_state_variant_threads_through_transition_heat() -> None:
+    recipe = dict(V25_RECIPE)
+    recipe.update(variant="strict_state", state_protocol="strict_causal")
+
+    result = calculate_v25(FakeDataset(), "cycle_a", recipe)
+
+    assert not result["label_eligible"].any()
+    assert result["transition_energy_rule"].eq("strict_causal_[tau-60s,tau)").all()
+    assert result["transition_heat_rule"].eq("strict_causal_[tau-60s,tau)").all()
+    assert result["transition_energy_kwh"].equals(result["strict_transition_energy_kwh"])
+    assert result["transition_heat_kwh"].equals(result["strict_transition_heat_kwh"])
+    assert result["QT_supported"].equals(result["strict_QT_supported"])

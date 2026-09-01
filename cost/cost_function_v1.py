@@ -1,7 +1,7 @@
-"""V1 uses [stable_heating_start, tau] for EH/QH.
+"""Canonical V1 reconstructs EH/QH from stable heating through tau.
 
 Candidates begin at stable+10 min and end exactly at actual preparation.
-Pe features use the strict interval [tau-60 s, tau).
+Canonical Pe reproduces the formal historical interpolation; strict variants use [tau-60 s, tau).
 """
 
 from __future__ import annotations
@@ -24,6 +24,8 @@ DEFAULT_RECIPE: dict[str, object] = {
     "heat_basis": "unit",
     "event_scope": "stable_heating_start_to_actual_preparation",
     "heating_start_rule": "stable_heating_start",
+    "integration_protocol": "historical_reconstruction",
+    "state_protocol": "historical_interpolation",
     "candidate_start_rule": "stable_heating_start_plus_10_minutes",
     "candidate_end_rule": "observed_defrost_preparation_start",
     "candidate_cadence": "1_minute_plus_exact_endpoint",
@@ -50,11 +52,14 @@ def calculate_cycle(
     record = loader.get_cycle_record(cycle_name)
 
     boundary = build_candidate_boundaries(loader, cycle_name, str(checked["heating_start_rule"]))
-    eh = heating_energy(frame, boundary)
+    integration_protocol = str(checked["integration_protocol"])
+    state_protocol = str(checked["state_protocol"])
+    eh = heating_energy(frame, boundary, integration_protocol)
     qh = heating_heat(
         frame,
         boundary,
         "unit" if checked["heating_heat_model"] == "measured_unit_heat" else "water",
+        integration_protocol,
     )
     et = transition_energy(
         frame,
@@ -62,11 +67,12 @@ def calculate_cycle(
         str(record["experiment_id"]),
         include_fixed_recovery=checked["transition_energy_model"]
         == "pe_quadratic_plus_fixed_recovery",
+        state_protocol=state_protocol,
     )
     qt = (
         zero_transition_heat(len(boundary))
         if checked["transition_heat_model"] == "zero_transition_heat"
-        else transition_heat_v2_5(frame, boundary, record)
+        else transition_heat_v2_5(frame, boundary, record, state_protocol)
     )
     return build_cost_curve(boundary, eh, qh, et, qt, checked)
 

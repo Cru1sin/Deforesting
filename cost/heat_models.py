@@ -8,10 +8,23 @@ import numpy as np
 import pandas as pd
 
 from .boundaries import cycle_boundaries
-from .energy_models import MINIMUM_COVERAGE, integrate_heating_curve, load_parameters
+from .energy_models import (
+    MINIMUM_COVERAGE,
+    _historical_pressure,
+    _strict_pressure,
+    integrate_heating_curve,
+    load_parameters,
+)
 
 
-def heating_heat(frame: pd.DataFrame, boundaries: pd.DataFrame, basis: str) -> pd.DataFrame:
+def heating_heat(
+    frame: pd.DataFrame,
+    boundaries: pd.DataFrame,
+    basis: str,
+    integration_protocol: str = "historical_reconstruction",
+    *,
+    historical_start: pd.Timestamp | None = None,
+) -> pd.DataFrame:
     """Integrate clipped unit heat or signed water heat from the recipe boundary."""
     if basis == "unit":
         power = pd.to_numeric(frame["heating_capacity"], errors="coerce").clip(lower=0)
@@ -34,18 +47,35 @@ def heating_heat(frame: pd.DataFrame, boundaries: pd.DataFrame, basis: str) -> p
         power,
         boundaries["candidate_time"],
         start,
+        integration_protocol,
+        historical_start,
     )
     coverage = curve["coverage"]
     supported = coverage.ge(MINIMUM_COVERAGE)
+    strict_supported = curve["strict_coverage"].ge(MINIMUM_COVERAGE)
+    start_rule = str(boundaries["integration_start_rule"].iloc[0])
+    if integration_protocol == "historical_reconstruction":
+        rule = (
+            "offline_historical_reconstruction_stable_block_bridged_internal_gaps_"
+            "endpoint_extrapolation_plus_bridged_observed_heating_start_prefix"
+            if historical_start is not None and historical_start != start
+            else "offline_historical_reconstruction_bridged_internal_gaps_"
+            f"endpoint_extrapolation_from_{start_rule}"
+        )
+    else:
+        rule = f"strict_causal_gap_aware_5s_from_{start_rule}"
     return pd.DataFrame(
         {
             "heating_heat_kwh": curve["energy_kwh"].to_numpy(),
-            "heating_heat_legacy_bridged_kwh": curve["legacy_bridged_energy_kwh"].to_numpy(),
             "heating_heat_coverage": coverage.to_numpy(),
             "heating_heat_supported": supported.to_numpy(),
+            "strict_heating_heat_kwh": curve["strict_energy_kwh"].to_numpy(),
+            "strict_heating_heat_coverage": curve["strict_coverage"].to_numpy(),
+            "strict_heating_heat_supported": strict_supported.to_numpy(),
             "heating_heat_model": model,
-            "heating_heat_rule": str(boundaries["integration_start_rule"].iloc[0]),
+            "heating_heat_rule": rule,
             "heating_heat_status": np.where(supported, "supported", "incomplete"),
+            "strict_heating_heat_status": np.where(strict_supported, "supported", "incomplete"),
         }
     )
 
@@ -59,6 +89,10 @@ def zero_transition_heat(count: int) -> pd.DataFrame:
             "defrost_heat_kwh": np.zeros(count),
             "recovery_heat_kwh": np.zeros(count),
             "QT_supported": np.ones(count, dtype=bool),
+            "strict_QT_supported": np.ones(count, dtype=bool),
+            "strict_transition_heat_kwh": np.zeros(count),
+            "strict_preparation_heat_kwh": np.zeros(count),
+            "strict_defrost_heat_kwh": np.zeros(count),
             "transition_heat_model": "zero_transition_heat",
             "transition_heat_rule": "none",
             "transition_heat_status": "supported",
@@ -66,11 +100,13 @@ def zero_transition_heat(count: int) -> pd.DataFrame:
     )
 
 
-def _strict_states(frame: pd.DataFrame, end: pd.Timestamp) -> tuple[dict[str, float], bool]:
+def _candidate_states(
+    frame: pd.DataFrame, end: pd.Timestamp, state_protocol: str
+) -> tuple[dict[str, float], dict[str, int]]:
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
     window = frame.loc[timestamps.ge(end - pd.Timedelta(seconds=60)) & timestamps.lt(end)]
     result = {}
-    complete_seconds = []
+    complete_seconds = {}
     for column in (
         "water_in_temperature",
         "water_out_temperature",
@@ -81,10 +117,51 @@ def _strict_states(frame: pd.DataFrame, end: pd.Timestamp) -> tuple[dict[str, fl
         finite = pd.DataFrame(
             {"timestamp": timestamps.loc[window.index].dt.floor("s"), column: values}
         )
-        complete_seconds.append(len(finite.dropna().drop_duplicates("timestamp")))
+        complete_seconds[column] = len(finite.dropna().drop_duplicates("timestamp"))
         values = values.dropna()
         result[column] = float(values.median()) if not values.empty else float("nan")
-    return result, min(complete_seconds) >= 48
+    if state_protocol == "historical_interpolation":
+        result["evaporating_pressure"] = _historical_pressure(frame, end)
+    elif state_protocol == "strict_causal":
+        result["evaporating_pressure"] = _strict_pressure(frame, end)[0]
+    else:
+        raise ValueError("state protocol must be historical_interpolation or strict_causal")
+    return result, complete_seconds
+
+
+def _linear_prediction(states: pd.DataFrame, model: Mapping[str, object]) -> pd.Series:
+    raw_coefficients = model["coefficients"]
+    feature_order = model["feature_order"]
+    if not isinstance(raw_coefficients, list) or not isinstance(feature_order, list):
+        raise ValueError("linear model parameters must be lists")
+    coefficients = [float(value) for value in raw_coefficients]
+    prediction = pd.Series(coefficients[0], index=states.index)
+    for name, coefficient in zip(feature_order, coefficients[1:], strict=True):
+        prediction += coefficient * states[str(name)]
+    return prediction
+
+
+def _quadratic_prediction(states: pd.DataFrame, model: Mapping[str, object]) -> pd.Series:
+    coefficients = model["coefficients"]
+    feature_order = model["feature_order"]
+    if not isinstance(coefficients, Mapping) or not isinstance(feature_order, list):
+        raise ValueError("quadratic model parameters are malformed")
+    linear = coefficients.get("linear")
+    quadratic = coefficients.get("quadratic")
+    if not isinstance(linear, list) or not isinstance(quadratic, list):
+        raise ValueError("quadratic model coefficients must be lists")
+    prediction = pd.Series(float(coefficients["intercept"]), index=states.index)
+    for name, linear_coefficient, quadratic_coefficient in zip(
+        feature_order,
+        linear,
+        quadratic,
+        strict=True,
+    ):
+        values = states[str(name)]
+        prediction += float(linear_coefficient) * values + float(
+            quadratic_coefficient
+        ) * values.pow(2)
+    return prediction
 
 
 def _rule_duration(frame: pd.DataFrame, record: Mapping[str, object]) -> float:
@@ -109,6 +186,7 @@ def transition_heat_v2_5(
     frame: pd.DataFrame,
     boundaries: pd.DataFrame,
     record: Mapping[str, object],
+    state_protocol: str = "historical_interpolation",
 ) -> pd.DataFrame:
     """Predict linear Qprep plus signed-negative quadratic QD, with QR=0."""
     parameters = load_parameters()["v2.5"]
@@ -119,27 +197,25 @@ def transition_heat_v2_5(
         events["defrost_start"] - events["defrost_preparation_start"]
     ).total_seconds() / 60
     duration = _rule_duration(frame, record)
-    state_rows = [
-        _strict_states(frame, pd.Timestamp(value)) for value in boundaries["candidate_time"]
-    ]
+    candidate_times = [pd.Timestamp(value) for value in boundaries["candidate_time"]]
+    state_rows = [_candidate_states(frame, value, state_protocol) for value in candidate_times]
+    strict_rows = (
+        state_rows
+        if state_protocol == "strict_causal"
+        else [_candidate_states(frame, value, "strict_causal") for value in candidate_times]
+    )
     states = pd.DataFrame([values for values, _ in state_rows])
-    state_window_supported = pd.Series([supported for _, supported in state_rows])
+    strict_states = pd.DataFrame([values for values, _ in strict_rows])
+    strict_counts = pd.DataFrame([counts for _, counts in strict_rows])
+    strict_window_supported = strict_counts.min(axis=1).ge(48)
     states["preparation_duration_minutes"] = preparation_duration
     states["rule_defrost_duration_minutes"] = duration
-    qprep_features = qprep_model["feature_order"]
-    qprep_coefficients = [float(value) for value in qprep_model["coefficients"]]
-    qprep = pd.Series(qprep_coefficients[0], index=states.index)
-    for name, coefficient in zip(qprep_features, qprep_coefficients[1:], strict=True):
-        qprep += coefficient * states[name]
-    qd_features = qd_model["feature_order"]
-    qd = pd.Series(float(qd_model["coefficients"]["intercept"]), index=states.index)
-    for name, linear, quadratic in zip(
-        qd_features,
-        qd_model["coefficients"]["linear"],
-        qd_model["coefficients"]["quadratic"],
-        strict=True,
-    ):
-        qd += float(linear) * states[name] + float(quadratic) * states[name].pow(2)
+    strict_states["preparation_duration_minutes"] = preparation_duration
+    strict_states["rule_defrost_duration_minutes"] = duration
+    qprep = _linear_prediction(states, qprep_model)
+    qd = _quadratic_prediction(states, qd_model)
+    strict_qprep = _linear_prediction(strict_states, qprep_model)
+    strict_qd = _quadratic_prediction(strict_states, qd_model)
     qprep_supported = pd.Series(True, index=states.index)
     for name, limits in qprep_model["support"].items():
         qprep_supported &= states[name].between(float(limits[0]), float(limits[1]))
@@ -147,9 +223,14 @@ def transition_heat_v2_5(
     for name, limits in qd_model["support"].items():
         qd_supported &= states[name].between(float(limits[0]), float(limits[1]))
     signed_qd = -qd
+    physical = qprep.gt(0) & signed_qd.lt(0)
     supported = (
-        state_window_supported & qprep_supported & qd_supported & qprep.gt(0) & signed_qd.le(0)
+        physical
+        if state_protocol == "historical_interpolation"
+        else physical & strict_window_supported
     )
+    strict_signed_qd = -strict_qd
+    strict_supported = strict_window_supported & strict_qprep.gt(0) & strict_signed_qd.lt(0)
     result = states.rename(columns={"evaporating_pressure": "qd_evaporating_pressure_mpa"})
     result["transition_heat_kwh"] = qprep + signed_qd
     result["preparation_heat_kwh"] = qprep
@@ -157,13 +238,24 @@ def transition_heat_v2_5(
     result["recovery_heat_kwh"] = 0.0
     result["qprep_supported"] = qprep_supported
     result["qd_supported"] = qd_supported
-    result["state_window_supported"] = state_window_supported
+    result["strict_transition_heat_kwh"] = strict_qprep + strict_signed_qd
+    result["strict_preparation_heat_kwh"] = strict_qprep
+    result["strict_defrost_heat_kwh"] = strict_signed_qd
+    for column in strict_counts:
+        result[f"strict_{column}_complete_seconds"] = strict_counts[column]
+    result["strict_state_window_supported"] = strict_window_supported
     result["QT_supported"] = supported
+    result["strict_QT_supported"] = strict_supported
     result["transition_heat_model"] = "linear_qprep_plus_signed_quadratic_qd"
-    result["transition_heat_rule"] = "strict_pre_action_window_[tau-60s,tau)"
-    result["transition_heat_status"] = np.select(
-        [~state_window_supported, supported],
-        ["incomplete", "supported"],
-        default="outside_support",
+    result["transition_heat_rule"] = (
+        "offline_historical_interpolation_[tau-60s,tau)"
+        if state_protocol == "historical_interpolation"
+        else "strict_causal_[tau-60s,tau)"
     )
+    result["transition_heat_status"] = np.select(
+        [~supported, ~(qprep_supported & qd_supported)],
+        ["incomplete", "outside_empirical_support"],
+        default="supported",
+    )
+    result["strict_transition_heat_status"] = np.where(strict_supported, "supported", "incomplete")
     return result

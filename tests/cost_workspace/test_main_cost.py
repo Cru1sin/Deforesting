@@ -265,6 +265,18 @@ def test_action_is_a_required_option_not_a_positional() -> None:
     parser = main_cost.build_parser()
 
     assert parser.parse_args(["--action", "calculate"]).action == "calculate"
+    parsed = parser.parse_args(
+        [
+            "--action",
+            "calculate",
+            "--integration-protocol",
+            "strict_causal",
+            "--state-protocol",
+            "strict_causal",
+        ]
+    )
+    assert parsed.integration_protocol == "strict_causal"
+    assert parsed.state_protocol == "strict_causal"
     with pytest.raises(SystemExit):
         parser.parse_args(["calculate"])
 
@@ -297,7 +309,56 @@ def test_calculate_writes_cost_command_and_recipe(
         .read_text()
         .startswith("uv run python main_cost.py --action calculate")
     )
-    assert json.loads((run / "recipe.json").read_text())["heat_basis"] == "unit"
+    recipe = json.loads((run / "recipe.json").read_text())
+    assert recipe["heat_basis"] == "unit"
+    assert recipe["integration_protocol"] == "historical_reconstruction"
+    assert recipe["state_protocol"] == "historical_interpolation"
+
+
+def test_strict_protocol_dry_run_requires_named_variant_and_records_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class Module:
+        DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+
+        @staticmethod
+        def calculate(_: object, cycles: list[str], __: object) -> pd.DataFrame:
+            return pd.DataFrame({"cycle_name": cycles, "inverse_cop": 0.5})
+
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: AnchorDataset())
+    monkeypatch.setitem(main_cost.COST_MODULES, "v1", Module)
+    common = [
+        "--action",
+        "calculate",
+        "--cost",
+        "v1",
+        "--cycles",
+        "cycle_a",
+        "--integration-protocol",
+        "strict_causal",
+        "--state-protocol",
+        "strict_causal",
+        "--output-root",
+        str(tmp_path),
+        "--dry-run",
+    ]
+
+    with pytest.raises(ValueError, match="named variant"):
+        main_cost.main(common)
+
+    assert main_cost.main([*common, "--variant", "strict"]) == 0
+    output = capsys.readouterr().out
+    assert "integration_protocol=strict_causal" in output
+    assert "state_protocol=strict_causal" in output
+
+    calculate = [value for value in common if value != "--dry-run"]
+    assert main_cost.main([*calculate, "--variant", "strict"]) == 0
+    recipe = json.loads((tmp_path / "cost/v1__strict/recipe.json").read_text())
+    assert recipe["integration_protocol"] == "strict_causal"
+    assert recipe["state_protocol"] == "strict_causal"
+    assert recipe["label_eligible"] is False
 
 
 def test_overwrite_removes_stale_per_cycle_csvs(

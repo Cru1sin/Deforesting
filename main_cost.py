@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--heating-start-rule", choices=("stable_heating_start", "heating_start"))
+    parser.add_argument(
+        "--integration-protocol", choices=("historical_reconstruction", "strict_causal")
+    )
+    parser.add_argument("--state-protocol", choices=("historical_interpolation", "strict_causal"))
     parser.add_argument("--heating-energy-model", choices=("measured_total_power",))
     parser.add_argument(
         "--heating-heat-model", choices=("measured_unit_heat", "measured_water_heat")
@@ -71,6 +75,8 @@ def _recipe(module: Any, args: argparse.Namespace) -> dict[str, object]:
         (args.heat_basis, "heat_basis"),
         (args.event_scope, "event_scope"),
         (args.heating_start_rule, "heating_start_rule"),
+        (args.integration_protocol, "integration_protocol"),
+        (args.state_protocol, "state_protocol"),
         (args.heating_energy_model, "heating_energy_model"),
         (args.heating_heat_model, "heating_heat_model"),
         (args.transition_energy_model, "transition_energy_model"),
@@ -240,7 +246,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
         print(
             "Dry-run OK: recipe, parameters, variant, output, and "
             f"{len(cycles)} metadata-eligible cycle(s) checked; "
-            "raw clean-anchor gate deferred"
+            "raw clean-anchor gate deferred; "
+            f"integration_protocol={recipe['integration_protocol']}; "
+            f"state_protocol={recipe['state_protocol']}"
         )
         return 0
 

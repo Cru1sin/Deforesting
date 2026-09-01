@@ -15,6 +15,8 @@ def _recipe(**changes: object) -> dict[str, object]:
         "heat_basis": "unit",
         "event_scope": "stable_heating_start_to_actual_preparation",
         "heating_start_rule": "stable_heating_start",
+        "integration_protocol": "historical_reconstruction",
+        "state_protocol": "historical_interpolation",
         "candidate_start_rule": "stable_heating_start_plus_10_minutes",
         "candidate_end_rule": "observed_defrost_preparation_start",
         "candidate_cadence": "1_minute_plus_exact_endpoint",
@@ -73,6 +75,25 @@ def test_component_override_requires_a_named_variant() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "protocol",
+    [
+        {"integration_protocol": "strict_causal"},
+        {"state_protocol": "strict_causal"},
+        {"integration_protocol": "strict_causal", "state_protocol": "strict_causal"},
+    ],
+)
+def test_noncanonical_measurement_protocol_requires_label_ineligible_variant(
+    protocol: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="named variant"):
+        validate_recipe(_recipe(**protocol))
+
+    checked = validate_recipe(_recipe(variant="strict_audit", **protocol))
+
+    assert checked["label_eligible"] is False
+
+
 def test_variant_still_rejects_unknown_or_incompatible_parameters() -> None:
     with pytest.raises(ValueError, match="transition heat model"):
         validate_recipe(_recipe(variant="trial", transition_heat_model="experimental"))
@@ -103,6 +124,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
         {
             "heating_energy_kwh": [1.0, 1.0, 2.0, 1.0],
             "heating_valid": [True, True, True, False],
+            "strict_heating_energy_supported": False,
             "heating_energy_model": "measured_total_power",
             "heating_energy_rule": "stable_heating_start",
             "heating_energy_status": "supported",
@@ -111,6 +133,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
     qh = pd.DataFrame(
         {
             "heating_heat_kwh": [1.0, 2.0, -1.0, 2.0],
+            "strict_heating_heat_supported": False,
             "heating_heat_model": "measured_unit_heat",
             "heating_heat_rule": "stable_heating_start",
             "heating_heat_status": "supported",
@@ -123,6 +146,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
             "defrost_energy_kwh": 0.0,
             "recovery_energy_kwh": 0.0,
             "ET_supported": [True, True, True, True],
+            "strict_ET_supported": False,
             "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
             "transition_energy_rule": "strict_pre_action_60s",
             "transition_energy_status": "supported",
@@ -135,6 +159,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
             "defrost_heat_kwh": 0.0,
             "recovery_heat_kwh": 0.0,
             "QT_supported": [True, True, True, True],
+            "strict_QT_supported": False,
             "transition_heat_model": "zero_transition_heat",
             "transition_heat_rule": "none",
             "transition_heat_status": "supported",

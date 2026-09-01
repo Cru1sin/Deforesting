@@ -70,6 +70,34 @@ def test_v25_candidates_keep_domain_but_elapsed_and_integration_start_at_cycle_h
     assert heat["heating_heat_kwh"].iloc[0] == pytest.approx(1.161)
 
 
+def test_v25_historical_prefix_bridges_without_endpoint_extrapolation() -> None:
+    boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "heating_start")
+    historical_start = pd.Timestamp(boundaries["stable_heating_start"].iloc[0])
+    frame = _frame()
+    prefix_nans = frame["timestamp"].isin(
+        [pd.Timestamp("2026-01-01 00:00:00"), pd.Timestamp("2026-01-01 00:01:00")]
+    )
+    frame.loc[prefix_nans, "power_total"] = float("nan")
+    frame.loc[prefix_nans, "water_flow"] = float("nan")
+
+    energy = heating_energy(
+        frame,
+        boundaries.iloc[:1],
+        historical_start=historical_start,
+    )
+    heat = heating_heat(
+        frame,
+        boundaries.iloc[:1],
+        "water",
+        historical_start=historical_start,
+    )
+
+    assert energy["heating_energy_kwh"].iloc[0] == pytest.approx(6 * 719 / 3600)
+    assert heat["heating_heat_kwh"].iloc[0] == pytest.approx(1.161 * 719 / 720)
+    assert energy["heating_energy_supported"].iloc[0]
+    assert heat["heating_heat_supported"].iloc[0]
+
+
 def test_v1_heating_blocks_integrate_from_stable_and_use_unit_heat() -> None:
     boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "stable_heating_start")
     energy = heating_energy(_frame(), boundaries)
@@ -116,26 +144,31 @@ def test_transition_energy_does_not_fill_strict_window_from_tau_or_earlier_data(
         boundaries.iloc[:1],
         "exp_20260714",
         include_fixed_recovery=False,
+        state_protocol="strict_causal",
     )
 
     assert pd.isna(result["evaporating_pressure_mpa"].iloc[0])
     assert not result["ET_supported"].iloc[0]
 
 
-def test_heating_coverage_is_anchored_to_declared_integration_start() -> None:
+def test_strict_heating_coverage_is_anchored_to_declared_integration_start() -> None:
     boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "heating_start")
     delayed = _frame().loc[lambda values: values["timestamp"].ge("2026-01-01 00:05:00")]
 
     energy = heating_energy(delayed, boundaries.iloc[:1])
     heat = heating_heat(delayed, boundaries.iloc[:1], "water")
 
-    assert energy["heating_energy_coverage"].iloc[0] == pytest.approx(7 / 12)
-    assert heat["heating_heat_coverage"].iloc[0] == pytest.approx(7 / 12)
-    assert not energy["heating_energy_supported"].iloc[0]
-    assert not heat["heating_heat_supported"].iloc[0]
+    assert energy["heating_energy_coverage"].iloc[0] == 1
+    assert heat["heating_heat_coverage"].iloc[0] == 1
+    assert energy["heating_energy_supported"].iloc[0]
+    assert heat["heating_heat_supported"].iloc[0]
+    assert energy["strict_heating_energy_coverage"].iloc[0] == pytest.approx(7 / 12)
+    assert heat["strict_heating_heat_coverage"].iloc[0] == pytest.approx(7 / 12)
+    assert not energy["strict_heating_energy_supported"].iloc[0]
+    assert not heat["strict_heating_heat_supported"].iloc[0]
 
 
-def test_later_signal_sample_cannot_change_an_earlier_candidate() -> None:
+def test_later_signal_sample_changes_only_offline_historical_reconstruction() -> None:
     start = pd.Timestamp("2026-01-01")
     boundaries = pd.DataFrame(
         {
@@ -159,11 +192,18 @@ def test_later_signal_sample_cannot_change_an_earlier_candidate() -> None:
     before_qh = heating_heat(frame, boundaries, "unit")
     after_qh = heating_heat(changed, boundaries, "unit")
 
-    assert before_eh["heating_energy_kwh"].iloc[0] == after_eh["heating_energy_kwh"].iloc[0]
-    assert before_qh["heating_heat_kwh"].iloc[0] == after_qh["heating_heat_kwh"].iloc[0]
+    assert before_eh["heating_energy_kwh"].iloc[0] != after_eh["heating_energy_kwh"].iloc[0]
+    assert before_qh["heating_heat_kwh"].iloc[0] != after_qh["heating_heat_kwh"].iloc[0]
+    assert (
+        before_eh["strict_heating_energy_kwh"].iloc[0]
+        == after_eh["strict_heating_energy_kwh"].iloc[0]
+    )
+    assert (
+        before_qh["strict_heating_heat_kwh"].iloc[0] == after_qh["strict_heating_heat_kwh"].iloc[0]
+    )
 
 
-def test_channel_leading_nans_are_uncovered_and_not_extrapolated() -> None:
+def test_channel_leading_nans_are_only_extrapolated_by_historical_reconstruction() -> None:
     start = pd.Timestamp("2026-01-01")
     timestamps = pd.date_range(start, periods=61, freq="s")
     missing = timestamps < start + pd.Timedelta(seconds=30)
@@ -187,15 +227,21 @@ def test_channel_leading_nans_are_uncovered_and_not_extrapolated() -> None:
     energy = heating_energy(frame, boundaries)
     heat = heating_heat(frame, boundaries, "water")
 
-    assert energy["heating_energy_kwh"].iloc[0] == pytest.approx(6 * 30 / 3600)
-    assert heat["heating_heat_kwh"].iloc[0] == pytest.approx(1.161 * 5 * 30 / 3600)
-    assert energy["heating_energy_coverage"].iloc[0] == pytest.approx(0.5)
-    assert heat["heating_heat_coverage"].iloc[0] == pytest.approx(0.5)
-    assert not energy["heating_energy_supported"].iloc[0]
-    assert not heat["heating_heat_supported"].iloc[0]
+    assert energy["heating_energy_kwh"].iloc[0] == pytest.approx(6 * 60 / 3600)
+    assert heat["heating_heat_kwh"].iloc[0] == pytest.approx(1.161 * 5 * 60 / 3600)
+    assert energy["heating_energy_coverage"].iloc[0] == 1
+    assert heat["heating_heat_coverage"].iloc[0] == 1
+    assert energy["heating_energy_supported"].iloc[0]
+    assert heat["heating_heat_supported"].iloc[0]
+    assert energy["strict_heating_energy_kwh"].iloc[0] == pytest.approx(6 * 30 / 3600)
+    assert heat["strict_heating_heat_kwh"].iloc[0] == pytest.approx(1.161 * 5 * 30 / 3600)
+    assert energy["strict_heating_energy_coverage"].iloc[0] == pytest.approx(0.5)
+    assert heat["strict_heating_heat_coverage"].iloc[0] == pytest.approx(0.5)
+    assert not energy["strict_heating_energy_supported"].iloc[0]
+    assert not heat["strict_heating_heat_supported"].iloc[0]
 
 
-def test_endpoint_only_heating_observations_do_not_bridge_a_sparse_gap() -> None:
+def test_sparse_gap_is_bridged_canonically_but_not_in_strict_diagnostics() -> None:
     start = pd.Timestamp("2026-01-01")
     frame = pd.DataFrame(
         {
@@ -215,17 +261,21 @@ def test_endpoint_only_heating_observations_do_not_bridge_a_sparse_gap() -> None
     energy = heating_energy(frame, boundaries)
     heat = heating_heat(frame, boundaries, "unit")
 
-    assert energy["heating_energy_kwh"].iloc[0] == 0
-    assert heat["heating_heat_kwh"].iloc[0] == 0
-    assert energy["heating_energy_legacy_bridged_kwh"].iloc[0] == pytest.approx(0.1)
-    assert heat["heating_heat_legacy_bridged_kwh"].iloc[0] == pytest.approx(0.2)
-    assert energy["heating_energy_coverage"].iloc[0] == 0
-    assert heat["heating_heat_coverage"].iloc[0] == 0
-    assert not energy["heating_energy_supported"].iloc[0]
-    assert not heat["heating_heat_supported"].iloc[0]
+    assert energy["heating_energy_kwh"].iloc[0] == pytest.approx(0.1)
+    assert heat["heating_heat_kwh"].iloc[0] == pytest.approx(0.2)
+    assert energy["heating_energy_coverage"].iloc[0] == 1
+    assert heat["heating_heat_coverage"].iloc[0] == 1
+    assert energy["heating_energy_supported"].iloc[0]
+    assert heat["heating_heat_supported"].iloc[0]
+    assert energy["strict_heating_energy_kwh"].iloc[0] == 0
+    assert heat["strict_heating_heat_kwh"].iloc[0] == 0
+    assert energy["strict_heating_energy_coverage"].iloc[0] == 0
+    assert heat["strict_heating_heat_coverage"].iloc[0] == 0
+    assert not energy["strict_heating_energy_supported"].iloc[0]
+    assert not heat["strict_heating_heat_supported"].iloc[0]
 
 
-def test_one_finite_pe_second_is_not_supported() -> None:
+def test_one_finite_pe_second_is_canonical_but_not_strictly_supported() -> None:
     boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "stable_heating_start")
     frame = _frame()
     candidate = boundaries["candidate_time"].iloc[0]
@@ -244,11 +294,13 @@ def test_one_finite_pe_second_is_not_supported() -> None:
         include_fixed_recovery=False,
     )
 
-    assert not result["ET_supported"].iloc[0]
-    assert result["transition_energy_status"].iloc[0] == "incomplete"
+    assert result["ET_supported"].iloc[0]
+    assert not result["strict_ET_supported"].iloc[0]
+    assert result["transition_energy_status"].iloc[0] == "supported"
+    assert result["strict_transition_energy_status"].iloc[0] == "incomplete"
 
 
-def test_one_finite_second_per_v25_state_feature_is_not_supported() -> None:
+def test_one_finite_state_second_is_canonical_but_not_strictly_supported() -> None:
     boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "heating_start")
     frame = _frame()
     candidate = boundaries["candidate_time"].iloc[0]
@@ -275,8 +327,10 @@ def test_one_finite_second_per_v25_state_feature_is_not_supported() -> None:
 
     result = transition_heat_v2_5(frame, boundaries.iloc[:1], FakeLoader().record)
 
-    assert not result["QT_supported"].iloc[0]
-    assert result["transition_heat_status"].iloc[0] == "incomplete"
+    assert result["QT_supported"].iloc[0]
+    assert not result["strict_QT_supported"].iloc[0]
+    assert result["transition_heat_status"].iloc[0] == "supported"
+    assert result["strict_transition_heat_status"].iloc[0] == "incomplete"
 
 
 def test_v25_transition_heat_uses_strict_window_and_emits_signed_qd() -> None:
