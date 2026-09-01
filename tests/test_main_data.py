@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pandas as pd
 
 
 def test_main_data_help_lists_dataset_actions() -> None:
+    environment = os.environ.copy()
+    environment["UV_CACHE_DIR"] = "/private/tmp/pinn4soh-uv-cache"
     result = subprocess.run(
-        [sys.executable, "main_data.py", "--help"],
+        ["uv", "run", "python", "main_data.py", "--help"],
         check=True,
         capture_output=True,
+        env=environment,
         text=True,
     )
 

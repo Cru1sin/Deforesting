@@ -1,6 +1,6 @@
 """Dataset image collection and coverage operations."""
 
-from frost_analysis.dataset.images import (
+from src.frost_analysis.dataset.images import (
     build_rgb_coverage_intervals,
     collect_cycle_images,
     copy_image,
