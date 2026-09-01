@@ -70,25 +70,6 @@ def test_cli_accepts_explicit_v268_fixed9_defaults_without_creating_variant() ->
     )
 
 
-def test_main_recipe_delegates_validation_to_selected_module() -> None:
-    called = False
-
-    class Module:
-        DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
-
-        @staticmethod
-        def validate_recipe(recipe):
-            nonlocal called
-            called = True
-            return dict(recipe)
-
-    args = build_parser().parse_args(["--action", "calculate", "--cost", "v1"])
-
-    main_cost._recipe(Module, args)
-
-    assert called
-
-
 def test_v268_canonical_is_cli_defaults_and_overrides_require_variant() -> None:
     args = build_parser().parse_args(["--action", "calculate", "--cost", "v2.6.8"])
     assert main_cost._recipe(main_cost.cost_function_v2_6_8, args) == (

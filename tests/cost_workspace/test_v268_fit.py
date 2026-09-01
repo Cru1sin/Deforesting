@@ -95,15 +95,22 @@ def test_artifact_round_trip_and_missing_fold_fail_closed() -> None:
 def test_independent_support_is_intersection() -> None:
     from cost.fit_v2_6_8 import predict_independent_targets
 
+    fold = {
+        "feature_order": ["x"],
+        "imputer_median": [0.0],
+        "scaler_mean": [0.0],
+        "scaler_scale": [1.0],
+        "coefficients": [1.0],
+        "intercept": 0.0,
+        "training_standardized_references": [[0.0]],
+    }
     e_artifact = {
-        "folds": {"a": {"support_threshold": 1.0}},
+        "folds": {"a": {**fold, "support_threshold": 1.0}},
     }
     q_artifact = {
-        "folds": {"a": {"support_threshold": 0.5}},
+        "folds": {"a": {**fold, "support_threshold": 0.5}},
     }
-    e = pd.DataFrame({"prediction": [1.0, 1.0], "support_distance": [0.2, 0.2]})
-    q = pd.DataFrame({"prediction": [1.0, 1.0], "support_distance": [0.2, 0.8]})
     result = predict_independent_targets(
-        e_artifact, q_artifact, pd.DataFrame(index=range(2)), "a", replay=(e, q)
+        e_artifact, q_artifact, pd.DataFrame({"x": [0.2, 0.8]}), "a"
     )
     assert result["model_supported"].tolist() == [True, False]

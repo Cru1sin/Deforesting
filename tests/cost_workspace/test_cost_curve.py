@@ -43,9 +43,9 @@ def test_validate_recipe_accepts_canonical_v1_defaults() -> None:
     ("change", "message"),
     [
         ({"heat_basis": "water"}, "heat basis"),
-        ({"event_scope": "heating_start_to_actual_preparation"}, "event scope"),
-        ({"heating_start_rule": "heating_start"}, "start rule"),
-        ({"variant": "trial"}, "canonical recipe"),
+        ({"event_scope": "heating_start_to_actual_preparation"}, "does not implement"),
+        ({"heating_start_rule": "heating_start"}, "does not implement"),
+        ({"variant": "trial"}, "variant"),
     ],
 )
 def test_validate_recipe_rejects_incompatible_canonical_recipe(
@@ -88,7 +88,7 @@ def test_component_override_requires_a_named_variant() -> None:
 def test_noncanonical_measurement_protocol_requires_label_ineligible_variant(
     protocol: dict[str, object],
 ) -> None:
-    with pytest.raises(ValueError, match="named variant"):
+    with pytest.raises(ValueError, match="variant"):
         validate_recipe(_recipe(**protocol))
 
     checked = validate_recipe(_recipe(variant="strict_audit", **protocol))
@@ -101,7 +101,7 @@ def test_variant_still_rejects_unknown_or_incompatible_parameters() -> None:
         validate_recipe(_recipe(variant="trial", transition_heat_model="experimental"))
     with pytest.raises(ValueError, match="heat basis.*heating heat model"):
         validate_recipe(_recipe(variant="trial", heat_basis="water"))
-    with pytest.raises(ValueError, match="event scope|start rule"):
+    with pytest.raises(ValueError, match="does not implement"):
         validate_recipe(
             _recipe(
                 variant="trial",

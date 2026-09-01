@@ -444,13 +444,9 @@ def predict_independent_targets(
     heat_artifact: dict[str, Any],
     values: pd.DataFrame,
     experiment_id: str,
-    *,
-    replay: tuple[pd.DataFrame, pd.DataFrame] | None = None,
 ) -> pd.DataFrame:
-    energy, heat = replay or (
-        predict_from_artifact(energy_artifact, values, experiment_id),
-        predict_from_artifact(heat_artifact, values, experiment_id),
-    )
+    energy = predict_from_artifact(energy_artifact, values, experiment_id)
+    heat = predict_from_artifact(heat_artifact, values, experiment_id)
     e_fold = energy_artifact["folds"][experiment_id]
     q_fold = heat_artifact["folds"][experiment_id]
     e_supported = energy["support_distance"].le(float(e_fold["support_threshold"]))
