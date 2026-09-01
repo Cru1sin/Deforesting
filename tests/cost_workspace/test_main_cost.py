@@ -256,9 +256,11 @@ def test_existing_canonical_and_variant_run_directories_require_overwrite(
         )
 
 
-def test_fit_is_explicitly_reserved(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main_cost.main(["--action", "fit"]) == 2
-    assert "V2.6.8 fit not migrated yet" in capsys.readouterr().err
+def test_fit_is_scoped_to_named_v268_candidates() -> None:
+    with pytest.raises(ValueError, match="only for --cost v2.6.8"):
+        main_cost.main(["--action", "fit"])
+    with pytest.raises(ValueError, match="requires --variant"):
+        main_cost.main(["--action", "fit", "--cost", "v2.6.8"])
 
 
 def test_action_is_a_required_option_not_a_positional() -> None:

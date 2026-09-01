@@ -10,6 +10,18 @@ import pandas as pd
 
 def transition_semantics(energy_model: object, heat_model: object) -> dict[str, str]:
     """Return truthful protocol metadata for the selected ET/QT models."""
+    ticket_models = {
+        "experiment_mean",
+        "ticket_ridge_static5",
+        "ticket_ridge_physical6",
+        "ticket_ridge_dynamic8",
+    }
+    if energy_model in ticket_models and heat_model in ticket_models:
+        return {
+            "transition_scope": "preparation_defrost_recovery",
+            "transition_window": "observed_preparation_defrost_fixed_9m_recovery",
+            "transition_provenance": "offline_diagnostic_fixed9_full_transition_target",
+        }
     fixed_recovery = energy_model == "pe_quadratic_plus_fixed_recovery"
     observed_durations = heat_model == "linear_qprep_plus_signed_quadratic_qd"
     if observed_durations:
@@ -30,7 +42,7 @@ def transition_semantics(energy_model: object, heat_model: object) -> dict[str, 
 
 
 def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa: C901
-    """Validate a V1/V2.5 canonical recipe or a named single-base variant."""
+    """Validate a canonical cost recipe or a named single-base variant."""
     value = dict(recipe)
     base = value.get("base_cost")
     canonical = {
@@ -76,9 +88,32 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
             "transition_energy_model": "pe_quadratic",
             "transition_heat_model": "linear_qprep_plus_signed_quadratic_qd",
         },
+        "v2.6.8": {
+            "version": "v2.6.8",
+            "label_eligible": False,
+            "heat_basis": "water",
+            "event_scope": "fixed_post_defrost_9min_to_actual_preparation",
+            "heating_start_rule": "fixed_post_defrost_9min",
+            "integration_protocol": "strict_causal",
+            "state_protocol": "strict_causal",
+            "candidate_start_rule": "heating_start_plus_10_minutes",
+            "candidate_end_rule": "observed_defrost_preparation_start",
+            "candidate_cadence": "1_minute_plus_exact_endpoint",
+            "state_window": "[tau-60s,tau)",
+            "slope_window": "[tau-5m,tau)",
+            "transition_scope": "preparation_defrost_recovery",
+            "transition_window": "observed_preparation_defrost_fixed_9m_recovery",
+            "transition_provenance": "offline_diagnostic_fixed9_full_transition_target",
+            "transition_breakdown": "not_decomposed",
+            "decision_rule": "corrected_supported_minimum",
+            "heating_energy_model": "measured_total_power",
+            "heating_heat_model": "measured_water_heat",
+            "transition_energy_model": "ticket_ridge_dynamic8",
+            "transition_heat_model": "ticket_ridge_dynamic8",
+        },
     }
     if base not in canonical:
-        raise ValueError("base_cost must be v1 or v2.5")
+        raise ValueError("base_cost must be v1, v2.5, or v2.6.8")
     required = {"base_cost", "variant", *canonical[str(base)]}
     missing = required - value.keys()
     if missing:
@@ -91,29 +126,41 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
         "event_scope": {
             "stable_heating_start_to_actual_preparation",
             "heating_start_to_actual_preparation",
+            "fixed_post_defrost_9min_to_actual_preparation",
         },
-        "heating_start_rule": {"stable_heating_start", "heating_start"},
+        "heating_start_rule": {
+            "stable_heating_start",
+            "heating_start",
+            "fixed_post_defrost_9min",
+        },
         "integration_protocol": {"historical_reconstruction", "strict_causal"},
         "state_protocol": {"historical_interpolation", "strict_causal"},
-        "candidate_start_rule": {"stable_heating_start_plus_10_minutes"},
+        "candidate_start_rule": {
+            "stable_heating_start_plus_10_minutes",
+            "heating_start_plus_10_minutes",
+        },
         "candidate_end_rule": {"observed_defrost_preparation_start"},
         "candidate_cadence": {"1_minute_plus_exact_endpoint"},
         "state_window": {"[tau-60s,tau)"},
+        "slope_window": {"[tau-5m,tau)"},
         "transition_scope": {"preparation_defrost_recovery"},
         "transition_window": {
             "candidate_state_at_tau",
             "observed_preparation_and_defrost_durations",
+            "observed_preparation_defrost_fixed_9m_recovery",
         },
         "transition_provenance": {
             "candidate_time_state",
             "candidate_time_state_plus_fixed_recovery",
             "offline_diagnostic_future_boundary_observed_durations",
             "offline_diagnostic_future_boundary_observed_durations_plus_fixed_recovery",
+            "offline_diagnostic_fixed9_full_transition_target",
         },
-        "decision_rule": {"supported_argmin_inverse_cop"},
+        "transition_breakdown": {"not_decomposed"},
+        "decision_rule": {"supported_argmin_inverse_cop", "corrected_supported_minimum"},
     }
     for key, choices in domains.items():
-        if value[key] not in choices:
+        if key in value and value[key] not in choices:
             raise ValueError(f"unknown {key.replace('_', ' ')}")
     if value["version"] != base:
         raise ValueError("version must match base_cost")
@@ -128,13 +175,25 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
             "linear_qprep_plus_signed_quadratic_qd",
         },
     }
+    ticket_models = {
+        "experiment_mean",
+        "ticket_ridge_static5",
+        "ticket_ridge_physical6",
+        "ticket_ridge_dynamic8",
+    }
+    allowed["transition_energy_model"].update(ticket_models)
+    allowed["transition_heat_model"].update(ticket_models)
     for key, choices in allowed.items():
         if value[key] not in choices:
             raise ValueError(f"unknown {key.replace('_', ' ')}")
     expected_heat_model = f"measured_{value['heat_basis']}_heat"
     if value["heating_heat_model"] != expected_heat_model:
         raise ValueError("heat basis and heating heat model are incompatible")
-    expected_scope = f"{value['heating_start_rule']}_to_actual_preparation"
+    expected_scope = (
+        "fixed_post_defrost_9min_to_actual_preparation"
+        if value["heating_start_rule"] == "fixed_post_defrost_9min"
+        else f"{value['heating_start_rule']}_to_actual_preparation"
+    )
     if value["event_scope"] != expected_scope:
         raise ValueError("event scope and start rule are incompatible")
     differences = {

@@ -12,12 +12,24 @@ from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import pandas as pd
 
-from cost import cost_function_v1, cost_function_v2_5
+from cost import cost_function_v1, cost_function_v2_5, cost_function_v2_6_8
 from cost.boundaries import catalog_exclusion_reason, clean_anchor_exclusion_reason
 from cost.cost_curve import transition_semantics, validate_recipe
 from cost.energy_models import load_parameters
+from cost.fit_v2_6_8 import (
+    MODEL_FEATURES,
+    assemble_target_artifact,
+    bootstrap_minima,
+    build_validation_table,
+    fit_full_outcome,
+    fit_outcome_fold,
+    load_artifacts,
+    mean_target_artifact,
+    predict_from_artifact,
+)
 from dataloader import DatasetLoader
 
 if TYPE_CHECKING:
@@ -26,6 +38,7 @@ if TYPE_CHECKING:
 COST_MODULES: dict[str, ModuleType] = {
     "v1": cost_function_v1,
     "v2.5": cost_function_v2_5,
+    "v2.6.8": cost_function_v2_6_8,
 }
 
 
@@ -57,11 +70,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--transition-energy-model",
-        choices=("pe_quadratic_plus_fixed_recovery", "pe_quadratic"),
+        choices=(
+            "pe_quadratic_plus_fixed_recovery",
+            "pe_quadratic",
+            "experiment_mean",
+            "ticket_ridge_static5",
+            "ticket_ridge_physical6",
+            "ticket_ridge_dynamic8",
+        ),
     )
     parser.add_argument(
         "--transition-heat-model",
-        choices=("zero_transition_heat", "linear_qprep_plus_signed_quadratic_qd"),
+        choices=(
+            "zero_transition_heat",
+            "linear_qprep_plus_signed_quadratic_qd",
+            "experiment_mean",
+            "ticket_ridge_static5",
+            "ticket_ridge_physical6",
+            "ticket_ridge_dynamic8",
+        ),
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -203,12 +230,110 @@ def compare_results(
     return figure, path
 
 
+def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C901
+    """Fit the review-only candidate artifact with explicit outer loops."""
+    if args.cost != "v2.6.8":
+        raise ValueError("fit is available only for --cost v2.6.8")
+    if not args.variant:
+        raise ValueError("V2.6.8 fit requires --variant NAME")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(args.variant)):
+        raise ValueError("variant may contain only letters, numbers, dot, underscore, and hyphen")
+    run = args.output_root / "cost" / "fit" / str(args.variant)
+    if run.exists() and not args.overwrite:
+        raise FileExistsError(f"fit directory exists; pass --overwrite: {run}")
+
+    loader = DatasetLoader(args.dataset)
+    events = cost_function_v2_6_8.build_event_table(loader)
+    valid = events.loc[events["event_valid"].fillna(False)].copy()
+    if valid.empty:
+        raise ValueError("V2.6.8 fit has no valid observed events")
+    experiments = sorted(valid["experiment_id"].astype(str).unique())
+    artifact: dict[str, Any] = {
+        "artifact_version": "v2.6.8",
+        "fit_variant": str(args.variant),
+        "bootstrap_seed": 268,
+        "bootstrap_replicates": 200,
+        "models": {
+            "experiment_mean": {
+                "energy": mean_target_artifact(valid, "E_T_observed_kwh"),
+                "heat": mean_target_artifact(valid, "Q_T_observed_kwh"),
+            }
+        },
+    }
+    memory: dict[str, dict[str, dict[str, Any]]] = {}
+    for model_name, features in MODEL_FEATURES.items():
+        energy_folds = {}
+        heat_folds = {}
+        for heldout_experiment in experiments:
+            energy_folds[heldout_experiment] = fit_outcome_fold(
+                valid, heldout_experiment, features, "E_T_observed_kwh"
+            )
+            heat_folds[heldout_experiment] = fit_outcome_fold(
+                valid, heldout_experiment, features, "Q_T_observed_kwh"
+            )
+        energy_full = fit_full_outcome(valid, features, "E_T_observed_kwh")
+        heat_full = fit_full_outcome(valid, features, "Q_T_observed_kwh")
+        artifact["models"][model_name] = {
+            "energy": assemble_target_artifact(
+                "E_T_observed_kwh", features, energy_folds, energy_full
+            ),
+            "heat": assemble_target_artifact("Q_T_observed_kwh", features, heat_folds, heat_full),
+        }
+        memory[model_name] = {"energy": energy_folds, "heat": heat_folds}
+
+    for model_name, targets in memory.items():
+        for heldout in experiments:
+            heldout_rows = valid.loc[valid["experiment_id"].astype(str).eq(heldout)]
+            for target_name in ("energy", "heat"):
+                expected = targets[target_name][heldout].predict(heldout_rows)
+                replay = predict_from_artifact(
+                    artifact["models"][model_name][target_name], heldout_rows, heldout
+                )["prediction"].to_numpy()
+                if not np.allclose(expected, replay, rtol=1e-9, atol=1e-12):
+                    raise ValueError(
+                        f"artifact replay mismatch: {model_name}/{target_name}/{heldout}"
+                    )
+
+    validation = build_validation_table(events, artifact)
+    cohort, candidate_rows = cost_function_v2_6_8.candidate_cohort(loader, set(experiments))
+    curves = pd.concat(
+        [
+            cost_function_v2_6_8.calculate_cycle(
+                loader, cycle_name, cost_function_v2_6_8.DEFAULT_RECIPE, artifact
+            )
+            for cycle_name in cohort
+        ],
+        ignore_index=True,
+    )
+    dynamic = artifact["models"]["ticket_ridge_dynamic8"]
+    bootstrap = bootstrap_minima(curves, events, dynamic["energy"], dynamic["heat"])
+    recipe = dict(cost_function_v2_6_8.DEFAULT_RECIPE)
+    recipe["fit_variant"] = str(args.variant)
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "command.txt").write_text(
+        "uv run python main_cost.py " + shlex.join(arguments) + "\n", encoding="utf-8"
+    )
+    (run / "recipe.json").write_text(json.dumps(recipe, indent=2, sort_keys=True), encoding="utf-8")
+    events.to_csv(run / "events.csv", index=False)
+    validation.to_csv(run / "validation.csv", index=False)
+    bootstrap.to_csv(run / "bootstrap.csv", index=False)
+    candidate = {key: value for key, value in artifact.items() if not key.startswith("_")}
+    (run / "params_candidate.json").write_text(
+        json.dumps(candidate, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8"
+    )
+    print(
+        f"Fit candidate written: {run}; {len(valid)} valid event(s), "
+        f"{len(events) - len(valid)} exclusion(s), {len(cohort)} candidate cycle(s), "
+        f"{candidate_rows} candidate row(s); not promoted"
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     arguments = list(argv) if argv is not None else sys.argv[1:]
     args = build_parser().parse_args(arguments)
     if args.action == "fit":
-        print("V2.6.8 fit not migrated yet", file=sys.stderr)
-        return 2
+        return _fit_v268(args, arguments)
     if args.action == "compare":
         if not args.results:
             raise ValueError("compare requires --results run directories")
@@ -220,14 +345,27 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
 
     module = COST_MODULES[args.cost]
     recipe = _recipe(module, args)
-    parameters = load_parameters()
-    if not {"pe_quadratic", "v1", "v2.5"} <= parameters.keys():
-        raise ValueError("empirical parameters are incomplete")
     run = _run_directory(args.output_root, recipe)
     if run.exists() and not args.overwrite:
         raise FileExistsError(f"run directory exists; pass --overwrite: {run}")
     loader = DatasetLoader(args.dataset)
-    cycles = _cycle_names(loader, args.cycles, set(parameters["pe_quadratic"]))
+    if args.cost == "v2.6.8":
+        artifact = load_artifacts()
+        model_name = str(recipe["transition_energy_model"])
+        heat_model_name = str(recipe["transition_heat_model"])
+        if model_name not in artifact.get("models", {}) or heat_model_name not in artifact.get(
+            "models", {}
+        ):
+            raise ValueError("V2.6.8 artifact does not contain the selected component model")
+        experiment_folds = set(artifact["models"][model_name]["energy"]["folds"])
+        experiment_folds &= set(artifact["models"][heat_model_name]["heat"]["folds"])
+        cycles = _cycle_names(loader, args.cycles, experiment_folds)
+        parameters: dict[str, Any] = {}
+    else:
+        parameters = load_parameters()
+        if not {"pe_quadratic", "v1", "v2.5"} <= parameters.keys():
+            raise ValueError("empirical parameters are incomplete")
+        cycles = _cycle_names(loader, args.cycles, set(parameters["pe_quadratic"]))
     if (
         recipe["transition_energy_model"] == "pe_quadratic_plus_fixed_recovery"
         and "fixed_recovery_electricity_kwh" not in parameters["v1"]
