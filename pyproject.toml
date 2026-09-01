@@ -39,7 +39,10 @@ package = false
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -m 'not slow'"
+markers = [
+    "slow: opt-in acceptance tests against the full read-only Dataset",
+]
 
 [tool.ruff]
 line-length = 100

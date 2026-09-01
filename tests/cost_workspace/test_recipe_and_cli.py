@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import main_cost
+from cost.cost_curve import validate_recipe
 from main_cost import build_parser
 
 
@@ -69,3 +70,80 @@ def test_v268_canonical_is_cli_defaults_and_overrides_require_variant() -> None:
         main_cost._recipe(main_cost.cost_function_v2_6_8, args)
     args.variant = "static_energy"
     assert main_cost._recipe(main_cost.cost_function_v2_6_8, args)["label_eligible"] is False
+
+
+@pytest.mark.parametrize("cost", ["v1", "v2.5"])
+@pytest.mark.parametrize(
+    ("option", "model"),
+    [
+        ("--transition-energy-model", "ticket_ridge_dynamic8"),
+        ("--transition-heat-model", "experiment_mean"),
+    ],
+)
+def test_legacy_versions_reject_unimplemented_ticket_components(
+    cost: str, option: str, model: str
+) -> None:
+    args = build_parser().parse_args(
+        ["--action", "calculate", "--cost", cost, "--variant", "ticket", option, model]
+    )
+
+    with pytest.raises(ValueError, match=f"{cost} does not implement"):
+        main_cost._recipe(main_cost.COST_MODULES[cost], args)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["--heat-basis", "unit", "--heating-heat-model", "measured_unit_heat"],
+        ["--integration-protocol", "historical_reconstruction"],
+        ["--state-protocol", "historical_interpolation"],
+        [
+            "--heating-start-rule",
+            "heating_start",
+            "--event-scope",
+            "heating_start_to_actual_preparation",
+        ],
+    ],
+)
+def test_v268_rejects_named_overrides_that_execution_does_not_implement(
+    overrides: list[str],
+) -> None:
+    args = build_parser().parse_args(
+        ["--action", "calculate", "--cost", "v2.6.8", "--variant", "fake", *overrides]
+    )
+
+    with pytest.raises(ValueError, match="v2.6.8 does not implement"):
+        main_cost._recipe(main_cost.cost_function_v2_6_8, args)
+
+
+def test_v268_accepts_independent_ticket_component_selection() -> None:
+    args = build_parser().parse_args(
+        [
+            "--action",
+            "calculate",
+            "--cost",
+            "v2.6.8",
+            "--variant",
+            "mixed",
+            "--transition-energy-model",
+            "ticket_ridge_static5",
+            "--transition-heat-model",
+            "experiment_mean",
+        ]
+    )
+
+    recipe = main_cost._recipe(main_cost.cost_function_v2_6_8, args)
+
+    assert recipe["transition_energy_model"] == "ticket_ridge_static5"
+    assert recipe["transition_heat_model"] == "experiment_mean"
+
+
+def test_v268_rejects_unimplemented_candidate_rule_even_for_named_variant() -> None:
+    recipe = dict(main_cost.cost_function_v2_6_8.DEFAULT_RECIPE)
+    recipe.update(
+        variant="fake",
+        candidate_start_rule="stable_heating_start_plus_10_minutes",
+    )
+
+    with pytest.raises(ValueError, match="v2.6.8 does not implement"):
+        validate_recipe(recipe)

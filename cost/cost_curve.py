@@ -201,6 +201,60 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
         for key, expected in canonical[str(base)].items()
         if key != "label_eligible" and value.get(key) != expected
     }
+    implemented_models = {
+        "v1": {
+            "transition_energy_model": {"pe_quadratic_plus_fixed_recovery", "pe_quadratic"},
+            "transition_heat_model": {
+                "zero_transition_heat",
+                "linear_qprep_plus_signed_quadratic_qd",
+            },
+        },
+        "v2.5": {
+            "transition_energy_model": {"pe_quadratic_plus_fixed_recovery", "pe_quadratic"},
+            "transition_heat_model": {
+                "zero_transition_heat",
+                "linear_qprep_plus_signed_quadratic_qd",
+            },
+        },
+        "v2.6.8": {
+            "transition_energy_model": ticket_models,
+            "transition_heat_model": ticket_models,
+        },
+    }
+    for key, choices in implemented_models[str(base)].items():
+        if value[key] not in choices:
+            raise ValueError(f"{base} does not implement {key.replace('_', ' ')}={value[key]}")
+    implemented_overrides = {
+        "v1": {
+            "heat_basis",
+            "integration_protocol",
+            "state_protocol",
+            "heating_heat_model",
+            "transition_energy_model",
+            "transition_heat_model",
+            "transition_window",
+            "transition_provenance",
+        },
+        "v2.5": {
+            "heat_basis",
+            "integration_protocol",
+            "state_protocol",
+            "heating_heat_model",
+            "transition_energy_model",
+            "transition_heat_model",
+            "transition_window",
+            "transition_provenance",
+        },
+        "v2.6.8": {
+            "transition_energy_model",
+            "transition_heat_model",
+            "transition_window",
+            "transition_provenance",
+        },
+    }
+    unimplemented = differences - implemented_overrides[str(base)]
+    if unimplemented:
+        raise ValueError(f"{base} does not implement recipe override(s): {sorted(unimplemented)}")
     variant = value.get("variant")
     if not variant:
         labels = {

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import copy
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -46,18 +44,43 @@ def test_heldout_targets_cannot_change_fold_model_or_alpha() -> None:
     np.testing.assert_allclose(before.ridge.coef_, after.ridge.coef_)
 
 
-def test_artifact_round_trip_and_missing_fold_fail_closed() -> None:
-    from cost.fit_v2_6_8 import build_model_artifact, predict_from_artifact
+def test_experiment_mean_api_builds_one_target_model_without_outer_folds() -> None:
+    from cost.fit_v2_6_8 import mean_outcome_artifact
 
-    artifact = build_model_artifact(_events(), ("x",), "E_T_observed_kwh")
+    training = _events().loc[lambda frame: ~frame["experiment_id"].eq("heldout")]
+    artifact = mean_outcome_artifact(training, "E_T_observed_kwh")
+
+    assert "folds" not in artifact
+    assert artifact["target"] == "E_T_observed_kwh"
+    assert artifact["training_experiment_count"] == 3
+    assert artifact["intercept"] == pytest.approx(6.0)
+
+
+def test_artifact_round_trip_and_missing_fold_fail_closed() -> None:
+    from cost.fit_v2_6_8 import (
+        assemble_target_artifact,
+        fit_full_outcome,
+        fit_outcome_fold,
+        predict_from_artifact,
+    )
+
+    events = _events()
+    folds = {
+        experiment: fit_outcome_fold(events, experiment, ("x",), "E_T_observed_kwh")
+        for experiment in events["experiment_id"].unique()
+    }
+    artifact = assemble_target_artifact(
+        "E_T_observed_kwh",
+        ("x",),
+        folds,
+        fit_full_outcome(events, ("x",), "E_T_observed_kwh"),
+    )
     candidates = pd.DataFrame({"x": [1.5, 3.5]})
-    memory = artifact["_models"]["heldout"].predict(candidates)
-    serializable = copy.deepcopy(artifact)
-    serializable.pop("_models")
-    replay = predict_from_artifact(serializable, candidates, "heldout")
+    memory = folds["heldout"].predict(candidates)
+    replay = predict_from_artifact(artifact, candidates, "heldout")
     np.testing.assert_allclose(replay["prediction"], memory, rtol=1e-12, atol=1e-12)
     with pytest.raises(ValueError, match="no retrospective fold"):
-        predict_from_artifact(serializable, candidates, "unknown")
+        predict_from_artifact(artifact, candidates, "unknown")
 
 
 def test_independent_support_is_intersection() -> None:

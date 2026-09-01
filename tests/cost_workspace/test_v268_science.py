@@ -131,6 +131,84 @@ def test_main_curve_decomposition_is_nan_and_labels_are_disabled() -> None:
         assert result[f"{phase}_heat_kwh"].isna().all()
 
 
+def test_calculate_cycle_executes_declared_independent_ticket_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cost import cost_function_v2_6_8 as module
+
+    heating = pd.Timestamp("2026-01-01")
+
+    class Loader:
+        def get_cycle_record(self, _: str) -> dict[str, object]:
+            return {
+                "experiment_id": "experiment",
+                "heating_start": heating,
+                "defrost_preparation_start": heating + pd.Timedelta(minutes=15),
+            }
+
+        def load_cycle_original(
+            self, _: str, *, columns: list[str] | None = None
+        ) -> pd.DataFrame:
+            return pd.DataFrame({"timestamp": [heating]})
+
+    monkeypatch.setattr(
+        module,
+        "_candidate_integral_table",
+        lambda _frame, _start, candidates, quantity: pd.DataFrame(
+            {"energy": 1.0 if quantity == "power_total" else 3.0, "valid": True},
+            index=range(len(candidates)),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "pre_action_features",
+        lambda _frame, candidates, _heating: pd.DataFrame(
+            {"pre_action_window_valid": True}, index=range(len(candidates))
+        ),
+    )
+    selected: dict[str, object] = {}
+
+    def predict(energy, heat, values, experiment_id):
+        selected.update(energy=energy, heat=heat, experiment_id=experiment_id)
+        return pd.DataFrame(
+            {
+                "transition_energy_kwh": 1.0,
+                "transition_heat_kwh": 2.0,
+                "E_support_distance": 0.0,
+                "Q_support_distance": 0.0,
+                "ET_supported": True,
+                "QT_supported": True,
+                "model_supported": True,
+            },
+            index=values.index,
+        )
+
+    monkeypatch.setattr(module, "predict_independent_targets", predict)
+    static_energy, mean_heat = object(), object()
+    artifacts = {
+        "models": {
+            "ticket_ridge_static5": {"energy": static_energy},
+            "experiment_mean": {"heat": mean_heat},
+        }
+    }
+    recipe = dict(module.DEFAULT_RECIPE)
+    recipe.update(
+        variant="mixed",
+        transition_energy_model="ticket_ridge_static5",
+        transition_heat_model="experiment_mean",
+    )
+
+    result = module.calculate_cycle(Loader(), "cycle", recipe, artifacts)
+
+    assert selected == {
+        "energy": static_energy,
+        "heat": mean_heat,
+        "experiment_id": "experiment",
+    }
+    assert result["transition_energy_kwh"].eq(1.0).all()
+    assert result["transition_heat_kwh"].eq(2.0).all()
+
+
 def test_event_audit_retains_cycle_012_missing_preparation() -> None:
     from cost.cost_function_v2_6_8 import build_event_table
 

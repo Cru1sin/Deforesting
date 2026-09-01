@@ -184,26 +184,6 @@ def model_to_artifact(model: RidgeOutcomeModel) -> dict[str, object]:
     }
 
 
-def build_model_artifact(
-    events: pd.DataFrame, features: tuple[str, ...], target: str
-) -> dict[str, Any]:
-    experiments = sorted(events.loc[events[target].notna(), "experiment_id"].astype(str).unique())
-    models = {
-        experiment: fit_outcome_fold(events, experiment, features, target)
-        for experiment in experiments
-    }
-    full = fit_full_outcome(events, features, target)
-    return {
-        "artifact_version": "v2.6.8",
-        "target": target,
-        "feature_order": list(features),
-        "support_policy": "95th_percentile_nearest_cross_experiment_training_distance",
-        "folds": {name: model_to_artifact(model) for name, model in models.items()},
-        "full_data_model": model_to_artifact(full),
-        "_models": models,
-    }
-
-
 def fit_full_outcome(
     events: pd.DataFrame, features: tuple[str, ...], target: str
 ) -> RidgeOutcomeModel:
@@ -228,47 +208,31 @@ def assemble_target_artifact(
     }
 
 
-def mean_target_artifact(events: pd.DataFrame, target: str) -> dict[str, object]:
-    folds: dict[str, dict[str, object]] = {}
-    experiments = sorted(events["experiment_id"].astype(str).unique())
-    for heldout in experiments:
-        train = events.loc[
-            ~events["experiment_id"].astype(str).eq(heldout) & events[target].notna()
-        ]
-        weights = experiment_weights(train["experiment_id"])
-        mean = float(np.average(train[target].to_numpy(dtype=float), weights=weights))
-        folds[heldout] = {
-            "feature_order": [], "target": target,
-            "imputer_median": [], "scaler_mean": [], "scaler_scale": [],
-            "alpha": 0.0, "coefficients": [], "intercept": mean,
-            "raw_formula": repr(mean),
-            "support_threshold": 0.0,
-            "training_standardized_references": [[] for _ in range(len(train))],
-            "training_experiment_ids": train["experiment_id"].astype(str).tolist(),
-            "training_event_ids": train["event_id"].astype(str).tolist(),
-            "training_event_count": len(train),
-            "training_experiment_count": train["experiment_id"].nunique(),
-            "sample_weight_sum": float(weights.sum()),
-            "mean_baseline": mean,
-        }
-    full_weights = experiment_weights(events["experiment_id"])
-    full_mean = float(np.average(events[target].to_numpy(dtype=float), weights=full_weights))
-    full = dict(next(iter(folds.values())))
-    full.update(
-        intercept=full_mean,
-        raw_formula=repr(full_mean),
-        mean_baseline=full_mean,
-        training_event_count=len(events),
-        training_experiment_count=events["experiment_id"].nunique(),
-        training_experiment_ids=events["experiment_id"].astype(str).tolist(),
-        training_event_ids=events["event_id"].astype(str).tolist(),
-        training_standardized_references=[[] for _ in range(len(events))],
-        sample_weight_sum=float(full_weights.sum()),
-    )
+def mean_outcome_artifact(events: pd.DataFrame, target: str) -> dict[str, object]:
+    """Build one experiment-balanced mean target model for the supplied training rows."""
+    selected = events.loc[events[target].notna()]
+    if selected.empty:
+        raise ValueError(f"no complete training targets for {target}")
+    weights = experiment_weights(selected["experiment_id"])
+    mean = float(np.average(selected[target].to_numpy(dtype=float), weights=weights))
     return {
-        "artifact_version": "v2.6.8", "target": target, "feature_order": [],
-        "support_policy": "all_candidates_for_experiment_balanced_mean",
-        "folds": folds, "full_data_model": full,
+        "feature_order": [],
+        "target": target,
+        "imputer_median": [],
+        "scaler_mean": [],
+        "scaler_scale": [],
+        "alpha": 0.0,
+        "coefficients": [],
+        "intercept": mean,
+        "raw_formula": repr(mean),
+        "support_threshold": 0.0,
+        "training_standardized_references": [[] for _ in range(len(selected))],
+        "training_experiment_ids": selected["experiment_id"].astype(str).tolist(),
+        "training_event_ids": selected["event_id"].astype(str).tolist(),
+        "training_event_count": len(selected),
+        "training_experiment_count": selected["experiment_id"].nunique(),
+        "sample_weight_sum": float(weights.sum()),
+        "mean_baseline": mean,
     }
 
 

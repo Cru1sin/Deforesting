@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 import main_cost
 
@@ -106,3 +107,49 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
     assert not (Path(main_cost.__file__).parent / "cost/params/ticket_ridge_models.json").exists()
     validation = pd.read_csv(run / "validation.csv")
     assert len(validation) == 8 * 4 + 1
+
+    assert (
+        main_cost.main(
+            [
+                "--action",
+                "fit",
+                "--cost",
+                "v2.6.8",
+                "--variant",
+                "review_a",
+                "--output-root",
+                str(tmp_path),
+                "--overwrite",
+            ]
+        )
+        == 0
+    )
+    assert {path.name for path in run.iterdir()} == main_cost.FIT_ARTIFACT_NAMES
+
+
+def test_fit_overwrite_rejects_directory_with_stale_members(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run = tmp_path / "cost" / "fit" / "review_a"
+    run.mkdir(parents=True)
+    (run / "stale.txt").write_text("old")
+    monkeypatch.setattr(
+        main_cost,
+        "DatasetLoader",
+        lambda _: pytest.fail("stale directory must fail before loading Dataset"),
+    )
+
+    with pytest.raises(FileExistsError, match="unexpected member.*stale.txt"):
+        main_cost.main(
+            [
+                "--action",
+                "fit",
+                "--cost",
+                "v2.6.8",
+                "--variant",
+                "review_a",
+                "--output-root",
+                str(tmp_path),
+                "--overwrite",
+            ]
+        )

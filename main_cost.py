@@ -27,7 +27,7 @@ from cost.fit_v2_6_8 import (
     fit_full_outcome,
     fit_outcome_fold,
     load_artifacts,
-    mean_target_artifact,
+    mean_outcome_artifact,
     predict_from_artifact,
 )
 from dataloader import DatasetLoader
@@ -39,6 +39,14 @@ COST_MODULES: dict[str, ModuleType] = {
     "v1": cost_function_v1,
     "v2.5": cost_function_v2_5,
     "v2.6.8": cost_function_v2_6_8,
+}
+FIT_ARTIFACT_NAMES = {
+    "command.txt",
+    "recipe.json",
+    "events.csv",
+    "validation.csv",
+    "bootstrap.csv",
+    "params_candidate.json",
 }
 
 
@@ -241,6 +249,16 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     run = args.output_root / "cost" / "fit" / str(args.variant)
     if run.exists() and not args.overwrite:
         raise FileExistsError(f"fit directory exists; pass --overwrite: {run}")
+    if run.exists():
+        members = list(run.iterdir())
+        names = {path.name for path in members}
+        if members and (names != FIT_ARTIFACT_NAMES or any(not path.is_file() for path in members)):
+            unexpected = sorted(names - FIT_ARTIFACT_NAMES)
+            detail = f"; unexpected member(s): {', '.join(unexpected)}" if unexpected else ""
+            raise FileExistsError(
+                "fit --overwrite requires an empty directory or exactly the six expected files"
+                f"{detail}: {run}"
+            )
 
     loader = DatasetLoader(args.dataset)
     events = cost_function_v2_6_8.build_event_table(loader)
@@ -248,16 +266,32 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     if valid.empty:
         raise ValueError("V2.6.8 fit has no valid observed events")
     experiments = sorted(valid["experiment_id"].astype(str).unique())
+    mean_models: dict[str, dict[str, object]] = {}
+    for target_name, target in (
+        ("energy", "E_T_observed_kwh"),
+        ("heat", "Q_T_observed_kwh"),
+    ):
+        folds = {
+            heldout: mean_outcome_artifact(
+                valid.loc[~valid["experiment_id"].astype(str).eq(heldout)], target
+            )
+            for heldout in experiments
+        }
+        mean_models[target_name] = {
+            "artifact_version": "v2.6.8",
+            "target": target,
+            "feature_order": [],
+            "support_policy": "all_candidates_for_experiment_balanced_mean",
+            "folds": folds,
+            "full_data_model": mean_outcome_artifact(valid, target),
+        }
     artifact: dict[str, Any] = {
         "artifact_version": "v2.6.8",
         "fit_variant": str(args.variant),
         "bootstrap_seed": 268,
         "bootstrap_replicates": 200,
         "models": {
-            "experiment_mean": {
-                "energy": mean_target_artifact(valid, "E_T_observed_kwh"),
-                "heat": mean_target_artifact(valid, "Q_T_observed_kwh"),
-            }
+            "experiment_mean": mean_models,
         },
     }
     memory: dict[str, dict[str, dict[str, Any]]] = {}
