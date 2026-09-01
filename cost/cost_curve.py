@@ -8,6 +8,27 @@ import numpy as np
 import pandas as pd
 
 
+def transition_semantics(energy_model: object, heat_model: object) -> dict[str, str]:
+    """Return truthful protocol metadata for the selected ET/QT models."""
+    fixed_recovery = energy_model == "pe_quadratic_plus_fixed_recovery"
+    observed_durations = heat_model == "linear_qprep_plus_signed_quadratic_qd"
+    if observed_durations:
+        provenance = "offline_diagnostic_future_boundary_observed_durations"
+        if fixed_recovery:
+            provenance += "_plus_fixed_recovery"
+        window = "observed_preparation_and_defrost_durations"
+    else:
+        provenance = (
+            "candidate_time_state_plus_fixed_recovery" if fixed_recovery else "candidate_time_state"
+        )
+        window = "candidate_state_at_tau"
+    return {
+        "transition_scope": "preparation_defrost_recovery",
+        "transition_window": window,
+        "transition_provenance": provenance,
+    }
+
+
 def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa: C901
     """Validate a V1/V2.5 canonical recipe or a named single-base variant."""
     value = dict(recipe)
@@ -78,8 +99,10 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
             "observed_preparation_and_defrost_durations",
         },
         "transition_provenance": {
+            "candidate_time_state",
             "candidate_time_state_plus_fixed_recovery",
             "offline_diagnostic_future_boundary_observed_durations",
+            "offline_diagnostic_future_boundary_observed_durations_plus_fixed_recovery",
         },
         "decision_rule": {"supported_argmin_inverse_cop"},
     }
@@ -133,6 +156,11 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:  # noqa:
         raise ValueError("canonical label_eligible status cannot be changed")
     if variant is not None and (not isinstance(variant, str) or not variant.strip()):
         raise ValueError("variant must be a non-empty string")
+    semantics = transition_semantics(
+        value["transition_energy_model"], value["transition_heat_model"]
+    )
+    if any(value[key] != expected for key, expected in semantics.items()):
+        raise ValueError("transition metadata and models are incompatible")
     return value
 
 

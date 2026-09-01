@@ -182,6 +182,104 @@ def test_calculate_writes_cost_command_and_recipe(
     assert json.loads((run / "recipe.json").read_text())["heat_basis"] == "unit"
 
 
+def test_overwrite_removes_stale_per_cycle_csvs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class Module:
+        DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
+
+        @staticmethod
+        def calculate(_: object, cycles: list[str], __: object) -> pd.DataFrame:
+            return pd.DataFrame({"cycle_name": cycles, "inverse_cop": 0.5})
+
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: MetadataOnlyDataset())
+    monkeypatch.setitem(main_cost.COST_MODULES, "v1", Module)
+    output = tmp_path / "output"
+    common = ["--action", "calculate", "--cost", "v1", "--output-root", str(output)]
+
+    assert main_cost.main(common) == 0
+    assert main_cost.main([*common, "--cycles", "cycle_a", "--overwrite"]) == 0
+
+    assert {path.name for path in (output / "cost/v1/cycles").iterdir()} == {"cycle_a.csv"}
+
+
+@pytest.mark.parametrize(
+    ("cost", "overrides", "expected"),
+    [
+        (
+            "v1",
+            ["--transition-heat-model", "linear_qprep_plus_signed_quadratic_qd"],
+            {
+                "transition_scope": "preparation_defrost_recovery",
+                "transition_window": "observed_preparation_and_defrost_durations",
+                "transition_provenance": (
+                    "offline_diagnostic_future_boundary_observed_durations_plus_fixed_recovery"
+                ),
+            },
+        ),
+        (
+            "v1",
+            ["--transition-energy-model", "pe_quadratic"],
+            {
+                "transition_scope": "preparation_defrost_recovery",
+                "transition_window": "candidate_state_at_tau",
+                "transition_provenance": "candidate_time_state",
+            },
+        ),
+        (
+            "v2.5",
+            ["--transition-heat-model", "zero_transition_heat"],
+            {
+                "transition_scope": "preparation_defrost_recovery",
+                "transition_window": "candidate_state_at_tau",
+                "transition_provenance": "candidate_time_state",
+            },
+        ),
+    ],
+)
+def test_variant_recipe_metadata_matches_selected_transition_models(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    cost: str,
+    overrides: list[str],
+    expected: dict[str, str],
+) -> None:
+    source = main_cost.COST_MODULES[cost]
+
+    class Module:
+        DEFAULT_RECIPE = source.DEFAULT_RECIPE
+
+        @staticmethod
+        def calculate(*_: object) -> pd.DataFrame:
+            return pd.DataFrame({"cycle_name": ["cycle_a"], "inverse_cop": [0.5]})
+
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: MetadataOnlyDataset())
+    monkeypatch.setitem(main_cost.COST_MODULES, cost, Module)
+    output = tmp_path / cost
+
+    assert (
+        main_cost.main(
+            [
+                "--action",
+                "calculate",
+                "--cost",
+                cost,
+                "--variant",
+                "semantic_trial",
+                "--cycles",
+                "cycle_a",
+                "--output-root",
+                str(output),
+                *overrides,
+            ]
+        )
+        == 0
+    )
+
+    recipe = json.loads((output / "cost" / f"{cost}__semantic_trial" / "recipe.json").read_text())
+    assert {key: recipe[key] for key in expected} == expected
+
+
 def test_compare_separates_absolute_inverse_cop_by_heat_basis(tmp_path: Path) -> None:
     runs = []
     for name, basis, cost in (("v1", "unit", 0.5), ("v25", "water", 0.4)):

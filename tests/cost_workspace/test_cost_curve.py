@@ -56,9 +56,21 @@ def test_component_override_requires_a_named_variant() -> None:
     with pytest.raises(ValueError, match="variant"):
         validate_recipe(_recipe(transition_heat_model="linear_qprep_plus_signed_quadratic_qd"))
 
-    recipe = _recipe(variant="trial", transition_heat_model="linear_qprep_plus_signed_quadratic_qd")
+    recipe = _recipe(
+        variant="trial",
+        transition_heat_model="linear_qprep_plus_signed_quadratic_qd",
+        transition_window="observed_preparation_and_defrost_durations",
+        transition_provenance=(
+            "offline_diagnostic_future_boundary_observed_durations_plus_fixed_recovery"
+        ),
+    )
     assert validate_recipe(recipe)["variant"] == "trial"
     assert validate_recipe(recipe)["label_eligible"] is False
+
+    with pytest.raises(ValueError, match="metadata"):
+        validate_recipe(
+            _recipe(variant="trial", transition_heat_model="linear_qprep_plus_signed_quadratic_qd")
+        )
 
 
 def test_variant_still_rejects_unknown_or_incompatible_parameters() -> None:

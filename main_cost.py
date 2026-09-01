@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 
 from cost import cost_function_v1, cost_function_v2_5
-from cost.cost_curve import validate_recipe
+from cost.cost_curve import transition_semantics, validate_recipe
 from cost.energy_models import load_parameters
 from dataloader import DatasetLoader
 
@@ -77,6 +77,9 @@ def _recipe(module: Any, args: argparse.Namespace) -> dict[str, object]:
     ):
         if argument is not None:
             recipe[key] = argument
+    recipe.update(
+        transition_semantics(recipe["transition_energy_model"], recipe["transition_heat_model"])
+    )
     return validate_recipe(recipe)
 
 
@@ -199,6 +202,9 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     table.to_csv(run / "cost.csv", index=False)
     cycles_dir = run / "cycles"
     cycles_dir.mkdir(exist_ok=True)
+    if args.overwrite:
+        for stale in cycles_dir.glob("*.csv"):
+            stale.unlink()
     for cycle_name, cycle in table.groupby("cycle_name", sort=False):
         cycle.to_csv(cycles_dir / f"{cycle_name}.csv", index=False)
     (run / "recipe.json").write_text(
