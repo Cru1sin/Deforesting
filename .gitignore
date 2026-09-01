@@ -6,6 +6,9 @@
 !.python-version
 !README.md
 !pyproject.toml
+!main_data.py
+!dataloader/
+!dataloader/**
 !src/
 !src/**
 !tests/
