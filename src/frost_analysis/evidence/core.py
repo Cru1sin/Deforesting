@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from ..dataset_loader import DatasetLoader
+from ..dataset import DatasetLoader
 from .contracts import (
     CYCLE_ELIGIBILITY_COLUMNS,
     FEATURE_CYCLE_METRIC_COLUMNS,

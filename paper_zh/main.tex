@@ -1,0 +1,378 @@
+\documentclass[UTF8,11pt,a4paper]{ctexart}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,graphicx,microtype,natbib,xcolor}
+\usepackage[colorlinks=true,allcolors=blue]{hyperref}
+\usepackage{caption,float}
+\captionsetup{font=small,labelfont=bf}
+\graphicspath{{figures/}}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+
+\title{基于周期性能系数的空气源热泵\newline 近优除霜时间估计与图像标签生成}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+空气源热泵结霜后，继续制热的单位供热电耗可能上升，但启动除霜也引入准备、反向循环和恢复能量。本文比较两个离线反事实成本版本：v1为$J=(E_H+\widehat E_D(P_e)+0.279901897467)/Q_{\rm unit}$；v2为$J=(E_H+\widehat E_D(P_e)+E_R(T_s))/(Q_{\rm water}-\widehat A_D+Q_R(T_s))$。两版本共享候选点、experiment-LOEO $P_e+P_e^2$ Ridge的准备及主动除霜电耗$\widehat E_D$和原始eligibility；v2另纳入主动除霜吸热$\widehat A_D$及按设定水温分组的恢复电耗和供热量。
+
+69个完整有效循环共享7,418个候选点。v1全部eligible，$t^*$的P10/中位数/P90为48.7/59.0/74.0 min，63个interior、6个right-observed；v2有7,338个eligible候选点，对应结果为32.8/42.0/61.2 min、64个interior和5个right-observed。v1与v2的1\%近优跨度P10/中位数/P90分别为13.6/28.0/39.0和13.0/19.0/29.2 min。v2相对v1使55个循环提前、11个不变、3个延后；有符号位移中位数为$-16$ min，绝对位移中位数为16 min。v2保留QD多项式外推；7,338个eligible候选中1,806个位于QD训练支持域外，且32/69个当前$t^*$域外。
+
+v1和v2标签parquet各含89,282行图像记录，finite可插值标签分别为81,426和80,642行；进一步排除NA和1\%近优样本后，二分样本分别为59,195和63,988行。本轮没有重新训练v2 RGB模型；文中保留的RGB分类数值属于旧v1热量口径实验，不是v2训练结果。v2还使用历史循环实测的规则除霜时长$D$，因此仅适用于离线标签与敏感性分析，不构成在线节能验证。
+\end{abstract}
+
+\section{引言}
+室外换热器结霜会堵塞空气流道并削弱传热。除霜能够恢复换热能力，但反向循环和恢复过程也会耗电，并在一段时间内停止设备侧正向供热。因此，控制器不仅要识别霜层，还要决定何时启动除霜。霜层检测回答“是否结霜或霜层处于何种状态”，性能退化分析回答“制热能力或效率下降多少”，除霜时机分析则需权衡继续制热与启动一次完整瞬态过程的代价。已有研究从制热损失、霜量估计和模型预测控制等角度研究除霜时机\citep{wang2020,li2020,chung2021,klingebiel2025}；图像研究则使用灰度、霜覆盖率、纹理或卷积神经网络识别结霜状态\citep{li2021image,xu2023glcm,chen2022,wang2024}。然而，霜层可见并不等同于此时除霜在周期能效上最合适；历史记录通常也只包含每个循环实际执行的一次除霜，不能直接给出其他候选时刻的动作结果。
+
+本文以估计周期COP的倒数统一核算候选时刻前的制热电耗和供热量。v1使用机组记录供热量和固定恢复电耗；v2使用水侧供热量，并纳入主动除霜吸热和按设定水温分组的恢复能量。这一版本化定义使能量边界差异与模型训练差异可分开审阅。
+
+本文的主要贡献是定义可追溯的v1/v2反事实能量边界，报告两版本的离线最低点、1\%近优候选集和边界状态，并量化v2相对v1的循环级位移。RGB部分保留旧v1标签的既有复现实验，v2仅报告已生成标签，不声称已完成模型重训。
+
+\section{结果}
+\subsection{v1/v2能量边界与完整瞬态}
+主分析队列包含69个完整有效循环和7,418个共享候选点。v1的固定恢复电耗为0.279901897467~kWh。v2中，$T_s=50\,^{\circ}\mathrm C$的恢复时长、$E_R$和$Q_R$分别为9~min、0.250930~kWh和0.804970~kWh；$T_s=55\,^{\circ}\mathrm C$时分别为12~min、0.395172~kWh和1.146153~kWh。
+
+水侧瞬时制热量按
+\begin{equation}
+\dot Q_h(t)=1.161\,\dot V_w(t)\,[T_{\rm out}(t)-T_{\rm in}(t)]
+\label{eq:water-heating}
+\end{equation}
+计算，其中体积流量单位为$\mathrm{m^3\,h^{-1}}$，温差单位为K，制热量单位为kW；系数1.161按水的定物性把$\mathrm{m^3\,h^{-1}}\times\mathrm K$换算为kW。动态项$\widehat E_D$的训练目标是从$t_{\rm prep}$到$t_{\rm def,end}$对\texttt{power\_total}积分得到的总电耗，不扣除正常制热基线；61个建模事件来自16个实验。Pe与Pe$^2$二次Ridge（$\alpha=1$）的LOEO事件级MSE、RMSE和MAE分别为0.00002213~kWh$^2$、0.004704~kWh和0.003726~kWh，实验宏平均MSE为0.00002750~kWh$^2$。其事件级MSE比旧Pe线性模型低3.67\%，且13/16个留出实验改善。v1固定恢复项来自68个有效事件的均值$\bar E_R=0.280$~kWh；v2不使用该统一均值，而使用上述$T_s$分组量。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.95\linewidth]{../output/test/成本函数/ED模型/经验经济窗口/图表/figure_defrost_energy_method_comparison.pdf}
+\caption{准备及主动除霜电耗模型比较。主要比较采用61个事件、16个实验的experiment-LOEO；圆点和菱形分别表示事件级MSE和实验等权宏平均MSE。图中selected表示已进入候选成本的Pe+Pe$^2$二次Ridge，而非事后仅作展示的模型。}
+\label{fig:defrost-energy-models}
+\end{figure}
+
+该二次模型已进入69个有效循环的候选成本。相对旧Pe线性模型，最低点绝对位移的中位数、第90百分位数和最大值分别为0、0和4分钟，仅2/69个循环发生移动。
+
+除霜和恢复阶段实测有符号水侧热量的均值为0.028~kWh，标准差为0.431~kWh。旧v1热量口径实验将该阶段供热量记为0；当前v2则将主动除霜吸热和恢复供热分开建模后纳入分母。
+
+主动除霜吸热可被状态非线性模型独立估计。68个事件、15个实验的experiment-LOEO中，水温、规则除霜时长、盘管温度和Pe五个一次项及其各自平方项模型达到MSE 0.001563~kWh$^2$、RMSE 0.03954~kWh、MAE 0.02954~kWh、实验宏平均MSE 0.001524~kWh$^2$和$R^2=0.831$。五输入线性模型的MSE、RMSE和$R^2$分别为0.001707~kWh$^2$、0.04131~kWh和0.815；平方项模型的MSE低8.41\%，11/15个留出实验改善。其RMSE为平均吸热0.804~kWh的4.92\%，绝对误差的中位数、第90、第95百分位数和最大值分别为0.0207、0.0667、0.0887和0.1036~kWh。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.92\linewidth]{../output/test/成本函数/QD模型/经验经济窗口/图表/figure_defrost_absorbed_heat_method_comparison.pdf}
+\caption{主动除霜吸热模型比较。比较采用68个事件、15个实验的experiment-LOEO；圆点和菱形分别表示事件级MSE和实验等权宏平均MSE。selected表示五一次项加各自平方项模型；其正值吸热估计已进入v2分母，不进入v1。}
+\label{fig:defrost-absorbed-heat-models}
+\end{figure}
+
+\subsection{v1/v2单位供热电耗}
+对第$i$个循环，候选除霜时刻$\tau$之前的制热电耗和有效供热量分别为
+\begin{align}
+E_{H,i}(\tau)&=\int_{t_{0,i}}^{\tau}P_{\rm el}(t)\,{\rm d}t,\\
+Q_{U,i}^{(m)}(\tau)&=\int_{t_{0,i}}^{\tau}[\dot Q_h^{(m)}(t)]_+\,{\rm d}t,
+\quad m\in\{\mathrm{water},\mathrm{unit}\}.
+\end{align}
+主指标定义为
+\begin{equation}
+\boxed{J_{v1,i}(\tau)=
+\frac{E_{H,i}(\tau)+\widehat E_{D,-e(i)}[P_{e,i}(\tau)]+0.279901897467}
+{Q_{{\rm unit},i}(\tau)}}.
+\label{eq:primary-cost}
+\end{equation}
+其中，$\widehat E_{D,-e(i)}$表示不使用第$i$个循环所属实验训练的Pe与Pe$^2$二次Ridge模型，$P_{e,i}(\tau)$为候选时刻前60秒的蒸发压力中位数。v2定义为
+\begin{equation}
+\boxed{J_{v2,i}(\tau)=
+\frac{E_{H,i}(\tau)+\widehat E_{D,-e(i)}[P_{e,i}(\tau)]+E_R(T_s)}
+{Q_{{\rm water},i}(\tau)-\widehat A_D(T_{\rm in},T_{\rm out},D,T_3,P_e)+Q_R(T_s)}}.
+\label{eq:v2-cost}
+\end{equation}
+两个分母都是设备侧供热代理量，不代表房间供热。旧方案
+\begin{equation}
+\rho_i(\tau)=
+\frac{\int_{t_{0,i}}^{\tau}
+\{P_{\rm el}(t)+\lambda_Q[Q_{{\rm ref},i}(t)-\dot Q_h(t)]_+\}\,{\rm d}t+K_D}
+{T_{H,i}(\tau)+T_D}
+\label{eq:legacy-cost}
+\end{equation}
+其中，$Q_{{\rm ref},i}$是当前与下一循环各自稳定起点后60秒无霜供热基准之间的线性连接。热量折算系数为$\lambda_Q=0.4265$~kWh$_e$/kWh$_{th}$（即$1/2.34466$），68个事件的平均等效瞬态代价为$K_D=1.085$~kWh-eq。另有$T_{H,i}(\tau)=\tau-t_{0,i}$和$T_D=14.081$~min。该式回答单位时间等效成本问题，仅作为目标定义敏感性分析，不决定主标签。
+
+为说明v1中动态$E_D$对边际判据的影响，记
+\(E(\tau)=E_H(\tau)+\widehat E_D[P_e(\tau)]+0.279901897467\)、
+\(Q(\tau)=Q_{\rm unit}(\tau)\)，在各项可微时有
+\begin{equation}
+\widehat J'(\tau)=
+\frac{\{P_{\rm el}(\tau)+\frac{\mathrm d}{\mathrm d\tau}\widehat E_D[P_e(\tau)]\}Q(\tau)-[\dot Q_{\rm unit}(\tau)]_+E(\tau)}{Q^2(\tau)}.
+\label{eq:marginal-rule}
+\end{equation}
+式\eqref{eq:marginal-rule}同时包含继续制热的电耗和候选Pe引起的预测准备及除霜电耗变化。由于$P_e$按一分钟候选离散计算，本文不对其时间导数作平滑近似，而是在积分覆盖合格且Pe有限的候选集合上直接搜索$\widehat J(\tau)$的最低值。
+
+\subsection{跨循环结果和近优候选集}
+候选时刻从稳定制热后10分钟开始，以1分钟为步长搜索至实际除霜准备时刻，并额外纳入精确准备边界。69个完整有效循环共享7,418个候选点。v1的7,418个候选点全部eligible，$t^*$的P10/中位数/P90为48.7/59.0/74.0~min，63个最低点位于候选域内部，6个位于已观测右边界。v2有7,338个eligible候选点，$t^*$的P10/中位数/P90为32.8/42.0/61.2~min，64个为内部最低点，5个为已观测右边界最低点。右边界最低只表明观测结束前未见曲线转折。
+
+给定相对阈值$\epsilon$，近优候选集定义为
+\begin{equation}
+\mathcal W_{i,\epsilon}=\left\{\tau\in\Omega_i:
+\widehat J_i(\tau)\le(1+\epsilon)\min_{u\in\Omega_i}\widehat J_i(u)\right\}.
+\label{eq:near-optimal-window}
+\end{equation}
+集合跨度定义为$\max\mathcal W_{i,\epsilon}-\min\mathcal W_{i,\epsilon}$，集合可以不连续；仅在连通时称为近优时段。在$\epsilon=1\%$时，v1跨度的P10/中位数/P90为13.6/28.0/39.0~min，v2为13.0/19.0/29.2~min。跨度反映目标曲线平坦程度和时间辨识度，不是统计置信区间。
+
+v2相对v1使55个循环的$t^*$提前，11个不变，3个延后。有符号位移$t^*_{v2}-t^*_{v1}$的中位数为$-16$~min，P10/P90为$-29$/0~min，范围为$-38$至$+20$~min；绝对位移的中位数/P90/最大值为16/29/38~min。
+
+v2主结果允许QD多项式沿五个一次输入外推。全部7,418个候选中1,886个QD域外，涉及55个循环；限定为v2的7,338个eligible候选后，其中1,806个QD域外，涉及51个循环，且32/69个当前$t^*$位于QD域外。若严格将五个QD输入限制在各自训练范围内，67个循环仍有候选，30个最低点发生移动；绝对移动的中位数/P90/最大值为0/19.4/25~min，2个循环无支持域内候选。该比较是模型支持域敏感性，不是置信区间。
+
+\begin{figure}[H]
+\centering
+\includegraphics[height=0.82\textheight,keepaspectratio]{../output/成本函数/comparison_v1_v2_RB.png}
+\caption{69个完整有效循环中v1、v2与历史RB规则时刻的循环级比较。v2使用历史实测规则除霜时长，因此图中v2仅为离线反事实结果。}
+\label{fig:v1-v2-rb}
+\end{figure}
+
+
+\subsection{循环70的v1/v2示例}
+在当前候选成本表中，循环70的v1最低点位于稳定制热后47~min，$J_{v1}=0.4962$；v2最低点位于41~min，$J_{v2}=0.4549$。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.90\linewidth]{../output/成本函数/cost_function_v2_cycle/cycle_070_publication.png}
+\caption{循环70的v2候选成本曲线。当前v2最低点位于稳定制热后41~min，$J_{v2}=0.4549$。}
+\label{fig:cycle70-v2}
+\end{figure}
+
+\subsection{旧v1热量口径的既有二分类结果}
+本节数值来自旧v1热量口径的既有RGB实验。当前v1和v2标签parquet各含89,282行，finite可插值标签分别为81,426和80,642行，排除NA和1\%近优样本后的二分样本分别为59,195和63,988行。本轮未重新训练v2模型；因此下述分类数值不得外推为v2结果。
+为检验设备侧供热代理量口径对标签和图像识别的影响，本文保持候选点和分子不变，只把式\eqref{eq:primary-cost}的分母分别设为$Q_{U,i}^{\rm water}$和$Q_{U,i}^{\rm unit}$。两种口径各自得到最低点$t_i^*$。图像时刻$t<t_i^*$标为“最低点前”，$t\ge t_i^*$标为“最低点后”；该标签仅表示图像相对离线最低点的时间位置，不是霜厚或“是否应该除霜”的在线真值。相对成本差不超过1\%的样本称为“1\%近优图像”，保留在训练集和完整测试集中，并单独报告测试结果。
+
+参考标签记录可插值到81,426张图像；其中51,959张图像具备本次分析所需的完整循环数据，来自42个循环和12个实验。固定的实验级切分包含训练集31,979张（7个实验、24个循环）、验证集9,276张（2个实验、10个循环）和测试集10,704张（3个实验、8个循环）。同一实验及其连续图像不会跨集合。融合比较进一步限定在严格15秒向后匹配成功的51,941张图像上，因而融合测试集包含10,698张图像。
+
+RGB模型以ResNet50将图像编码为2,048维向量，分类头为$2048\rightarrow1000\rightarrow64\rightarrow2$。前5轮固定主干，只训练分类头；后5轮解冻ResNet50的\texttt{layer4}并微调。图\ref{fig:water-resnet-loss}和图\ref{fig:unit-resnet-loss}给出两种口径的训练损失。解冻后损失短暂上升，随后继续下降；由于每种口径仅训练一次，这些曲线只用于核对优化过程，不表示实验间不确定性。直接使用微调阶段分类头时，水侧和机组侧完整测试宏平均F1分别为0.9515和0.9592；后续输入消融不直接沿用这两个分类头，而是在同一51,941张配对子集上分别重训融合分类头。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/01_water_resnet_train_loss.pdf}
+\caption{水侧供热量标签下ResNet50二分类模型的训练损失。前5轮固定图像主干，虚线后解冻\texttt{layer4}继续训练5轮。曲线来自一次固定实验级切分和一次训练。}
+\label{fig:water-resnet-loss}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/02_unit_resnet_train_loss.pdf}
+\caption{机组记录供热量标签下ResNet50二分类模型的训练损失。训练阶段和数据切分与图\ref{fig:water-resnet-loss}相同，两种模型从相同预训练权重独立训练。}
+\label{fig:unit-resnet-loss}
+\end{figure}
+
+传感器融合以已训练图像模型的2,048维特征$z$为起点，探索性比较三种输入：仅RGB特征$z$、$z$与28个当前传感器量、以及$z$与当前量和16个因果5分钟变化率。三种输入均用同一多层感知机训练10轮，各自按验证集宏平均F1选择轮次；三种输入之间的高低排序来自完整测试集上的事后比较，并非预先锁定模型的独立测试。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/03_water_fusion_train_loss.pdf}
+\caption{水侧供热量标签下三种输入的融合分类头训练损失。$z$表示RGB特征，“当前量”表示与图像时刻匹配的传感器读数，“5分钟变化率”仅使用图像时刻以前的数据。}
+\label{fig:water-fusion-loss}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.78\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/04_unit_fusion_train_loss.pdf}
+\caption{机组记录供热量标签下三种输入的融合分类头训练损失。训练设置与图\ref{fig:water-fusion-loss}相同。}
+\label{fig:unit-fusion-loss}
+\end{figure}
+
+完整测试集结果见图\ref{fig:binary-full-f1}。为保证输入比较样本一致，图中的RGB基线是在配对子集上用特征$z$重训的分类头。水侧标签的三种输入宏平均F1依次为0.958、0.979和0.977；机组侧标签依次为0.970、0.970和0.979。本次测试中最高分组合分别为RGB特征加当前量，以及RGB特征加当前量和变化率。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/05_full_test_macro_f1.pdf}
+\caption{两种供热量标签和三种输入在完整留出测试集上的宏平均F1。每个柱表示一次固定实验级切分和一次训练所得结果，共评价10,698张完成传感器匹配的测试图像；图中不含重复训练误差线。}
+\label{fig:binary-full-f1}
+\end{figure}
+
+1\%近优图像更集中地反映最低点附近的分类误差（图\ref{fig:binary-boundary-f1}）。水侧标签下，RGB在2,238张测试图像上的宏平均F1为0.811，加入当前量后为0.905，加入变化率后为0.895。机组侧标签下，相应2,766张图像上的结果依次为0.886、0.885和0.917。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.84\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/06_near_1pct_macro_f1.pdf}
+\caption{成本不超过各自最低值1\%的测试图像宏平均F1。水侧和机组侧近优集合分别包含2,238和2,766张图像，因此两组分数用于各自标签内的输入比较，不把样本量差异解释为标签优劣。}
+\label{fig:binary-boundary-f1}
+\end{figure}
+
+本次测试中两个最高分组合的分类型结果见图\ref{fig:water-confusion}和图\ref{fig:unit-confusion}。水侧当前量组合对最低点前后两类的召回率分别为97.29\%和98.52\%；机组侧当前量及变化率组合分别为98.46\%和97.41\%。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.68\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/08_water_z_current_normalized_confusion.pdf}
+\caption{水侧标签本次测试最高分组合（RGB特征与当前传感器量）的行归一化混淆矩阵。每行以真实类别为分母；0和1分别表示最低点前和最低点后。}
+\label{fig:water-confusion}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.68\linewidth]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/09_unit_z_current_slope_normalized_confusion.pdf}
+\caption{机组记录供热量标签本次测试最高分组合（RGB特征、当前传感器量和5分钟变化率）的行归一化混淆矩阵。类别定义与图\ref{fig:water-confusion}相同。}
+\label{fig:unit-confusion}
+\end{figure}
+
+图\ref{fig:tstar-shift}显示，改变供热量口径会移动部分循环的最低点。在42个图像循环中，机组侧最低点相对水侧的偏移从提前36分钟到延后37分钟；6,852张图像（13.19\%）因此改变二分类标签。机组侧RGB在1\%近优图像上更高的F1说明其当前标签与图像外观更容易分开，但不能证明机组记录供热量在物理上更准确。
+
+\begin{figure}[H]
+\centering
+\includegraphics[height=0.76\textheight,keepaspectratio]{../output/model/rgb_binary_results_latest/热量口径二分类/图表/10_unit_minus_water_tstar_shift.pdf}
+\caption{42个本地循环中，机组记录供热量口径相对水侧口径的最低点偏移。正值表示机组侧最低点更晚，负值表示更早；结果来自同一候选域和相同分子，仅替换供热量分母。}
+\label{fig:tstar-shift}
+\end{figure}
+
+\section{讨论}
+\subsection{相同更新周期假设下的排序一致性}
+设候选时刻$\tau$对应的单周期电耗和有效供热量分别为$E(\tau)$和$Q(\tau)>0$。若每次除霜后系统都回到相同状态，外界工况和结霜路径完全重复，并在每个周期采用同一除霜时刻，则重复$N$个完整周期后的指标为
+\begin{equation}
+\widehat J_N(\tau)=\frac{\sum_{n=1}^{N}E(\tau)}{\sum_{n=1}^{N}Q(\tau)}
+=\frac{NE(\tau)}{NQ(\tau)}=\widehat J(\tau).
+\end{equation}
+因此，对任意正整数$N$以及$N\rightarrow\infty$，
+\begin{equation}
+\arg\min_\tau \widehat J_N(\tau)=\arg\min_\tau \widehat J(\tau).
+\end{equation}
+在这些条件下可推得，完整循环的重复次数不会改变最低点。较早除霜虽然会在相同墙钟时间内完成更多循环，但每个完整周期都同时增加$E(\tau)$和$Q(\tau)$。
+
+对固定墙钟时长$H$，令周期时长为$T(\tau)$，完整循环数为
+$N_\tau=\lfloor H/T(\tau)\rfloor$，末尾未完整周期的电耗和供热量为$E_r$和$Q_r$，则
+\begin{equation}
+\widehat J_H(\tau)=\frac{N_\tau E(\tau)+E_r(\tau,H)}
+{N_\tau Q(\tau)+Q_r(\tau,H)}
+\xrightarrow[H\to\infty]{}\frac{E(\tau)}{Q(\tau)},
+\end{equation}
+其中要求单个残段的电耗和供热量有界且$Q(\tau)>0$。无限墙钟时间下仍由单周期$\widehat J(\tau)$决定最低点；有限墙钟时长的残段或初末储热状态则可能改变排序。随机工况下，长期指标应按累计量计算，其更新周期极限为$\mathbb E[E]/\mathbb E[Q]$，而不是逐循环$E/Q$的算术平均。
+
+\subsection{v1瞬态电耗抑制频繁除霜，但不强制内部最低点}
+式\eqref{eq:primary-cost}可分解为
+\begin{equation}
+J_{v1}(\tau)=\frac{E_H(\tau)}{Q_{\rm unit}(\tau)}+
+\frac{\widehat E_D[P_e(\tau)]+0.279901897467}{Q_{\rm unit}(\tau)}.
+\end{equation}
+较早除霜时，v1的准备及除霜电耗估计与固定恢复电耗由更少的机组供热量分摊。因此，v1早期$\widehat J(\tau)$快速下降不一定表示机组性能迅速改善，也可能主要来自固定恢复电耗的摊薄。v2分子与分母的恢复项随$T_s$分组，并额外扣除主动除霜吸热，因此不应用该v1分解代替式\eqref{eq:v2-cost}。
+
+计入瞬态电耗并不保证每条候选曲线都在观察区间内出现内部最低点。若已观测候选域内$\widehat J$一直下降，只能说明当前记录尚未观察到转折。
+
+\subsection{反事实、储热和测量边界}
+方法部分列出的反事实条件决定了最低点的解释范围。Pe域外候选虽保留在二次模型延拓曲线中，但其支持状态被单独记录；当前最低点因而是给定模型和已观测候选域内的离线估计。
+
+主动除霜吸热模型的误差改善来自状态变量非线性项的整体拟合，不能由单个系数推出因果机制。特别是$D^2$系数为正，数据不支持“时长边际吸热递减”的表述。该模型的正值吸热估计已进入v2分母，未进入v1。
+
+v2的主要部署限制来自$D$。当前$D$是每个历史循环已实测的规则除霜时长，即\path{offline_counterfactual_observed_rule_duration}；它可支持离线标签和敏感性分析，但在候选时刻不可观。因此，本文不将v2表述为可直接部署的在线成本函数。
+
+水侧流量和温差的系统性偏差会同时改变分母和最低点，除霜瞬态还可能受管路与水箱储热影响。本文没有直接测量室内环境，因此估计周期COP只表示设备侧代理供热口径下的效率。
+
+\subsection{图像分类结果的解释边界}
+在旧v1热量口径实验中，两种供热代理量标签都可被RGB模型较好地区分。该差异只表示当时标签在固定切分中与图像外观的可分性，不表示任一代理量在物理上更准确，也不构成v2重训证据。
+
+水温、流量、功率、制热量和COP直接参与标签构造或与其高度相关，因此融合模型可能部分重建成本函数。当前融合结果只描述现有测量体系中的标签复现。
+
+10,698张融合测试帧具有明显时间相关性；图像级指标描述逐帧分类，泛化证据的单位是3个测试实验和8个循环，而不是10,698个独立重复。
+
+\section{方法}
+\subsection{事件定义与能量边界}
+循环按以下状态序列划分：
+\[
+t_0\rightarrow t_{\rm prep}\rightarrow t_{\rm def,start}
+\rightarrow t_{\rm def,end}\rightarrow t_{\rm rec}.
+\]
+每个循环的稳定制热起点$t_0$取出水温首次达到设定值减2~$^\circ$C与水温曲线全局拐点两者中较早的时刻。$t_{\rm prep}$取正式除霜前120秒内压缩机频率设定值首次下降不少于10~Hz的时刻。$t_{\rm def,start}$和$t_{\rm def,end}$分别为\texttt{defrost\_active}经20秒去抖后的ON和OFF边界。下一循环无霜供热基准取下一稳定起点后60秒水侧制热量的中位数；$t_{\rm rec}$取$t_{\rm def,end}$后水侧制热量达到该基准90\%的首个连续合格段起点，该段须覆盖至少30秒，确认段本身不计入$E_R$。
+
+$P_{\rm el}$采用机组记录的p2总功率通道，经0.001换算为kW；全文的电功率边界均以该通道为准。准备及除霜总电耗和恢复总电耗分别定义为
+\begin{align}
+E_D&=\int_{t_{\rm prep}}^{t_{\rm def,end}}P_{\rm el}(t)\,{\rm d}t,\\
+E_R&=\int_{t_{\rm def,end}}^{t_{\rm rec}}P_{\rm el}(t)\,{\rm d}t.
+\end{align}
+积分按左闭右开时段执行；二者都是相应时段的总电耗，不扣正常制热基线。水侧制热量采用式\eqref{eq:water-heating}，另一口径采用机组记录供热量；两者都只作为设备侧供热代理量。
+
+主动除霜吸热定义为
+\begin{equation}
+A_D=-\int_{t_{\rm def,start}}^{t_{\rm def,end}}\dot Q_{\rm water}(t)\,{\rm d}t,
+\end{equation}
+使水侧吸热为正。其独立估计模型使用$T_{\rm in}$、$T_{\rm out}$、规则除霜时长$D$、$T_3$和$P_e$五个一次项及各自平方项，不含交互项。全样本描述式为
+\begin{align}
+\widehat A_D={}&0.626874+0.013759T_{\rm in}-0.015977T_{\rm out}+0.084840D
+-0.002228T_3-0.381601P_e\nonumber\\
+&+0.0001938T_{\rm in}^2-0.0001592T_{\rm out}^2+0.005278D^2
+-0.0002358T_3^2-1.133069P_e^2.
+\label{eq:absorbed-heat-model}
+\end{align}
+温度、$D$和$P_e$的单位分别为$^\circ$C、min和MPa，输出为kWh；转换为有符号水侧热量时取$\widehat Q_D=-\widehat A_D$。LOEO系数只用于留出实验评价；正式v2成本使用\path{defrost_absorbed_heat_model_coefficients.csv}中的全样本固定系数，不按fold应用$\widehat A_D$系数。v2中$D$是历史循环实测的规则除霜时长，数据合同记为\path{offline_counterfactual_observed_rule_duration}，不是候选时刻可获得的在线特征。
+
+\subsection{反事实候选与最低点证据等级}
+候选时刻从$t_0+10$分钟开始，以1分钟为步长搜索到$t_{\rm prep}$，并额外纳入精确的$t_{\rm prep}$。候选前积分复用历史实测轨迹；积分覆盖率须不低于95\%。对每个$\tau$，$P_e(\tau)$取$[\tau-60\,\mathrm{s},\tau)$内1秒网格记录的中位数。Pe模型在61个事件、16个实验上按实验留一拟合真实$t_{\rm prep}$处的Pe与$E_D$，输入为Pe和Pe$^2$，采用Ridge（$\alpha=1$）。全样本描述式为
+\begin{equation}
+\widehat E_D=0.109021-0.051851P_e-0.209486P_e^2\quad\mathrm{kWh},
+\label{eq:defrost-energy-model}
+\end{equation}
+其中Pe单位为MPa。实际成本使用16个LOEO折各自的三项系数，不使用式\eqref{eq:defrost-energy-model}的全样本系数。训练支持域外值沿相应折的二次模型延拓，并保留支持状态和延拓距离标记。v1恢复项为0.279901897467~kWh；v2在$T_s=50$\,$^\circ$C时使用$E_R=0.250930$~kWh、$Q_R=0.804970$~kWh和9~min恢复时长，在$T_s=55$\,$^\circ$C时使用0.395172~kWh、1.146153~kWh和12~min。
+
+两版反事实核算都复用候选前被截断的实测轨迹，并把在真实准备边界拟合的Pe二次$E_D$关系迁移到候选点。候选后的准备、除霜与恢复均未在其他候选点实际执行；v2还使用事后观测的$D$。因此，v1和v2都是离线反事实核算，v2尤其不能被解释为在线可部署模型。
+
+每个循环取候选集合中最早达到全曲线最低值的时刻，并记录最低值位于左边界、内部或已观测右边界。数值位置分类只描述当前集合中的极小值位置；论文证据等级另将边界或候选域不完整的有效结果归为“边界/搜索域受限”，其余分为“内部最低点”和“无有效估计”。近优候选集按式\eqref{eq:near-optimal-window}计算，同时记录跨度和连续段数。
+
+\subsection{图像队列、标签与模型训练}
+图像仅纳入\texttt{cycle\_stage=frost\_development}，即$[t_0,t_{\rm prep})$内的结霜制热阶段；由于候选从$t_0+10$分钟开始，实际可插值标签通常也从该时刻开始。准备、除霜和恢复图像均不纳入。六个机位为\texttt{top}、\texttt{top\_close}、\texttt{left}、\texttt{left\_close}、\texttt{front}和\texttt{extreme}，各机位图像的中位时间间隔均为30.0秒；不作物理感兴趣区域裁剪。
+
+当前v1和v2标签parquet各含89,282行图像记录，finite可插值标签分别为81,426和80,642行，排除NA和1\%近优样本后的二分样本分别为59,195和63,988行。本轮没有使用v2标签重新训练模型。下述训练方法仅描述旧v1热量口径的既有RGB实验，其实验切分只隔离分类器样本，任务定位是回顾性标签复现。
+
+RGB模型采用ResNet50 ImageNet1K-V2权重，分类头为$2048\rightarrow1000\rightarrow64\rightarrow2$，两层隐藏层后使用ReLU，不使用dropout。训练使用类别加权交叉熵、Adam、batch size 16、seed 0和weight decay 0。前5轮仅训练分类头，学习率$10^{-3}$；后5轮同时训练分类头和\texttt{layer4}，学习率$10^{-4}$。训练图像依次经过Resize 256、RandomResizedCrop 224（scale 0.85--1.0）、$\pm5^\circ$旋转、水平翻转、亮度/对比度/饱和度0.1扰动和ImageNet归一化；验证与测试使用Resize 256、CenterCrop 224和同一归一化。每个阶段按验证集宏平均F1选择checkpoint。
+
+融合模型输入依次经过$1000\rightarrow64\rightarrow2$的全连接层，隐藏层使用ReLU且不使用dropout。训练10轮，采用类别加权交叉熵、Adam、学习率$10^{-3}$、batch size 16、seed 0和weight decay 0，分类阈值为0.5；每种输入分别按验证集宏平均F1选择轮次。测试集仅用于报告各输入结果，但三种输入中最高分组合的称谓来自完整测试集上的探索性事后比较。
+
+\subsection{传感器输入与因果匹配}
+表\ref{tab:current-sensors}列出28个当前量，表\ref{tab:slope-sensors}列出16个5分钟变化率。当前量按图像时刻向后匹配15秒内最近的传感器记录。对变化率，先取该传感器时刻$x(t)$，再在$t-5$分钟处向后15秒内取最近历史值；变化率为两端点差除以实际间隔分钟数。缺失值中位数填补和标准化参数均只由训练集计算。
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{28个当前传感器量及单位。}
+\label{tab:current-sensors}
+\begin{tabular}{p{0.35\linewidth}lp{0.35\linewidth}l}
+\toprule
+变量 & 单位 & 变量 & 单位\\
+\midrule
+\path{ambient_temperature} & $^\circ$C & \path{environment_relative_humidity} & \%RH\\
+\path{water_in_temperature} & $^\circ$C & \path{water_out_temperature} & $^\circ$C\\
+\path{water_temperature_setpoint} & $^\circ$C & \path{water_flow} & m$^3$/h\\
+\path{evaporating_pressure} & MPa abs & \path{coil_temperature} & $^\circ$C\\
+\path{suction_temperature} & $^\circ$C & \path{superheat} & $^\circ$C\\
+\path{condensing_pressure} & MPa abs & \path{condensing_temperature} & $^\circ$C\\
+\path{discharge_temperature} & $^\circ$C & \path{plate_heat_exchanger_inlet_temperature} & $^\circ$C\\
+\path{plate_heat_exchanger_outlet_temperature} & $^\circ$C & \path{compressor_frequency} & Hz\\
+\path{compressor_frequency_setpoint} & Hz & \path{compressor_current} & A\\
+\path{compressor_power} & kW & \path{fan_speed} & rpm\\
+\path{fan_current} & A & \path{exv_opening} & steps\\
+\path{heating_capacity} & kW & \path{power_total} & kW\\
+\path{cop} & 无量纲 & \path{evaporator_capacity} & kW\\
+\path{pressure_ratio} & 无量纲 & \path{water_delta_temperature} & $^\circ$C\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering\scriptsize
+\caption{16个5分钟变化率及单位。}
+\label{tab:slope-sensors}
+\begin{tabular}{p{0.35\linewidth}lp{0.35\linewidth}l}
+\toprule
+变量 & 单位 & 变量 & 单位\\
+\midrule
+\path{evaporating_pressure} & MPa abs/min & \path{coil_temperature} & $^\circ$C/min\\
+\path{fan_current} & A/min & \path{compressor_frequency} & Hz/min\\
+\path{exv_opening} & steps/min & \path{compressor_power} & kW/min\\
+\path{power_total} & kW/min & \path{heating_capacity} & kW/min\\
+\path{cop} & 1/min & \path{evaporator_capacity} & kW/min\\
+\path{water_out_temperature} & $^\circ$C/min & \path{water_delta_temperature} & $^\circ$C/min\\
+\path{suction_temperature} & $^\circ$C/min & \path{superheat} & $^\circ$C/min\\
+\path{discharge_temperature} & $^\circ$C/min & \path{pressure_ratio} & 1/min\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{数据与代码可用性}
+循环纳入记录、候选成本曲线、最低点、近优候选集、模型训练记录和测试指标保存在本分析工作区。大容量RGB原图位于授权云端。当前尚未建立公开仓库。
+
+\section{结论}
+本文以统一候选域比较了v1和v2两个离线反事实成本版本。69个完整有效循环中，v1和v2的$t^*$中位数分别为59.0和42.0~min，1\%近优跨度中位数分别为28.0和19.0~min。v2相对v1使55个循环提前、11个不变、3个延后，有符号位移中位数为$-16$~min。
+
+v1和v2标签均已生成，但v2模型未重新训练。文中保留的RGB分类结果只是旧v1热量口径下的回顾性标签复现证据。特别是，v2使用事后实测的规则除霜时长，因此本文不声称v2可在线部署或已获得实测节能改善。
+
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+\end{document}

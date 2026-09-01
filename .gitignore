@@ -3,6 +3,7 @@
 
 # 仅允许项目代码、测试、配置和 README 进入 Git。
 !.gitignore
+!.python-version
 !README.md
 !pyproject.toml
 !src/

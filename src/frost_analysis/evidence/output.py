@@ -7,7 +7,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..dataset_loader import DatasetLoader
+from ..dataset import DatasetLoader
 from .contracts import (
     ANALYSIS_VERSION,
     CYCLE_ELIGIBILITY_COLUMNS,
