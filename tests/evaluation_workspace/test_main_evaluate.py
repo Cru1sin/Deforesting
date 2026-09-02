@@ -87,7 +87,9 @@ def test_main_reads_multiple_runs_and_writes_exactly_four_outputs(tmp_path: Path
     recorded_args = json.loads((output / "args.json").read_text())
     assert set(recorded_args) == {"results", "output", "task", "overwrite"}
     assert recorded_args["task"] == "binary"
-    assert (output / "command.txt").read_text().strip() == "main_evaluate.py --results ..."
+    assert (output / "command.txt").read_text().strip() == (
+        "uv run python main_evaluate.py --results ..."
+    )
 
 
 def test_nonempty_output_requires_overwrite(tmp_path: Path) -> None:

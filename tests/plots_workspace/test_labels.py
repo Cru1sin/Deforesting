@@ -41,7 +41,6 @@ def _labels() -> pd.DataFrame:
         {
             "experiment_id": ["a", "a", "b", "c"],
             "cycle_name": ["c1", "c1", "c2", "c3"],
-            "split": ["train", "train", "validation", "test"],
         }
     )
 
@@ -84,12 +83,16 @@ def test_label_figures_reuse_four_single_axis_layouts_and_span_band_widths(
         ("figure_2_inverse_cop_example", 1, ("png", "svg")),
         ("figure_3_near_optimal_width", 1, ("png", "svg")),
         ("figure_4_label_coverage", 1, ("png", "svg")),
-        ("figure_5_split_independence", 1, ("png", "svg")),
+        ("figure_5_dataset_scope", 1, ("png", "svg")),
     ]
     bands = pd.read_csv(tmp_path / "source_data" / "near_optimal_band_widths.csv")
     assert bands["band_width_minutes"].tolist() == [30.0, 30.0]
-    splits = pd.read_csv(tmp_path / "source_data" / "split_summary.csv")
-    assert splits["cycle_count"].tolist() == [1, 1, 1]
+    scope = pd.read_csv(tmp_path / "source_data" / "dataset_scope.csv")
+    assert scope.set_index("metric")["count"].to_dict() == {
+        "Experiments": 3,
+        "Cycles": 3,
+        "Images": 4,
+    }
 
 
 def test_export_defaults_to_png_and_explicit_formats_share_one_figure(

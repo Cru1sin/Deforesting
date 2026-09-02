@@ -30,8 +30,13 @@ def test_formal_v1_output_parity(tmp_path: Path) -> None:
     assert len(actual) == len(expected) == 89_282
     pd.testing.assert_frame_equal(
         actual.drop(columns="local_available"),
-        expected.drop(columns="local_available"),
+        expected.drop(columns=["local_available", "split"]),
         check_exact=True,
+    )
+    expected_balance = (
+        expected_balance.drop(columns="split")
+        .groupby(["regret_threshold", "camera_group", "cost_state"], as_index=False)
+        .sum()
     )
     pd.testing.assert_frame_equal(
         actual_balance.drop(columns="local_image_count"),

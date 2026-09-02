@@ -65,7 +65,8 @@ def run(args: argparse.Namespace, *, command: list[str] | None = None) -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "command.txt").write_text(
-        shlex.join(command or sys.argv) + "\n", encoding="utf-8"
+        shlex.join(["uv", "run", "python", *(command or sys.argv)]) + "\n",
+        encoding="utf-8",
     )
     recorded_args = (
         vars(args)

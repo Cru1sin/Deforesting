@@ -241,15 +241,18 @@ def test_parallel_handcrafted_run_writes_complete_artifacts_from_main(
 
     assert main_train.run(args, command=["main_train.py", "--jobs", "2"]) == 0
 
-    assert (output / "command.txt").read_text().strip() == "main_train.py --jobs 2"
+    assert (output / "command.txt").read_text().strip() == (
+        "uv run python main_train.py --jobs 2"
+    )
     saved_args = json.loads((output / "args.json").read_text())
     assert saved_args["jobs"] == 2
     assert len(pd.read_csv(output / "settings.csv")) == 2
-    progress = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
+    assert not (output / "progress.jsonl").exists()
+    task_log = [json.loads(line) for line in (output / "task_log.jsonl").read_text().splitlines()]
     metrics = pd.read_csv(output / "metrics.csv")
     predictions = pd.read_parquet(output / "predictions.parquet")
-    assert len(progress) == 6
-    assert {row["status"] for row in progress} == {"ok"}
+    assert len(task_log) == 6
+    assert {row["status"] for row in task_log} == {"ok"}
     assert len(metrics) == 6
     assert len(predictions) == 12
     assert set(predictions["held_out_experiment"]) == {"a", "b", "c"}
@@ -257,7 +260,7 @@ def test_parallel_handcrafted_run_writes_complete_artifacts_from_main(
     assert (tmp_path / "output/models/_cache/handcrafted/front/features.parquet").is_file()
 
 
-def test_parallel_run_writes_progress_in_completion_order(
+def test_parallel_run_writes_task_log_in_completion_order(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     labels = tmp_path / "labels.parquet"
@@ -311,8 +314,8 @@ def test_parallel_run_writes_progress_in_completion_order(
     )
 
     assert main_train.run(args) == 0
-    progress = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
-    assert [row["task_index"] for row in progress] == [1, 0]
+    task_log = [json.loads(line) for line in (output / "task_log.jsonl").read_text().splitlines()]
+    assert [row["task_index"] for row in task_log] == [1, 0]
 
 
 def test_all_invalid_folds_still_write_the_prediction_schema(

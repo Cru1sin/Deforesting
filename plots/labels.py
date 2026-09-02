@@ -97,13 +97,15 @@ def plot_label_figures(
     """Export four standalone figures, one conclusion per figure."""
     bands = _band_widths(cost, thresholds)
     threshold_summary = regret_threshold_summary(bands, balance)
-    splits = labels[["experiment_id", "cycle_name", "split"]].drop_duplicates()
-    split_summary = (
-        splits.groupby("split", as_index=False)
-        .agg(experiment_count=("experiment_id", "nunique"), cycle_count=("cycle_name", "nunique"))
-        .set_index("split")
-        .reindex(["train", "validation", "test"])
-        .reset_index()
+    dataset_scope = pd.DataFrame(
+        {
+            "metric": ["Experiments", "Cycles", "Images"],
+            "count": [
+                labels["experiment_id"].nunique(),
+                labels["cycle_name"].nunique(),
+                len(labels),
+            ],
+        }
     )
 
     representative = str(cost.groupby("cycle_name").size().idxmax())
@@ -124,7 +126,7 @@ def plot_label_figures(
     source_output.mkdir(parents=True, exist_ok=True)
     bands.to_csv(source_output / "near_optimal_band_widths.csv", index=False)
     threshold_summary.to_csv(source_output / "threshold_summary.csv", index=False)
-    split_summary.to_csv(source_output / "split_summary.csv", index=False)
+    dataset_scope.to_csv(source_output / "dataset_scope.csv", index=False)
     curve.to_csv(source_output / "representative_inverse_cop_curve.csv", index=False)
 
     plt.rcParams.update(
@@ -199,24 +201,6 @@ def plot_label_figures(
     _export(fig, output / "figure_4_label_coverage", figure_formats)
 
     fig, ax = plt.subplots(figsize=(3.5, 2.6), constrained_layout=True)
-    x = np.arange(len(split_summary))
-    width = 0.36
-    ax.bar(
-        x - width / 2,
-        split_summary["experiment_count"],
-        width,
-        color=_BLUE,
-        label="Experiments",
-    )
-    ax.bar(
-        x + width / 2,
-        split_summary["cycle_count"],
-        width,
-        color=_PALE,
-        edgecolor=_BLUE,
-        label="Cycles",
-    )
-    ax.set_xticks(x, ["Train", "Validation", "Test"])
-    ax.set(ylabel="Independent units")
-    ax.legend(fontsize=7)
-    _export(fig, output / "figure_5_split_independence", figure_formats)
+    ax.bar(dataset_scope["metric"], dataset_scope["count"], color=(_BLUE, _PALE, _ORANGE))
+    ax.set(ylabel="Count")
+    _export(fig, output / "figure_5_dataset_scope", figure_formats)

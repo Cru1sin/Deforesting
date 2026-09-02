@@ -162,13 +162,7 @@ def complete_observed_cycle_names(catalog: pd.DataFrame, cost: pd.DataFrame) -> 
     return sorted(censored.index[~censored].astype(str).tolist())
 
 
-def experiment_splits(experiments: list[str]) -> dict[str, str]:
-    """Reproduce the formal V1 experiment-level split."""
-    pattern = ("train", "train", "train", "validation", "test")
-    return {name: pattern[index % len(pattern)] for index, name in enumerate(sorted(experiments))}
-
-
-def build_labels(
+def build_labels(  # noqa: C901 - explicit cycle labeling and audit flow.
     dataset_root: Path,
     cost: pd.DataFrame,
     output: Path,
@@ -192,10 +186,6 @@ def build_labels(
         metadata["cycle_name"].isin(valid_cycles)
         & metadata["cycle_stage"].eq("frost_development")
     ].merge(catalog, on="cycle_name", how="left", validate="many_to_one")
-    split_map = experiment_splits(
-        metadata["experiment_id"].dropna().astype(str).unique().tolist()
-    )
-    metadata["split"] = metadata["experiment_id"].map(split_map)
     metadata["image_path"] = (
         "images/"
         + metadata["cycle_name"].astype(str)
@@ -214,7 +204,11 @@ def build_labels(
         {
             "cycle_name": cycle_name,
             "included": False,
-            "reason": "no_current_curve" if cycle_name not in current_cost_cycles else "censored_curve",
+            "reason": (
+                "no_current_curve"
+                if cycle_name not in current_cost_cycles
+                else "censored_curve"
+            ),
             "labeled_image_count": 0,
         }
         for cycle_name in complete_cycles
@@ -273,12 +267,11 @@ def build_labels(
         state_column = f"cost_state_{threshold_suffix(float(threshold))}"
         for group_name, roles in CAMERA_GROUPS.items():
             selected = labels.loc[labels["camera_role"].isin(roles)]
-            for (split, state), rows in selected.groupby(["split", state_column], observed=True):
+            for state, rows in selected.groupby(state_column, observed=True):
                 balance_rows.append(
                     {
                         "regret_threshold": threshold,
                         "camera_group": group_name,
-                        "split": split,
                         "cost_state": state,
                         "image_count": len(rows),
                         "cycle_count": rows["cycle_name"].nunique(),

@@ -166,7 +166,7 @@ def _write_result(
     prediction = result["predictions"]
     if not prediction.empty:
         predictions.append(prediction)
-    with (output / "progress.jsonl").open("a", encoding="utf-8") as stream:
+    with (output / "task_log.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, default=str) + "\n")
     if save_model and result["model"] is not None:
         model_dir = output / "models"
@@ -218,7 +218,8 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         raise FileExistsError(f"output exists and is not empty: {args.output}")
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "command.txt").write_text(
-        shlex.join(command or sys.argv) + "\n", encoding="utf-8"
+        shlex.join(["uv", "run", "python", *(command or sys.argv)]) + "\n",
+        encoding="utf-8",
     )
     (args.output / "args.json").write_text(
         json.dumps(serializable_args, ensure_ascii=False, indent=2) + "\n",
@@ -227,7 +228,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
     pd.DataFrame([setting._asdict() for setting in settings]).to_csv(
         args.output / "settings.csv", index=False
     )
-    (args.output / "progress.jsonl").touch()
+    (args.output / "task_log.jsonl").touch()
 
     folds: list[tuple[int, str, Setting, pd.DataFrame, list[str], str, bool]] = []
     for setting, selected in selected_settings:

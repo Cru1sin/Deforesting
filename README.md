@@ -19,6 +19,11 @@ minimum is a diagnostic minimum, not a promoted decision label. Training and
 evaluation therefore remain anchored to the frozen canonical V1 labels.
 
 Run all commands from the repository root with the project `uv` environment.
+Prerequisite: an existing Dataset is available at `dataset/`.
+
+```bash
+uv sync --extra ml
+```
 
 ## 1. Data
 
@@ -33,14 +38,23 @@ uv run python main_data.py validate --dataset dataset
 
 ## 2. Cost
 
-Calculate the current V2.6.8 diagnostic curves:
+Calculate canonical V1 before building the current RGB labels:
+
+```bash
+uv run python main_cost.py --action calculate --cost v1 --dataset dataset --output-root output
+```
+
+The result is written under `output/cost/v1/` as one standard `cost.csv`,
+per-cycle tables, and its recipe.
+
+V2.6.8 is a separate cost-research branch, not the upstream stage of the V1
+label workflow:
 
 ```bash
 uv run python main_cost.py --action calculate --cost v2.6.8 --dataset dataset --output-root output
 ```
 
-The result is written under `output/cost/v2.6.8/` as one standard `cost.csv`,
-per-cycle tables, and its recipe. This diagnostic output does not replace
+Its output is written under `output/cost/v2.6.8/`. It does not replace
 `output/cost/v1/cost.csv` as the label source.
 
 Cost versions are selected with `--cost` (`v1`, `v2.5`, or `v2.6.8`). Named
@@ -73,6 +87,10 @@ explicitly through their matching arguments. Available values are listed by
 `--help`, and setting compatibility is validated before training; accepted
 settings share the same fold orchestration and standard `settings.csv`,
 `metrics.csv`, and `predictions.parquet` outputs.
+
+`task_log.jsonl` records folds as they finish for observation and diagnosis. It
+is not a resume checkpoint; the current entry point requires a new empty output
+directory when rerun.
 
 ## 5. Evaluate
 

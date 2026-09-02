@@ -23,16 +23,6 @@ def _canonical_cost(**columns: object) -> pd.DataFrame:
     return pd.DataFrame(values)
 
 
-def test_experiment_split_matches_the_formal_v1_pattern() -> None:
-    assert build.experiment_splits(["e5", "e3", "e1", "e4", "e2"]) == {
-        "e1": "train",
-        "e2": "train",
-        "e3": "train",
-        "e4": "validation",
-        "e5": "test",
-    }
-
-
 def test_threshold_suffixes_are_exact_and_collision_free() -> None:
     assert [build.threshold_suffix(value) for value in (0.01, 0.02, 0.05, 0.10)] == [
         "01pct",
@@ -189,7 +179,7 @@ def test_build_writes_labels_balance_and_cycle_audit(
 
     labels = pd.read_parquet(output / "image_cost_labels.parquet")
     assert labels["cycle_name"].tolist() == ["cycle_a", "cycle_a"]
-    assert labels["split"].eq("train").all()
+    assert "split" not in labels
     assert set(labels) >= {
         "cost_state_01pct",
         "three_class_state_01pct",
@@ -208,6 +198,7 @@ def test_build_writes_labels_balance_and_cycle_audit(
     assert audit.loc["no_images", "reason"] == "no_interpolatable_image_times"
 
     balance = pd.read_csv(output / "label_balance.csv")
+    assert "split" not in balance
     top = balance.loc[balance["regret_threshold"].eq(0.01) & balance["camera_group"].eq("top")]
     assert top["image_count"].sum() == 2
     assert set(balance["camera_group"]) >= {"top", "top_pair", "all"}
