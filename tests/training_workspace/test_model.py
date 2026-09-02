@@ -79,9 +79,10 @@ def test_small_frozen_fold_really_trains_and_returns_predictions() -> None:
         "decision_score",
     }.issubset(predictions.columns)
     assert predictions["held_out_experiment"].eq("c").all()
+    assert predictions["camera"].eq("front").all()
 
 
-def test_missing_required_test_class_returns_clear_invalid_result() -> None:
+def test_missing_test_class_is_still_evaluated_with_full_label_metrics() -> None:
     result = train_frozen_fold(
         _rows(missing_heldout_class=True),
         ["feature_000", "feature_001"],
@@ -93,10 +94,33 @@ def test_missing_required_test_class_returns_clear_invalid_result() -> None:
         task="binary",
     )
 
-    assert result["metrics"]["status"] == "invalid"
-    assert "test classes" in result["metrics"]["message"]
-    assert result["predictions"].empty
+    assert result["metrics"]["status"] == "ok"
+    assert result["metrics"]["macro_f1"] == pytest.approx(0.5)
+    assert result["metrics"]["balanced_accuracy"] == pytest.approx(0.5)
+    assert len(result["predictions"]) == 1
     assert result["model"] is None
+
+
+def test_missing_training_class_returns_clear_invalid_result() -> None:
+    rows = _rows()
+    rows = rows.loc[
+        rows["experiment_id"].eq("c") | rows["target"].eq(0)
+    ].reset_index(drop=True)
+
+    result = train_frozen_fold(
+        rows,
+        ["feature_000", "feature_001"],
+        heldout_experiment="c",
+        head="logistic",
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        task="binary",
+    )
+
+    assert result["metrics"]["status"] == "invalid"
+    assert "train classes" in result["metrics"]["message"]
+    assert result["predictions"].empty
 
 
 def test_binary_random_forest_decision_score_is_positive_class_probability() -> None:

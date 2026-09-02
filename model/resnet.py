@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, recall_score
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
@@ -108,7 +108,6 @@ def _invalid_result(
     train: pd.DataFrame,
     test: pd.DataFrame,
     heldout_experiment: str,
-    split_name: str,
     present: set[int],
     expected: set[int],
 ) -> dict[str, Any]:
@@ -122,7 +121,7 @@ def _invalid_result(
             "train_images": len(train),
             "test_images": len(test),
             "status": "invalid",
-            "message": f"{split_name} classes {sorted(present)}; expected {sorted(expected)}",
+            "message": f"train classes {sorted(present)}; expected {sorted(expected)}",
             "accuracy": float("nan"),
             "balanced_accuracy": float("nan"),
             "macro_f1": float("nan"),
@@ -149,14 +148,11 @@ def train_resnet_fold(
     heldout = rows["experiment_id"].astype(str).eq(heldout_experiment)
     train, test = rows.loc[~heldout].copy(), rows.loc[heldout].copy()
     expected = set(range(2 if task == "binary" else 3))
-    for split_name, split in (("train", train), ("test", test)):
-        present = set(split["target"].astype(int))
-        if present != expected:
-            result = _invalid_result(
-                train, test, heldout_experiment, split_name, present, expected
-            )
-            result["metrics"]["camera"] = camera
-            return result
+    present = set(train["target"].astype(int))
+    if present != expected:
+        result = _invalid_result(train, test, heldout_experiment, present, expected)
+        result["metrics"]["camera"] = camera
+        return result
 
     destination = device or preferred_device()
     torch.manual_seed(0)
@@ -215,6 +211,7 @@ def train_resnet_fold(
     ]
     predictions = test[columns].reset_index(drop=True).copy()
     predictions["held_out_experiment"] = heldout_experiment
+    predictions["camera"] = camera
     predictions["representation"] = "resnet50_finetune"
     predictions["head"] = "paper_mlp"
     predictions["modality"] = "rgb"
@@ -235,7 +232,15 @@ def train_resnet_fold(
         "status": "ok",
         "message": "",
         "accuracy": float(accuracy_score(target, prediction)),
-        "balanced_accuracy": float(balanced_accuracy_score(target, prediction)),
+        "balanced_accuracy": float(
+            recall_score(
+                target,
+                prediction,
+                labels=sorted(expected),
+                average="macro",
+                zero_division=0,
+            )
+        ),
         "macro_f1": float(
             f1_score(
                 target,

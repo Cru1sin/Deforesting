@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, recall_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
@@ -93,14 +93,13 @@ def train_frozen_fold(
         camera=camera,
         modality=modality,
     )
-    for split_name, split in (("train", train), ("test", test)):
-        present = set(split["target"].astype(int))
-        if present != expected:
-            metrics.update(
-                status="invalid",
-                message=f"{split_name} classes {sorted(present)}; expected {sorted(expected)}",
-            )
-            return {"metrics": metrics, "predictions": pd.DataFrame(), "model": None}
+    present = set(train["target"].astype(int))
+    if present != expected:
+        metrics.update(
+            status="invalid",
+            message=f"train classes {sorted(present)}; expected {sorted(expected)}",
+        )
+        return {"metrics": metrics, "predictions": pd.DataFrame(), "model": None}
 
     model = make_head(head)
     model.fit(train[feature_columns], train["target"])
@@ -126,6 +125,7 @@ def train_frozen_fold(
     ]
     predictions = test[prediction_columns].reset_index(drop=True).copy()
     predictions["held_out_experiment"] = heldout_experiment
+    predictions["camera"] = camera
     predictions["representation"] = representation
     predictions["head"] = head
     predictions["modality"] = modality
@@ -142,7 +142,15 @@ def train_frozen_fold(
     target = test["target"].to_numpy(dtype=int)
     metrics.update(
         accuracy=float(accuracy_score(target, prediction)),
-        balanced_accuracy=float(balanced_accuracy_score(target, prediction)),
+        balanced_accuracy=float(
+            recall_score(
+                target,
+                prediction,
+                labels=sorted(expected),
+                average="macro",
+                zero_division=0,
+            )
+        ),
         macro_f1=float(
             f1_score(
                 target,

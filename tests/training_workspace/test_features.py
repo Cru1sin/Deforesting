@@ -26,6 +26,7 @@ def _image_rows(dataset: Path) -> pd.DataFrame:
                     "image_path": str(relative),
                     "image_time": pd.Timestamp("2026-01-01")
                     + pd.Timedelta(minutes=5 - 5 * index),
+                    "stable_heating_start": pd.Timestamp("2025-12-31 23:50:00"),
                     "relative_regret": 0.2,
                     "cost_state_01pct": state,
                     "target": index,
@@ -91,7 +92,7 @@ def test_two_heads_reuse_one_fixed_handcrafted_cache(
     assert (cache_root / "handcrafted/front/features.parquet").is_file()
 
 
-def test_time_and_rgb_time_use_earliest_labeled_image_per_cycle(tmp_path: Path) -> None:
+def test_time_and_rgb_time_use_stable_heating_start(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset"
     rows = _image_rows(dataset)
     cache_root = tmp_path / "output/models/_cache"
@@ -119,9 +120,56 @@ def test_time_and_rgb_time_use_earliest_labeled_image_per_cycle(tmp_path: Path) 
 
     assert time_columns == ["time_minutes"]
     assert sorted(time_rows.groupby("cycle_name")["time_minutes"].apply(list)) == [
-        [5.0, 0.0],
-        [5.0, 0.0],
+        [15.0, 10.0],
+        [15.0, 10.0],
     ]
     assert "time_minutes" in rgb_time_columns
     assert len(rgb_time_columns) == 36
-    assert rgb_time_rows["time_minutes"].min() == 0.0
+    assert rgb_time_rows["time_minutes"].min() == 10.0
+
+
+def test_cache_reuse_requires_the_same_resolved_dataset_root(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    first_dataset = tmp_path / "first"
+    second_dataset = tmp_path / "second"
+    first_rows = _image_rows(first_dataset)
+    second_rows = _image_rows(second_dataset)
+    for relative in second_rows["image_path"]:
+        Image.new("RGB", (16, 8), (0, 220, 0)).save(second_dataset / relative)
+    calls = 0
+    original = features.image_color_features
+
+    def counted(path: Path) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(features, "image_color_features", counted)
+    cache_root = tmp_path / "cache"
+
+    first, columns = features.prepare_features(
+        first_rows,
+        dataset_root=first_dataset,
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        state_column="cost_state_01pct",
+        maximum_per_group=48,
+        cache_root=cache_root,
+    )
+    second, _ = features.prepare_features(
+        second_rows,
+        dataset_root=second_dataset,
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        state_column="cost_state_01pct",
+        maximum_per_group=48,
+        cache_root=cache_root,
+    )
+
+    assert calls == len(first_rows) + len(second_rows)
+    assert not np.allclose(first[columns], second[columns])
+    cached = pd.read_parquet(cache_root / "handcrafted/front/features.parquet")
+    assert cached["dataset_root"].unique().tolist() == [str(second_dataset.resolve())]

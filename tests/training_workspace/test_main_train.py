@@ -101,6 +101,7 @@ def _labels() -> pd.DataFrame:
             "file_name": [f"{index}.png" for index in range(7)],
             "image_path": [f"images/c/{index}.png" for index in range(7)],
             "image_time": pd.date_range("2026-01-01", periods=7, freq="min"),
+            "stable_heating_start": [pd.Timestamp("2025-12-31 23:50:00")] * 7,
             "relative_regret": [0.2, 0.0, 0.3, 0.3, 0.0, 0.2, float("nan")],
             "cost_state_01pct": [
                 "pre_optimal",
@@ -130,6 +131,16 @@ def test_label_rows_apply_binary_and_three_class_contracts() -> None:
     assert three["target"].tolist() == [0, 1, 2, 0, 1, 2]
     assert binary["relative_regret"].notna().all()
     assert binary["camera_role"].eq("front").all()
+
+
+def test_label_rows_requires_canonical_stable_heating_start() -> None:
+    with pytest.raises(ValueError, match="stable_heating_start"):
+        main_train.label_rows(
+            _labels().drop(columns="stable_heating_start"),
+            task="binary",
+            state_column="cost_state_01pct",
+            camera="front",
+        )
 
 
 def test_dry_run_reads_labels_and_prints_task_total_without_touching_images(
@@ -182,6 +193,7 @@ def _training_labels(dataset: Path) -> pd.DataFrame:
                     "image_path": str(relative),
                     "image_time": pd.Timestamp("2026-01-01")
                     + pd.Timedelta(minutes=target),
+                    "stable_heating_start": pd.Timestamp("2025-12-31 23:50:00"),
                     "relative_regret": 0.2,
                     "cost_state_01pct": state,
                 }
@@ -273,6 +285,7 @@ def test_all_invalid_folds_still_write_the_prediction_schema(
     assert set(pd.read_parquet(output / "predictions.parquet").columns) == {
         "experiment_id",
         "cycle_name",
+        "camera",
         "camera_role",
         "image_time",
         "held_out_experiment",
@@ -283,3 +296,59 @@ def test_all_invalid_folds_still_write_the_prediction_schema(
         "prediction",
         "decision_score",
     }
+
+
+def test_each_setting_uses_only_its_own_experiments_for_folds(
+    tmp_path: Path, monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    rows = []
+    for camera, experiments in (("front", ("a", "b")), ("top", ("c", "d"))):
+        for experiment in experiments:
+            for target, state in ((0, "pre_optimal"), (1, "post_optimal")):
+                rows.append(
+                    {
+                        "experiment_id": experiment,
+                        "cycle_name": f"cycle_{experiment}",
+                        "camera_role": camera,
+                        "file_name": f"{target}.png",
+                        "image_path": f"{experiment}/{target}.png",
+                        "image_time": pd.Timestamp("2026-01-01")
+                        + pd.Timedelta(minutes=target),
+                        "stable_heating_start": pd.Timestamp("2026-01-01"),
+                        "relative_regret": 0.2,
+                        "cost_state_01pct": state,
+                    }
+                )
+    labels = tmp_path / "labels.parquet"
+    pd.DataFrame(rows).to_parquet(labels, index=False)
+    output = tmp_path / "run"
+    args = main_train.build_parser().parse_args(
+        [
+            "--labels",
+            str(labels),
+            "--output",
+            str(output),
+            "--heads",
+            "logistic",
+            "--cameras",
+            "front",
+            "top",
+            "--modalities",
+            "time",
+            "--jobs",
+            "1",
+        ]
+    )
+
+    assert main_train.run(args) == 0
+
+    metrics = pd.read_csv(output / "metrics.csv")
+    assert len(metrics) == 4
+    assert set(zip(metrics["camera"], metrics["held_out_experiment"], strict=True)) == {
+        ("front", "a"),
+        ("front", "b"),
+        ("top", "c"),
+        ("top", "d"),
+    }
+    assert "Total tasks: 4" in capsys.readouterr().out

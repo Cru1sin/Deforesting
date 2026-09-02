@@ -77,7 +77,12 @@ def _extract_handcrafted(
     ]
     width = 34 + len(roles)
     matrix = np.stack(values) if values else np.empty((0, width), dtype=np.float32)
-    result = pd.DataFrame({"image_path": rows["image_path"].astype(str)})
+    result = pd.DataFrame(
+        {
+            "dataset_root": str(dataset_root.resolve()),
+            "image_path": rows["image_path"].astype(str),
+        }
+    )
     for index in range(width):
         result[f"feature_{index:03d}"] = matrix[:, index]
     return result
@@ -105,12 +110,15 @@ def prepare_features(
     cache_path = cache_root / representation / camera / "features.parquet"
     need_rgb = modality in {"rgb", "rgb_time"}
     cached = pd.read_parquet(cache_path) if cache_path.is_file() else pd.DataFrame()
+    resolved_root = str(dataset_root.resolve())
     expected_paths = sampled["image_path"].astype(str).tolist()
     feature_columns = [
         str(column) for column in cached.columns if str(column).startswith("feature_")
     ]
     reusable = (
-        cached.get("image_path", pd.Series(dtype="string")).astype(str).tolist()
+        cached.get("dataset_root", pd.Series(dtype="string")).astype(str).tolist()
+        == [resolved_root] * len(expected_paths)
+        and cached.get("image_path", pd.Series(dtype="string")).astype(str).tolist()
         == expected_paths
         and (not need_rgb or len(feature_columns) == 34 + len(CAMERA_GROUPS[camera]))
     )
@@ -118,7 +126,9 @@ def prepare_features(
         cached = (
             _extract_handcrafted(sampled, dataset_root, camera)
             if need_rgb
-            else pd.DataFrame({"image_path": expected_paths})
+            else pd.DataFrame(
+                {"dataset_root": resolved_root, "image_path": expected_paths}
+            )
         )
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cached.to_parquet(cache_path, index=False)
@@ -131,11 +141,13 @@ def prepare_features(
     result = sampled.copy()
     if feature_columns:
         result[feature_columns] = cached[feature_columns].to_numpy()
-    # Elapsed time is anchored to the earliest already-labeled image in each cycle;
-    # it uses neither a future cycle end nor any sensor value.
+    # Stable heating start is an observed physical boundary preceding each image;
+    # this uses neither a future cycle end nor any sensor value.
     image_time = pd.to_datetime(result["image_time"], errors="raise", format="mixed")
-    cycle_start = image_time.groupby(result["cycle_name"]).transform("min")
-    result["time_minutes"] = (image_time - cycle_start).dt.total_seconds() / 60
+    stable_start = pd.to_datetime(
+        result["stable_heating_start"], errors="raise", format="mixed"
+    )
+    result["time_minutes"] = (image_time - stable_start).dt.total_seconds() / 60
     selected_columns: list[str] = {
         "rgb": feature_columns,
         "time": ["time_minutes"],

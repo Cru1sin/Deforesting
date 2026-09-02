@@ -25,6 +25,7 @@ MODALITIES = ("rgb", "time", "rgb_time")
 PREDICTION_COLUMNS = (
     "experiment_id",
     "cycle_name",
+    "camera",
     "camera_role",
     "image_time",
     "held_out_experiment",
@@ -108,6 +109,7 @@ def label_rows(
         "camera_role",
         "image_time",
         "image_path",
+        "stable_heating_start",
         "relative_regret",
         state_column,
     }
@@ -192,17 +194,27 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
 ) -> int:
     settings = expand_settings(args)
     labels = pd.read_parquet(args.labels)
-    heldout = sorted(
-        {
-            str(experiment)
-            for setting in settings
-            for experiment in label_rows(
+    selected_settings = [
+        (
+            setting,
+            label_rows(
                 labels,
                 task=args.task,
                 state_column=args.state_column,
                 camera=setting.camera,
-            )["experiment_id"].unique()
+            ),
+        )
+        for setting in settings
+    ]
+    heldout = sorted(
+        {
+            str(experiment)
+            for _, selected in selected_settings
+            for experiment in selected["experiment_id"].unique()
         }
+    )
+    total_tasks = sum(
+        selected["experiment_id"].nunique() for _, selected in selected_settings
     )
     serializable_args = {
         key: str(value) if isinstance(value, Path) else value
@@ -213,7 +225,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
     for setting in settings:
         print("  " + " / ".join(setting))
     print(f"Held-out experiments: {len(heldout)}")
-    print(f"Total tasks: {len(settings) * len(heldout)}")
+    print(f"Total tasks: {total_tasks}")
     if args.dry_run:
         return 0
     if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
@@ -234,13 +246,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
     frozen_tasks: list[FrozenTask] = []
     resnet_tasks: list[ResNetTask] = []
     prepared: list[tuple[Setting, pd.DataFrame, list[str]]] = []
-    for setting in settings:
-        selected = label_rows(
-            labels,
-            task=args.task,
-            state_column=args.state_column,
-            camera=setting.camera,
-        )
+    for setting, selected in selected_settings:
         if setting.representation == "resnet50_finetune":
             selected["absolute_path"] = selected["image_path"].map(
                 lambda value: str((args.dataset / str(value)).resolve())
@@ -258,26 +264,29 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         )
         prepared.append((setting, featured, feature_columns))
 
-    task_index = 0
-    for experiment in heldout:
-        for setting, selected, feature_columns in prepared:
-            if setting.representation == "resnet50_finetune":
-                resnet_tasks.append(
-                    ResNetTask(task_index, selected, experiment, setting)
+    folds = sorted(
+        (
+            (str(experiment), setting, selected, feature_columns)
+            for setting, selected, feature_columns in prepared
+            for experiment in selected["experiment_id"].unique()
+        ),
+        key=lambda fold: fold[0],
+    )
+    for task_index, (experiment, setting, selected, feature_columns) in enumerate(folds):
+        if setting.representation == "resnet50_finetune":
+            resnet_tasks.append(ResNetTask(task_index, selected, experiment, setting))
+        else:
+            frozen_tasks.append(
+                FrozenTask(
+                    task_index,
+                    selected,
+                    feature_columns,
+                    experiment,
+                    setting,
+                    args.task,
+                    args.save_models,
                 )
-            else:
-                frozen_tasks.append(
-                    FrozenTask(
-                        task_index,
-                        selected,
-                        feature_columns,
-                        experiment,
-                        setting,
-                        args.task,
-                        args.save_models,
-                    )
-                )
-            task_index += 1
+            )
 
     metrics: list[dict[str, Any]] = []
     predictions: list[pd.DataFrame] = []
