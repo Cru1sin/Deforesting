@@ -91,7 +91,6 @@ def zero_transition_heat(count: int) -> pd.DataFrame:
             "QT_evaluable": np.ones(count, dtype=bool),
             "QT_in_support": np.ones(count, dtype=bool),
             "QT_physical_valid": np.ones(count, dtype=bool),
-            "QT_supported": np.ones(count, dtype=bool),
             "strict_QT_supported": np.ones(count, dtype=bool),
             "strict_transition_heat_kwh": np.zeros(count),
             "strict_preparation_heat_kwh": np.zeros(count),
@@ -251,7 +250,6 @@ def transition_heat_v2_5(
     for column in strict_counts:
         result[f"strict_{column}_complete_seconds"] = strict_counts[column]
     result["strict_state_window_supported"] = strict_window_supported
-    result["QT_supported"] = evaluable
     result["strict_QT_supported"] = strict_supported
     result["transition_heat_model"] = "linear_qprep_plus_signed_quadratic_qd"
     result["transition_heat_rule"] = (

@@ -463,7 +463,5 @@ def predict_independent_targets(
             "QT_evaluable": q_evaluable,
             "ET_in_support": e_supported.to_numpy(),
             "QT_in_support": q_supported.to_numpy(),
-            "ET_supported": e_supported.to_numpy(),
-            "QT_supported": q_supported.to_numpy(),
         }
     )

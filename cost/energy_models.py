@@ -465,7 +465,6 @@ def transition_energy(
             "pe_support_max_mpa": upper,
             "ET_evaluable": evaluable,
             "ET_in_support": in_support,
-            "ET_supported": evaluable,
             "strict_ET_supported": strict_supported,
             "transition_energy_model": (
                 "pe_quadratic_plus_fixed_recovery" if include_fixed_recovery else "pe_quadratic"

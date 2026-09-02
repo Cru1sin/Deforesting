@@ -219,8 +219,6 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
                 "QT_evaluable": True,
                 "ET_in_support": True,
                 "QT_in_support": True,
-                "ET_supported": True,
-                "QT_supported": True,
             },
             index=values.index,
         )

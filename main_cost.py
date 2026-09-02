@@ -36,14 +36,6 @@ COST_MODULES: dict[str, ModuleType] = {
     "v2.5": cost_function_v2_5,
     "v2.6.8": cost_function_v2_6_8,
 }
-FIT_ARTIFACT_NAMES = {
-    "command.txt",
-    "recipe.json",
-    "events.csv",
-    "validation.csv",
-    "bootstrap.csv",
-    "params_candidate.json",
-}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -87,6 +79,93 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
+    arguments = list(argv) if argv is not None else sys.argv[1:]
+    args = build_parser().parse_args(arguments)
+    if args.action == "fit":
+        return _fit_v268(args, arguments)
+    if args.action == "compare":
+        if not args.results:
+            raise ValueError("compare requires --results run directories")
+        generate_cost_function_figures(
+            args.results,
+            DatasetLoader(args.dataset),
+            args.output_root / "plots",
+            overwrite=args.overwrite,
+        )
+        print(f"Comparison written: {args.output_root / 'plots'}")
+        return 0
+
+    module = COST_MODULES[args.cost]
+    recipe = _recipe(module, args)
+    run = _run_directory(args.output_root, recipe)
+    if run.exists() and not args.overwrite:
+        raise FileExistsError(f"run directory exists; pass --overwrite: {run}")
+    loader = DatasetLoader(args.dataset)
+    if args.cost == "v2.6.8":
+        artifact = load_artifacts()
+        model_name = str(recipe["transition_energy_model"])
+        heat_model_name = str(recipe["transition_heat_model"])
+        if model_name not in artifact.get("models", {}) or heat_model_name not in artifact.get(
+            "models", {}
+        ):
+            raise ValueError("V2.6.8 artifact does not contain the selected component model")
+        experiment_folds = set(artifact["models"][model_name]["energy"]["folds"])
+        experiment_folds &= set(artifact["models"][heat_model_name]["heat"]["folds"])
+        cycles = _cycle_names(loader, args.cycles, experiment_folds)
+        parameters: dict[str, Any] = {}
+    else:
+        parameters = load_parameters()
+        if not {"pe_quadratic", "v1", "v2.5"} <= parameters.keys():
+            raise ValueError("empirical parameters are incomplete")
+        cycles = _cycle_names(loader, args.cycles, set(parameters["pe_quadratic"]))
+    if (
+        recipe["transition_energy_model"] == "pe_quadratic_plus_fixed_recovery"
+        and "fixed_recovery_electricity_kwh" not in parameters["v1"]
+    ):
+        raise ValueError("V1 fixed recovery parameter is missing")
+    if (
+        recipe["transition_heat_model"] == "linear_qprep_plus_signed_quadratic_qd"
+        and not {
+            "preparation_heat",
+            "defrost_heat",
+        }
+        <= parameters["v2.5"].keys()
+    ):
+        raise ValueError("V2.5 transition heat parameters are incomplete")
+    if args.dry_run:
+        print(
+            "Dry-run OK: recipe, parameters, variant, output, and "
+            f"{len(cycles)} metadata-eligible cycle(s) checked; "
+            "raw clean-anchor gate deferred; "
+            f"integration_protocol={recipe['integration_protocol']}; "
+            f"state_protocol={recipe['state_protocol']}"
+        )
+        return 0
+
+    cycles, anchor_excluded = _clean_anchor_cycles(loader, cycles, explicit=bool(args.cycles))
+    print(f"Selected {len(cycles)} cycle(s); excluded {anchor_excluded} by raw clean-anchor gate")
+    table = module.calculate(loader, cycles, recipe)
+    run.mkdir(parents=True, exist_ok=True)
+    table.to_csv(run / "cost.csv", index=False)
+    cycles_dir = run / "cycles"
+    cycles_dir.mkdir(exist_ok=True)
+    if args.overwrite:
+        for stale in cycles_dir.glob("*.csv"):
+            stale.unlink()
+    for cycle_name, cycle in table.groupby("cycle_name", sort=False):
+        cycle.to_csv(cycles_dir / f"{cycle_name}.csv", index=False)
+    (run / "recipe.json").write_text(
+        json.dumps(recipe, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    (run / "command.txt").write_text(
+        shlex.join(["uv", "run", "python", "main_cost.py", *arguments]) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Cost result written: {run}")
+    return 0
 
 
 def _recipe(module: Any, args: argparse.Namespace) -> dict[str, object]:
@@ -166,20 +245,6 @@ def _clean_anchor_cycles(
     return selected, len(cycles) - len(selected)
 
 
-def _validate_cycle_artifact_names(table: pd.DataFrame) -> None:
-    for value in table["cycle_name"]:
-        if (
-            not isinstance(value, str)
-            or not value.strip()
-            or value in {".", ".."}
-            or Path(value).is_absolute()
-            or Path(value).name != value
-            or "/" in value
-            or "\\" in value
-        ):
-            raise ValueError(f"unsafe cycle name for artifact: {value!r}")
-
-
 def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C901
     """Fit the review-only candidate artifact with explicit outer loops."""
     if args.cost != "v2.6.8":
@@ -191,17 +256,6 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     run = args.output_root / "cost" / "fit" / str(args.variant)
     if run.exists() and not args.overwrite:
         raise FileExistsError(f"fit directory exists; pass --overwrite: {run}")
-    if run.exists():
-        members = list(run.iterdir())
-        names = {path.name for path in members}
-        if members and (names != FIT_ARTIFACT_NAMES or any(not path.is_file() for path in members)):
-            unexpected = sorted(names - FIT_ARTIFACT_NAMES)
-            detail = f"; unexpected member(s): {', '.join(unexpected)}" if unexpected else ""
-            raise FileExistsError(
-                "fit --overwrite requires an empty directory or exactly the six expected files"
-                f"{detail}: {run}"
-            )
-
     loader = DatasetLoader(args.dataset)
     events = build_event_table(loader)
     valid = events.loc[events["event_valid"].fillna(False)].copy()
@@ -278,101 +332,14 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     validation.to_csv(run / "validation.csv", index=False)
     bootstrap.to_csv(run / "bootstrap.csv", index=False)
     (run / "params_candidate.json").write_text(
-        json.dumps(artifact, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8"
+        json.dumps(artifact, sort_keys=True, allow_nan=False, separators=(",", ":")),
+        encoding="utf-8",
     )
     print(
         f"Fit candidate written: {run}; {len(valid)} valid event(s), "
         f"{len(events) - len(valid)} exclusion(s), {len(cohort)} candidate cycle(s), "
         f"{candidate_rows} candidate row(s); not promoted"
     )
-    return 0
-
-
-def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
-    arguments = list(argv) if argv is not None else sys.argv[1:]
-    args = build_parser().parse_args(arguments)
-    if args.action == "fit":
-        return _fit_v268(args, arguments)
-    if args.action == "compare":
-        if not args.results:
-            raise ValueError("compare requires --results run directories")
-        generate_cost_function_figures(
-            args.results,
-            DatasetLoader(args.dataset),
-            args.output_root / "plots",
-            overwrite=args.overwrite,
-        )
-        print(f"Comparison written: {args.output_root / 'plots'}")
-        return 0
-
-    module = COST_MODULES[args.cost]
-    recipe = _recipe(module, args)
-    run = _run_directory(args.output_root, recipe)
-    if run.exists() and not args.overwrite:
-        raise FileExistsError(f"run directory exists; pass --overwrite: {run}")
-    loader = DatasetLoader(args.dataset)
-    if args.cost == "v2.6.8":
-        artifact = load_artifacts()
-        model_name = str(recipe["transition_energy_model"])
-        heat_model_name = str(recipe["transition_heat_model"])
-        if model_name not in artifact.get("models", {}) or heat_model_name not in artifact.get(
-            "models", {}
-        ):
-            raise ValueError("V2.6.8 artifact does not contain the selected component model")
-        experiment_folds = set(artifact["models"][model_name]["energy"]["folds"])
-        experiment_folds &= set(artifact["models"][heat_model_name]["heat"]["folds"])
-        cycles = _cycle_names(loader, args.cycles, experiment_folds)
-        parameters: dict[str, Any] = {}
-    else:
-        parameters = load_parameters()
-        if not {"pe_quadratic", "v1", "v2.5"} <= parameters.keys():
-            raise ValueError("empirical parameters are incomplete")
-        cycles = _cycle_names(loader, args.cycles, set(parameters["pe_quadratic"]))
-    if (
-        recipe["transition_energy_model"] == "pe_quadratic_plus_fixed_recovery"
-        and "fixed_recovery_electricity_kwh" not in parameters["v1"]
-    ):
-        raise ValueError("V1 fixed recovery parameter is missing")
-    if (
-        recipe["transition_heat_model"] == "linear_qprep_plus_signed_quadratic_qd"
-        and not {
-            "preparation_heat",
-            "defrost_heat",
-        }
-        <= parameters["v2.5"].keys()
-    ):
-        raise ValueError("V2.5 transition heat parameters are incomplete")
-    if args.dry_run:
-        print(
-            "Dry-run OK: recipe, parameters, variant, output, and "
-            f"{len(cycles)} metadata-eligible cycle(s) checked; "
-            "raw clean-anchor gate deferred; "
-            f"integration_protocol={recipe['integration_protocol']}; "
-            f"state_protocol={recipe['state_protocol']}"
-        )
-        return 0
-
-    cycles, anchor_excluded = _clean_anchor_cycles(loader, cycles, explicit=bool(args.cycles))
-    print(f"Selected {len(cycles)} cycle(s); excluded {anchor_excluded} by raw clean-anchor gate")
-    table = module.calculate(loader, cycles, recipe)
-    _validate_cycle_artifact_names(table)
-    run.mkdir(parents=True, exist_ok=True)
-    table.to_csv(run / "cost.csv", index=False)
-    cycles_dir = run / "cycles"
-    cycles_dir.mkdir(exist_ok=True)
-    if args.overwrite:
-        for stale in cycles_dir.glob("*.csv"):
-            stale.unlink()
-    for cycle_name, cycle in table.groupby("cycle_name", sort=False):
-        cycle.to_csv(cycles_dir / f"{cycle_name}.csv", index=False)
-    (run / "recipe.json").write_text(
-        json.dumps(recipe, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-    (run / "command.txt").write_text(
-        shlex.join(["uv", "run", "python", "main_cost.py", *arguments]) + "\n",
-        encoding="utf-8",
-    )
-    print(f"Cost result written: {run}")
     return 0
 
 

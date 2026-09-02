@@ -8,7 +8,21 @@ import numpy as np
 import pandas as pd
 
 
-def build_cost_curve(  # noqa: C901
+def cycle_ratio(curve: pd.DataFrame) -> pd.DataFrame:
+    """Return EH + ET, QH + QT, and their finite nonzero-denominator ratio."""
+    result = curve.copy()
+    result["total_energy_kwh"] = result["heating_energy_kwh"] + result["transition_energy_kwh"]
+    result["total_heat_kwh"] = result["heating_heat_kwh"] + result["transition_heat_kwh"]
+    valid = (
+        np.isfinite(result["total_energy_kwh"])
+        & np.isfinite(result["total_heat_kwh"])
+        & result["total_heat_kwh"].ne(0)
+    )
+    result["inverse_cop"] = (result["total_energy_kwh"] / result["total_heat_kwh"]).where(valid)
+    return result
+
+
+def build_historical_cost_curve(  # noqa: C901
     boundaries: pd.DataFrame,
     heating_energy: pd.DataFrame,
     heating_heat: pd.DataFrame,
@@ -16,7 +30,7 @@ def build_cost_curve(  # noqa: C901
     transition_heat: pd.DataFrame,
     recipe: Mapping[str, object],
 ) -> pd.DataFrame:
-    """Combine EH, QH, ET, and QT and mark supported optima per cycle."""
+    """Apply the shared V1/V2.5 allow_historical_extrapolation curve policy."""
     checked = dict(recipe)
     lengths = {
         len(part)
@@ -41,19 +55,8 @@ def build_cost_curve(  # noqa: C901
     curve = pd.concat(parts, axis=1)
     if "defrost_heat_kwh" in curve and curve["defrost_heat_kwh"].gt(0).any():
         raise ValueError("defrost_heat_kwh must be signed and non-positive")
-    for column in (
-        "preparation_energy_kwh",
-        "defrost_energy_kwh",
-        "recovery_energy_kwh",
-        "preparation_heat_kwh",
-        "defrost_heat_kwh",
-        "recovery_heat_kwh",
-    ):
-        if column not in curve:
-            curve[column] = 0.0
-    numerator = curve["heating_energy_kwh"] + curve["transition_energy_kwh"]
-    denominator = curve["heating_heat_kwh"] + curve["transition_heat_kwh"]
-    positive = np.isfinite(denominator) & denominator.gt(0)
+    curve = cycle_ratio(curve)
+    positive = np.isfinite(curve["total_heat_kwh"]) & curve["total_heat_kwh"].gt(0)
     if "heating_valid" not in curve:
         curve["heating_valid"] = True
     for column in ("heating_energy_supported", "heating_heat_supported"):
@@ -71,7 +74,6 @@ def build_cost_curve(  # noqa: C901
     )
     curve["optimization_eligible"] = curve["supported"]
     curve["support_policy"] = "allow_historical_extrapolation"
-    curve["inverse_cop"] = (numerator / denominator).where(positive)
     curve["relative_regret"] = np.nan
     curve["is_optimum"] = False
     for _, positions in curve.groupby("cycle_name", sort=False).groups.items():

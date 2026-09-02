@@ -128,7 +128,8 @@ def test_transition_energy_uses_strict_pre_action_window_and_frozen_fold() -> No
     assert result["defrost_energy_kwh"].iloc[0] == pytest.approx(expected_ed)
     assert result["recovery_energy_kwh"].iloc[0] == pytest.approx(0.279901897467)
     assert result["transition_energy_kwh"].iloc[0] == pytest.approx(expected_ed + 0.279901897467)
-    assert result["ET_supported"].iloc[0]
+    assert result["ET_evaluable"].iloc[0]
+    assert "ET_supported" not in result
 
 
 def test_transition_energy_separates_evaluable_from_empirical_support() -> None:
@@ -145,7 +146,7 @@ def test_transition_energy_separates_evaluable_from_empirical_support() -> None:
 
     assert result["ET_evaluable"].iloc[0]
     assert not result["ET_in_support"].iloc[0]
-    assert result["ET_supported"].equals(result["ET_evaluable"])
+    assert "ET_supported" not in result
     assert result["transition_energy_status"].iloc[0] == "above_support"
 
 
@@ -168,7 +169,7 @@ def test_transition_energy_does_not_fill_strict_window_from_tau_or_earlier_data(
     assert pd.isna(result["evaporating_pressure_mpa"].iloc[0])
     assert not result["ET_evaluable"].iloc[0]
     assert not result["ET_in_support"].iloc[0]
-    assert not result["ET_supported"].iloc[0]
+    assert "ET_supported" not in result
 
 
 def test_strict_heating_coverage_is_anchored_to_declared_integration_start() -> None:
@@ -314,7 +315,8 @@ def test_one_finite_pe_second_is_canonical_but_not_strictly_supported() -> None:
         include_fixed_recovery=False,
     )
 
-    assert result["ET_supported"].iloc[0]
+    assert result["ET_evaluable"].iloc[0]
+    assert "ET_supported" not in result
     assert not result["strict_ET_supported"].iloc[0]
     assert result["transition_energy_status"].iloc[0] == "supported"
     assert result["strict_transition_energy_status"].iloc[0] == "incomplete"
@@ -347,10 +349,9 @@ def test_one_finite_state_second_is_canonical_but_not_strictly_supported() -> No
 
     result = transition_heat_v2_5(frame, boundaries.iloc[:1], FakeLoader().record)
 
-    assert result["QT_supported"].iloc[0]
     assert result["QT_evaluable"].iloc[0]
     assert result["QT_physical_valid"].iloc[0]
-    assert result["QT_supported"].equals(result["QT_evaluable"])
+    assert "QT_supported" not in result
     assert not result["strict_QT_supported"].iloc[0]
     assert result["transition_heat_status"].iloc[0] == "supported"
     assert result["strict_transition_heat_status"].iloc[0] == "incomplete"
@@ -364,7 +365,7 @@ def test_transition_heat_separates_evaluable_from_empirical_support() -> None:
 
     assert result["QT_evaluable"].iloc[0]
     assert not result["QT_in_support"].iloc[0]
-    assert result["QT_supported"].equals(result["QT_evaluable"])
+    assert "QT_supported" not in result
     assert result["transition_heat_status"].iloc[0] == "outside_empirical_support"
 
 

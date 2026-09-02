@@ -195,4 +195,5 @@ def test_v25_strict_state_variant_threads_through_transition_heat() -> None:
     assert result["transition_heat_rule"].eq("strict_causal_[tau-60s,tau)").all()
     assert result["transition_energy_kwh"].equals(result["strict_transition_energy_kwh"])
     assert result["transition_heat_kwh"].equals(result["strict_transition_heat_kwh"])
-    assert result["QT_supported"].equals(result["strict_QT_supported"])
+    assert result["QT_evaluable"].equals(result["strict_QT_supported"])
+    assert "QT_supported" not in result

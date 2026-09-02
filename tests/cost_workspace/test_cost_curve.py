@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from cost.cost_curve import build_cost_curve
+from cost.cost_curve import build_historical_cost_curve, cycle_ratio
 from cost.cost_function_v1 import validate_recipe
 
 
@@ -113,7 +113,7 @@ def test_variant_still_rejects_unknown_or_incompatible_parameters() -> None:
         validate_recipe(_recipe(unexpected_parameter=True))
 
 
-def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
+def test_build_historical_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
     times = pd.date_range("2026-01-01", periods=4, freq="min")
     boundaries = pd.DataFrame(
         {
@@ -147,7 +147,6 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
             "preparation_energy_kwh": 0.0,
             "defrost_energy_kwh": 0.0,
             "recovery_energy_kwh": 0.0,
-            "ET_supported": [True, True, True, True],
             "ET_evaluable": [True, True, True, True],
             "ET_in_support": [False, False, False, False],
             "strict_ET_supported": False,
@@ -162,7 +161,6 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
             "preparation_heat_kwh": 0.0,
             "defrost_heat_kwh": 0.0,
             "recovery_heat_kwh": 0.0,
-            "QT_supported": [True, True, True, True],
             "QT_evaluable": [True, True, True, True],
             "QT_in_support": [False, False, False, False],
             "QT_physical_valid": [True, True, True, True],
@@ -173,7 +171,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
         }
     )
 
-    result = build_cost_curve(boundaries, eh, qh, et, qt, _recipe())
+    result = build_historical_cost_curve(boundaries, eh, qh, et, qt, _recipe())
 
     assert result["supported"].tolist() == [True, True, False, False]
     assert result["optimization_eligible"].tolist() == [True, True, False, False]
@@ -188,20 +186,61 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
     assert result["label_eligible"].all()
 
 
-def test_build_cost_curve_rejects_positive_defrost_heat() -> None:
+def test_build_historical_cost_curve_rejects_positive_defrost_heat() -> None:
     boundary = pd.DataFrame(
         {"cycle_name": ["cycle_a"], "candidate_time": [pd.Timestamp("2026-01-01")]}
     )
     eh = pd.DataFrame({"heating_energy_kwh": [1.0], "heating_valid": [True]})
     qh = pd.DataFrame({"heating_heat_kwh": [2.0]})
-    et = pd.DataFrame({"transition_energy_kwh": [0.0], "ET_supported": [True]})
+    et = pd.DataFrame({"transition_energy_kwh": [0.0], "ET_evaluable": [True]})
     qt = pd.DataFrame(
         {
             "transition_heat_kwh": [0.1],
             "defrost_heat_kwh": [0.1],
-            "QT_supported": [True],
+            "QT_evaluable": [True],
+            "QT_physical_valid": [True],
         }
     )
 
     with pytest.raises(ValueError, match="defrost_heat_kwh"):
-        build_cost_curve(boundary, eh, qh, et, qt, _recipe())
+        build_historical_cost_curve(boundary, eh, qh, et, qt, _recipe())
+
+
+def test_cycle_ratio_names_totals_and_masks_nonfinite_or_zero_heat() -> None:
+    curve = pd.DataFrame(
+        {
+            "heating_energy_kwh": [1.0, 1.0, float("inf")],
+            "transition_energy_kwh": [0.5, 0.5, 0.5],
+            "heating_heat_kwh": [2.0, 0.0, 2.0],
+            "transition_heat_kwh": [1.0, 0.0, 1.0],
+        }
+    )
+
+    result = cycle_ratio(curve)
+
+    assert result["total_energy_kwh"].tolist()[:2] == [1.5, 1.5]
+    assert result["total_heat_kwh"].tolist() == [3.0, 0.0, 3.0]
+    assert result["inverse_cop"].iloc[0] == pytest.approx(0.5)
+    assert result["inverse_cop"].iloc[1:].isna().all()
+
+
+def test_build_historical_cost_curve_does_not_invent_missing_transition_breakdown() -> None:
+    boundary = pd.DataFrame(
+        {"cycle_name": ["cycle_a"], "candidate_time": [pd.Timestamp("2026-01-01")]}
+    )
+    eh = pd.DataFrame({"heating_energy_kwh": [1.0], "heating_valid": [True]})
+    qh = pd.DataFrame({"heating_heat_kwh": [2.0]})
+    et = pd.DataFrame({"transition_energy_kwh": [0.0], "ET_evaluable": [True]})
+    qt = pd.DataFrame(
+        {
+            "transition_heat_kwh": [0.0],
+            "QT_evaluable": [True],
+            "QT_physical_valid": [True],
+        }
+    )
+
+    result = build_historical_cost_curve(boundary, eh, qh, et, qt, _recipe())
+
+    for phase in ("preparation", "defrost", "recovery"):
+        assert f"{phase}_energy_kwh" not in result
+        assert f"{phase}_heat_kwh" not in result

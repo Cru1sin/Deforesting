@@ -1,4 +1,10 @@
-"""V2.6.8 fixed-nine-minute diagnostic cost recipe and curve assembly."""
+"""Calculate J = (EH + ET) / (QH + QT) for V2.6.8 diagnostic candidates.
+
+Candidates run from fixed post-defrost heating + 10 min through actual preparation. EH and
+QH are measured heating blocks; independently predicted ET and QT are the transition blocks.
+The decision requires empirical support and continuous eligibility, then reports the minimum
+inverse COP and its connected 1% and 5% basins.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .cost_curve import cycle_ratio
 from .fit_v2_6_8 import (
     five_minute_support_runs,
     load_artifacts,
@@ -48,6 +55,85 @@ DEFAULT_RECIPE: dict[str, object] = {
     "transition_energy_model": "ticket_ridge_dynamic8",
     "transition_heat_model": "ticket_ridge_dynamic8",
 }
+
+
+def calculate_cycle(
+    loader: Any,
+    cycle_name: str,
+    recipe: Mapping[str, object] | None = None,
+    artifacts: Mapping[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Execute boundary/cohort → EH → QH → ET → QT → final curve."""
+    checked = validate_recipe(DEFAULT_RECIPE if recipe is None else recipe)
+    record = loader.get_cycle_record(cycle_name)
+    nested = record.get("boundaries")
+    boundary_source = nested if isinstance(nested, Mapping) else record
+    heating = timestamp(boundary_source.get("heating_start"))
+    preparation = timestamp(boundary_source.get("defrost_preparation_start"))
+    if heating is None or preparation is None:
+        raise ValueError(f"V2.6.8 boundaries are incomplete for {cycle_name}")
+
+    boundary = build_candidate_boundaries(
+        cycle_name, str(record["experiment_id"]), heating, preparation
+    )
+    frame = loader.load_cycle_original(cycle_name, columns=list(RAW_COLUMNS)).copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = frame.sort_values("timestamp", kind="stable").drop_duplicates("timestamp", keep="last")
+    candidates = [pd.Timestamp(value) for value in boundary["candidate_time"]]
+    start = pd.Timestamp(boundary["integration_start"].iloc[0])
+
+    eh_audit = candidate_integral_table(frame, start, candidates, "power_total")
+    eh = pd.DataFrame(
+        {"heating_energy_kwh": eh_audit["energy"], "heating_energy_supported": eh_audit["valid"]}
+    )
+    qh_audit = candidate_integral_table(frame, start, candidates, "water_heat")
+    qh = pd.DataFrame(
+        {"heating_heat_kwh": qh_audit["energy"], "heating_heat_supported": qh_audit["valid"]}
+    )
+    features = pre_action_features(frame, candidates, heating)
+    source = dict(load_artifacts() if artifacts is None else artifacts)
+    energy_model = source["models"][str(checked["transition_energy_model"])]["energy"]
+    heat_model = source["models"][str(checked["transition_heat_model"])]["heat"]
+    transition = predict_independent_targets(
+        energy_model, heat_model, features, str(record["experiment_id"])
+    )
+    et = transition[
+        [
+            "transition_energy_kwh",
+            "E_support_distance",
+            "ET_evaluable",
+            "ET_in_support",
+        ]
+    ]
+    qt = transition[
+        [
+            "transition_heat_kwh",
+            "Q_support_distance",
+            "QT_evaluable",
+            "QT_in_support",
+        ]
+    ]
+
+    curve = pd.concat([boundary, eh, qh, features, et, qt], axis=1)
+    curve["heating_measurement_valid"] = eh_audit["valid"] & qh_audit["valid"]
+    curve = cycle_ratio(curve)
+    curve["physical_valid"] = curve["total_energy_kwh"].gt(0) & curve["total_heat_kwh"].gt(
+        Q_MIN_KWH
+    )
+    curve["algorithm"] = curve["base_cost"] = "v2.6.8"
+    curve["variant"] = checked["variant"]
+    curve["transition_scope"] = "preparation_defrost_recovery"
+    curve["transition_breakdown"] = "not_decomposed"
+    return finalize_v268_curve(curve)
+
+
+def calculate(
+    loader: Any, cycle_names: Sequence[str], recipe: Mapping[str, object] | None = None
+) -> pd.DataFrame:
+    """Calculate V2.6.8 curves for the requested Dataset-native cohort."""
+    artifact = load_artifacts()
+    tables = [calculate_cycle(loader, name, recipe, artifact) for name in cycle_names]
+    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()
 
 
 def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
@@ -164,85 +250,3 @@ def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
     result["hard_label_eligible"] = False
     result["label_eligible"] = False
     return result
-
-
-def calculate_cycle(
-    loader: Any,
-    cycle_name: str,
-    recipe: Mapping[str, object] | None = None,
-    artifacts: Mapping[str, Any] | None = None,
-) -> pd.DataFrame:
-    """Execute boundary/cohort → EH → QH → ET → QT → final curve."""
-    checked = validate_recipe(DEFAULT_RECIPE if recipe is None else recipe)
-    record = loader.get_cycle_record(cycle_name)
-    nested = record.get("boundaries")
-    boundary_source = nested if isinstance(nested, Mapping) else record
-    heating = timestamp(boundary_source.get("heating_start"))
-    preparation = timestamp(boundary_source.get("defrost_preparation_start"))
-    if heating is None or preparation is None:
-        raise ValueError(f"V2.6.8 boundaries are incomplete for {cycle_name}")
-
-    boundary = build_candidate_boundaries(
-        cycle_name, str(record["experiment_id"]), heating, preparation
-    )
-    frame = loader.load_cycle_original(cycle_name, columns=list(RAW_COLUMNS)).copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
-    frame = frame.sort_values("timestamp", kind="stable").drop_duplicates("timestamp", keep="last")
-    candidates = [pd.Timestamp(value) for value in boundary["candidate_time"]]
-    start = pd.Timestamp(boundary["integration_start"].iloc[0])
-
-    eh_audit = candidate_integral_table(frame, start, candidates, "power_total")
-    eh = pd.DataFrame(
-        {"heating_energy_kwh": eh_audit["energy"], "heating_energy_supported": eh_audit["valid"]}
-    )
-    qh_audit = candidate_integral_table(frame, start, candidates, "water_heat")
-    qh = pd.DataFrame(
-        {"heating_heat_kwh": qh_audit["energy"], "heating_heat_supported": qh_audit["valid"]}
-    )
-    features = pre_action_features(frame, candidates, heating)
-    source = dict(load_artifacts() if artifacts is None else artifacts)
-    energy_model = source["models"][str(checked["transition_energy_model"])]["energy"]
-    heat_model = source["models"][str(checked["transition_heat_model"])]["heat"]
-    transition = predict_independent_targets(
-        energy_model, heat_model, features, str(record["experiment_id"])
-    )
-    et = transition[
-        [
-            "transition_energy_kwh",
-            "E_support_distance",
-            "ET_evaluable",
-            "ET_in_support",
-            "ET_supported",
-        ]
-    ]
-    qt = transition[
-        [
-            "transition_heat_kwh",
-            "Q_support_distance",
-            "QT_evaluable",
-            "QT_in_support",
-            "QT_supported",
-        ]
-    ]
-
-    curve = pd.concat([boundary, eh, qh, features, et, qt], axis=1)
-    curve["heating_measurement_valid"] = eh_audit["valid"] & qh_audit["valid"]
-    numerator = curve["heating_energy_kwh"] + curve["transition_energy_kwh"]
-    denominator = curve["heating_heat_kwh"] + curve["transition_heat_kwh"]
-    curve["physical_valid"] = numerator.gt(0) & denominator.gt(Q_MIN_KWH)
-    finite_ratio = np.isfinite(numerator) & np.isfinite(denominator) & denominator.ne(0)
-    curve["inverse_cop"] = (numerator / denominator).where(finite_ratio)
-    curve["algorithm"] = curve["base_cost"] = "v2.6.8"
-    curve["variant"] = checked["variant"]
-    curve["transition_scope"] = "preparation_defrost_recovery"
-    curve["transition_breakdown"] = "not_decomposed"
-    return finalize_v268_curve(curve)
-
-
-def calculate(
-    loader: Any, cycle_names: Sequence[str], recipe: Mapping[str, object] | None = None
-) -> pd.DataFrame:
-    """Calculate V2.6.8 curves for the requested Dataset-native cohort."""
-    artifact = load_artifacts()
-    tables = [calculate_cycle(loader, name, recipe, artifact) for name in cycle_names]
-    return pd.concat(tables, ignore_index=True) if tables else pd.DataFrame()

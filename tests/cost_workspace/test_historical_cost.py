@@ -171,14 +171,16 @@ def test_all_dataset_native_curves_match_formal_cost_outputs(
     )
     assert current["heating_heat_supported"].tolist() == historical["integration_eligible"].tolist()
     assert (
-        current["ET_supported"].tolist() == historical["evaporating_pressure_mpa"].notna().tolist()
+        current["ET_evaluable"].tolist() == historical["evaporating_pressure_mpa"].notna().tolist()
     )
     expected_qt_support = (
         historical["qprep_eligible"].fillna(False) & historical["qd_eligible"].fillna(False)
         if name == "v2.5"
         else pd.Series(True, index=historical.index)
     )
-    assert current["QT_supported"].tolist() == expected_qt_support.tolist()
+    assert current["QT_evaluable"].tolist() == expected_qt_support.tolist()
+    assert "ET_supported" not in current
+    assert "QT_supported" not in current
     expected_optima = pd.to_datetime(historical["candidate_time"], format="mixed").eq(
         pd.to_datetime(historical["t_star"], format="mixed")
     )

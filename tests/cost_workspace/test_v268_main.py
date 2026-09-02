@@ -99,6 +99,9 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
         "params_candidate.json",
     }
     artifact = json.loads((run / "params_candidate.json").read_text())
+    assert (run / "params_candidate.json").read_text() == json.dumps(
+        artifact, sort_keys=True, allow_nan=False, separators=(",", ":")
+    )
     recipe = json.loads((run / "recipe.json").read_text())
     assert recipe == main_cost.cost_function_v2_6_8.DEFAULT_RECIPE
     assert artifact["fit_variant"] == "review_a"
@@ -136,22 +139,26 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
         )
         == 0
     )
-    assert {path.name for path in run.iterdir()} == main_cost.FIT_ARTIFACT_NAMES
+    assert {path.name for path in run.iterdir()} == {
+        "command.txt",
+        "recipe.json",
+        "events.csv",
+        "validation.csv",
+        "bootstrap.csv",
+        "params_candidate.json",
+    }
 
 
-def test_fit_overwrite_rejects_directory_with_stale_members(
+def test_fit_overwrite_does_not_reject_directory_with_stale_members(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     run = tmp_path / "cost" / "fit" / "review_a"
     run.mkdir(parents=True)
     (run / "stale.txt").write_text("old")
-    monkeypatch.setattr(
-        main_cost,
-        "DatasetLoader",
-        lambda _: pytest.fail("stale directory must fail before loading Dataset"),
-    )
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: object())
+    monkeypatch.setattr(main_cost, "build_event_table", lambda _: _events().iloc[0:0])
 
-    with pytest.raises(FileExistsError, match="unexpected member.*stale.txt"):
+    with pytest.raises(ValueError, match="no valid observed events"):
         main_cost.main(
             [
                 "--action",

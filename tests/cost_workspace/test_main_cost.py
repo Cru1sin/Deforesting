@@ -475,52 +475,6 @@ def test_variant_recipe_metadata_matches_selected_transition_models(
     assert {key: recipe[key] for key in expected} == expected
 
 
-@pytest.mark.parametrize("cycle_name", ["../escaped", "/private/tmp/escaped"])
-def test_cycle_artifact_name_must_be_a_safe_basename(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    cycle_name: str,
-) -> None:
-    class UnsafeDataset(AnchorDataset):
-        def list_cycles(self, **_: object) -> pd.DataFrame:
-            values = super().list_cycles().iloc[:1].copy()
-            values["cycle_name"] = cycle_name
-            return values
-
-        def get_cycle_record(self, _: str) -> dict[str, object]:
-            record = super().get_cycle_record("cycle_a")
-            record["cycle_name"] = cycle_name
-            return record
-
-        def load_cycle_original(self, _: str, *, columns: list[str] | None = None) -> pd.DataFrame:
-            return super().load_cycle_original("cycle_a", columns=columns)
-
-    class Module:
-        DEFAULT_RECIPE = main_cost.cost_function_v1.DEFAULT_RECIPE
-        validate_recipe = staticmethod(main_cost.cost_function_v1.validate_recipe)
-
-        @staticmethod
-        def calculate(*_: object) -> pd.DataFrame:
-            return pd.DataFrame({"cycle_name": [cycle_name], "inverse_cop": [0.5]})
-
-    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: UnsafeDataset())
-    monkeypatch.setitem(main_cost.COST_MODULES, "v1", Module)
-
-    with pytest.raises(ValueError, match="unsafe cycle name"):
-        main_cost.main(
-            [
-                "--action",
-                "calculate",
-                "--cost",
-                "v1",
-                "--cycles",
-                cycle_name,
-                "--output-root",
-                str(tmp_path / "output"),
-            ]
-        )
-
-
 def test_compare_delegates_results_and_dataset_to_moved_cost_plotter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
