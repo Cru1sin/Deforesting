@@ -58,6 +58,23 @@ def test_one_resnet_fold_trains_for_fixed_epochs_without_validation_selection(
                 }
             )
     checkpoint = tmp_path / "fold.pt"
+    manual_seeds: list[int] = []
+    generator_seeds: list[int] = []
+    original_manual_seed = torch.manual_seed
+    original_data_loader = resnet.DataLoader
+
+    def record_manual_seed(seed: int):  # type: ignore[no-untyped-def]
+        manual_seeds.append(seed)
+        return original_manual_seed(seed)
+
+    def record_data_loader(*args, **kwargs):  # type: ignore[no-untyped-def]
+        generator = kwargs.get("generator")
+        if generator is not None:
+            generator_seeds.append(generator.initial_seed())
+        return original_data_loader(*args, **kwargs)
+
+    monkeypatch.setattr(resnet.torch, "manual_seed", record_manual_seed)
+    monkeypatch.setattr(resnet, "DataLoader", record_data_loader)
 
     result = resnet.train_resnet_fold(
         pd.DataFrame(rows),
@@ -69,6 +86,7 @@ def test_one_resnet_fold_trains_for_fixed_epochs_without_validation_selection(
         save_path=checkpoint,
         weights=None,
         device=torch.device("cpu"),
+        seed=19,
     )
 
     assert result["metrics"]["status"] == "ok"
@@ -76,6 +94,8 @@ def test_one_resnet_fold_trains_for_fixed_epochs_without_validation_selection(
     assert result["predictions"]["camera"].eq("front").all()
     assert checkpoint.is_file()
     assert "model_state_dict" in torch.load(checkpoint, map_location="cpu")
+    assert manual_seeds == [19]
+    assert generator_seeds == [19]
 
 
 def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
@@ -106,6 +126,7 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
     def fake_fold(rows: pd.DataFrame, **kwargs):  # type: ignore[no-untyped-def]
         heldout = kwargs["heldout_experiment"]
         assert rows["absolute_path"].map(lambda value: Path(value).is_absolute()).all()
+        assert kwargs["seed"] == 29
         calls.append((heldout, kwargs["save_path"]))
         test = rows.loc[rows["experiment_id"].eq(heldout)].copy()
         test["held_out_experiment"] = heldout
@@ -152,6 +173,8 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
             "--epochs",
             "1",
             "--save-models",
+            "--seed",
+            "29",
         ]
     )
 

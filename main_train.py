@@ -67,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--modalities", nargs="+", choices=MODALITIES, default=["rgb"])
     parser.add_argument("--jobs", type=int, default=6)
+    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--maximum-per-group", type=int, default=48)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=5)
@@ -137,9 +138,9 @@ def label_rows(
 
 
 def _train_frozen_task(
-    task: tuple[int, str, Setting, pd.DataFrame, list[str], str, bool],
+    task: tuple[int, str, Setting, pd.DataFrame, list[str], str, bool, int],
 ) -> tuple[int, dict[str, Any]]:
-    index, experiment, setting, rows, feature_columns, task_name, return_model = task
+    index, experiment, setting, rows, feature_columns, task_name, return_model, seed = task
     result = train_frozen_fold(
         rows,
         feature_columns,
@@ -150,8 +151,24 @@ def _train_frozen_task(
         modality=setting.modality,
         task=task_name,
         return_model=return_model,
+        seed=seed,
     )
     return index, result
+
+
+def run_folds(
+    folds: list[tuple[int, str, Setting, pd.DataFrame, list[str], str, bool, int]],
+    jobs: int,
+) -> Any:
+    if jobs == 1:
+        yield from map(_train_frozen_task, folds)
+        return
+    with threadpool_limits(1), concurrent.futures.ThreadPoolExecutor(
+        max_workers=jobs
+    ) as executor:
+        futures = [executor.submit(_train_frozen_task, fold) for fold in folds]
+        for future in concurrent.futures.as_completed(futures):
+            yield future.result()
 
 
 def _write_result(
@@ -201,28 +218,18 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
 ) -> int:
     settings = expand_settings(args)
     labels = pd.read_parquet(args.labels)
-    selected_settings = [
-        (
-            setting,
-            label_rows(
-                labels,
-                task=args.task,
-                state_column=args.state_column,
-                camera=setting.camera,
-            ),
+    heldout: set[str] = set()
+    total_tasks = 0
+    for setting in settings:
+        selected = label_rows(
+            labels,
+            task=args.task,
+            state_column=args.state_column,
+            camera=setting.camera,
         )
-        for setting in settings
-    ]
-    heldout = sorted(
-        {
-            str(experiment)
-            for _, selected in selected_settings
-            for experiment in selected["experiment_id"].unique()
-        }
-    )
-    total_tasks = sum(
-        selected["experiment_id"].nunique() for _, selected in selected_settings
-    )
+        experiments = selected["experiment_id"].unique()
+        heldout.update(map(str, experiments))
+        total_tasks += len(experiments)
     serializable_args = {
         key: str(value) if isinstance(value, Path) else value
         for key, value in vars(args).items()
@@ -267,8 +274,16 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         except Exception as exc:
             print(f"[W&B warning] {exc}", flush=True)
 
-    folds: list[tuple[int, str, Setting, pd.DataFrame, list[str], str, bool]] = []
-    for setting, selected in selected_settings:
+    metrics: list[dict[str, Any]] = []
+    predictions: list[pd.DataFrame] = []
+    task_index = 0
+    for setting in settings:
+        selected = label_rows(
+            labels,
+            task=args.task,
+            state_column=args.state_column,
+            camera=setting.camera,
+        )
         if setting.representation == "resnet50_finetune":
             selected["absolute_path"] = selected["image_path"].map(
                 lambda value: str((args.dataset / str(value)).resolve())
@@ -284,45 +299,11 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                 state_column=args.state_column,
                 maximum_per_group=args.maximum_per_group,
             )
-        for experiment in selected["experiment_id"].unique():
-            folds.append(
-                (
-                    len(folds),
-                    str(experiment),
-                    setting,
-                    selected,
-                    feature_columns,
-                    args.task,
-                    args.save_models,
-                )
-            )
+        experiments = [str(value) for value in selected["experiment_id"].unique()]
+        if setting.representation == "resnet50_finetune":
+            from model.resnet import train_resnet_fold
 
-    metrics: list[dict[str, Any]] = []
-    predictions: list[pd.DataFrame] = []
-    if args.jobs > 1:
-        with threadpool_limits(1), concurrent.futures.ThreadPoolExecutor(
-            max_workers=args.jobs
-        ) as executor:
-            for future in concurrent.futures.as_completed(
-                executor.submit(_train_frozen_task, fold) for fold in folds
-            ):
-                index, result = future.result()
-                _write_result(
-                    args.output,
-                    index,
-                    result,
-                    metrics,
-                    predictions,
-                    save_model=args.save_models,
-                    total_tasks=total_tasks,
-                    wandb_run=wandb_run,
-                )
-    else:
-        for fold in folds:
-            index, experiment, setting, selected, _, _, _ = fold
-            if setting.representation == "resnet50_finetune":
-                from model.resnet import train_resnet_fold
-
+            for experiment in experiments:
                 result = train_resnet_fold(
                     selected,
                     heldout_experiment=experiment,
@@ -331,14 +312,41 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                     epochs=args.epochs,
                     learning_rate=args.learning_rate,
                     save_path=(
-                        args.output / "models" / f"fold_{index:04d}.pt"
+                        args.output / "models" / f"fold_{task_index:04d}.pt"
                         if args.save_models
                         else None
                     ),
                     camera=setting.camera,
+                    seed=args.seed,
                 )
-            else:
-                index, result = _train_frozen_task(fold)
+                _write_result(
+                    args.output,
+                    task_index,
+                    result,
+                    metrics,
+                    predictions,
+                    save_model=args.save_models,
+                    total_tasks=total_tasks,
+                    wandb_run=wandb_run,
+                )
+                task_index += 1
+            continue
+
+        folds = []
+        for experiment in experiments:
+            folds.append(
+                (
+                    task_index + len(folds),
+                    experiment,
+                    setting,
+                    selected,
+                    feature_columns,
+                    args.task,
+                    args.save_models,
+                    args.seed,
+                )
+            )
+        for index, result in run_folds(folds, args.jobs):
             _write_result(
                 args.output,
                 index,
@@ -349,6 +357,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                 total_tasks=total_tasks,
                 wandb_run=wandb_run,
             )
+        task_index += len(folds)
 
     pd.DataFrame(metrics).sort_values("task_index").to_csv(
         args.output / "metrics.csv", index=False

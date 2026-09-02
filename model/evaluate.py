@@ -50,16 +50,11 @@ def _expected_labels(task: str) -> list[int]:
     raise ValueError(f"unknown task: {task}")
 
 
-def _prediction_groups(predictions: pd.DataFrame) -> dict[tuple[str, ...], list[int]]:
-    groups: dict[tuple[str, ...], list[int]] = {}
-    for index in range(len(predictions)):
-        groups.setdefault(_key(predictions.iloc[index]), []).append(index)
-    return groups
-
-
-def _fold_metrics(predictions: pd.DataFrame, labels: list[int]) -> dict[str, float]:
-    target = pd.to_numeric(predictions["target"], errors="raise").astype(int)
-    prediction = pd.to_numeric(predictions["prediction"], errors="raise").astype(int)
+def classification_metrics(
+    target: Any, prediction: Any, task: str
+) -> dict[str, float]:
+    """Return classification metrics over the task's complete label set."""
+    labels = _expected_labels(task)
     return {
         "accuracy": float(accuracy_score(target, prediction)),
         "balanced_accuracy": float(
@@ -81,6 +76,19 @@ def _fold_metrics(predictions: pd.DataFrame, labels: list[int]) -> dict[str, flo
             )
         ),
     }
+
+
+def _prediction_groups(predictions: pd.DataFrame) -> dict[tuple[str, ...], list[int]]:
+    groups: dict[tuple[str, ...], list[int]] = {}
+    for index in range(len(predictions)):
+        groups.setdefault(_key(predictions.iloc[index]), []).append(index)
+    return groups
+
+
+def _fold_metrics(predictions: pd.DataFrame, task: str) -> dict[str, float]:
+    target = pd.to_numeric(predictions["target"], errors="raise").astype(int)
+    prediction = pd.to_numeric(predictions["prediction"], errors="raise").astype(int)
+    return classification_metrics(target, prediction, task)
 
 
 def _summary(metrics: pd.DataFrame) -> pd.DataFrame:
@@ -135,7 +143,7 @@ def evaluate_run(
         ).all():
             raise ValueError("prediction experiment_id must equal held_out_experiment")
 
-    labels = _expected_labels(task)
+    _expected_labels(task)
     metrics = metrics.reset_index(drop=True).copy()
     predictions = predictions.reset_index(drop=True)
     metric_rows: dict[tuple[str, ...], list[int]] = {}
@@ -157,6 +165,6 @@ def evaluate_run(
                     f"({len(indices)} != {expected_count})"
                 )
             metrics.loc[metric_index, list(METRIC_COLUMNS)] = _fold_metrics(
-                predictions.loc[indices], labels
+                predictions.loc[indices], task
             )
     return metrics, _summary(metrics)

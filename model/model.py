@@ -9,19 +9,20 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, f1_score, recall_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
+from model.evaluate import classification_metrics
 
-def make_head(name: str) -> Pipeline:
+
+def make_head(name: str, seed: int = 0) -> Pipeline:
     classifiers = {
         "logistic": LogisticRegression(
-            class_weight="balanced", max_iter=1_000, random_state=0
+            class_weight="balanced", max_iter=1_000, random_state=seed
         ),
         "random_forest": RandomForestClassifier(
-            n_estimators=200, class_weight="balanced", random_state=0, n_jobs=1
+            n_estimators=200, class_weight="balanced", random_state=seed, n_jobs=1
         ),
         "rbf_svm": SVC(kernel="rbf", class_weight="balanced"),
     }
@@ -80,6 +81,7 @@ def train_frozen_fold(
     modality: str,
     task: str,
     return_model: bool = False,
+    seed: int = 0,
 ) -> dict[str, Any]:
     """Fit one frozen-feature fold and return data for the main process to write."""
     train, test = split_heldout(rows, heldout_experiment)
@@ -101,7 +103,7 @@ def train_frozen_fold(
         )
         return {"metrics": metrics, "predictions": pd.DataFrame(), "model": None}
 
-    model = make_head(head)
+    model = make_head(head, seed=seed)
     model.fit(train[feature_columns], train["target"])
     prediction = model.predict(test[feature_columns]).astype(int)
     if hasattr(model, "decision_function"):
@@ -140,27 +142,7 @@ def train_frozen_fold(
             predictions[f"decision_score_{class_index}"] = scores[:, class_index]
 
     target = test["target"].to_numpy(dtype=int)
-    metrics.update(
-        accuracy=float(accuracy_score(target, prediction)),
-        balanced_accuracy=float(
-            recall_score(
-                target,
-                prediction,
-                labels=sorted(expected),
-                average="macro",
-                zero_division=0,
-            )
-        ),
-        macro_f1=float(
-            f1_score(
-                target,
-                prediction,
-                labels=sorted(expected),
-                average="macro",
-                zero_division=0,
-            )
-        ),
-    )
+    metrics.update(classification_metrics(target, prediction, task))
     return {
         "metrics": metrics,
         "predictions": predictions,

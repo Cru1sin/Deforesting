@@ -7,7 +7,7 @@ import sys
 import pandas as pd
 import pytest
 
-from model.evaluate import evaluate_run
+from model.evaluate import classification_metrics, evaluate_run
 
 SETTING = {
     "representation": "handcrafted",
@@ -15,6 +15,19 @@ SETTING = {
     "camera": "front",
     "modality": "rgb",
 }
+
+
+def test_classification_metrics_use_the_full_task_labels() -> None:
+    assert classification_metrics([0, 0], [0, 0], "binary") == {
+        "accuracy": 1.0,
+        "balanced_accuracy": 0.5,
+        "macro_f1": 0.5,
+    }
+
+
+def test_classification_metrics_reject_unknown_task() -> None:
+    with pytest.raises(ValueError, match="unknown task"):
+        classification_metrics([0], [0], "unknown")
 
 
 def _metrics(*, held_out: str, status: str = "ok", test_images: int = 2) -> pd.DataFrame:

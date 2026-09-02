@@ -31,11 +31,13 @@ def _rows(*, missing_heldout_class: bool = False) -> pd.DataFrame:
 
 @pytest.mark.parametrize("name", ["logistic", "random_forest", "rbf_svm"])
 def test_make_head_uses_the_required_small_sklearn_pipeline(name: str) -> None:
-    pipeline = make_head(name)
+    pipeline = make_head(name, seed=17)
 
     assert list(pipeline.named_steps) == ["imputer", "scaler", "classifier"]
     if name == "random_forest":
         assert pipeline.named_steps["classifier"].n_jobs == 1
+    if name in {"logistic", "random_forest"}:
+        assert pipeline.named_steps["classifier"].random_state == 17
 
 
 def test_split_heldout_never_leaks_the_test_experiment_into_training() -> None:

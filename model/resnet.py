@@ -13,10 +13,11 @@ import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
-from sklearn.metrics import accuracy_score, f1_score, recall_score
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
+
+from model.evaluate import classification_metrics
 
 
 class ImageRows(Dataset):  # type: ignore[misc]
@@ -116,6 +117,7 @@ def train_resnet_fold(
     weights: models.ResNet50_Weights | None = models.ResNet50_Weights.IMAGENET1K_V2,
     device: torch.device | None = None,
     camera: str = "front",
+    seed: int = 0,
 ) -> dict[str, Any]:
     """Train fixed epochs on non-heldout rows, then evaluate heldout once."""
     heldout = rows["experiment_id"].astype(str).eq(heldout_experiment)
@@ -144,7 +146,7 @@ def train_resnet_fold(
         return {"metrics": metrics, "predictions": pd.DataFrame(), "model": None}
 
     destination = device or preferred_device()
-    torch.manual_seed(0)
+    torch.manual_seed(seed)
     model = BinaryResNet50(num_classes=len(expected), weights=weights).to(destination)
     train_transform, evaluation_transform = image_transforms()
     loader = DataLoader(
@@ -152,7 +154,7 @@ def train_resnet_fold(
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
-        generator=torch.Generator().manual_seed(0),
+        generator=torch.Generator().manual_seed(seed),
     )
     counts = train["target"].value_counts().reindex(sorted(expected)).to_numpy()
     class_weights = torch.tensor(
@@ -210,25 +212,5 @@ def train_resnet_fold(
         for class_index in sorted(expected):
             predictions[f"decision_score_{class_index}"] = scores[:, class_index]
     target = test["target"].to_numpy(dtype=int)
-    metrics.update(
-        accuracy=float(accuracy_score(target, prediction)),
-        balanced_accuracy=float(
-            recall_score(
-                target,
-                prediction,
-                labels=sorted(expected),
-                average="macro",
-                zero_division=0,
-            )
-        ),
-        macro_f1=float(
-            f1_score(
-                target,
-                prediction,
-                labels=sorted(expected),
-                average="macro",
-                zero_division=0,
-            )
-        ),
-    )
+    metrics.update(classification_metrics(target, prediction, task))
     return {"metrics": metrics, "predictions": predictions, "model": None}

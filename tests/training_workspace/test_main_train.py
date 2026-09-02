@@ -26,6 +26,7 @@ def test_parser_defaults_to_one_primary_setting() -> None:
     assert args.modalities == ["rgb"]
     assert args.jobs == 6
     assert args.maximum_per_group == 48
+    assert args.seed == 0
     assert args.wandb_project is None
     assert args.wandb_run_name is None
     assert main_train.expand_settings(args) == [
@@ -288,9 +289,6 @@ def test_parallel_run_writes_task_log_in_completion_order(
         def __exit__(self, *args: object) -> None:
             pass
 
-        def map(self, function, folds):  # type: ignore[no-untyped-def]
-            return (result(fold[0]) for fold in folds)
-
         def submit(self, function, fold):  # type: ignore[no-untyped-def]
             future = main_train.concurrent.futures.Future()
             future.set_result(result(fold[0]))
@@ -310,6 +308,7 @@ def test_parallel_run_writes_task_log_in_completion_order(
             str(output),
             "--heads",
             "logistic",
+            "random_forest",
             "--modalities",
             "time",
             "--jobs",
@@ -319,7 +318,40 @@ def test_parallel_run_writes_task_log_in_completion_order(
 
     assert main_train.run(args) == 0
     task_log = [json.loads(line) for line in (output / "task_log.jsonl").read_text().splitlines()]
-    assert [row["task_index"] for row in task_log] == [1, 0]
+    assert [row["task_index"] for row in task_log] == [1, 0, 3, 2]
+
+
+def test_main_passes_seed_unchanged_to_frozen_folds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels = tmp_path / "labels.parquet"
+    _labels().to_parquet(labels, index=False)
+    seeds: list[int] = []
+
+    def fake_fold(*args: object, **kwargs: object) -> dict[str, object]:
+        seeds.append(kwargs["seed"])  # type: ignore[arg-type]
+        return {"metrics": {"status": "ok"}, "predictions": pd.DataFrame(), "model": None}
+
+    monkeypatch.setattr(main_train, "train_frozen_fold", fake_fold)
+    args = main_train.build_parser().parse_args(
+        [
+            "--labels",
+            str(labels),
+            "--output",
+            str(tmp_path / "trained"),
+            "--heads",
+            "logistic",
+            "--modalities",
+            "time",
+            "--jobs",
+            "1",
+            "--seed",
+            "23",
+        ]
+    )
+
+    assert main_train.run(args) == 0
+    assert seeds == [23, 23]
 
 
 def test_wandb_is_optional_and_logged_only_by_main_process(
