@@ -100,3 +100,24 @@ def test_nonempty_output_requires_overwrite(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError, match="not empty"):
         main_evaluate.run(args)
+
+
+def test_overwrite_replaces_stale_evaluation_directory(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run)
+    output = tmp_path / "evaluation"
+    output.mkdir()
+    (output / "stale.txt").write_text("old")
+    args = main_evaluate.build_parser().parse_args(
+        ["--results", str(run), "--output", str(output), "--overwrite"]
+    )
+
+    assert main_evaluate.run(args) == 0
+
+    assert not (output / "stale.txt").exists()
+    assert {path.name for path in output.iterdir()} == {
+        "command.txt",
+        "args.json",
+        "experiment_metrics.csv",
+        "summary.csv",
+    }
