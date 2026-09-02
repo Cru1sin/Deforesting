@@ -1,19 +1,12 @@
 from __future__ import annotations
 
-import importlib
 import json
 from pathlib import Path
-from types import ModuleType
 
 import pandas as pd
 import pytest
 
-
-def _main_labels() -> ModuleType:
-    try:
-        return importlib.import_module("main_labels")
-    except ModuleNotFoundError:
-        pytest.fail("main_labels.py is missing", pytrace=False)
+import main_labels
 
 
 def _canonical_cost() -> pd.DataFrame:
@@ -31,8 +24,6 @@ def _canonical_cost() -> pd.DataFrame:
 
 
 def test_parser_exposes_only_the_label_run_arguments() -> None:
-    main_labels = _main_labels()
-
     args = main_labels.build_parser().parse_args([])
 
     assert vars(args) == {
@@ -47,7 +38,6 @@ def test_parser_exposes_only_the_label_run_arguments() -> None:
 def test_main_gates_cost_before_calling_build(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    main_labels = _main_labels()
     cost = _canonical_cost()
     cost.loc[0, "label_eligible"] = False
     monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: cost)
@@ -69,7 +59,6 @@ def test_main_calls_build_once_and_records_copyable_invocation(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    main_labels = _main_labels()
     cost = _canonical_cost()
     monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: cost)
     calls: list[tuple[object, ...]] = []

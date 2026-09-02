@@ -1,17 +1,9 @@
 from __future__ import annotations
 
-import importlib
-
 import pandas as pd
 import pytest
 
-
-def _gate(cost: pd.DataFrame) -> None:
-    try:
-        build = importlib.import_module("labels.build")
-    except ModuleNotFoundError:
-        pytest.fail("labels.build cost gate is missing", pytrace=False)
-    build.validate_cost(cost)
+from labels.build import validate_cost
 
 
 def _canonical_cost() -> pd.DataFrame:
@@ -29,14 +21,14 @@ def _canonical_cost() -> pd.DataFrame:
 
 
 def test_gate_accepts_only_canonical_label_eligible_cost() -> None:
-    _gate(_canonical_cost())
+    validate_cost(_canonical_cost())
 
 
 def test_gate_rejects_missing_columns_clearly() -> None:
     cost = _canonical_cost().drop(columns="candidate_time")
 
     with pytest.raises(ValueError, match="missing required columns: candidate_time"):
-        _gate(cost)
+        validate_cost(cost)
 
 
 def test_gate_rejects_any_label_ineligible_row() -> None:
@@ -44,7 +36,7 @@ def test_gate_rejects_any_label_ineligible_row() -> None:
     cost.loc[1, "label_eligible"] = False
 
     with pytest.raises(ValueError, match="label_eligible must be True for every row"):
-        _gate(cost)
+        validate_cost(cost)
 
 
 def test_gate_rejects_any_named_variant() -> None:
@@ -52,4 +44,4 @@ def test_gate_rejects_any_named_variant() -> None:
     cost.loc[1, "variant"] = "strict_state"
 
     with pytest.raises(ValueError, match="named cost variant cannot produce hard labels"):
-        _gate(cost)
+        validate_cost(cost)

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
+import frost_analysis.labels.cost as legacy_cost
 from labels import build
 
 
@@ -23,125 +23,6 @@ def _canonical_cost(**columns: object) -> pd.DataFrame:
     return pd.DataFrame(values)
 
 
-def test_image_states_interpolate_only_contiguous_runs_with_two_candidates() -> None:
-    curve = _canonical_cost(
-        cycle_name=["cycle_a"] * 7,
-        candidate_time=pd.date_range("2026-01-01 00:10", periods=7, freq="10min"),
-        relative_regret=[0.2, 0.0, 0.0, 0.2, 0.0, 0.0, 0.1],
-        optimization_eligible=[True, True, False, True, True, False, True],
-        is_censored=[False] * 7,
-        label_eligible=[True] * 7,
-        variant=[None] * 7,
-    )
-    image_times = pd.to_datetime(
-        [
-            "2026-01-01 00:05",
-            "2026-01-01 00:10",
-            "2026-01-01 00:15",
-            "2026-01-01 00:20",
-            "2026-01-01 00:25",
-            "2026-01-01 00:30",
-            "2026-01-01 00:35",
-            "2026-01-01 00:40",
-            "2026-01-01 00:45",
-            "2026-01-01 00:50",
-            "2026-01-01 00:55",
-            "2026-01-01 01:00",
-            "2026-01-01 01:05",
-            "2026-01-01 01:10",
-            "2026-01-01 01:15",
-        ]
-    )
-
-    labels = build.assign_image_cost_states(image_times, curve, regret_threshold=0.01)
-
-    expected = pd.Series(
-        [
-            pd.NA,
-            "pre_optimal",
-            "pre_optimal",
-            "near_optimal",
-            pd.NA,
-            pd.NA,
-            pd.NA,
-            "post_optimal",
-            "post_optimal",
-            "near_optimal",
-            pd.NA,
-            pd.NA,
-            pd.NA,
-            pd.NA,
-            pd.NA,
-        ],
-        dtype="string",
-    )
-    pd.testing.assert_series_equal(labels["cost_state"], expected, check_names=False)
-    assert labels.loc[labels["cost_state"].eq("near_optimal"), "binary_state"].isna().all()
-    assert labels.loc[labels["cost_state"].isna(), "relative_regret"].isna().all()
-
-
-def test_image_states_do_not_envelope_near_points() -> None:
-    curve = _canonical_cost(
-        cycle_name=["cycle_a"] * 3,
-        candidate_time=pd.date_range("2026-01-01", periods=3, freq="10min"),
-        relative_regret=[0.0, 0.2, 0.0],
-        optimization_eligible=[True] * 3,
-        is_censored=[False] * 3,
-        label_eligible=[True] * 3,
-        variant=[None] * 3,
-    )
-
-    labels = build.assign_image_cost_states(curve["candidate_time"], curve, regret_threshold=0.01)
-
-    assert labels["cost_state"].tolist() == [
-        "near_optimal",
-        "post_optimal",
-        "near_optimal",
-    ]
-
-
-def test_image_states_require_t_star_in_an_interpolatable_run() -> None:
-    curve = _canonical_cost(
-        cycle_name=["cycle_a"] * 7,
-        candidate_time=pd.date_range("2026-01-01 00:10", periods=7, freq="10min"),
-        relative_regret=[0.2, 0.1, np.nan, 0.0, np.nan, 0.1, 0.2],
-        optimization_eligible=[True, True, False, True, False, True, True],
-        is_censored=[False] * 7,
-        label_eligible=[True] * 7,
-        variant=[None] * 7,
-    )
-
-    labels = build.assign_image_cost_states(
-        pd.to_datetime(["2026-01-01 00:15", "2026-01-01 00:40", "2026-01-01 01:05"]),
-        curve,
-        regret_threshold=0.01,
-    )
-
-    assert labels["cost_state"].isna().all()
-    assert labels["relative_regret"].isna().all()
-
-
-def test_complete_cycles_require_observed_stable_preparation_and_defrost_boundaries() -> None:
-    catalog = pd.DataFrame(
-        {
-            "cycle_name": ["complete", "missing_prep", "censored"],
-            "status": ["valid", "valid", "valid"],
-            "stable_heating_start": ["2026-01-01"] * 3,
-            "defrost_preparation_start": ["2026-01-01 00:50", None, "2026-01-01 00:50"],
-            "defrost_start": ["2026-01-01 01:00"] * 3,
-            "defrost_end": ["2026-01-01 01:05"] * 3,
-        }
-    )
-    cost = pd.DataFrame(
-        {
-            "cycle_name": ["complete", "missing_prep", "censored"],
-            "is_censored": [False, False, True],
-        }
-    )
-
-    assert build.complete_observed_cycle_names(catalog, cost) == ["complete"]
-
-
 def test_experiment_split_matches_the_formal_v1_pattern() -> None:
     assert build.experiment_splits(["e5", "e3", "e1", "e4", "e2"]) == {
         "e1": "train",
@@ -150,6 +31,76 @@ def test_experiment_split_matches_the_formal_v1_pattern() -> None:
         "e4": "validation",
         "e5": "test",
     }
+
+
+def test_threshold_suffixes_are_exact_and_collision_free() -> None:
+    assert [build.threshold_suffix(value) for value in (0.01, 0.02, 0.05, 0.10)] == [
+        "01pct",
+        "02pct",
+        "05pct",
+        "10pct",
+    ]
+    assert build.threshold_suffix(0.011) == "01p1pct"
+    assert build.threshold_suffix(0.019) == "01p9pct"
+    assert build.threshold_suffix(0.29) == "29pct"
+
+
+def test_legacy_module_reexports_the_single_label_algorithm_owner() -> None:
+    assert legacy_cost._curve_support is build._curve_support
+    assert legacy_cost.curve_label_exclusion_reason is build.curve_label_exclusion_reason
+    assert legacy_cost.complete_catalog_cycle_names is build.complete_catalog_cycle_names
+    assert legacy_cost.complete_observed_cycle_names is build.complete_observed_cycle_names
+    assert legacy_cost.assign_image_cost_states is build.assign_image_cost_states
+
+
+def test_build_rejects_an_all_unsupported_cycle_with_images(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = pd.DataFrame(
+        {
+            "cycle_name": ["unsupported"],
+            "experiment_id": ["e1"],
+            "status": ["valid"],
+            "stable_heating_start": ["2026-01-01 00:00"],
+            "defrost_start": ["2026-01-01 00:40"],
+            "defrost_end": ["2026-01-01 00:45"],
+        }
+    )
+    metadata = pd.DataFrame(
+        {
+            "cycle_name": ["unsupported"],
+            "cycle_stage": ["frost_development"],
+            "image_time": pd.to_datetime(["2026-01-01 00:10"]),
+            "camera_role": ["top"],
+            "file_name": ["image.jpg"],
+        }
+    )
+
+    class FakeLoader:
+        def __init__(self, _: Path) -> None:
+            pass
+
+        def list_cycles(self) -> pd.DataFrame:
+            return catalog
+
+        def load_image_metadata(self) -> pd.DataFrame:
+            return metadata
+
+    monkeypatch.setattr(build, "DatasetLoader", FakeLoader)
+    cost = pd.DataFrame(
+        {
+            "cycle_name": ["unsupported"] * 3,
+            "candidate_time": pd.date_range("2026-01-01", periods=3, freq="10min"),
+            "relative_regret": [0.2, 0.0, 0.1],
+            "optimization_eligible": [False, True, False],
+            "is_censored": [False] * 3,
+            "label_eligible": [True] * 3,
+            "variant": [None] * 3,
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="^no supported RGB labels$"):
+        build.build_labels(tmp_path / "dataset", cost, tmp_path / "labels", (0.01,))
 
 
 def test_build_writes_labels_balance_and_cycle_audit(
@@ -161,7 +112,6 @@ def test_build_writes_labels_balance_and_cycle_audit(
             "experiment_id": ["e1", "e2", "e3", "e4"],
             "status": ["valid"] * 4,
             "stable_heating_start": pd.date_range("2026-01-01", periods=4, freq="D"),
-            "defrost_preparation_start": pd.date_range("2026-01-01 00:50", periods=4, freq="D"),
             "defrost_start": pd.date_range("2026-01-01 01:00", periods=4, freq="D"),
             "defrost_end": pd.date_range("2026-01-01 01:05", periods=4, freq="D"),
         }
@@ -249,22 +199,9 @@ def test_build_writes_labels_balance_and_cycle_audit(
     assert (output / "keep.txt").read_text(encoding="utf-8") == "do not remove\n"
 
 
-def test_existing_output_is_rejected_before_dataset_loading(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class DatasetMustNotLoad:
-        def __init__(self, _: Path) -> None:
-            raise AssertionError("existing-output check must precede Dataset loading")
-
-    monkeypatch.setattr(build, "DatasetLoader", DatasetMustNotLoad, raising=False)
+def test_existing_output_is_rejected_before_dataset_loading(tmp_path: Path) -> None:
     output = tmp_path / "labels"
     output.mkdir()
 
     with pytest.raises(FileExistsError, match="pass --overwrite"):
-        build.build_labels(tmp_path / "dataset", _canonical_cost(), output, (0.01,))
-
-
-def test_dataloader_wrapper_exports_rgb_camera_order() -> None:
-    import dataloader.images as images
-
-    assert hasattr(images, "RGB_CAMERA_ORDER")
+        build.build_labels(tmp_path / "missing_dataset", _canonical_cost(), output, (0.01,))

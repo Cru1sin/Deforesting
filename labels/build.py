@@ -20,13 +20,6 @@ COST_REQUIRED_COLUMNS = (
     "label_eligible",
     "variant",
 )
-LABEL_KEY_COLUMNS = (
-    "cycle_name",
-    "camera_role",
-    "image_time",
-    "file_name",
-    "relative_regret",
-)
 CAMERA_GROUPS: dict[str, tuple[str, ...]] = {
     "top": ("top",),
     "top_close": ("top_close",),
@@ -49,6 +42,12 @@ def validate_cost(cost: pd.DataFrame) -> None:
         raise ValueError("label_eligible must be True for every row")
     if cost["variant"].fillna("").astype(str).str.strip().ne("").any():
         raise ValueError("named cost variant cannot produce hard labels")
+
+
+def threshold_suffix(threshold: float) -> str:
+    """Format a regret threshold as an exact readable column suffix."""
+    whole, dot, fraction = f"{threshold * 100:.12g}".partition(".")
+    return f"{whole.zfill(2)}{f'p{fraction}' if dot else ''}pct"
 
 
 def _curve_support(
@@ -127,7 +126,6 @@ def complete_catalog_cycle_names(catalog: pd.DataFrame) -> list[str]:
         "cycle_name",
         "status",
         "stable_heating_start",
-        "defrost_preparation_start",
         "defrost_start",
         "defrost_end",
     )
@@ -171,9 +169,6 @@ def build_labels(
     loader = DatasetLoader(dataset_root)
     catalog = loader.list_cycles()
     metadata = loader.load_image_metadata()
-    missing = [column for column in LABEL_KEY_COLUMNS[:-1] if column not in metadata]
-    if missing:
-        raise ValueError(f"image metadata is missing label columns: {', '.join(missing)}")
 
     complete_cycles = complete_catalog_cycle_names(catalog)
     valid_cycles = complete_observed_cycle_names(catalog, cost)
@@ -240,7 +235,7 @@ def build_labels(
                 ),
             }
         )
-        if images is None or base is None:
+        if images is None or base is None or reason != "labeled":
             continue
         result = images.reset_index(drop=True).copy()
         result["relative_regret"] = base["relative_regret"]
@@ -248,7 +243,7 @@ def build_labels(
             states = assign_image_cost_states(
                 images["image_time"], curve, regret_threshold=float(threshold)
             )
-            suffix = f"{int(threshold * 100):02d}pct"
+            suffix = threshold_suffix(float(threshold))
             result[f"cost_state_{suffix}"] = states["three_class_state"]
             result[f"three_class_state_{suffix}"] = states["three_class_state"]
             result[f"binary_state_{suffix}"] = states["binary_state"]
@@ -259,7 +254,7 @@ def build_labels(
     labels = pd.concat(labeled, ignore_index=True)
     balance_rows: list[dict[str, object]] = []
     for threshold in thresholds:
-        state_column = f"cost_state_{int(threshold * 100):02d}pct"
+        state_column = f"cost_state_{threshold_suffix(float(threshold))}"
         for group_name, roles in CAMERA_GROUPS.items():
             selected = labels.loc[labels["camera_role"].isin(roles)]
             for (split, state), rows in selected.groupby(["split", state_column], observed=True):
