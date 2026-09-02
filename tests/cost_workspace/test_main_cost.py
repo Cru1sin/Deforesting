@@ -512,29 +512,39 @@ def test_cycle_artifact_name_must_be_a_safe_basename(
         )
 
 
-def test_compare_separates_absolute_inverse_cop_by_heat_basis(tmp_path: Path) -> None:
-    runs = []
-    for name, basis, cost in (("v1", "unit", 0.5), ("v25", "water", 0.4)):
-        run = tmp_path / name
-        run.mkdir()
-        (run / "recipe.json").write_text(json.dumps({"base_cost": name, "heat_basis": basis}))
-        pd.DataFrame(
-            {
-                "cycle_name": ["cycle_a", "cycle_a"],
-                "candidate_elapsed_minutes": [10, 11],
-                "relative_regret": [0.1, 0.0],
-                "inverse_cop": [cost + 0.1, cost],
-            }
-        ).to_csv(run / "cost.csv", index=False)
-        runs.append(run)
+def test_compare_delegates_results_and_dataset_to_moved_cost_plotter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs = [tmp_path / "v1", tmp_path / "v25"]
+    loader = object()
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda dataset: (calls.append((dataset,)), loader)[1])
+    monkeypatch.setattr(
+        main_cost,
+        "render_standardized_cost_results",
+        lambda result_dirs, actual_loader, output, *, overwrite: calls.append(
+            (result_dirs, actual_loader, output, overwrite)
+        ),
+    )
 
-    figure, path = main_cost.compare_results(runs, tmp_path / "plots")
+    assert (
+        main_cost.main(
+            [
+                "--action",
+                "compare",
+                "--dataset",
+                str(tmp_path / "dataset"),
+                "--results",
+                *(str(run) for run in runs),
+                "--output-root",
+                str(tmp_path / "output"),
+                "--overwrite",
+            ]
+        )
+        == 0
+    )
 
-    assert path.exists()
-    assert figure.axes[0].get_ylabel() == "Relative regret"
-    assert {axis.get_title() for axis in figure.axes[1:]} == {
-        "Absolute inverse COP — unit heat basis",
-        "Absolute inverse COP — water heat basis",
-    }
-    with pytest.raises(FileExistsError, match="overwrite"):
-        main_cost.compare_results(runs, tmp_path / "plots")
+    assert calls == [
+        (tmp_path / "dataset",),
+        (runs, loader, tmp_path / "output" / "plots", True),
+    ]

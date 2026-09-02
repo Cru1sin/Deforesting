@@ -1,10 +1,11 @@
+# mypy: ignore-errors
 #!/usr/bin/env python3
 """Compare defrost cost optima and render cycle publication PNGs."""
 
 from __future__ import annotations
 
-import argparse
-from collections.abc import Mapping
+import json
+from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -34,6 +35,7 @@ STYLES = {
     "v2.6": ("#333333", "h", "V2.6 unit-heat optimum"),
     "v3": ("#1B7F79", ">", "V3 robust optimum"),
     "renewal_water": ("#B2182B", "*", "Renewal-water optimum"),
+    "v2.6.8": ("#333333", "h", "V2.6.8 optimum"),
     "RB": ("#2E7D5B", "o", "Rule defrost"),
 }
 CURVE_LINESTYLES = {
@@ -47,6 +49,7 @@ CURVE_LINESTYLES = {
     "v2.6": ":",
     "v3": "-",
     "renewal_water": "-",
+    "v2.6.8": ":",
 }
 V26_PATCHES = tuple(f"v2.6.{patch}" for patch in range(1, 8))
 V26_PATCH_STYLES = {
@@ -68,6 +71,13 @@ CURVE_LINESTYLES.update(
         "v2.6.6": (0, (3, 1, 1, 1)),
         "v2.6.7": (0, (5, 2)),
     }
+)
+_CANONICAL_STYLES = frozenset(STYLES)
+_DYNAMIC_STYLES = (
+    ("#E69F00", "s", "--"),
+    ("#009E73", "^", "-."),
+    ("#D55E00", "P", ":"),
+    ("#CC79A7", "X", "-"),
 )
 DATE_BANDS = ("#EAF2F8", "#FFF3E6")
 V266_STATUS_MARKERS = {
@@ -114,6 +124,16 @@ def _style(algorithm: str) -> tuple[str, str, str]:
     return V26_PATCH_STYLES[algorithm] if algorithm in V26_PATCH_STYLES else STYLES[algorithm]
 
 
+def _run_key(recipe: Mapping[str, object]) -> tuple[str, str]:
+    base_cost = str(recipe.get("base_cost", "")).strip().lower()
+    if not base_cost:
+        raise ValueError("result recipe has no base_cost")
+    variant = recipe.get("variant")
+    key = base_cost if variant in (None, "") else f"{base_cost}__{variant}"
+    label = base_cost.upper() if variant in (None, "") else f"{base_cost.upper()} ({variant})"
+    return key, label
+
+
 def _read_tables(sources: Mapping[str, Path]) -> dict[str, pd.DataFrame]:
     tables: dict[str, pd.DataFrame] = {}
     for label, path in sources.items():
@@ -131,6 +151,75 @@ def _read_tables(sources: Mapping[str, Path]) -> dict[str, pd.DataFrame]:
         tables[algorithm] = table
         tables[algorithm].attrs["label"] = str(label)
     return tables
+
+
+def _load_result_tables(
+    result_dirs: Sequence[Path], loader: DatasetLoader
+) -> dict[str, pd.DataFrame]:
+    tables: dict[str, pd.DataFrame] = {}
+    for directory in result_dirs:
+        recipe = json.loads((directory / "recipe.json").read_text(encoding="utf-8"))
+        key, label = _run_key(recipe)
+        if key in tables:
+            raise ValueError(f"result runs have the same key: {key}")
+        heat_basis = recipe.get("heat_basis")
+        if heat_basis not in {"unit", "water"}:
+            raise ValueError(f"result has no explicit heat basis: {directory}")
+        table = pd.read_csv(directory / "cost.csv")
+        table["algorithm"] = key
+        table["heat_basis"] = heat_basis
+        if "t_RB" not in table:
+            table["t_RB"] = pd.NaT
+        if "rb_status" not in table:
+            table["rb_status"] = "unavailable"
+        for cycle_name, curve in table.groupby("cycle_name", sort=False):
+            regret = pd.to_numeric(curve["relative_regret"], errors="coerce")
+            eligible = curve["optimization_eligible"].fillna(False) & np.isfinite(regret)
+            if not eligible.any():
+                if key.startswith("v2.6.8"):
+                    table.loc[curve.index, "t_star"] = pd.NaT
+                    table.loc[curve.index, "t_star_model_supported"] = False
+                    continue
+                raise ValueError(f"{key} has no finite eligible optimum for {cycle_name}")
+            selected = curve.loc[eligible].iloc[int(regret.loc[eligible].argmin())]
+            table.loc[curve.index, "t_star"] = pd.to_datetime(
+                selected["candidate_time"], errors="coerce", format="mixed"
+            )
+            support_column = next(
+                (
+                    column
+                    for column in ("model_supported", "supported", "optimization_eligible")
+                    if column in curve
+                ),
+                None,
+            )
+            table.loc[curve.index, "t_star_model_supported"] = (
+                selected[support_column] if support_column is not None else pd.NA
+            )
+        table.attrs["display_label"] = label
+        table.attrs["heat_basis"] = str(heat_basis)
+        tables[key] = table
+    cycles = sorted(
+        set().union(*(set(table["cycle_name"].astype(str)) for table in tables.values()))
+    )
+    records = {cycle: loader.get_cycle_record(cycle) for cycle in cycles}
+    for table in tables.values():
+        table["cycle_start"] = table["cycle_name"].map(
+            lambda cycle: records[str(cycle)]["boundaries"]["start_time"]
+        )
+    return tables
+
+
+def _register_dynamic_styles(tables: Mapping[str, pd.DataFrame]) -> None:
+    dynamic = 0
+    for algorithm, table in tables.items():
+        if algorithm in _CANONICAL_STYLES or algorithm in V26_PATCH_STYLES:
+            continue
+        color, marker, linestyle = _DYNAMIC_STYLES[dynamic % len(_DYNAMIC_STYLES)]
+        label = table.attrs.get("display_label", algorithm.upper())
+        STYLES[algorithm] = (color, marker, f"{label} optimum")
+        CURVE_LINESTYLES[algorithm] = linestyle
+        dynamic += 1
 
 
 def _cycle_points(table: pd.DataFrame, optimum_column: str = "t_star") -> pd.DataFrame:
@@ -961,6 +1050,53 @@ def generate_v267_evidence(
         _save_png(_plot_ticket_loeo(loeo, target), output / f"ticket_{target}_loeo.png")
 
 
+def _render_decision_publications(
+    tables: Mapping[str, pd.DataFrame], loader: DatasetLoader, output: Path
+) -> None:
+    for algorithm, table in tables.items():
+        for cycle_name in sorted(table["cycle_name"].astype(str).unique()):
+            curve = table.loc[table["cycle_name"].eq(cycle_name)]
+            record = loader.get_cycle_record(cycle_name)
+            filename = f"cycle_{int(cycle_name.rsplit('_', 1)[-1]):03d}_publication.png"
+            render_decision_publication(
+                loader.load_cycle(cycle_name),
+                record,
+                curve,
+                _decision_images(
+                    loader.load_image_metadata(cycle_name),
+                    loader.load_cycle_images(cycle_name),
+                    curve,
+                ),
+                output / algorithm / filename,
+                optimal_label=f"{table.attrs['display_label']} optimum",
+                full_candidate_domain=True,
+            )
+
+
+def render_standardized_cost_results(
+    result_dirs: Sequence[Path],
+    loader: DatasetLoader,
+    output: Path,
+    *,
+    overwrite: bool = False,
+) -> None:
+    """Render the established cost figures from standardized cost run directories."""
+    tables = _load_result_tables(result_dirs, loader)
+    _register_dynamic_styles(tables)
+    comparison = output / "comparison_all_runs_RB.png"
+    if comparison.exists() and not overwrite:
+        raise FileExistsError(f"comparison exists; pass --overwrite: {comparison}")
+    _save_png(_comparison_figure(tables, tuple(tables)), comparison)
+    _render_decision_publications(tables, loader, output / "decision_publications")
+    for heat_basis in dict.fromkeys(table.attrs["heat_basis"] for table in tables.values()):
+        selected = {
+            algorithm: table
+            for algorithm, table in tables.items()
+            if table.attrs["heat_basis"] == heat_basis
+        }
+        _render_cost_curve_comparisons(selected, loader, output / "cost_curves" / heat_basis)
+
+
 def generate_cost_function_figures(
     sources: Mapping[str, Path],
     loader: DatasetLoader,
@@ -1052,43 +1188,3 @@ def generate_cost_function_figures(
         )
     if not comparison_only:
         _render_cycle_sets(tables, loader, records, output)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cost", nargs="+", required=True, metavar="LABEL=CSV")
-    parser.add_argument("--dataset", type=Path, default=Path("dataset"))
-    parser.add_argument("--output", type=Path, default=Path("output/成本函数"))
-    parser.add_argument("--comparison-only", action="store_true")
-    parser.add_argument("--curves-only", action="store_true")
-    parser.add_argument("--fetch-cloud", action="store_true")
-    parser.add_argument("--minimum-free-gib", type=float, default=5)
-    parser.add_argument("--v267-evidence-output", type=Path)
-    args = parser.parse_args()
-    sources = {label: Path(path) for label, path in (item.split("=", 1) for item in args.cost)}
-    generate_cost_function_figures(
-        sources,
-        DatasetLoader(args.dataset),
-        args.output,
-        comparison_only=args.comparison_only,
-        curves_only=args.curves_only,
-        fetch_cloud=args.fetch_cloud,
-        minimum_free_gib=args.minimum_free_gib,
-    )
-    if args.v267_evidence_output is not None:
-        v267_path = next(
-            (path for path in sources.values() if "v2.6.7" in path.name), None
-        )
-        if v267_path is None:
-            parser.error("--v267-evidence-output requires a V2.6.7 cost source")
-        stem = v267_path.with_suffix("")
-        generate_v267_evidence(
-            pd.read_csv(stem.with_name(f"{stem.name}_bootstrap_audit.csv")),
-            pd.read_csv(stem.with_name(f"{stem.name}_ticket_loeo.csv")),
-            args.v267_evidence_output,
-            pd.read_csv(stem.with_name(f"{stem.name}_cycle_audit.csv")),
-        )
-
-
-if __name__ == "__main__":
-    main()

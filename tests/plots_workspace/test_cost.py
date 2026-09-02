@@ -14,7 +14,7 @@ from matplotlib.colors import to_rgb
 
 
 def _module():
-    path = Path("scripts/cost/plot.py")
+    path = Path("plots/cost.py")
     spec = importlib.util.spec_from_file_location("cost_function_comparison", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
@@ -538,7 +538,7 @@ def test_optimal_rgb_figures_paginate_four_methods_per_page() -> None:
     assert [sum(axis.get_visible() for axis in figure.axes) for figure in pages] == [
         4,
         4,
-        2,
+        3,
     ]
     for figure in pages:
         plt.close(figure)
