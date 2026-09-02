@@ -55,24 +55,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--results", nargs="+", type=Path)
     parser.add_argument("--variant")
-    parser.add_argument("--heat-basis", choices=("unit", "water"))
-    parser.add_argument(
-        "--event-scope",
-        choices=(
-            "stable_heating_start_to_actual_preparation",
-            "heating_start_to_actual_preparation",
-            "fixed_post_defrost_9min_to_actual_preparation",
-        ),
-    )
-    parser.add_argument(
-        "--heating-start-rule",
-        choices=("stable_heating_start", "heating_start", "fixed_post_defrost_9min"),
-    )
     parser.add_argument(
         "--integration-protocol", choices=("historical_reconstruction", "strict_causal")
     )
     parser.add_argument("--state-protocol", choices=("historical_interpolation", "strict_causal"))
-    parser.add_argument("--heating-energy-model", choices=("measured_total_power",))
     parser.add_argument(
         "--heating-heat-model", choices=("measured_unit_heat", "measured_water_heat")
     )
@@ -107,18 +93,18 @@ def _recipe(module: Any, args: argparse.Namespace) -> dict[str, object]:
     recipe = dict(module.DEFAULT_RECIPE)
     recipe["variant"] = args.variant
     for argument, key in (
-        (args.heat_basis, "heat_basis"),
-        (args.event_scope, "event_scope"),
-        (args.heating_start_rule, "heating_start_rule"),
         (args.integration_protocol, "integration_protocol"),
         (args.state_protocol, "state_protocol"),
-        (args.heating_energy_model, "heating_energy_model"),
         (args.heating_heat_model, "heating_heat_model"),
         (args.transition_energy_model, "transition_energy_model"),
         (args.transition_heat_model, "transition_heat_model"),
     ):
         if argument is not None:
             recipe[key] = argument
+    if args.heating_heat_model is not None:
+        recipe["heat_basis"] = (
+            "unit" if args.heating_heat_model == "measured_unit_heat" else "water"
+        )
     return cast(dict[str, object], module.validate_recipe(recipe))
 
 

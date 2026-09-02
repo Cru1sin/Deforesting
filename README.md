@@ -62,6 +62,17 @@ variants use `--variant` together with the explicit supported recipe arguments.
 `--action compare --results ...` sends comparable runs through the shared cost
 plotter in `plots/cost.py`.
 
+Cost tables distinguish calculation availability from empirical model support:
+
+- `ET_evaluable` / `QT_evaluable`: the required inputs and windows exist.
+- `ET_in_support` / `QT_in_support`: model features lie inside empirical support.
+- `QT_physical_valid`: predicted transition heat has the required physical sign.
+- `optimization_eligible`: the version-specific decision mask.
+
+Frozen V1/V2.5 preserve their historical extrapolation policy
+(`allow_historical_extrapolation`); diagnostic V2.6.8 requires empirical support
+(`require_empirical_support`).
+
 ## 3. Labels
 
 Build hard RGB labels from canonical V1 and render the default PNG figures:
@@ -91,6 +102,13 @@ settings share the same fold orchestration and standard `settings.csv`,
 `task_log.jsonl` records folds as they finish for observation and diagnosis. It
 is not a resume checkpoint; the current entry point requires a new empty output
 directory when rerun.
+
+For live W&B monitoring, install it with `uv sync --extra tracking`, log in once
+with `uv run wandb login`, then add
+`--wandb-project rgb-feature-matrix` and optionally `--wandb-run-name NAME` to
+the training command. One W&B run represents the whole matrix; only the main
+process logs completed folds. W&B is observational and does not replace local
+outputs or task recovery. Without `--wandb-project`, W&B is not imported.
 
 ## 5. Evaluate
 

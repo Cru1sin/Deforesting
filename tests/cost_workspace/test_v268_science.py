@@ -103,8 +103,10 @@ def test_measurement_gate_breaks_support_run_and_connected_basin() -> None:
             "candidate_time": times,
             "inverse_cop": [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.45, 0.5],
             "heating_measurement_valid": [True, True, True, False, True, True, True, True],
-            "ET_supported": True,
-            "QT_supported": True,
+            "ET_evaluable": True,
+            "QT_evaluable": True,
+            "ET_in_support": True,
+            "QT_in_support": True,
             "pre_action_window_valid": True,
             "physical_valid": True,
         }
@@ -119,6 +121,32 @@ def test_measurement_gate_breaks_support_run_and_connected_basin() -> None:
     assert result["basin_1pct_width_minutes"].iloc[0] == 0
 
 
+def test_v268_requires_in_support_even_when_transition_is_evaluable() -> None:
+    from cost.cost_function_v2_6_8 import finalize_v268_curve
+
+    times = pd.date_range("2026-01-01", periods=6, freq="min")
+    curve = pd.DataFrame(
+        {
+            "candidate_time": times,
+            "inverse_cop": np.linspace(1.0, 0.5, 6),
+            "heating_measurement_valid": True,
+            "ET_evaluable": True,
+            "QT_evaluable": True,
+            "ET_in_support": False,
+            "QT_in_support": True,
+            "pre_action_window_valid": True,
+            "physical_valid": True,
+        }
+    )
+
+    result = finalize_v268_curve(curve)
+
+    assert result["ET_evaluable"].all()
+    assert not result["model_supported"].any()
+    assert not result["optimization_eligible"].any()
+    assert result["support_policy"].eq("require_empirical_support").all()
+
+
 def test_main_curve_decomposition_is_nan_and_labels_are_disabled() -> None:
     from cost.cost_function_v2_6_8 import finalize_v268_curve
 
@@ -128,8 +156,10 @@ def test_main_curve_decomposition_is_nan_and_labels_are_disabled() -> None:
             "candidate_time": times,
             "inverse_cop": np.linspace(1.0, 0.5, 6),
             "heating_measurement_valid": True,
-            "ET_supported": True,
-            "QT_supported": True,
+            "ET_evaluable": True,
+            "QT_evaluable": True,
+            "ET_in_support": True,
+            "QT_in_support": True,
             "pre_action_window_valid": True,
             "physical_valid": True,
         }
@@ -185,9 +215,12 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
                 "transition_heat_kwh": 2.0,
                 "E_support_distance": 0.0,
                 "Q_support_distance": 0.0,
+                "ET_evaluable": True,
+                "QT_evaluable": True,
+                "ET_in_support": True,
+                "QT_in_support": True,
                 "ET_supported": True,
                 "QT_supported": True,
-                "model_supported": True,
             },
             index=values.index,
         )

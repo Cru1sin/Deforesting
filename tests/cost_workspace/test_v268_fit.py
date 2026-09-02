@@ -113,4 +113,5 @@ def test_independent_support_is_intersection() -> None:
     result = predict_independent_targets(
         e_artifact, q_artifact, pd.DataFrame({"x": [0.2, 0.8]}), "a"
     )
-    assert result["model_supported"].tolist() == [True, False]
+    assert result["ET_in_support"].tolist() == [True, True]
+    assert result["QT_in_support"].tolist() == [True, False]

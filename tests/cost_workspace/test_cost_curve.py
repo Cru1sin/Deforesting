@@ -148,6 +148,8 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
             "defrost_energy_kwh": 0.0,
             "recovery_energy_kwh": 0.0,
             "ET_supported": [True, True, True, True],
+            "ET_evaluable": [True, True, True, True],
+            "ET_in_support": [False, False, False, False],
             "strict_ET_supported": False,
             "transition_energy_model": "pe_quadratic_plus_fixed_recovery",
             "transition_energy_rule": "strict_pre_action_60s",
@@ -161,6 +163,9 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
             "defrost_heat_kwh": 0.0,
             "recovery_heat_kwh": 0.0,
             "QT_supported": [True, True, True, True],
+            "QT_evaluable": [True, True, True, True],
+            "QT_in_support": [False, False, False, False],
+            "QT_physical_valid": [True, True, True, True],
             "strict_QT_supported": False,
             "transition_heat_model": "zero_transition_heat",
             "transition_heat_rule": "none",
@@ -172,6 +177,7 @@ def test_build_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:
 
     assert result["supported"].tolist() == [True, True, False, False]
     assert result["optimization_eligible"].tolist() == [True, True, False, False]
+    assert result["support_policy"].eq("allow_historical_extrapolation").all()
     assert result["inverse_cop"].iloc[:2].tolist() == pytest.approx([1.0, 0.5])
     assert result["is_optimum"].tolist() == [False, True, False, False]
     assert result["relative_regret"].iloc[:2].tolist() == pytest.approx([1.0, 0.0])

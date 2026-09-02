@@ -59,13 +59,18 @@ def build_cost_curve(  # noqa: C901
     for column in ("heating_energy_supported", "heating_heat_supported"):
         if column in curve:
             curve["heating_valid"] &= curve[column].fillna(False)
+    et_evaluable = curve["ET_evaluable"].fillna(False)
+    qt_evaluable = curve["QT_evaluable"].fillna(False)
+    qt_physical = curve["QT_physical_valid"].fillna(False)
     curve["supported"] = (
         curve["heating_valid"].fillna(False)
-        & curve["ET_supported"].fillna(False)
-        & curve["QT_supported"].fillna(False)
+        & et_evaluable
+        & qt_evaluable
+        & qt_physical
         & positive
     )
     curve["optimization_eligible"] = curve["supported"]
+    curve["support_policy"] = "allow_historical_extrapolation"
     curve["inverse_cop"] = (numerator / denominator).where(positive)
     curve["relative_regret"] = np.nan
     curve["is_optimum"] = False

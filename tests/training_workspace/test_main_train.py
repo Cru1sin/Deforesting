@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+import types
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +26,8 @@ def test_parser_defaults_to_one_primary_setting() -> None:
     assert args.modalities == ["rgb"]
     assert args.jobs == 6
     assert args.maximum_per_group == 48
+    assert args.wandb_project is None
+    assert args.wandb_run_name is None
     assert main_train.expand_settings(args) == [
         main_train.Setting("handcrafted", "rbf_svm", "front", "rgb")
     ]
@@ -316,6 +320,61 @@ def test_parallel_run_writes_task_log_in_completion_order(
     assert main_train.run(args) == 0
     task_log = [json.loads(line) for line in (output / "task_log.jsonl").read_text().splitlines()]
     assert [row["task_index"] for row in task_log] == [1, 0]
+
+
+def test_wandb_is_optional_and_logged_only_by_main_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels = tmp_path / "labels.parquet"
+    _labels().to_parquet(labels, index=False)
+    output = tmp_path / "trained"
+    initialized: list[dict[str, object]] = []
+
+    class Run:
+        def __init__(self) -> None:
+            self.logs: list[dict[str, object]] = []
+            self.finished = False
+
+        def log(self, values: dict[str, object]) -> None:
+            self.logs.append(values)
+
+        def finish(self) -> None:
+            self.finished = True
+
+    run = Run()
+
+    def init(**kwargs: object) -> Run:
+        initialized.append(kwargs)
+        return run
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(init=init))
+    args = main_train.build_parser().parse_args(
+        [
+            "--labels",
+            str(labels),
+            "--output",
+            str(output),
+            "--heads",
+            "logistic",
+            "--modalities",
+            "time",
+            "--jobs",
+            "1",
+            "--wandb-project",
+            "rgb-feature-matrix",
+            "--wandb-run-name",
+            "review-run",
+        ]
+    )
+
+    assert main_train.run(args) == 0
+
+    assert initialized[0]["project"] == "rgb-feature-matrix"
+    assert initialized[0]["name"] == "review-run"
+    assert len(run.logs) == 2
+    assert run.logs[0]["task_step"] == 1
+    assert run.logs[-1]["progress/completed"] == 2
+    assert run.finished
 
 
 def test_all_invalid_folds_still_write_the_prediction_schema(

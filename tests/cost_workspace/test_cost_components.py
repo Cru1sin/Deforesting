@@ -131,6 +131,24 @@ def test_transition_energy_uses_strict_pre_action_window_and_frozen_fold() -> No
     assert result["ET_supported"].iloc[0]
 
 
+def test_transition_energy_separates_evaluable_from_empirical_support() -> None:
+    boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "stable_heating_start")
+    frame = _frame()
+    frame["evaporating_pressure"] = 0.5
+
+    result = transition_energy(
+        frame,
+        boundaries.iloc[:1],
+        "exp_20260714",
+        include_fixed_recovery=False,
+    )
+
+    assert result["ET_evaluable"].iloc[0]
+    assert not result["ET_in_support"].iloc[0]
+    assert result["ET_supported"].equals(result["ET_evaluable"])
+    assert result["transition_energy_status"].iloc[0] == "above_support"
+
+
 def test_transition_energy_does_not_fill_strict_window_from_tau_or_earlier_data() -> None:
     boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "stable_heating_start")
     frame = _frame()
@@ -148,6 +166,8 @@ def test_transition_energy_does_not_fill_strict_window_from_tau_or_earlier_data(
     )
 
     assert pd.isna(result["evaporating_pressure_mpa"].iloc[0])
+    assert not result["ET_evaluable"].iloc[0]
+    assert not result["ET_in_support"].iloc[0]
     assert not result["ET_supported"].iloc[0]
 
 
@@ -328,9 +348,24 @@ def test_one_finite_state_second_is_canonical_but_not_strictly_supported() -> No
     result = transition_heat_v2_5(frame, boundaries.iloc[:1], FakeLoader().record)
 
     assert result["QT_supported"].iloc[0]
+    assert result["QT_evaluable"].iloc[0]
+    assert result["QT_physical_valid"].iloc[0]
+    assert result["QT_supported"].equals(result["QT_evaluable"])
     assert not result["strict_QT_supported"].iloc[0]
     assert result["transition_heat_status"].iloc[0] == "supported"
     assert result["strict_transition_heat_status"].iloc[0] == "incomplete"
+
+
+def test_transition_heat_separates_evaluable_from_empirical_support() -> None:
+    boundaries = build_candidate_boundaries(FakeLoader(), "cycle_a", "heating_start")
+    result = transition_heat_v2_5(
+        _frame(), boundaries.iloc[:1], FakeLoader().record
+    )
+
+    assert result["QT_evaluable"].iloc[0]
+    assert not result["QT_in_support"].iloc[0]
+    assert result["QT_supported"].equals(result["QT_evaluable"])
+    assert result["transition_heat_status"].iloc[0] == "outside_empirical_support"
 
 
 def test_v25_transition_heat_uses_strict_window_and_emits_signed_qd() -> None:

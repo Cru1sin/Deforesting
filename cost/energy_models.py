@@ -425,13 +425,14 @@ def transition_energy(
     recovery = (
         float(parameters["v1"]["fixed_recovery_electricity_kwh"]) if include_fixed_recovery else 0.0
     )
-    selected_supported = (
+    evaluable = (
         pe.notna()
         if state_protocol == "historical_interpolation"
         else pe.notna() & complete_seconds.ge(48)
     )
+    in_support = evaluable & pe.between(lower, upper)
     status = np.select(
-        [pe.isna(), ~selected_supported, pe.lt(lower), pe.gt(upper)],
+        [pe.isna(), ~evaluable, pe.lt(lower), pe.gt(upper)],
         ["missing", "incomplete", "below_support", "above_support"],
         default="supported",
     )
@@ -462,7 +463,9 @@ def transition_energy(
             "pe_quadratic_squared_kwh_per_mpa2": coefficients[2],
             "pe_support_min_mpa": lower,
             "pe_support_max_mpa": upper,
-            "ET_supported": selected_supported,
+            "ET_evaluable": evaluable,
+            "ET_in_support": in_support,
+            "ET_supported": evaluable,
             "strict_ET_supported": strict_supported,
             "transition_energy_model": (
                 "pe_quadratic_plus_fixed_recovery" if include_fixed_recovery else "pe_quadratic"

@@ -88,6 +88,9 @@ def zero_transition_heat(count: int) -> pd.DataFrame:
             "preparation_heat_kwh": np.zeros(count),
             "defrost_heat_kwh": np.zeros(count),
             "recovery_heat_kwh": np.zeros(count),
+            "QT_evaluable": np.ones(count, dtype=bool),
+            "QT_in_support": np.ones(count, dtype=bool),
+            "QT_physical_valid": np.ones(count, dtype=bool),
             "QT_supported": np.ones(count, dtype=bool),
             "strict_QT_supported": np.ones(count, dtype=bool),
             "strict_transition_heat_kwh": np.zeros(count),
@@ -224,11 +227,12 @@ def transition_heat_v2_5(
         qd_supported &= states[name].between(float(limits[0]), float(limits[1]))
     signed_qd = -qd
     physical = qprep.gt(0) & signed_qd.lt(0)
-    supported = (
-        physical
+    evaluable = (
+        qprep.notna() & qd.notna()
         if state_protocol == "historical_interpolation"
-        else physical & strict_window_supported
+        else qprep.notna() & qd.notna() & strict_window_supported
     )
+    in_support = evaluable & qprep_supported & qd_supported
     strict_signed_qd = -strict_qd
     strict_supported = strict_window_supported & strict_qprep.gt(0) & strict_signed_qd.lt(0)
     result = states.rename(columns={"evaporating_pressure": "qd_evaporating_pressure_mpa"})
@@ -238,13 +242,16 @@ def transition_heat_v2_5(
     result["recovery_heat_kwh"] = 0.0
     result["qprep_supported"] = qprep_supported
     result["qd_supported"] = qd_supported
+    result["QT_evaluable"] = evaluable
+    result["QT_in_support"] = in_support
+    result["QT_physical_valid"] = physical
     result["strict_transition_heat_kwh"] = strict_qprep + strict_signed_qd
     result["strict_preparation_heat_kwh"] = strict_qprep
     result["strict_defrost_heat_kwh"] = strict_signed_qd
     for column in strict_counts:
         result[f"strict_{column}_complete_seconds"] = strict_counts[column]
     result["strict_state_window_supported"] = strict_window_supported
-    result["QT_supported"] = supported
+    result["QT_supported"] = evaluable
     result["strict_QT_supported"] = strict_supported
     result["transition_heat_model"] = "linear_qprep_plus_signed_quadratic_qd"
     result["transition_heat_rule"] = (
@@ -253,8 +260,8 @@ def transition_heat_v2_5(
         else "strict_causal_[tau-60s,tau)"
     )
     result["transition_heat_status"] = np.select(
-        [~supported, ~(qprep_supported & qd_supported)],
-        ["incomplete", "outside_empirical_support"],
+        [~evaluable, ~physical, ~in_support],
+        ["incomplete", "physical_invalid", "outside_empirical_support"],
         default="supported",
     )
     result["strict_transition_heat_status"] = np.where(strict_supported, "supported", "incomplete")

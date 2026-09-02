@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import importlib
 import itertools
 import json
 import pickle
@@ -70,6 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-run-name")
     parser.add_argument("--save-models", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser
@@ -159,6 +162,8 @@ def _write_result(
     predictions: list[pd.DataFrame],
     *,
     save_model: bool,
+    total_tasks: int,
+    wandb_run: Any | None,
 ) -> None:
     row = dict(result["metrics"])
     row["task_index"] = task_index
@@ -168,6 +173,22 @@ def _write_result(
         predictions.append(prediction)
     with (output / "task_log.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(row, default=str) + "\n")
+    if wandb_run is not None:
+        try:
+            wandb_run.log(
+                {
+                    "task_step": len(metrics),
+                    "progress/completed": len(metrics),
+                    "progress/total": total_tasks,
+                    **{
+                        f"latest/{key}": value
+                        for key, value in row.items()
+                        if isinstance(value, (int, float))
+                    },
+                }
+            )
+        except Exception as exc:
+            print(f"[W&B warning] {exc}", flush=True)
     if save_model and result["model"] is not None:
         model_dir = output / "models"
         model_dir.mkdir(exist_ok=True)
@@ -230,6 +251,22 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
     )
     (args.output / "task_log.jsonl").touch()
 
+    wandb_run: Any | None = None
+    if args.wandb_project:
+        try:
+            wandb = importlib.import_module("wandb")
+            wandb_run = wandb.init(
+                project=args.wandb_project,
+                name=args.wandb_run_name,
+                config={
+                    **serializable_args,
+                    "settings": [setting._asdict() for setting in settings],
+                    "total_tasks": total_tasks,
+                },
+            )
+        except Exception as exc:
+            print(f"[W&B warning] {exc}", flush=True)
+
     folds: list[tuple[int, str, Setting, pd.DataFrame, list[str], str, bool]] = []
     for setting, selected in selected_settings:
         if setting.representation == "resnet50_finetune":
@@ -277,6 +314,8 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                     metrics,
                     predictions,
                     save_model=args.save_models,
+                    total_tasks=total_tasks,
+                    wandb_run=wandb_run,
                 )
     else:
         for fold in folds:
@@ -307,6 +346,8 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                 metrics,
                 predictions,
                 save_model=args.save_models,
+                total_tasks=total_tasks,
+                wandb_run=wandb_run,
             )
 
     pd.DataFrame(metrics).sort_values("task_index").to_csv(
@@ -318,6 +359,11 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         else pd.DataFrame(columns=PREDICTION_COLUMNS)
     )
     combined.to_parquet(args.output / "predictions.parquet", index=False)
+    if wandb_run is not None:
+        try:
+            wandb_run.finish()
+        except Exception as exc:
+            print(f"[W&B warning] {exc}", flush=True)
     return 0
 
 

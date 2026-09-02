@@ -114,15 +114,18 @@ def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
     )
     base = (
         result["heating_measurement_valid"].fillna(False)
-        & result["ET_supported"].fillna(False)
-        & result["QT_supported"].fillna(False)
+        & result["ET_evaluable"].fillna(False)
+        & result["QT_evaluable"].fillna(False)
+        & result["ET_in_support"].fillna(False)
+        & result["QT_in_support"].fillna(False)
         & result["pre_action_window_valid"].fillna(False)
         & result["physical_valid"].fillna(False)
         & inverse.notna()
     )
-    result["model_supported"] = result["ET_supported"].fillna(False) & result[
-        "QT_supported"
+    result["model_supported"] = result["ET_in_support"].fillna(False) & result[
+        "QT_in_support"
     ].fillna(False)
+    result["support_policy"] = "require_empirical_support"
     result["continuous_support"] = five_minute_support_runs(result["candidate_time"], base)
     result["optimization_eligible"] = base & result["continuous_support"]
     result["diagnostic_minimum"] = pd.NaT
@@ -203,9 +206,23 @@ def calculate_cycle(
     transition = predict_independent_targets(
         energy_model, heat_model, features, str(record["experiment_id"])
     )
-    et = transition[["transition_energy_kwh", "E_support_distance", "ET_supported"]]
+    et = transition[
+        [
+            "transition_energy_kwh",
+            "E_support_distance",
+            "ET_evaluable",
+            "ET_in_support",
+            "ET_supported",
+        ]
+    ]
     qt = transition[
-        ["transition_heat_kwh", "Q_support_distance", "QT_supported", "model_supported"]
+        [
+            "transition_heat_kwh",
+            "Q_support_distance",
+            "QT_evaluable",
+            "QT_in_support",
+            "QT_supported",
+        ]
     ]
 
     curve = pd.concat([boundary, eh, qh, features, et, qt], axis=1)

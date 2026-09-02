@@ -9,9 +9,9 @@ from typing import Any, cast
 
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer  # type: ignore[import-untyped]
-from sklearn.linear_model import Ridge  # type: ignore[import-untyped]
-from sklearn.preprocessing import StandardScaler  # type: ignore[import-untyped]
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
 
 ALPHAS = (0.1, 1.0, 10.0, 100.0)
 STATIC_5 = (
@@ -451,14 +451,19 @@ def predict_independent_targets(
     q_fold = heat_artifact["folds"][experiment_id]
     e_supported = energy["support_distance"].le(float(e_fold["support_threshold"]))
     q_supported = heat["support_distance"].le(float(q_fold["support_threshold"]))
+    e_evaluable = np.isfinite(energy["prediction"])
+    q_evaluable = np.isfinite(heat["prediction"])
     return pd.DataFrame(
         {
             "transition_energy_kwh": energy["prediction"].to_numpy(),
             "transition_heat_kwh": heat["prediction"].to_numpy(),
             "E_support_distance": energy["support_distance"].to_numpy(),
             "Q_support_distance": heat["support_distance"].to_numpy(),
+            "ET_evaluable": e_evaluable,
+            "QT_evaluable": q_evaluable,
+            "ET_in_support": e_supported.to_numpy(),
+            "QT_in_support": q_supported.to_numpy(),
             "ET_supported": e_supported.to_numpy(),
             "QT_supported": q_supported.to_numpy(),
-            "model_supported": (e_supported & q_supported).to_numpy(),
         }
     )

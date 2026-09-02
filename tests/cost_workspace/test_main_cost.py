@@ -257,8 +257,6 @@ def test_existing_canonical_and_variant_run_directories_require_overwrite(
                 "v1",
                 "--variant",
                 "water_trial",
-                "--heat-basis",
-                "water",
                 "--heating-heat-model",
                 "measured_water_heat",
                 "--output-root",

@@ -51,23 +51,15 @@ def test_cli_lists_ticket_feature_models_and_v268() -> None:
     assert "v2.6.8" in actions["cost"].choices
 
 
-def test_cli_accepts_explicit_v268_fixed9_defaults_without_creating_variant() -> None:
-    args = build_parser().parse_args(
-        [
-            "--action",
-            "calculate",
-            "--cost",
-            "v2.6.8",
-            "--event-scope",
-            "fixed_post_defrost_9min_to_actual_preparation",
-            "--heating-start-rule",
-            "fixed_post_defrost_9min",
-        ]
-    )
+def test_cli_hides_fixed_recipe_fields() -> None:
+    actions = {action.dest for action in build_parser()._actions}
 
-    assert main_cost._recipe(main_cost.cost_function_v2_6_8, args) == (
-        main_cost.cost_function_v2_6_8.DEFAULT_RECIPE
-    )
+    assert not {
+        "heat_basis",
+        "event_scope",
+        "heating_start_rule",
+        "heating_energy_model",
+    } & actions
 
 
 def test_v268_canonical_is_cli_defaults_and_overrides_require_variant() -> None:
@@ -113,15 +105,9 @@ def test_legacy_versions_reject_unimplemented_ticket_components(
 @pytest.mark.parametrize(
     "overrides",
     [
-        ["--heat-basis", "unit", "--heating-heat-model", "measured_unit_heat"],
+        ["--heating-heat-model", "measured_unit_heat"],
         ["--integration-protocol", "historical_reconstruction"],
         ["--state-protocol", "historical_interpolation"],
-        [
-            "--heating-start-rule",
-            "heating_start",
-            "--event-scope",
-            "heating_start_to_actual_preparation",
-        ],
     ],
 )
 def test_v268_rejects_named_overrides_that_execution_does_not_implement(
