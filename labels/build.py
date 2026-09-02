@@ -165,17 +165,12 @@ def complete_observed_cycle_names(catalog: pd.DataFrame, cost: pd.DataFrame) -> 
 def build_labels(  # noqa: C901 - explicit cycle labeling and audit flow.
     dataset_root: Path,
     cost: pd.DataFrame,
-    output: Path,
     thresholds: Sequence[float],
-    *,
-    overwrite: bool = False,
-) -> None:
-    """Build the three formal V1 label artifacts."""
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Build the three formal V1 label tables."""
     suffixes = [threshold_suffix(float(threshold)) for threshold in thresholds]
     if len(suffixes) != len(set(suffixes)):
         raise ValueError("threshold suffix collision")
-    if output.exists() and not overwrite:
-        raise FileExistsError(f"label output exists; pass --overwrite: {output}")
     loader = DatasetLoader(dataset_root)
     catalog = loader.list_cycles()
     metadata = loader.load_image_metadata()
@@ -279,8 +274,5 @@ def build_labels(  # noqa: C901 - explicit cycle labeling and audit flow.
                     }
                 )
 
-    output.mkdir(parents=True, exist_ok=overwrite)
-    labels.to_parquet(output / "image_cost_labels.parquet", index=False)
-    pd.DataFrame(balance_rows).to_csv(output / "label_balance.csv", index=False)
     audit.sort(key=lambda row: str(row["cycle_name"]))
-    pd.DataFrame(audit).to_csv(output / "cycle_audit.csv", index=False)
+    return labels, pd.DataFrame(balance_rows), pd.DataFrame(audit)

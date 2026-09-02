@@ -45,7 +45,6 @@ def test_build_rejects_threshold_suffix_collision_before_dataset_loading(
         build.build_labels(
             tmp_path / "missing_dataset",
             _canonical_cost(),
-            tmp_path / "labels",
             thresholds,
         )
 
@@ -105,10 +104,10 @@ def test_build_rejects_an_all_unsupported_cycle_with_images(
     )
 
     with pytest.raises(RuntimeError, match="^no supported RGB labels$"):
-        build.build_labels(tmp_path / "dataset", cost, tmp_path / "labels", (0.01,))
+        build.build_labels(tmp_path / "dataset", cost, (0.01,))
 
 
-def test_build_writes_labels_balance_and_cycle_audit(
+def test_build_returns_labels_balance_and_cycle_audit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog = pd.DataFrame(
@@ -171,13 +170,10 @@ def test_build_writes_labels_balance_and_cycle_audit(
         ],
         ignore_index=True,
     )
-    output = tmp_path / "labels"
-    output.mkdir()
-    (output / "keep.txt").write_text("do not remove\n", encoding="utf-8")
+    labels, balance, audit_table = build.build_labels(
+        tmp_path / "dataset", cost, (0.01, 0.10)
+    )
 
-    build.build_labels(tmp_path / "dataset", cost, output, (0.01, 0.10), overwrite=True)
-
-    labels = pd.read_parquet(output / "image_cost_labels.parquet")
     assert labels["cycle_name"].tolist() == ["cycle_a", "cycle_a"]
     assert "split" not in labels
     assert set(labels) >= {
@@ -191,23 +187,13 @@ def test_build_writes_labels_balance_and_cycle_audit(
     assert labels["cost_state_01pct"].tolist() == ["pre_optimal", "near_optimal"]
     assert pd.isna(labels.loc[1, "binary_state_01pct"])
 
-    audit = pd.read_csv(output / "cycle_audit.csv").set_index("cycle_name")
+    audit = audit_table.set_index("cycle_name")
     assert audit.loc["cycle_a", "reason"] == "labeled"
     assert audit.loc["no_curve", "reason"] == "no_current_curve"
     assert audit.loc["censored", "reason"] == "censored_curve"
     assert audit.loc["no_images", "reason"] == "no_interpolatable_image_times"
 
-    balance = pd.read_csv(output / "label_balance.csv")
     assert "split" not in balance
     top = balance.loc[balance["regret_threshold"].eq(0.01) & balance["camera_group"].eq("top")]
     assert top["image_count"].sum() == 2
     assert set(balance["camera_group"]) >= {"top", "top_pair", "all"}
-    assert (output / "keep.txt").read_text(encoding="utf-8") == "do not remove\n"
-
-
-def test_existing_output_is_rejected_before_dataset_loading(tmp_path: Path) -> None:
-    output = tmp_path / "labels"
-    output.mkdir()
-
-    with pytest.raises(FileExistsError, match="pass --overwrite"):
-        build.build_labels(tmp_path / "missing_dataset", _canonical_cost(), output, (0.01,))

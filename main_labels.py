@@ -46,18 +46,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(recorded, indent=2, sort_keys=True))
     cost = pd.read_csv(args.cost_csv)
     validate_cost(cost)
-    build_labels(
-        args.dataset,
-        cost,
-        args.output,
-        args.thresholds,
-        overwrite=args.overwrite,
-    )
+    if args.output.exists() and not args.overwrite:
+        raise FileExistsError(f"label output exists; pass --overwrite: {args.output}")
+    labels, balance, audit = build_labels(args.dataset, cost, args.thresholds)
+    args.output.mkdir(parents=True, exist_ok=args.overwrite)
+    labels.to_parquet(args.output / "image_cost_labels.parquet", index=False)
+    balance.to_csv(args.output / "label_balance.csv", index=False)
+    audit.to_csv(args.output / "cycle_audit.csv", index=False)
     if args.figures:
         plot_label_figures(
             cost=cost,
-            labels=pd.read_parquet(args.output / "image_cost_labels.parquet"),
-            balance=pd.read_csv(args.output / "label_balance.csv"),
+            labels=labels,
+            balance=balance,
             thresholds=args.thresholds,
             output=args.figure_output or args.output / "figures",
             source_output=args.output / "figure_source_data",

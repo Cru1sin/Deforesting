@@ -118,16 +118,11 @@ def test_main_routes_explicit_figure_arguments(
     output = tmp_path / "labels"
     calls: list[dict[str, object]] = []
 
-    monkeypatch.setattr(
-        main_labels.pd,
-        "read_csv",
-        lambda path: balance if Path(path).name == "label_balance.csv" else cost,
-    )
-    monkeypatch.setattr(main_labels.pd, "read_parquet", lambda _path: labels)
+    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _path: cost)
     monkeypatch.setattr(
         main_labels,
         "build_labels",
-        lambda _dataset, _cost, destination, _thresholds, *, overwrite: destination.mkdir(),
+        lambda _dataset, _cost, _thresholds: (labels, balance, pd.DataFrame()),
     )
     monkeypatch.setattr(main_labels, "plot_label_figures", lambda **kwargs: calls.append(kwargs))
 

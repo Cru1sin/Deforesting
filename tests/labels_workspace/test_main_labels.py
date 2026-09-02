@@ -63,19 +63,21 @@ def test_main_calls_build_once_and_records_copyable_invocation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     cost = _canonical_cost()
+    read_csv = pd.read_csv
     monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: cost)
     calls: list[tuple[object, ...]] = []
 
     def fake_build(
         dataset: Path,
         received_cost: pd.DataFrame,
-        output: Path,
         thresholds: list[float],
-        *,
-        overwrite: bool,
-    ) -> None:
-        calls.append((dataset, received_cost, output, thresholds, overwrite))
-        output.mkdir(parents=True)
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        calls.append((dataset, received_cost, thresholds))
+        return (
+            pd.DataFrame({"label": [1]}),
+            pd.DataFrame({"balance": [2]}),
+            pd.DataFrame({"audit": [3]}),
+        )
 
     monkeypatch.setattr(main_labels, "build_labels", fake_build)
     output = tmp_path / "labels"
@@ -97,7 +99,17 @@ def test_main_calls_build_once_and_records_copyable_invocation(
     assert len(calls) == 1
     assert calls[0][0] == Path("chosen_dataset")
     assert calls[0][1] is cost
-    assert calls[0][2:] == (output, [0.02, 0.05], True)
+    assert calls[0][2] == [0.02, 0.05]
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(output / "image_cost_labels.parquet"),
+        pd.DataFrame({"label": [1]}),
+    )
+    pd.testing.assert_frame_equal(
+        read_csv(output / "label_balance.csv"), pd.DataFrame({"balance": [2]})
+    )
+    pd.testing.assert_frame_equal(
+        read_csv(output / "cycle_audit.csv"), pd.DataFrame({"audit": [3]})
+    )
     assert (output / "command.txt").read_text(encoding="utf-8") == (
         "uv run python main_labels.py " + " ".join(arguments) + "\n"
     )
@@ -111,3 +123,35 @@ def test_main_calls_build_once_and_records_copyable_invocation(
     printed = capsys.readouterr().out
     assert "chosen_cost.csv" in printed
     assert str(output) in printed
+
+
+def test_main_rejects_existing_output_before_building_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "labels"
+    output.mkdir()
+    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: _canonical_cost())
+
+    def forbidden_build(*_: object, **__: object) -> None:
+        raise AssertionError("build_labels must not run for an existing output")
+
+    monkeypatch.setattr(main_labels, "build_labels", forbidden_build)
+
+    with pytest.raises(FileExistsError, match="pass --overwrite"):
+        main_labels.main(["--output", str(output)])
+
+
+def test_main_does_not_create_output_when_label_build_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output = tmp_path / "labels"
+    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: _canonical_cost())
+
+    def failed_build(*_: object, **__: object) -> None:
+        raise RuntimeError("label build failed")
+
+    monkeypatch.setattr(main_labels, "build_labels", failed_build)
+
+    with pytest.raises(RuntimeError, match="label build failed"):
+        main_labels.main(["--output", str(output)])
+    assert not output.exists()

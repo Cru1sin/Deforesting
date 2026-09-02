@@ -21,23 +21,26 @@ def test_formal_v1_output_parity(tmp_path: Path) -> None:
     expected = pd.read_parquet(OLD_LABELS)
     expected_balance = pd.read_csv(OLD_BALANCE)
     cost = pd.read_csv(OLD_COST).assign(label_eligible=True, variant=None)
-    output = tmp_path / "labels"
-
-    build.build_labels(DATASET, cost, output, (0.01, 0.02, 0.05, 0.10))
-
-    actual = pd.read_parquet(output / "image_cost_labels.parquet")
-    actual_balance = pd.read_csv(output / "label_balance.csv")
+    actual, actual_balance, _ = build.build_labels(
+        DATASET, cost, (0.01, 0.02, 0.05, 0.10)
+    )
     assert len(actual) == len(expected) == 89_282
     pd.testing.assert_frame_equal(
         actual.drop(columns="local_available"),
         expected.drop(columns=["local_available", "split"]),
         check_exact=True,
     )
+    balance_keys = ["regret_threshold", "camera_group", "cost_state"]
     expected_balance = (
         expected_balance.drop(columns="split")
-        .groupby(["regret_threshold", "camera_group", "cost_state"], as_index=False)
+        .groupby(balance_keys, as_index=False)
         .sum()
+        .sort_values(balance_keys, kind="stable")
+        .reset_index(drop=True)
     )
+    actual_balance = actual_balance.sort_values(
+        balance_keys, kind="stable"
+    ).reset_index(drop=True)
     pd.testing.assert_frame_equal(
         actual_balance.drop(columns="local_image_count"),
         expected_balance.drop(columns="local_image_count"),
