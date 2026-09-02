@@ -29,7 +29,7 @@ from cost.fit_v2_6_8 import (
 )
 from cost.v2_6_8_data import build_event_table, candidate_cohort
 from dataloader import DatasetLoader
-from plots.cost import render_standardized_cost_results
+from plots.cost import generate_cost_function_figures
 
 COST_MODULES: dict[str, ModuleType] = {
     "v1": cost_function_v1,
@@ -310,7 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     if args.action == "compare":
         if not args.results:
             raise ValueError("compare requires --results run directories")
-        render_standardized_cost_results(
+        generate_cost_function_figures(
             args.results,
             DatasetLoader(args.dataset),
             args.output_root / "plots",

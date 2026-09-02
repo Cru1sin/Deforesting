@@ -13,12 +13,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from frost_analysis.dataset.images import (
+from dataloader import DatasetLoader
+from dataloader.images import (
     materialize_cycle_image_members,
     scan_cycle_images,
 )
-from frost_analysis.dataset.loader import DatasetLoader
-from frost_analysis.figures.visualization import (
+from src.frost_analysis.figures.visualization import (
     _plot_decision_image,
     match_decision_rgb_images,
     render_decision_publication,
@@ -35,7 +35,7 @@ STYLES = {
     "v2.6": ("#333333", "h", "V2.6 unit-heat optimum"),
     "v3": ("#1B7F79", ">", "V3 robust optimum"),
     "renewal_water": ("#B2182B", "*", "Renewal-water optimum"),
-    "v2.6.8": ("#333333", "h", "V2.6.8 optimum"),
+    "v2.6.8": ("#333333", "h", "V2.6.8 diagnostic minimum"),
     "RB": ("#2E7D5B", "o", "Rule defrost"),
 }
 CURVE_LINESTYLES = {
@@ -72,13 +72,6 @@ CURVE_LINESTYLES.update(
         "v2.6.7": (0, (5, 2)),
     }
 )
-_CANONICAL_STYLES = frozenset(STYLES)
-_DYNAMIC_STYLES = (
-    ("#E69F00", "s", "--"),
-    ("#009E73", "^", "-."),
-    ("#D55E00", "P", ":"),
-    ("#CC79A7", "X", "-"),
-)
 DATE_BANDS = ("#EAF2F8", "#FFF3E6")
 V266_STATUS_MARKERS = {
     "identified_curve": ("p", True, "identified"),
@@ -113,15 +106,13 @@ def _save_png(fig: plt.Figure, path: Path) -> None:
     plt.close(fig)
 
 
-def _save_svg_png(fig: plt.Figure, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
-    fig.savefig(path.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-
-
 def _style(algorithm: str) -> tuple[str, str, str]:
-    return V26_PATCH_STYLES[algorithm] if algorithm in V26_PATCH_STYLES else STYLES[algorithm]
+    base, separator, variant = algorithm.partition("__")
+    color, marker, label = (
+        V26_PATCH_STYLES[base] if base in V26_PATCH_STYLES else STYLES[base]
+    )
+    suffix = "diagnostic minimum" if base == "v2.6.8" else "optimum"
+    return color, marker, f"{base.upper()} ({variant}) {suffix}" if separator else label
 
 
 def _run_key(recipe: Mapping[str, object]) -> tuple[str, str]:
@@ -132,25 +123,6 @@ def _run_key(recipe: Mapping[str, object]) -> tuple[str, str]:
     key = base_cost if variant in (None, "") else f"{base_cost}__{variant}"
     label = base_cost.upper() if variant in (None, "") else f"{base_cost.upper()} ({variant})"
     return key, label
-
-
-def _read_tables(sources: Mapping[str, Path]) -> dict[str, pd.DataFrame]:
-    tables: dict[str, pd.DataFrame] = {}
-    for label, path in sources.items():
-        table = pd.read_csv(path)
-        algorithm = str(table["algorithm"].dropna().iloc[0]).lower()
-        usable = table[
-            "valid" if "valid" in table else "optimization_eligible"
-        ].fillna(False)
-        admitted = (
-            pd.Series(True, index=table.index)
-            if algorithm == "v2.6.7"
-            else usable.groupby(table["cycle_name"]).transform("any")
-        )
-        table = table.loc[admitted].copy()
-        tables[algorithm] = table
-        tables[algorithm].attrs["label"] = str(label)
-    return tables
 
 
 def _load_result_tables(
@@ -172,29 +144,30 @@ def _load_result_tables(
             table["t_RB"] = pd.NaT
         if "rb_status" not in table:
             table["rb_status"] = "unavailable"
-        for cycle_name, curve in table.groupby("cycle_name", sort=False):
-            regret = pd.to_numeric(curve["relative_regret"], errors="coerce")
-            eligible = curve["optimization_eligible"].fillna(False) & np.isfinite(regret)
-            if not eligible.any():
-                if key.startswith("v2.6.8"):
-                    table.loc[curve.index, "t_star"] = pd.NaT
-                    table.loc[curve.index, "t_star_model_supported"] = False
-                    continue
-                raise ValueError(f"{key} has no finite eligible optimum for {cycle_name}")
-            selected = curve.loc[eligible].iloc[int(regret.loc[eligible].argmin())]
+        for _cycle_name, curve in table.groupby("cycle_name", sort=False):
+            if key.split("__", 1)[0] == "v2.6.8":
+                minimum = pd.to_datetime(
+                    curve["diagnostic_minimum"], errors="coerce", format="mixed"
+                ).dropna()
+                selected = curve.loc[
+                    pd.to_datetime(curve["candidate_time"], errors="coerce", format="mixed").eq(
+                        minimum.iloc[0] if not minimum.empty else pd.NaT
+                    )
+                ]
+                support_column = "model_supported"
+            else:
+                selected = curve.loc[curve["is_optimum"].fillna(False)]
+                support_column = "supported"
+            if selected.empty:
+                table.loc[curve.index, "t_star"] = pd.NaT
+                table.loc[curve.index, "t_star_model_supported"] = pd.NA
+                continue
+            selected_row = selected.iloc[0]
             table.loc[curve.index, "t_star"] = pd.to_datetime(
-                selected["candidate_time"], errors="coerce", format="mixed"
+                selected_row["candidate_time"], errors="coerce", format="mixed"
             )
-            support_column = next(
-                (
-                    column
-                    for column in ("model_supported", "supported", "optimization_eligible")
-                    if column in curve
-                ),
-                None,
-            )
-            table.loc[curve.index, "t_star_model_supported"] = (
-                selected[support_column] if support_column is not None else pd.NA
+            table.loc[curve.index, "t_star_model_supported"] = selected_row.get(
+                support_column, selected_row["optimization_eligible"]
             )
         table.attrs["display_label"] = label
         table.attrs["heat_basis"] = str(heat_basis)
@@ -208,18 +181,6 @@ def _load_result_tables(
             lambda cycle: records[str(cycle)]["boundaries"]["start_time"]
         )
     return tables
-
-
-def _register_dynamic_styles(tables: Mapping[str, pd.DataFrame]) -> None:
-    dynamic = 0
-    for algorithm, table in tables.items():
-        if algorithm in _CANONICAL_STYLES or algorithm in V26_PATCH_STYLES:
-            continue
-        color, marker, linestyle = _DYNAMIC_STYLES[dynamic % len(_DYNAMIC_STYLES)]
-        label = table.attrs.get("display_label", algorithm.upper())
-        STYLES[algorithm] = (color, marker, f"{label} optimum")
-        CURVE_LINESTYLES[algorithm] = linestyle
-        dynamic += 1
 
 
 def _cycle_points(table: pd.DataFrame, optimum_column: str = "t_star") -> pd.DataFrame:
@@ -287,7 +248,7 @@ def _shade_experiment_dates(axis: plt.Axes, experiments: list[str]) -> None:
         )
 
 
-def _comparison_figure(
+def _comparison_figure(  # noqa: C901
     tables: Mapping[str, pd.DataFrame], algorithms: tuple[str, ...]
 ) -> plt.Figure:
     points = {algorithm: _cycle_points(tables[algorithm]) for algorithm in algorithms}
@@ -328,13 +289,14 @@ def _comparison_figure(
             else _style(algorithm)
         )
         values = points[algorithm].reindex(cycles)
-        if algorithm in STATUS_MARKERS:
-            markers = STATUS_MARKERS[algorithm]
+        base = algorithm.split("__", 1)[0]
+        if base in STATUS_MARKERS:
+            markers = STATUS_MARKERS[base]
             no_minimum = values["optimum_minutes"].isna()
             unknown = set(values["cycle_status"].dropna()) - set(markers)
             if unknown or values["cycle_status"].isna().any():
                 raise ValueError(
-                    f"unrecognized {algorithm.upper()} cycle_status: {sorted(unknown)}"
+                    f"unrecognized {base.upper()} cycle_status: {sorted(unknown)}"
                 )
             for status, (status_marker, filled, status_label) in markers.items():
                 selected = values["cycle_status"].eq(status) & ~no_minimum
@@ -349,7 +311,7 @@ def _comparison_figure(
                         label=f"{label} ({status_label})",
                         zorder=3,
                     )
-            if algorithm == "v2.6.7" and no_minimum.any():
+            if no_minimum.any():
                 axis.scatter(
                     (x + offset)[no_minimum],
                     np.full(int(no_minimum.sum()), -0.04),
@@ -363,9 +325,10 @@ def _comparison_figure(
                     zorder=4,
                 )
             continue
-        supported = values["optimum_supported"].eq(True)
-        unsupported = values["optimum_supported"].eq(False)
-        unknown = values["optimum_supported"].isna()
+        no_minimum = values["optimum_minutes"].isna()
+        supported = values["optimum_supported"].eq(True) & ~no_minimum
+        unsupported = values["optimum_supported"].eq(False) & ~no_minimum
+        unknown = values["optimum_supported"].isna() & ~no_minimum
         axis.scatter(
             (x + offset)[supported],
             values.loc[supported, "optimum_minutes"],
@@ -396,6 +359,19 @@ def _comparison_figure(
                 s=30,
                 label=f"{label} (support unknown)",
                 zorder=3,
+            )
+        if no_minimum.any():
+            axis.scatter(
+                (x + offset)[no_minimum],
+                np.full(int(no_minimum.sum()), -0.04),
+                transform=axis.get_xaxis_transform(),
+                marker="x",
+                color=color,
+                s=24,
+                linewidths=0.8,
+                clip_on=False,
+                label=f"{label} (no diagnostic minimum)",
+                zorder=4,
             )
     rb = points[algorithms[0]].reindex(cycles)["rb_minutes"]
     color, marker, label = STYLES["RB"]
@@ -478,7 +454,9 @@ def _cost_curve_figure(
         cost = pd.to_numeric(curve["inverse_cop"], errors="coerce").where(eligible)
         regret = (100 * pd.to_numeric(curve["relative_regret"], errors="coerce")).where(eligible)
         color, marker, _label = _style(algorithm)
-        linestyle = CURVE_LINESTYLES.get(algorithm, CURVE_LINESTYLES["v2.6"])
+        linestyle = CURVE_LINESTYLES.get(
+            algorithm.split("__", 1)[0], CURVE_LINESTYLES["v2.6"]
+        )
         cost_axis.plot(
             minutes,
             cost,
@@ -544,7 +522,12 @@ def _cost_curve_figure(
     )
     cycle_id = int(cycle_name.rsplit("_", 1)[-1])
     status_algorithm = next(
-        (algorithm for algorithm in ("v2.6.7", "v2.6.6") if algorithm in tables), None
+        (
+            algorithm
+            for algorithm in tables
+            if algorithm.split("__", 1)[0] in {"v2.6.7", "v2.6.6"}
+        ),
+        None,
     )
     status_curve = tables.get(status_algorithm, reference)
     status_row = status_curve.loc[status_curve["cycle_name"].eq(cycle_name)].iloc[0]
@@ -581,6 +564,7 @@ def _optimal_rgb_figures(
         )
         flat_axes = axes.ravel()
         for axis, algorithm in zip(flat_axes, page, strict=False):
+            base = algorithm.split("__", 1)[0]
             info = front_images.get(algorithm, {})
             _plot_decision_image(axis, info, algorithm.upper(), start, pd.NaT)
             target = pd.to_datetime(info.get("target_time"), errors="coerce")
@@ -604,10 +588,10 @@ def _optimal_rgb_figures(
                     filter(
                         None,
                         (
-                            target_status if algorithm in STATUS_MARKERS else "",
+                            target_status if base in STATUS_MARKERS else "",
                             (
                                 "no eligible diagnostic minimum"
-                                if algorithm == "v2.6.7"
+                                if base in {"v2.6.7", "v2.6.8"}
                                 and info.get("status") == "no_valid_optimal"
                                 else str(info.get("status", "unavailable")).replace("_", " ")
                             ),
@@ -618,7 +602,7 @@ def _optimal_rgb_figures(
             axis.set_title(
                 (
                     f"{algorithm.upper()} diagnostic minimum\n{detail}"
-                    if algorithm in {"v2.6.6", "v2.6.7"}
+                    if base in {"v2.6.6", "v2.6.7", "v2.6.8"}
                     else f"{algorithm.upper()} optimum\n{detail}"
                 ),
                 loc="left",
@@ -633,7 +617,9 @@ def _optimal_rgb_figures(
         cycle_id = int(cycle_name.rsplit("_", 1)[-1])
         figure.suptitle(
             f"Cycle {cycle_id}: frost appearance at selected/diagnostic cost-function times"
-            if {"v2.6.6", "v2.6.7"}.intersection(page)
+            if {"v2.6.6", "v2.6.7", "v2.6.8"}.intersection(
+                algorithm.split("__", 1)[0] for algorithm in page
+            )
             else f"Cycle {cycle_id}: frost appearance at cost-function optima",
             x=0.02,
             ha="left",
@@ -664,11 +650,15 @@ def _match_optimal_front_images(
             None
             if support is None or pd.isna(support)
             else bool(support)
-            and (algorithm not in STATUS_MARKERS or cycle_status == "identified_curve")
+            and (
+                algorithm.split("__", 1)[0] not in STATUS_MARKERS
+                or cycle_status == "identified_curve"
+            )
         )
         matched[algorithm]["target_status"] = (
             cycle_status
-            if algorithm in STATUS_MARKERS and cycle_status != "identified_curve"
+            if algorithm.split("__", 1)[0] in STATUS_MARKERS
+            and cycle_status != "identified_curve"
             else ""
         )
     return matched
@@ -682,7 +672,7 @@ def _render_cost_curve_comparisons(
     fetch_cloud: bool = False,
     minimum_free_gib: float = 5,
 ) -> None:
-    algorithms = tuple(name for name in (*STYLES, *V26_PATCHES) if name != "RB" and name in tables)
+    algorithms = tuple(tables)
     selected = {algorithm: tables[algorithm] for algorithm in algorithms}
     cycle_sets = {
         algorithm: set(table["cycle_name"].astype(str)) for algorithm, table in selected.items()
@@ -754,14 +744,10 @@ def _render_cost_curve_comparisons(
 def _decision_images(
     metadata: pd.DataFrame, images: pd.DataFrame, curve: pd.DataFrame
 ) -> dict[str, dict[str, object]]:
-    eligible = curve["optimization_eligible"].fillna(False)
     first = curve.iloc[0]
     optimum = (
         first.get("recommended_time") if first.get("algorithm") == "v3" else first.get("t_star")
     )
-    if pd.isna(optimum):
-        formal = pd.to_numeric(curve["inverse_cop"], errors="coerce").where(eligible).dropna()
-        optimum = curve.loc[formal.idxmin(), "candidate_time"] if not formal.empty else pd.NaT
     rb = first["t_RB"] if first.get("rb_status") == "triggered" else pd.NaT
     matches = match_decision_rgb_images(
         metadata,
@@ -777,48 +763,35 @@ def _render_cycle_sets(  # noqa: C901
     records: Mapping[str, Mapping[str, object]],
     output: Path,
 ) -> None:
-    titles = {
-        "水侧制热量_cycle": "Water-heat optimum",
-        "cost_function_v1_cycle": "Unit-heat V1 optimum",
-        "cost_function_v2_cycle": "Updated V2 optimum",
+    suites = {
+        f"cost_function_{algorithm}_cycle": (table, _decision_title(algorithm))
+        for algorithm, table in tables.items()
     }
-    suites: dict[str, pd.DataFrame] = {}
-    if "v1" in tables:
-        suites["水侧制热量_cycle"] = _publication_curve(tables["v1"], "water_reference")
-        suites["cost_function_v1_cycle"] = _publication_curve(tables["v1"], "v1")
-    if "v2" in tables:
-        suites["cost_function_v2_cycle"] = _publication_curve(tables["v2"], "v2")
-    for algorithm in ("v2.1", "v2.2", "v2.3", "v2.4", "v2.5", "v2.6", *V26_PATCHES, "v3"):
-        if algorithm in tables:
-            directory = f"cost_function_{algorithm}_cycle"
-            titles[directory] = (
-                "V3 offline decision"
-                if algorithm == "v3"
-                else "V2.6.7 diagnostic identification minimum"
-                if algorithm == "v2.6.7"
-                else "V2.6.6 diagnostic identification minimum"
-                if algorithm == "v2.6.6"
-                else f"{algorithm.upper()} optimum"
-            )
-            suites[directory] = _publication_curve(tables[algorithm], algorithm)
-    if "renewal_water" in tables:
-        directory = "cost_function_renewal_water_cycle"
-        titles[directory] = "Renewal-water optimum"
-        suites[directory] = tables["renewal_water"]
-    cycles = sorted(set().union(*(set(table["cycle_name"]) for table in suites.values())))
+    water_reference_columns = {
+        "water_reference_t_star",
+        "water_reference_inverse_cop",
+        "water_reference_relative_regret",
+    }
+    if "v1" in tables and water_reference_columns.issubset(tables["v1"].columns):
+        suites["水侧制热量_cycle"] = (
+            _publication_curve(tables["v1"], "water_reference"),
+            "Water-heat optimum",
+        )
+    cycles = sorted(set().union(*(set(table["cycle_name"]) for table, _ in suites.values())))
     for cycle_name in cycles:
         cycle_name = str(cycle_name)
         record = records[cycle_name]
         frame = loader.load_cycle(cycle_name)
         metadata = loader.load_image_metadata(cycle_name)
         images = loader.load_cycle_images(cycle_name)
-        for label, table in suites.items():
+        for label, (table, title) in suites.items():
             curve = table.loc[table["cycle_name"].eq(cycle_name)]
             if curve.empty:
                 continue
             display_metric = None
             minimum_support_label = None
-            if curve.iloc[0].get("algorithm") == "v2.6.7":
+            algorithm = str(curve.iloc[0].get("algorithm", "")).split("__", 1)[0]
+            if algorithm == "v2.6.7":
                 curve = _with_v267_display_extension(curve)
                 display_metric = V267_DISPLAY_METRIC
                 cycle_status = str(curve.iloc[0].get("cycle_status", "identified_curve"))
@@ -832,19 +805,30 @@ def _render_cycle_sets(  # noqa: C901
                 _decision_images(metadata, images, curve),
                 output / label / filename,
                 optimal_label=(
-                    f"{titles[label]} ({str(curve.iloc[0]['cycle_status']).replace('_', ' ')})"
-                    if curve.iloc[0].get("algorithm") in STATUS_MARKERS
-                    else titles[label]
+                    f"{title} ({str(curve.iloc[0]['cycle_status']).replace('_', ' ')})"
+                    if algorithm in STATUS_MARKERS
+                    else title
                 ),
                 full_candidate_domain=True,
                 display_metric=display_metric,
                 minimum_label=(
                     "Diagnostic/raw minimum"
-                    if curve.iloc[0].get("algorithm") == "v2.6.7"
+                    if algorithm == "v2.6.7"
+                    else "Diagnostic minimum"
+                    if algorithm == "v2.6.8"
                     else "Minimum"
                 ),
                 minimum_support_label=minimum_support_label,
             )
+
+
+def _decision_title(algorithm: str) -> str:
+    base = algorithm.split("__", 1)[0]
+    if base == "v3":
+        return "V3 offline decision"
+    if base in {"v2.6.6", "v2.6.7"}:
+        return f"{base.upper()} diagnostic identification minimum"
+    return _style(algorithm)[2]
 
 
 def _plot_bootstrap_stability(bootstrap: pd.DataFrame) -> plt.Figure:
@@ -1050,141 +1034,29 @@ def generate_v267_evidence(
         _save_png(_plot_ticket_loeo(loeo, target), output / f"ticket_{target}_loeo.png")
 
 
-def _render_decision_publications(
-    tables: Mapping[str, pd.DataFrame], loader: DatasetLoader, output: Path
-) -> None:
-    for algorithm, table in tables.items():
-        for cycle_name in sorted(table["cycle_name"].astype(str).unique()):
-            curve = table.loc[table["cycle_name"].eq(cycle_name)]
-            record = loader.get_cycle_record(cycle_name)
-            filename = f"cycle_{int(cycle_name.rsplit('_', 1)[-1]):03d}_publication.png"
-            render_decision_publication(
-                loader.load_cycle(cycle_name),
-                record,
-                curve,
-                _decision_images(
-                    loader.load_image_metadata(cycle_name),
-                    loader.load_cycle_images(cycle_name),
-                    curve,
-                ),
-                output / algorithm / filename,
-                optimal_label=f"{table.attrs['display_label']} optimum",
-                full_candidate_domain=True,
-            )
-
-
-def render_standardized_cost_results(
+def generate_cost_function_figures(
     result_dirs: Sequence[Path],
     loader: DatasetLoader,
     output: Path,
     *,
     overwrite: bool = False,
 ) -> None:
-    """Render the established cost figures from standardized cost run directories."""
+    """Render cost figures from standardized cost run directories."""
     tables = _load_result_tables(result_dirs, loader)
-    _register_dynamic_styles(tables)
+    cycles = sorted(set().union(*(set(table["cycle_name"]) for table in tables.values())))
+    records = {cycle: loader.get_cycle_record(str(cycle)) for cycle in cycles}
     comparison = output / "comparison_all_runs_RB.png"
     if comparison.exists() and not overwrite:
         raise FileExistsError(f"comparison exists; pass --overwrite: {comparison}")
     _save_png(_comparison_figure(tables, tuple(tables)), comparison)
-    _render_decision_publications(tables, loader, output / "decision_publications")
+    _render_cycle_sets(tables, loader, records, output / "decision_publications")
     for heat_basis in dict.fromkeys(table.attrs["heat_basis"] for table in tables.values()):
-        selected = {
-            algorithm: table
-            for algorithm, table in tables.items()
-            if table.attrs["heat_basis"] == heat_basis
-        }
-        _render_cost_curve_comparisons(selected, loader, output / "cost_curves" / heat_basis)
-
-
-def generate_cost_function_figures(
-    sources: Mapping[str, Path],
-    loader: DatasetLoader,
-    output: Path,
-    *,
-    comparison_only: bool = False,
-    curves_only: bool = False,
-    fetch_cloud: bool = False,
-    minimum_free_gib: float = 5,
-) -> None:
-    """Read comprehensive cost CSVs and write comparison/publication PNGs."""
-    tables = _read_tables(sources)
-    cycles = sorted(set().union(*(set(table["cycle_name"]) for table in tables.values())))
-    records = {cycle: loader.get_cycle_record(str(cycle)) for cycle in cycles}
-    for table in tables.values():
-        table["cycle_start"] = table["cycle_name"].map(
-            lambda cycle: records[str(cycle)]["boundaries"]["start_time"]
-        )
-    if curves_only:
-        family = (
-            "cost_function_v1_v2.5_v2.6.5_v2.6.6_v2.6.7_cycle"
-            if {"v1", "v2.5", "v2.6.5", "v2.6.6", "v2.6.7"}.issubset(tables)
-            else "cost_function_v1_v2.5_v2.6.5_v2.6.6_cycle"
-            if {"v1", "v2.5", "v2.6.5", "v2.6.6"}.issubset(tables)
-            else "cost_function_v1_to_v2.6_cycle"
-        )
         _render_cost_curve_comparisons(
-            tables,
+            {
+                algorithm: table
+                for algorithm, table in tables.items()
+                if table.attrs["heat_basis"] == heat_basis
+            },
             loader,
-            output / family,
-            fetch_cloud=fetch_cloud,
-            minimum_free_gib=minimum_free_gib,
+            output / "cost_curves" / heat_basis,
         )
-        return
-    for algorithm in (
-        "v1",
-        "v2",
-        "v2.1",
-        "v2.2",
-        "v2.3",
-        "v2.4",
-        "v2.5",
-        "v2.6",
-        *V26_PATCHES,
-        "v3",
-        "renewal_water",
-    ):
-        if algorithm in tables:
-            figure = _comparison_figure(tables, (algorithm,))
-            path = output / f"comparison_{algorithm}_RB.png"
-            (_save_svg_png if algorithm == "renewal_water" else _save_png)(figure, path)
-    patches = tuple(algorithm for algorithm in V26_PATCHES if algorithm in tables)
-    if len(patches) > 1:
-        _save_png(
-            _comparison_figure(tables, patches),
-            output / f"comparison_{'_'.join(patches)}_RB.png",
-        )
-    for algorithms in (
-        ("v1", "v2"),
-        ("v1", "v2.1"),
-        ("v1", "v2.2"),
-        ("v1", "v2.1", "v2.2"),
-        ("v1", "v2.2", "v2.3"),
-        ("v1", "v2.3", "v2.4"),
-        ("v1", "v2.3", "v2.5"),
-        ("v2.5", "v2.6"),
-        ("v1", "v2.5", "v2.6"),
-        ("v1", "v2.5", "v2.6.5", "v2.6.6"),
-        ("v1", "v2.5", "v2.6.5", "v2.6.6", "v2.6.7"),
-        ("v2.5", "v2.6", "v3"),
-        ("v1", "v3"),
-        ("v1", "v2.2", "v2.5", "renewal_water"),
-    ):
-        if set(algorithms).issubset(tables):
-            figure = _comparison_figure(tables, algorithms)
-            path = output / f"comparison_{'_'.join(algorithms)}_RB.png"
-            (_save_svg_png if "renewal_water" in algorithms else _save_png)(figure, path)
-    if "v3" in tables and {"recommended_time", "recommended_rule"}.issubset(tables["v3"]):
-        recommended = tables["v3"].copy()
-        recommended["algorithm"] = "v3_recommended"
-        recommended["t_star"] = recommended["recommended_time"]
-        recommended["t_star_model_supported"] = True
-        _save_png(
-            _comparison_figure(
-                {**tables, "v3_recommended": recommended},
-                ("v3", "v3_recommended"),
-            ),
-            output / "comparison_v3_raw_recommended_RB.png",
-        )
-    if not comparison_only:
-        _render_cycle_sets(tables, loader, records, output)

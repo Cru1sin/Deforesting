@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -39,6 +41,15 @@ class MetadataOnlyDataset:
                 "defrost_end": "2026-01-01 00:24:00",
             },
         }
+
+
+def test_cost_cli_help_imports_the_moved_plot_consumer() -> None:
+    result = subprocess.run(
+        [sys.executable, "main_cost.py", "--help"], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--action" in result.stdout
 
 
 class AnchorDataset(MetadataOnlyDataset):
@@ -518,10 +529,12 @@ def test_compare_delegates_results_and_dataset_to_moved_cost_plotter(
     runs = [tmp_path / "v1", tmp_path / "v25"]
     loader = object()
     calls: list[tuple[object, ...]] = []
-    monkeypatch.setattr(main_cost, "DatasetLoader", lambda dataset: (calls.append((dataset,)), loader)[1])
+    monkeypatch.setattr(
+        main_cost, "DatasetLoader", lambda dataset: (calls.append((dataset,)), loader)[1]
+    )
     monkeypatch.setattr(
         main_cost,
-        "render_standardized_cost_results",
+        "generate_cost_function_figures",
         lambda result_dirs, actual_loader, output, *, overwrite: calls.append(
             (result_dirs, actual_loader, output, overwrite)
         ),

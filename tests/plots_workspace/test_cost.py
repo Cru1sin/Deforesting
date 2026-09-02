@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import warnings
 from contextlib import contextmanager
 from itertools import combinations
@@ -48,6 +49,127 @@ def _table(algorithm: str) -> pd.DataFrame:
             for minute, cost in ((optimum, 0.4), (end, 0.5))
         ]
     )
+
+
+def _write_standard_run(
+    root: Path,
+    name: str,
+    table: pd.DataFrame,
+    *,
+    base_cost: str,
+    heat_basis: str,
+    variant: str | None = None,
+) -> Path:
+    run = root / name
+    run.mkdir()
+    (run / "recipe.json").write_text(
+        json.dumps({"base_cost": base_cost, "heat_basis": heat_basis, "variant": variant}),
+        encoding="utf-8",
+    )
+    table.to_csv(run / "cost.csv", index=False)
+    return run
+
+
+def test_standardized_public_entrypoint_renders_one_comparison_and_each_heat_basis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    runs = [
+        _write_standard_run(
+            tmp_path,
+            "v1",
+            _table("v1").drop(
+                columns=[
+                    "water_reference_t_star",
+                    "water_reference_inverse_cop",
+                    "water_reference_relative_regret",
+                ]
+            ).assign(is_optimum=lambda values: values["relative_regret"].eq(0), supported=True),
+            base_cost="v1",
+            heat_basis="unit",
+        ),
+        _write_standard_run(
+            tmp_path,
+            "v2.5",
+            _table("v2.5").assign(
+                is_optimum=lambda values: values["relative_regret"].eq(0), supported=True
+            ),
+            base_cost="v2.5",
+            heat_basis="water",
+        ),
+    ]
+    saved: list[Path] = []
+    suites: list[tuple[tuple[str, ...], Path]] = []
+    curves: list[tuple[tuple[str, ...], Path]] = []
+    monkeypatch.setattr(
+        module, "_save_png", lambda figure, path: (saved.append(path), plt.close(figure))
+    )
+    monkeypatch.setattr(
+        module,
+        "_render_cycle_sets",
+        lambda tables, _loader, _records, output: suites.append((tuple(tables), output)),
+    )
+    monkeypatch.setattr(
+        module,
+        "_render_cost_curve_comparisons",
+        lambda tables, _loader, output: curves.append((tuple(tables), output)),
+    )
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(cycle_name: str) -> dict[str, object]:
+            return {
+                "cycle_name": cycle_name,
+                "boundaries": {"start_time": "2025-12-31 23:55:00"},
+            }
+
+    output = tmp_path / "figures"
+    module.generate_cost_function_figures(runs, Loader(), output)
+
+    assert saved == [output / "comparison_all_runs_RB.png"]
+    assert suites == [(("v1", "v2.5"), output / "decision_publications")]
+    assert curves == [
+        (("v1",), output / "cost_curves" / "unit"),
+        (("v2.5",), output / "cost_curves" / "water"),
+    ]
+
+
+def test_cycle_sets_render_variants_and_v268_as_diagnostic_minima(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    tables = {
+        "v1__alpha": _table("v1__alpha").drop(
+            columns=[
+                "water_reference_t_star",
+                "water_reference_inverse_cop",
+                "water_reference_relative_regret",
+            ]
+        ),
+        "v2.6.8": _table("v2.6.8"),
+    }
+    rendered: list[tuple[str, str]] = []
+    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
+    monkeypatch.setattr(
+        module,
+        "render_decision_publication",
+        lambda _frame, _record, _curve, _images, output, **kwargs: rendered.append(
+            (output.parent.name, kwargs["optimal_label"])
+        ),
+    )
+
+    class Loader:
+        load_cycle = load_image_metadata = load_cycle_images = staticmethod(
+            lambda _cycle_name: pd.DataFrame()
+        )
+
+    records = {cycle: {"cycle_name": cycle} for cycle in tables["v1__alpha"]["cycle_name"].unique()}
+    module._render_cycle_sets(tables, Loader(), records, tmp_path)
+
+    assert set(rendered) == {
+        ("cost_function_v1__alpha_cycle", "V1 (alpha) optimum"),
+        ("cost_function_v2.6.8_cycle", "V2.6.8 diagnostic minimum"),
+    }
 
 
 def test_cycle_points_accept_mixed_fractional_timestamp_formats() -> None:
@@ -98,27 +220,6 @@ def test_cycle_points_preserves_unknown_support() -> None:
     assert points["optimum_supported"].isna().all()
 
 
-def test_read_tables_admits_cycles_by_any_usable_candidate_and_keeps_full_curve(
-    tmp_path: Path,
-) -> None:
-    module = _module()
-    path = tmp_path / "v2.6.6.csv"
-    pd.DataFrame(
-        {
-            "cycle_name": ["keep", "keep", "drop", "drop"],
-            "algorithm": ["v2.6.6"] * 4,
-            "optimization_eligible": [True, False, False, False],
-            "valid": [True, False, False, False],
-            "is_censored": [False, True, False, True],
-        }
-    ).to_csv(path, index=False)
-
-    table = module._read_tables({"V2.6.6": path})["v2.6.6"]
-
-    assert table["cycle_name"].tolist() == ["keep", "keep"]
-    assert table["is_censored"].tolist() == [False, True]
-
-
 def test_water_reference_curve_uses_its_own_selected_time() -> None:
     module = _module()
     table = _table("v1")
@@ -128,280 +229,6 @@ def test_water_reference_curve_uses_its_own_selected_time() -> None:
     pd.testing.assert_series_equal(
         curve["t_star"], table["water_reference_t_star"], check_names=False
     )
-
-
-def test_cost_comparison_exports_three_grids_and_three_png_cycle_sets(
-    tmp_path: Path, monkeypatch
-) -> None:
-    module = _module()
-    v1_path, v2_path = tmp_path / "v1.csv", tmp_path / "v2.csv"
-    for algorithm, path in (("v1", v1_path), ("v2", v2_path)):
-        table = _table(algorithm)
-        excluded = pd.concat(
-            [
-                table.iloc[:2].assign(cycle_name="cycle_007", valid=False),
-                table.iloc[:2].assign(cycle_name="cycle_009", is_censored=True),
-            ],
-            ignore_index=True,
-        )
-        pd.concat([table, excluded], ignore_index=True).to_csv(path, index=False)
-    seen: list[tuple[str, int, str, str, list[str], list[str]]] = []
-    candidate_heights: list[list[float]] = []
-    original_save = module._save_png
-
-    def capture(fig: plt.Figure, path: Path) -> None:
-        axis = fig.axes[0]
-        seen.append(
-            (
-                path.name,
-                len(fig.axes),
-                axis.get_xlabel(),
-                axis.get_ylabel(),
-                [tick.get_text() for tick in axis.get_xticklabels()],
-                [label.get_text() for label in axis.texts],
-            )
-        )
-        candidate_heights.append([bar.get_height() for bar in axis.containers[0]])
-        original_save(fig, path)
-
-    rendered: list[Path] = []
-    decision_times: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
-    optimal_labels: dict[str, str] = {}
-
-    def render(_frame, _record, _curve, _images, output, **_kwargs) -> None:
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.touch()
-        rendered.append(output)
-        if output.is_relative_to(tmp_path / "figures"):
-            relative = output.relative_to(tmp_path / "figures").as_posix()
-            decision_times[relative] = (
-                pd.Timestamp(_images["optimal"]["target_time"]),
-                pd.Timestamp(_images["rb"]["target_time"]),
-            )
-            optimal_labels[relative] = _kwargs["optimal_label"]
-
-    monkeypatch.setattr(module, "_save_png", capture)
-    monkeypatch.setattr(module, "render_decision_publication", render)
-    loads: list[tuple[str, str]] = []
-
-    class Loader:
-        @staticmethod
-        def get_cycle_record(cycle_name: str) -> dict[str, object]:
-            loads.append(("record", cycle_name))
-            return {
-                "cycle_name": cycle_name,
-                "boundaries": {
-                    "start_time": "2025-12-31 23:55:00",
-                    "stable_heating_start": "2026-01-01",
-                },
-            }
-
-        @staticmethod
-        def load_cycle(cycle_name: str) -> pd.DataFrame:
-            loads.append(("frame", cycle_name))
-            return pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=2, freq="min")})
-
-        @staticmethod
-        def load_image_metadata(cycle_name: str) -> pd.DataFrame:
-            loads.append(("metadata", cycle_name))
-            return pd.DataFrame(columns=["camera_role", "file_name", "image_time"])
-
-        @staticmethod
-        def load_cycle_images(cycle_name: str) -> pd.DataFrame:
-            loads.append(("images", cycle_name))
-            return pd.DataFrame(columns=["camera_role", "file_name", "path"])
-
-    output = tmp_path / "figures"
-    module.generate_cost_function_figures({"v2": v2_path, "v1": v1_path}, Loader(), output)
-
-    assert seen == [
-        (
-            "comparison_v1_RB.png",
-            1,
-            "Cycle ID",
-            "Minutes from cycle start",
-            ["3", "5", "9"],
-            ["01-01", "01-02", "01-01"],
-        ),
-        (
-            "comparison_v2_RB.png",
-            1,
-            "Cycle ID",
-            "Minutes from cycle start",
-            ["3", "5", "9"],
-            ["01-01", "01-02", "01-01"],
-        ),
-        (
-            "comparison_v1_v2_RB.png",
-            1,
-            "Cycle ID",
-            "Minutes from cycle start",
-            ["3", "5", "9"],
-            ["01-01", "01-02", "01-01"],
-        ),
-    ]
-    assert candidate_heights == [[21, 25, 21], [21, 25, 21], [21, 25, 21]]
-    assert {path.relative_to(output).as_posix() for path in rendered} == {
-        f"{directory}/cycle_00{cycle}_publication.png"
-        for directory in (
-            "水侧制热量_cycle",
-            "cost_function_v1_cycle",
-            "cost_function_v2_cycle",
-        )
-        for cycle in (3, 5, 9)
-    }
-    assert decision_times["cost_function_v2_cycle/cycle_005_publication.png"] == (
-        pd.Timestamp("2026-01-01 00:12"),
-        pd.Timestamp("2026-01-01 00:14"),
-    )
-    assert {
-        optimal_labels[f"{directory}/cycle_003_publication.png"]
-        for directory in (
-            "水侧制热量_cycle",
-            "cost_function_v1_cycle",
-            "cost_function_v2_cycle",
-        )
-    } == {
-        "Water-heat optimum",
-        "Unit-heat V1 optimum",
-        "Updated V2 optimum",
-    }
-    assert not list(output.rglob("*.svg"))
-    assert not list(output.rglob("*.pdf"))
-    assert sorted(loads) == sorted(
-        (kind, cycle)
-        for kind in ("record", "frame", "metadata", "images")
-        for cycle in ("cycle_003", "cycle_005", "cycle_009")
-    )
-
-    rendered.clear()
-    v1_output = tmp_path / "v1_only"
-    module.generate_cost_function_figures({"anything": v1_path}, Loader(), v1_output)
-    assert {path.name for path in v1_output.glob("comparison*.png")} == {"comparison_v1_RB.png"}
-    assert {path.parent.name for path in rendered} == {
-        "水侧制热量_cycle",
-        "cost_function_v1_cycle",
-    }
-
-    rendered.clear()
-    v2_output = tmp_path / "v2_only"
-    module.generate_cost_function_figures({"anything": v2_path}, Loader(), v2_output)
-    assert {path.name for path in v2_output.glob("comparison*.png")} == {"comparison_v2_RB.png"}
-    assert {path.parent.name for path in rendered} == {"cost_function_v2_cycle"}
-
-
-def test_v2_variants_use_existing_v1_comparison_plotter(tmp_path: Path, monkeypatch) -> None:
-    module = _module()
-    sources = {}
-    for algorithm in ("v1", "v2.1", "v2.2", "v2.3", "v2.4", "v2.5", "v2.6"):
-        path = tmp_path / f"{algorithm}.csv"
-        _table(algorithm).to_csv(path, index=False)
-        sources[algorithm] = path
-
-    class Loader:
-        @staticmethod
-        def get_cycle_record(cycle_name: str) -> dict[str, object]:
-            return {"boundaries": {"start_time": "2025-12-31 23:55:00"}}
-
-    monkeypatch.setattr(
-        module,
-        "_render_cycle_sets",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("comparison only")),
-    )
-    module.generate_cost_function_figures(sources, Loader(), tmp_path, comparison_only=True)
-
-    assert (tmp_path / "comparison_v1_v2.1_RB.png").is_file()
-    assert (tmp_path / "comparison_v1_v2.1_v2.2_RB.png").is_file()
-    assert (tmp_path / "comparison_v1_v2.2_v2.3_RB.png").is_file()
-    assert (tmp_path / "comparison_v1_v2.3_v2.4_RB.png").is_file()
-    assert (tmp_path / "comparison_v1_v2.3_v2.5_RB.png").is_file()
-    assert (tmp_path / "comparison_v2.5_v2.6_RB.png").is_file()
-    assert (tmp_path / "comparison_v1_v2.5_v2.6_RB.png").is_file()
-
-
-def test_v2_variants_render_publication_cycles(tmp_path: Path, monkeypatch) -> None:
-    module = _module()
-    sources = {}
-    for algorithm in ("v2.1", "v2.2", "v2.3", "v2.4", "v2.5", "v2.6", "v3"):
-        path = tmp_path / f"{algorithm}.csv"
-        _table(algorithm).to_csv(path, index=False)
-        sources[algorithm] = path
-
-    class Loader:
-        @staticmethod
-        def get_cycle_record(cycle_name: str) -> dict[str, object]:
-            return {
-                "cycle_name": cycle_name,
-                "boundaries": {"start_time": "2025-12-31 23:55:00"},
-            }
-
-        @staticmethod
-        def load_cycle(_cycle_name: str) -> pd.DataFrame:
-            return pd.DataFrame()
-
-        @staticmethod
-        def load_image_metadata(_cycle_name: str) -> pd.DataFrame:
-            return pd.DataFrame()
-
-        @staticmethod
-        def load_cycle_images(_cycle_name: str) -> pd.DataFrame:
-            return pd.DataFrame()
-
-    rendered = []
-    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
-    monkeypatch.setattr(
-        module,
-        "render_decision_publication",
-        lambda _frame, _record, curve, _images, output, **kwargs: rendered.append(
-            (curve["algorithm"].iloc[0], output.parent.name, kwargs["optimal_label"])
-        ),
-    )
-
-    module.generate_cost_function_figures(sources, Loader(), tmp_path / "figures")
-
-    expected = {
-        (algorithm, f"cost_function_{algorithm}_cycle", f"{algorithm.upper()} optimum")
-        for algorithm in ("v2.1", "v2.2", "v2.3", "v2.4", "v2.5", "v2.6")
-    }
-    expected.add(("v3", "cost_function_v3_cycle", "V3 offline decision"))
-    assert set(rendered) == expected
-
-
-def test_v261_uses_dotted_comparison_and_cycle_directory(
-    tmp_path: Path, monkeypatch
-) -> None:
-    module = _module()
-    path = tmp_path / "v2.6.1.csv"
-    _table("v2.6.1").to_csv(path, index=False)
-
-    class Loader:
-        @staticmethod
-        def get_cycle_record(cycle_name: str) -> dict[str, object]:
-            return {
-                "cycle_name": cycle_name,
-                "boundaries": {"start_time": "2025-12-31 23:55:00"},
-            }
-
-        load_cycle = load_image_metadata = load_cycle_images = staticmethod(
-            lambda _cycle_name: pd.DataFrame()
-        )
-
-    rendered: list[Path] = []
-    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
-    monkeypatch.setattr(
-        module,
-        "render_decision_publication",
-        lambda _frame, _record, _curve, _images, output, **_kwargs: rendered.append(output),
-    )
-
-    output = tmp_path / "figures"
-    module.generate_cost_function_figures({"v2.6.1": path}, Loader(), output)
-
-    assert (output / "comparison_v2.6.1_RB.png").is_file()
-    assert {item.relative_to(output).as_posix() for item in rendered} == {
-        "cost_function_v2.6.1_cycle/cycle_003_publication.png",
-        "cost_function_v2.6.1_cycle/cycle_005_publication.png",
-    }
 
 
 def test_render_all_cost_curves_writes_curve_and_paginated_rgb_plates(
@@ -858,31 +685,6 @@ def test_cost_curve_rgb_fetches_only_missing_optimal_front_members(
     ]
 
 
-def test_v267_is_registered_and_keeps_cycles_without_an_eligible_candidate(
-    tmp_path: Path,
-) -> None:
-    module = _module()
-    path = tmp_path / "v267.csv"
-    table = _table("v2.6.7").assign(
-        cycle_status=lambda values: values["cycle_name"].map(
-            {"cycle_003": "identified_curve", "cycle_005": "model_support_limited"}
-        ),
-        model_supported=lambda values: values["cycle_name"].eq("cycle_003"),
-        t_star_model_supported=lambda values: values["cycle_name"].eq("cycle_003"),
-    )
-    table.loc[table["cycle_name"].eq("cycle_005"), ["valid", "optimization_eligible", "t_star"]] = [
-        False,
-        False,
-        pd.NaT,
-    ]
-    table.to_csv(path, index=False)
-
-    loaded = module._read_tables({"V2.6.7": path})["v2.6.7"]
-
-    assert module.V26_PATCHES[-1] == "v2.6.7"
-    assert set(loaded["cycle_name"]) == {"cycle_003", "cycle_005"}
-
-
 def test_v267_overview_rejects_unrecognized_status() -> None:
     module = _module()
     table = _table("v2.6.7").assign(
@@ -1034,4 +836,108 @@ def test_bootstrap_title_and_experiment_bars_follow_global_gate() -> None:
         to_rgb("#C6C6CC"),
         to_rgb("#7884B4"),
     ]
+    plt.close(figure)
+
+
+def test_standard_run_adapter_uses_authoritative_selected_fields_and_keeps_no_minimum(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    rows = {
+        "v1": pd.DataFrame(
+            {
+                "cycle_name": ["cycle_003"] * 2,
+                "candidate_time": [
+                    start + pd.Timedelta(minutes=10),
+                    start + pd.Timedelta(minutes=12),
+                ],
+                "optimization_eligible": [True, True],
+                "supported": [True, False],
+                "is_optimum": [True, False],
+                "relative_regret": [0.2, 0.0],
+                "inverse_cop": [0.6, 0.5],
+            }
+        ),
+        "v2.5": pd.DataFrame(
+            {
+                "cycle_name": ["cycle_003"] * 2,
+                "candidate_time": [
+                    start + pd.Timedelta(minutes=10),
+                    start + pd.Timedelta(minutes=12),
+                ],
+                "optimization_eligible": [False, False],
+                "supported": [False, False],
+                "is_optimum": [False, False],
+                "relative_regret": [np.nan, np.nan],
+                "inverse_cop": [0.6, 0.5],
+            }
+        ),
+        "v2.6.8": pd.DataFrame(
+            {
+                "cycle_name": ["cycle_003"] * 2,
+                "candidate_time": [
+                    start + pd.Timedelta(minutes=10),
+                    start + pd.Timedelta(minutes=12),
+                ],
+                "optimization_eligible": [True, True],
+                "model_supported": [False, True],
+                "diagnostic_minimum": [start + pd.Timedelta(minutes=10)] * 2,
+                "relative_regret": [0.2, 0.0],
+                "inverse_cop": [0.6, 0.5],
+            }
+        ),
+    }
+    runs = []
+    for base_cost, table in rows.items():
+        run = tmp_path / base_cost
+        run.mkdir()
+        (run / "recipe.json").write_text(
+            json.dumps({"base_cost": base_cost, "heat_basis": "water"}), encoding="utf-8"
+        )
+        table.to_csv(run / "cost.csv", index=False)
+        runs.append(run)
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(_: str) -> dict[str, object]:
+            return {"boundaries": {"start_time": start}}
+
+    tables = module._load_result_tables(runs, Loader())
+
+    assert tables["v1"]["t_star"].eq(start + pd.Timedelta(minutes=10)).all()
+    assert tables["v1"]["t_star_model_supported"].eq(True).all()
+    assert tables["v2.5"]["t_star"].isna().all()
+    assert tables["v2.5"]["t_star_model_supported"].isna().all()
+    assert tables["v2.6.8"]["t_star"].eq(start + pd.Timedelta(minutes=10)).all()
+    assert tables["v2.6.8"]["t_star_model_supported"].eq(False).all()
+    assert tables["v1"]["t_RB"].isna().all()
+    assert tables["v1"]["rb_status"].eq("unavailable").all()
+
+
+def test_variants_reuse_their_base_style_independent_of_input_order() -> None:
+    module = _module()
+
+    assert module._style("v1__alpha")[:2] == module._style("v1")[:2]
+    assert module._style("v2.5__beta")[:2] == module._style("v2.5")[:2]
+    assert module._style("v1__alpha")[2] == "V1 (alpha) optimum"
+
+
+def test_common_comparison_marks_any_unselected_cycle_off_the_data_axis() -> None:
+    module = _module()
+    table = _table("v2.6.8").assign(
+        cycle_start=pd.Timestamp("2025-12-31 23:55:00"),
+        t_star=pd.NaT,
+        t_star_model_supported=pd.NA,
+    )
+
+    figure = module._comparison_figure({"v2.6.8": table}, ("v2.6.8",))
+
+    marker = next(
+        item
+        for item in figure.axes[0].collections
+        if item.get_label() == "V2.6.8 diagnostic minimum (no diagnostic minimum)"
+    )
+    assert marker.get_offsets().tolist() == [[0.0, -0.04], [1.0, -0.04]]
+    assert marker.get_offset_transform() == figure.axes[0].get_xaxis_transform()
     plt.close(figure)
