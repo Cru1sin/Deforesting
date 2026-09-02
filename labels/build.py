@@ -164,6 +164,9 @@ def build_labels(
     overwrite: bool = False,
 ) -> None:
     """Build the three formal V1 label artifacts."""
+    suffixes = [threshold_suffix(float(threshold)) for threshold in thresholds]
+    if len(suffixes) != len(set(suffixes)):
+        raise ValueError("threshold suffix collision")
     if output.exists() and not overwrite:
         raise FileExistsError(f"label output exists; pass --overwrite: {output}")
     loader = DatasetLoader(dataset_root)

@@ -45,6 +45,21 @@ def test_threshold_suffixes_are_exact_and_collision_free() -> None:
     assert build.threshold_suffix(0.29) == "29pct"
 
 
+def test_build_rejects_threshold_suffix_collision_before_dataset_loading(
+    tmp_path: Path,
+) -> None:
+    thresholds = (0.12345678901231, 0.12345678901232)
+    assert len({build.threshold_suffix(value) for value in thresholds}) == 1
+
+    with pytest.raises(ValueError, match="threshold suffix collision"):
+        build.build_labels(
+            tmp_path / "missing_dataset",
+            _canonical_cost(),
+            tmp_path / "labels",
+            thresholds,
+        )
+
+
 def test_legacy_module_reexports_the_single_label_algorithm_owner() -> None:
     assert legacy_cost._curve_support is build._curve_support
     assert legacy_cost.curve_label_exclusion_reason is build.curve_label_exclusion_reason
