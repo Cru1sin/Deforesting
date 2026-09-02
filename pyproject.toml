@@ -58,7 +58,15 @@ max-complexity = 10
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["main_data.py", "main_cost.py", "main_train.py", "dataloader", "cost", "model"]
+files = [
+    "main_data.py",
+    "main_cost.py",
+    "main_train.py",
+    "main_evaluate.py",
+    "dataloader",
+    "cost",
+    "model",
+]
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
@@ -67,7 +75,15 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 branch = true
-source = ["main_data", "main_cost", "main_train", "dataloader", "cost", "model"]
+source = [
+    "main_data",
+    "main_cost",
+    "main_train",
+    "main_evaluate",
+    "dataloader",
+    "cost",
+    "model",
+]
 
 [tool.coverage.report]
 show_missing = true
