@@ -112,13 +112,14 @@ def _validate_groups(
     for key, indices in metric_rows.items():
         if len(indices) > 1:
             raise ValueError(f"duplicate metrics fold key: {key}")
-        if str(metrics.at[indices[0], "status"]) == "ok" and key not in groups:
-            raise ValueError(f"ok metrics row {key} has no prediction group")
     for key in groups:
         if len(metric_rows.get(key, [])) != 1:
             raise ValueError(
                 f"prediction group {key} does not map to exactly one metrics row"
             )
+    for key, indices in metric_rows.items():
+        if str(metrics.at[indices[0], "status"]) == "ok" and key not in groups:
+            raise ValueError(f"ok metrics row {key} has no prediction group")
 
 
 def evaluate_run(
