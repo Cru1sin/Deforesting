@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import pandas as pd
+from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from labels.build import CAMERA_GROUPS
 from model.features import prepare_features
@@ -132,37 +133,22 @@ def label_rows(
     return rows.reset_index(drop=True)
 
 
-class FrozenTask(NamedTuple):
-    task_index: int
-    rows: pd.DataFrame
-    feature_columns: list[str]
-    heldout_experiment: str
-    setting: Setting
-    task: str
-    return_model: bool
-
-
-class ResNetTask(NamedTuple):
-    task_index: int
-    rows: pd.DataFrame
-    heldout_experiment: str
-    setting: Setting
-
-
-def _train_frozen_task(task: FrozenTask) -> tuple[int, dict[str, Any]]:
-    setting = task.setting
+def _train_frozen_task(
+    task: tuple[int, str, Setting, pd.DataFrame, list[str], str, bool],
+) -> tuple[int, dict[str, Any]]:
+    index, experiment, setting, rows, feature_columns, task_name, return_model = task
     result = train_frozen_fold(
-        task.rows,
-        task.feature_columns,
-        heldout_experiment=task.heldout_experiment,
+        rows,
+        feature_columns,
+        heldout_experiment=experiment,
         head=setting.head,
         representation=setting.representation,
         camera=setting.camera,
         modality=setting.modality,
-        task=task.task,
-        return_model=task.return_model,
+        task=task_name,
+        return_model=return_model,
     )
-    return task.task_index, result
+    return index, result
 
 
 def _write_result(
@@ -243,46 +229,31 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
     )
     (args.output / "progress.jsonl").touch()
 
-    frozen_tasks: list[FrozenTask] = []
-    resnet_tasks: list[ResNetTask] = []
-    prepared: list[tuple[Setting, pd.DataFrame, list[str]]] = []
+    folds: list[tuple[int, str, Setting, pd.DataFrame, list[str], str, bool]] = []
     for setting, selected in selected_settings:
         if setting.representation == "resnet50_finetune":
             selected["absolute_path"] = selected["image_path"].map(
                 lambda value: str((args.dataset / str(value)).resolve())
             )
-            prepared.append((setting, selected, []))
-            continue
-        featured, feature_columns = prepare_features(
-            selected,
-            dataset_root=args.dataset,
-            representation=setting.representation,
-            camera=setting.camera,
-            modality=setting.modality,
-            state_column=args.state_column,
-            maximum_per_group=args.maximum_per_group,
-        )
-        prepared.append((setting, featured, feature_columns))
-
-    folds = sorted(
-        (
-            (str(experiment), setting, selected, feature_columns)
-            for setting, selected, feature_columns in prepared
-            for experiment in selected["experiment_id"].unique()
-        ),
-        key=lambda fold: fold[0],
-    )
-    for task_index, (experiment, setting, selected, feature_columns) in enumerate(folds):
-        if setting.representation == "resnet50_finetune":
-            resnet_tasks.append(ResNetTask(task_index, selected, experiment, setting))
+            feature_columns: list[str] = []
         else:
-            frozen_tasks.append(
-                FrozenTask(
-                    task_index,
+            selected, feature_columns = prepare_features(
+                selected,
+                dataset_root=args.dataset,
+                representation=setting.representation,
+                camera=setting.camera,
+                modality=setting.modality,
+                state_column=args.state_column,
+                maximum_per_group=args.maximum_per_group,
+            )
+        for experiment in selected["experiment_id"].unique():
+            folds.append(
+                (
+                    len(folds),
+                    str(experiment),
+                    setting,
                     selected,
                     feature_columns,
-                    experiment,
-                    setting,
                     args.task,
                     args.save_models,
                 )
@@ -290,57 +261,45 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
 
     metrics: list[dict[str, Any]] = []
     predictions: list[pd.DataFrame] = []
-    if resnet_tasks:
-        from model.resnet import train_resnet_fold
-
-        for index, selected, experiment, setting in resnet_tasks:
-            save_path = (
-                args.output / "models" / f"fold_{index:04d}.pt"
-                if args.save_models
-                else None
-            )
-            result = train_resnet_fold(
-                selected,
-                heldout_experiment=experiment,
-                task=args.task,
-                batch_size=args.batch_size,
-                epochs=args.epochs,
-                learning_rate=args.learning_rate,
-                save_path=save_path,
-                camera=setting.camera,
-            )
-            _write_result(
-                args.output,
-                index,
-                result,
-                metrics,
-                predictions,
-                save_model=False,
-            )
-    if args.jobs == 1:
-        results = map(_train_frozen_task, frozen_tasks)
-        for index, result in results:
-            _write_result(
-                args.output,
-                index,
-                result,
-                metrics,
-                predictions,
-                save_model=args.save_models,
-            )
+    completed: list[tuple[int, dict[str, Any]]] = []
+    if args.jobs > 1:
+        with threadpool_limits(1), concurrent.futures.ThreadPoolExecutor(
+            max_workers=args.jobs
+        ) as executor:
+            completed = list(executor.map(_train_frozen_task, folds))
     else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as executor:
-            futures = [executor.submit(_train_frozen_task, task) for task in frozen_tasks]
-            for future in concurrent.futures.as_completed(futures):
-                index, result = future.result()
-                _write_result(
-                    args.output,
-                    index,
-                    result,
-                    metrics,
-                    predictions,
-                    save_model=args.save_models,
+        for fold in folds:
+            index, experiment, setting, selected, _, _, _ = fold
+            if setting.representation == "resnet50_finetune":
+                from model.resnet import train_resnet_fold
+
+                result = train_resnet_fold(
+                    selected,
+                    heldout_experiment=experiment,
+                    task=args.task,
+                    batch_size=args.batch_size,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate,
+                    save_path=(
+                        args.output / "models" / f"fold_{index:04d}.pt"
+                        if args.save_models
+                        else None
+                    ),
+                    camera=setting.camera,
                 )
+                completed.append((index, result))
+            else:
+                completed.append(_train_frozen_task(fold))
+
+    for index, result in completed:
+        _write_result(
+            args.output,
+            index,
+            result,
+            metrics,
+            predictions,
+            save_model=args.save_models,
+        )
 
     pd.DataFrame(metrics).sort_values("task_index").to_csv(
         args.output / "metrics.csv", index=False

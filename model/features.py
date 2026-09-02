@@ -61,7 +61,7 @@ def image_color_features(path: Path) -> np.ndarray:
 
 
 def _extract_handcrafted(
-    rows: pd.DataFrame, dataset_root: Path, camera: str
+    rows: pd.DataFrame, absolute_paths: list[str], camera: str
 ) -> pd.DataFrame:
     roles = CAMERA_GROUPS[camera]
     role_index = {role: index for index, role in enumerate(roles)}
@@ -69,20 +69,15 @@ def _extract_handcrafted(
     values = [
         np.concatenate(
             [
-                image_color_features(dataset_root / str(row.image_path)),
+                image_color_features(Path(path)),
                 role_eye[role_index[str(row.camera_role)]],
             ]
         )
-        for row in rows.itertuples(index=False)
+        for row, path in zip(rows.itertuples(index=False), absolute_paths, strict=True)
     ]
     width = 34 + len(roles)
     matrix = np.stack(values) if values else np.empty((0, width), dtype=np.float32)
-    result = pd.DataFrame(
-        {
-            "dataset_root": str(dataset_root.resolve()),
-            "image_path": rows["image_path"].astype(str),
-        }
-    )
+    result = pd.DataFrame({"absolute_path": absolute_paths})
     for index in range(width):
         result[f"feature_{index:03d}"] = matrix[:, index]
     return result
@@ -107,29 +102,31 @@ def prepare_features(
         [state_column, "camera_role", "cycle_name"],
         maximum_per_group=maximum_per_group,
     )
+    # Stable heating start is an observed physical boundary preceding each image;
+    # this uses neither a future cycle end nor any sensor value.
+    image_time = pd.to_datetime(sampled["image_time"], errors="raise", format="mixed")
+    stable_start = pd.to_datetime(
+        sampled["stable_heating_start"], errors="raise", format="mixed"
+    )
+    sampled["time_minutes"] = (image_time - stable_start).dt.total_seconds() / 60
+    if modality == "time":
+        return sampled.reset_index(drop=True), ["time_minutes"]
+
     cache_path = cache_root / representation / camera / "features.parquet"
-    need_rgb = modality in {"rgb", "rgb_time"}
     cached = pd.read_parquet(cache_path) if cache_path.is_file() else pd.DataFrame()
-    resolved_root = str(dataset_root.resolve())
-    expected_paths = sampled["image_path"].astype(str).tolist()
+    absolute_paths = [
+        str((dataset_root / str(path)).resolve()) for path in sampled["image_path"]
+    ]
     feature_columns = [
         str(column) for column in cached.columns if str(column).startswith("feature_")
     ]
     reusable = (
-        cached.get("dataset_root", pd.Series(dtype="string")).astype(str).tolist()
-        == [resolved_root] * len(expected_paths)
-        and cached.get("image_path", pd.Series(dtype="string")).astype(str).tolist()
-        == expected_paths
-        and (not need_rgb or len(feature_columns) == 34 + len(CAMERA_GROUPS[camera]))
+        cached.get("absolute_path", pd.Series(dtype="string")).astype(str).tolist()
+        == absolute_paths
+        and len(feature_columns) == 34 + len(CAMERA_GROUPS[camera])
     )
     if not reusable:
-        cached = (
-            _extract_handcrafted(sampled, dataset_root, camera)
-            if need_rgb
-            else pd.DataFrame(
-                {"dataset_root": resolved_root, "image_path": expected_paths}
-            )
-        )
+        cached = _extract_handcrafted(sampled, absolute_paths, camera)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cached.to_parquet(cache_path, index=False)
         feature_columns = [
@@ -139,18 +136,8 @@ def prepare_features(
         ]
 
     result = sampled.copy()
-    if feature_columns:
-        result[feature_columns] = cached[feature_columns].to_numpy()
-    # Stable heating start is an observed physical boundary preceding each image;
-    # this uses neither a future cycle end nor any sensor value.
-    image_time = pd.to_datetime(result["image_time"], errors="raise", format="mixed")
-    stable_start = pd.to_datetime(
-        result["stable_heating_start"], errors="raise", format="mixed"
+    result[feature_columns] = cached[feature_columns].to_numpy()
+    selected_columns = (
+        feature_columns if modality == "rgb" else [*feature_columns, "time_minutes"]
     )
-    result["time_minutes"] = (image_time - stable_start).dt.total_seconds() / 60
-    selected_columns: list[str] = {
-        "rgb": feature_columns,
-        "time": ["time_minutes"],
-        "rgb_time": [*feature_columns, "time_minutes"],
-    }[modality]
     return result.reset_index(drop=True), selected_columns

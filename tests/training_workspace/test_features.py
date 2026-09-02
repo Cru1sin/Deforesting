@@ -107,6 +107,7 @@ def test_time_and_rgb_time_use_stable_heating_start(tmp_path: Path) -> None:
         maximum_per_group=48,
         cache_root=cache_root,
     )
+    assert not (cache_root / "handcrafted/front/features.parquet").exists()
     rgb_time_rows, rgb_time_columns = features.prepare_features(
         rows,
         dataset_root=dataset,
@@ -172,4 +173,7 @@ def test_cache_reuse_requires_the_same_resolved_dataset_root(
     assert calls == len(first_rows) + len(second_rows)
     assert not np.allclose(first[columns], second[columns])
     cached = pd.read_parquet(cache_root / "handcrafted/front/features.parquet")
-    assert cached["dataset_root"].unique().tolist() == [str(second_dataset.resolve())]
+    assert cached["absolute_path"].tolist() == [
+        str((second_dataset / path).resolve()) for path in second_rows["image_path"]
+    ]
+    assert "dataset_root" not in cached

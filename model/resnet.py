@@ -104,33 +104,6 @@ def load_checkpoint(
     return model
 
 
-def _invalid_result(
-    train: pd.DataFrame,
-    test: pd.DataFrame,
-    heldout_experiment: str,
-    present: set[int],
-    expected: set[int],
-) -> dict[str, Any]:
-    return {
-        "metrics": {
-            "held_out_experiment": heldout_experiment,
-            "representation": "resnet50_finetune",
-            "head": "paper_mlp",
-            "camera": "front",
-            "modality": "rgb",
-            "train_images": len(train),
-            "test_images": len(test),
-            "status": "invalid",
-            "message": f"train classes {sorted(present)}; expected {sorted(expected)}",
-            "accuracy": float("nan"),
-            "balanced_accuracy": float("nan"),
-            "macro_f1": float("nan"),
-        },
-        "predictions": pd.DataFrame(),
-        "model": None,
-    }
-
-
 def train_resnet_fold(
     rows: pd.DataFrame,
     *,
@@ -148,11 +121,27 @@ def train_resnet_fold(
     heldout = rows["experiment_id"].astype(str).eq(heldout_experiment)
     train, test = rows.loc[~heldout].copy(), rows.loc[heldout].copy()
     expected = set(range(2 if task == "binary" else 3))
+    metrics = {
+        "held_out_experiment": heldout_experiment,
+        "representation": "resnet50_finetune",
+        "head": "paper_mlp",
+        "camera": camera,
+        "modality": "rgb",
+        "train_images": len(train),
+        "test_images": len(test),
+        "status": "ok",
+        "message": "",
+        "accuracy": float("nan"),
+        "balanced_accuracy": float("nan"),
+        "macro_f1": float("nan"),
+    }
     present = set(train["target"].astype(int))
     if present != expected:
-        result = _invalid_result(train, test, heldout_experiment, present, expected)
-        result["metrics"]["camera"] = camera
-        return result
+        metrics.update(
+            status="invalid",
+            message=f"train classes {sorted(present)}; expected {sorted(expected)}",
+        )
+        return {"metrics": metrics, "predictions": pd.DataFrame(), "model": None}
 
     destination = device or preferred_device()
     torch.manual_seed(0)
@@ -221,18 +210,9 @@ def train_resnet_fold(
         for class_index in sorted(expected):
             predictions[f"decision_score_{class_index}"] = scores[:, class_index]
     target = test["target"].to_numpy(dtype=int)
-    metrics = {
-        "held_out_experiment": heldout_experiment,
-        "representation": "resnet50_finetune",
-        "head": "paper_mlp",
-        "camera": camera,
-        "modality": "rgb",
-        "train_images": len(train),
-        "test_images": len(test),
-        "status": "ok",
-        "message": "",
-        "accuracy": float(accuracy_score(target, prediction)),
-        "balanced_accuracy": float(
+    metrics.update(
+        accuracy=float(accuracy_score(target, prediction)),
+        balanced_accuracy=float(
             recall_score(
                 target,
                 prediction,
@@ -241,7 +221,7 @@ def train_resnet_fold(
                 zero_division=0,
             )
         ),
-        "macro_f1": float(
+        macro_f1=float(
             f1_score(
                 target,
                 prediction,
@@ -250,5 +230,5 @@ def train_resnet_fold(
                 zero_division=0,
             )
         ),
-    }
+    )
     return {"metrics": metrics, "predictions": predictions, "model": None}

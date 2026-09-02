@@ -352,3 +352,54 @@ def test_each_setting_uses_only_its_own_experiments_for_folds(
         ("top", "d"),
     }
     assert "Total tasks: 4" in capsys.readouterr().out
+
+
+def test_parallel_fits_limit_inner_threadpools(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.chdir(tmp_path)
+    dataset = tmp_path / "dataset"
+    labels = tmp_path / "labels.parquet"
+    _training_labels(dataset).to_parquet(labels, index=False)
+    active = False
+    limits: list[int] = []
+
+    class Limit:
+        def __init__(self, value: int) -> None:
+            limits.append(value)
+
+        def __enter__(self) -> None:
+            nonlocal active
+            active = True
+
+        def __exit__(self, *args: object) -> None:
+            nonlocal active
+            active = False
+
+    original = main_train.train_frozen_fold
+
+    def checked(*args, **kwargs):  # type: ignore[no-untyped-def]
+        assert active
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(main_train, "threadpool_limits", Limit, raising=False)
+    monkeypatch.setattr(main_train, "train_frozen_fold", checked)
+    args = main_train.build_parser().parse_args(
+        [
+            "--dataset",
+            str(dataset),
+            "--labels",
+            str(labels),
+            "--output",
+            str(tmp_path / "run"),
+            "--heads",
+            "logistic",
+            "--modalities",
+            "time",
+            "--jobs",
+            "2",
+        ]
+    )
+
+    assert main_train.run(args) == 0
+    assert limits == [1]
