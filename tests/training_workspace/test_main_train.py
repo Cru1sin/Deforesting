@@ -257,12 +257,19 @@ def test_parallel_handcrafted_run_writes_complete_artifacts_from_main(
     assert (tmp_path / "output/models/_cache/handcrafted/front/features.parquet").is_file()
 
 
-def test_parallel_run_writes_progress_before_all_results_are_consumed(
+def test_parallel_run_writes_progress_in_completion_order(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     labels = tmp_path / "labels.parquet"
     _labels().to_parquet(labels, index=False)
     output = tmp_path / "trained"
+
+    def result(index: int) -> tuple[int, dict[str, object]]:
+        return index, {
+            "metrics": {"status": "ok"},
+            "predictions": pd.DataFrame(),
+            "model": None,
+        }
 
     class Executor:
         def __init__(self, *, max_workers: int) -> None:
@@ -275,16 +282,19 @@ def test_parallel_run_writes_progress_before_all_results_are_consumed(
             pass
 
         def map(self, function, folds):  # type: ignore[no-untyped-def]
-            for index, *_ in folds:
-                if index == 1:
-                    assert len((output / "progress.jsonl").read_text().splitlines()) == 1
-                yield index, {
-                    "metrics": {"status": "ok"},
-                    "predictions": pd.DataFrame(),
-                    "model": None,
-                }
+            return (result(fold[0]) for fold in folds)
+
+        def submit(self, function, fold):  # type: ignore[no-untyped-def]
+            future = main_train.concurrent.futures.Future()
+            future.set_result(result(fold[0]))
+            return future
 
     monkeypatch.setattr(main_train.concurrent.futures, "ThreadPoolExecutor", Executor)
+    monkeypatch.setattr(
+        main_train.concurrent.futures,
+        "as_completed",
+        lambda futures: reversed(list(futures)),
+    )
     args = main_train.build_parser().parse_args(
         [
             "--labels",
@@ -301,6 +311,8 @@ def test_parallel_run_writes_progress_before_all_results_are_consumed(
     )
 
     assert main_train.run(args) == 0
+    progress = [json.loads(line) for line in (output / "progress.jsonl").read_text().splitlines()]
+    assert [row["task_index"] for row in progress] == [1, 0]
 
 
 def test_all_invalid_folds_still_write_the_prediction_schema(

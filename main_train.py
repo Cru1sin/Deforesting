@@ -265,7 +265,10 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         with threadpool_limits(1), concurrent.futures.ThreadPoolExecutor(
             max_workers=args.jobs
         ) as executor:
-            for index, result in executor.map(_train_frozen_task, folds):
+            for future in concurrent.futures.as_completed(
+                executor.submit(_train_frozen_task, fold) for fold in folds
+            ):
+                index, result = future.result()
                 _write_result(
                     args.output,
                     index,
