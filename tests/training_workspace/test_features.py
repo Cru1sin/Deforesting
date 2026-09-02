@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from PIL import Image
+
+from model import features
+
+
+def _image_rows(dataset: Path) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for experiment, cycle in (("a", "cycle_a"), ("b", "cycle_b")):
+        for index, state in enumerate(("pre_optimal", "post_optimal")):
+            relative = Path("images") / cycle / "front" / f"{index}.png"
+            path = dataset / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (16, 8), (index * 100, 20, 40)).save(path)
+            rows.append(
+                {
+                    "experiment_id": experiment,
+                    "cycle_name": cycle,
+                    "camera_role": "front",
+                    "file_name": path.name,
+                    "image_path": str(relative),
+                    "image_time": pd.Timestamp("2026-01-01")
+                    + pd.Timedelta(minutes=5 - 5 * index),
+                    "relative_regret": 0.2,
+                    "cost_state_01pct": state,
+                    "target": index,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_handcrafted_descriptor_is_the_existing_34_color_gradient_values(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "red.png"
+    Image.new("RGB", (16, 8), (255, 0, 0)).save(path)
+
+    values = features.image_color_features(path)
+
+    assert values.shape == (34,)
+    assert np.isfinite(values).all()
+    assert np.allclose(values[24:27], [1.0, 0.0, 0.0])
+
+
+def test_two_heads_reuse_one_fixed_handcrafted_cache(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    dataset = tmp_path / "dataset"
+    rows = _image_rows(dataset)
+    calls = 0
+    original = features.image_color_features
+
+    def counted(path: Path) -> np.ndarray:
+        nonlocal calls
+        calls += 1
+        return original(path)
+
+    monkeypatch.setattr(features, "image_color_features", counted)
+    cache_root = tmp_path / "output/models/_cache"
+
+    first, first_columns = features.prepare_features(
+        rows,
+        dataset_root=dataset,
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        state_column="cost_state_01pct",
+        maximum_per_group=48,
+        cache_root=cache_root,
+    )
+    second, second_columns = features.prepare_features(
+        rows,
+        dataset_root=dataset,
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        state_column="cost_state_01pct",
+        maximum_per_group=48,
+        cache_root=cache_root,
+    )
+
+    assert calls == len(rows)
+    assert first_columns == second_columns
+    assert len(first_columns) == 35  # 34 image values + one front-camera indicator.
+    pd.testing.assert_frame_equal(first, second)
+    assert (cache_root / "handcrafted/front/features.parquet").is_file()
+
+
+def test_time_and_rgb_time_use_earliest_labeled_image_per_cycle(tmp_path: Path) -> None:
+    dataset = tmp_path / "dataset"
+    rows = _image_rows(dataset)
+    cache_root = tmp_path / "output/models/_cache"
+
+    time_rows, time_columns = features.prepare_features(
+        rows,
+        dataset_root=dataset,
+        representation="handcrafted",
+        camera="front",
+        modality="time",
+        state_column="cost_state_01pct",
+        maximum_per_group=48,
+        cache_root=cache_root,
+    )
+    rgb_time_rows, rgb_time_columns = features.prepare_features(
+        rows,
+        dataset_root=dataset,
+        representation="handcrafted",
+        camera="front",
+        modality="rgb_time",
+        state_column="cost_state_01pct",
+        maximum_per_group=48,
+        cache_root=cache_root,
+    )
+
+    assert time_columns == ["time_minutes"]
+    assert sorted(time_rows.groupby("cycle_name")["time_minutes"].apply(list)) == [
+        [5.0, 0.0],
+        [5.0, 0.0],
+    ]
+    assert "time_minutes" in rgb_time_columns
+    assert len(rgb_time_columns) == 36
+    assert rgb_time_rows["time_minutes"].min() == 0.0

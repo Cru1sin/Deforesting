@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from model.model import make_head, split_heldout, train_frozen_fold
+
+
+def _rows(*, missing_heldout_class: bool = False) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for experiment_index, experiment in enumerate(("a", "b", "c")):
+        targets = (0,) if missing_heldout_class and experiment == "c" else (0, 1)
+        for target in targets:
+            rows.append(
+                {
+                    "experiment_id": experiment,
+                    "cycle_name": f"cycle_{experiment}",
+                    "camera_role": "front",
+                    "image_path": f"{experiment}-{target}.png",
+                    "image_time": pd.Timestamp("2026-01-01")
+                    + pd.Timedelta(minutes=target),
+                    "relative_regret": 0.2,
+                    "target": target,
+                    "feature_000": float(target * 3 + experiment_index * 0.01),
+                    "feature_001": np.nan if target == 0 else float(target),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("name", ["logistic", "random_forest", "rbf_svm"])
+def test_make_head_uses_the_required_small_sklearn_pipeline(name: str) -> None:
+    pipeline = make_head(name)
+
+    assert list(pipeline.named_steps) == ["imputer", "scaler", "classifier"]
+    if name == "random_forest":
+        assert pipeline.named_steps["classifier"].n_jobs == 1
+
+
+def test_split_heldout_never_leaks_the_test_experiment_into_training() -> None:
+    train, test = split_heldout(_rows(), "b")
+
+    assert set(train["experiment_id"]) == {"a", "c"}
+    assert set(test["experiment_id"]) == {"b"}
+    assert not set(train["experiment_id"]) & set(test["experiment_id"])
+
+
+def test_small_frozen_fold_really_trains_and_returns_predictions() -> None:
+    result = train_frozen_fold(
+        _rows(),
+        ["feature_000", "feature_001"],
+        heldout_experiment="c",
+        head="rbf_svm",
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        task="binary",
+        return_model=True,
+    )
+
+    assert result["metrics"]["status"] == "ok"
+    assert result["metrics"]["train_images"] == 4
+    assert result["metrics"]["test_images"] == 2
+    assert result["model"] is not None
+    predictions = result["predictions"]
+    assert len(predictions) == 2
+    assert {
+        "experiment_id",
+        "cycle_name",
+        "camera_role",
+        "image_time",
+        "held_out_experiment",
+        "representation",
+        "head",
+        "modality",
+        "target",
+        "prediction",
+        "decision_score",
+    }.issubset(predictions.columns)
+    assert predictions["held_out_experiment"].eq("c").all()
+
+
+def test_missing_required_test_class_returns_clear_invalid_result() -> None:
+    result = train_frozen_fold(
+        _rows(missing_heldout_class=True),
+        ["feature_000", "feature_001"],
+        heldout_experiment="c",
+        head="logistic",
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        task="binary",
+    )
+
+    assert result["metrics"]["status"] == "invalid"
+    assert "test classes" in result["metrics"]["message"]
+    assert result["predictions"].empty
+    assert result["model"] is None
+
+
+def test_binary_random_forest_decision_score_is_positive_class_probability() -> None:
+    rows = _rows()
+    columns = ["feature_000", "feature_001"]
+    result = train_frozen_fold(
+        rows,
+        columns,
+        heldout_experiment="c",
+        head="random_forest",
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        task="binary",
+        return_model=True,
+    )
+    _, test = split_heldout(rows, "c")
+
+    expected = result["model"].predict_proba(test[columns])[:, 1]
+    assert np.allclose(result["predictions"]["decision_score"], expected)
