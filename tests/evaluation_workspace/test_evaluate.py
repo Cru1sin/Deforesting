@@ -137,6 +137,29 @@ def test_prediction_group_must_map_to_one_metrics_row() -> None:
         evaluate_run(_metrics(held_out="a", test_images=1), predictions, task="binary")
 
 
+def test_duplicate_metrics_fold_keys_are_rejected_without_predictions() -> None:
+    metrics = pd.concat(
+        [_metrics(held_out="a"), _metrics(held_out="a")], ignore_index=True
+    )
+
+    with pytest.raises(ValueError, match="duplicate metrics fold key"):
+        evaluate_run(metrics, pd.DataFrame(), task="binary")
+
+
+def test_ok_metrics_fold_requires_a_prediction_group() -> None:
+    with pytest.raises(ValueError, match="ok metrics row.*prediction group"):
+        evaluate_run(_metrics(held_out="a"), pd.DataFrame(), task="binary")
+
+
+def test_prediction_count_must_match_test_images_before_scoring() -> None:
+    with pytest.raises(ValueError, match="prediction rows.*test_images"):
+        evaluate_run(
+            _metrics(held_out="a", test_images=2),
+            _predictions("a", [0], [0]),
+            task="binary",
+        )
+
+
 def test_evaluation_module_imports_without_torch() -> None:
     code = """
 import builtins

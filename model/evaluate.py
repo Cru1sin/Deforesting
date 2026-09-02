@@ -104,6 +104,23 @@ def _summary(metrics: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=SUMMARY_COLUMNS)
 
 
+def _validate_groups(
+    metrics: pd.DataFrame,
+    metric_rows: dict[tuple[str, ...], list[int]],
+    groups: dict[tuple[str, ...], list[int]],
+) -> None:
+    for key, indices in metric_rows.items():
+        if len(indices) > 1:
+            raise ValueError(f"duplicate metrics fold key: {key}")
+        if str(metrics.at[indices[0], "status"]) == "ok" and key not in groups:
+            raise ValueError(f"ok metrics row {key} has no prediction group")
+    for key in groups:
+        if len(metric_rows.get(key, [])) != 1:
+            raise ValueError(
+                f"prediction group {key} does not map to exactly one metrics row"
+            )
+
+
 def evaluate_run(
     metrics: pd.DataFrame, predictions: pd.DataFrame, task: str
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -124,17 +141,20 @@ def evaluate_run(
     for index in range(len(metrics)):
         metric_rows.setdefault(_key(metrics.iloc[index]), []).append(index)
     groups = _prediction_groups(predictions)
-    for key in groups:
-        matches = metric_rows.get(key, [])
-        if len(matches) != 1:
-            raise ValueError(
-                f"prediction group {key} does not map to exactly one metrics row"
-            )
+    _validate_groups(metrics, metric_rows, groups)
     for metric in METRIC_COLUMNS:
         metrics[metric] = float("nan")
     for key, indices in groups.items():
         metric_index = metric_rows[key][0]
         if str(metrics.at[metric_index, "status"]) == "ok":
+            expected_count = pd.to_numeric(
+                metrics.at[metric_index, "test_images"], errors="raise"
+            )
+            if len(indices) != expected_count:
+                raise ValueError(
+                    f"prediction rows for {key} do not match test_images "
+                    f"({len(indices)} != {expected_count})"
+                )
             metrics.loc[metric_index, list(METRIC_COLUMNS)] = _fold_metrics(
                 predictions.loc[indices], labels
             )
