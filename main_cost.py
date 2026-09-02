@@ -10,7 +10,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 
@@ -29,8 +29,9 @@ from cost.fit_v2_6_8 import (
 )
 from cost.v2_6_8_data import build_event_table, candidate_cohort
 from dataloader import DatasetLoader
-from dataloader.images import RGB_CAMERA_ORDER
-from plots.cost import compare_results
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
 
 COST_MODULES: dict[str, ModuleType] = {
     "v1": cost_function_v1,
@@ -55,7 +56,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cycles", nargs="*")
     parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--results", nargs="+", type=Path)
-    parser.add_argument("--camera", choices=RGB_CAMERA_ORDER, default="front")
     parser.add_argument("--variant")
     parser.add_argument("--heat-basis", choices=("unit", "water"))
     parser.add_argument(
@@ -196,6 +196,47 @@ def _validate_cycle_artifact_names(table: pd.DataFrame) -> None:
             raise ValueError(f"unsafe cycle name for artifact: {value!r}")
 
 
+def compare_results(
+    result_dirs: Sequence[Path], output_dir: Path, *, overwrite: bool = False
+) -> tuple[Figure, Path]:
+    """Plot relative regret together and absolute inverse COP in heat-basis panels."""
+    import matplotlib.pyplot as plt
+
+    path = output_dir / "cost_comparison.png"
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"comparison exists; pass --overwrite: {path}")
+    loaded: list[tuple[str, str, pd.DataFrame]] = []
+    for directory in result_dirs:
+        recipe = json.loads((directory / "recipe.json").read_text(encoding="utf-8"))
+        basis = recipe.get("heat_basis")
+        if basis not in {"unit", "water"}:
+            raise ValueError(f"result has no explicit heat basis: {directory}")
+        loaded.append((directory.name, str(basis), pd.read_csv(directory / "cost.csv")))
+    bases = sorted({basis for _, basis, _ in loaded})
+    figure, axes = plt.subplots(1 + len(bases), 1, figsize=(7, 3 * (1 + len(bases))))
+    axes_list = list(axes) if hasattr(axes, "__len__") else [axes]
+    for label, _, table in loaded:
+        for _, cycle in table.groupby("cycle_name", sort=False):
+            axes_list[0].plot(
+                cycle["candidate_elapsed_minutes"], cycle["relative_regret"], label=label
+            )
+    axes_list[0].set_ylabel("Relative regret")
+    axes_list[0].set_title("Cost comparison — relative regret")
+    for axis, basis in zip(axes_list[1:], bases, strict=True):
+        for label, result_basis, table in loaded:
+            if result_basis != basis:
+                continue
+            for _, cycle in table.groupby("cycle_name", sort=False):
+                axis.plot(cycle["candidate_elapsed_minutes"], cycle["inverse_cop"], label=label)
+        axis.set_ylabel("Inverse COP")
+        axis.set_title(f"Absolute inverse COP — {basis} heat basis")
+    axes_list[-1].set_xlabel("Candidate elapsed time (min)")
+    figure.tight_layout()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=160)
+    return figure, path
+
+
 def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C901
     """Fit the review-only candidate artifact with explicit outer loops."""
     if args.cost != "v2.6.8":
@@ -312,14 +353,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     if args.action == "compare":
         if not args.results:
             raise ValueError("compare requires --results run directories")
-        compare_results(
-            args.results,
-            args.dataset,
-            args.output_root / "plots" / "cost",
-            camera=args.camera,
-            overwrite=args.overwrite,
+        _, path = compare_results(
+            args.results, args.output_root / "plots", overwrite=args.overwrite
         )
-        print(f"Comparison written: {args.output_root / 'plots' / 'cost'}")
+        print(f"Comparison written: {path}")
         return 0
 
     module = COST_MODULES[args.cost]
