@@ -84,7 +84,9 @@ def test_main_reads_multiple_runs_and_writes_exactly_four_outputs(tmp_path: Path
     assert len(experiment_metrics) == 2
     assert len(summary) == 2
     assert set(experiment_metrics["source"]) == {str(first), str(second)}
-    assert json.loads((output / "args.json").read_text())["task"] == "binary"
+    recorded_args = json.loads((output / "args.json").read_text())
+    assert set(recorded_args) == {"results", "output", "task", "overwrite"}
+    assert recorded_args["task"] == "binary"
     assert (output / "command.txt").read_text().strip() == "main_evaluate.py --results ..."
 
 
@@ -121,3 +123,48 @@ def test_overwrite_replaces_stale_evaluation_directory(tmp_path: Path) -> None:
         "experiment_metrics.csv",
         "summary.csv",
     }
+
+
+def test_figures_route_current_evaluation_and_paired_optional_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    _write_run(run)
+    output = tmp_path / "evaluation"
+    optima = tmp_path / "optima.csv"
+    concentration = tmp_path / "concentration.csv"
+    pd.DataFrame({"cycle_name": ["a"]}).to_csv(optima, index=False)
+    pd.DataFrame({"camera_group": ["front"]}).to_csv(concentration, index=False)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(main_evaluate, "plot_model_figures", lambda **kwargs: calls.append(kwargs))
+    args = main_evaluate.build_parser().parse_args(
+        [
+            "--results",
+            str(run),
+            "--output",
+            str(output),
+            "--figures",
+            "--figure-output",
+            str(tmp_path / "paper"),
+            "--figure-format",
+            "svg",
+            "pdf",
+            "--optima",
+            str(optima),
+            "--concentration",
+            str(concentration),
+        ]
+    )
+
+    assert main_evaluate.run(args) == 0
+    assert len(calls) == 1
+    assert calls[0]["output"] == tmp_path / "paper"
+    assert calls[0]["source_output"] == output / "figure_source_data"
+    assert calls[0]["figure_formats"] == ("svg", "pdf")
+    assert isinstance(calls[0]["summary"], pd.DataFrame)
+    assert isinstance(calls[0]["optima"], pd.DataFrame)
+    assert isinstance(calls[0]["concentration"], pd.DataFrame)
+
+    unpaired = main_evaluate.build_parser().parse_args(["--optima", str(optima)])
+    with pytest.raises(ValueError, match="provided together"):
+        main_evaluate.run(unpaired)

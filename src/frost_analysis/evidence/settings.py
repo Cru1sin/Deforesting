@@ -5,9 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from pathlib import Path
-
-import yaml
 
 FORECAST_HORIZONS_MINUTES = (5, 10, 20)
 PRIMARY_FORECAST_HORIZON_MINUTES = 10
@@ -19,14 +16,14 @@ PRIMARY_DEGRADATION_THRESHOLD = 0.10
 class EvidenceSettings:
     """Immutable, date-independent scientific parameters for Evidence."""
 
-    targets: tuple[str, ...]
-    primary_target: str
-    minimum_feature_points: int
-    minimum_feature_coverage: float
-    minimum_valid_pairs: int
-    minimum_pair_coverage: float
+    targets: tuple[str, ...] = ("heating_capacity", "cop")
+    primary_target: str = "heating_capacity"
+    minimum_feature_points: int = 12
+    minimum_feature_coverage: float = 0.8
+    minimum_valid_pairs: int = 30
+    minimum_pair_coverage: float = 0.8
     eligible_statuses: tuple[str, ...] = ("valid",)
-    minimum_cycle_minutes: float = 0.0
+    minimum_cycle_minutes: float = 30.0
     primary_horizon_minutes: int = field(
         default=PRIMARY_FORECAST_HORIZON_MINUTES, init=False
     )
@@ -74,42 +71,6 @@ class EvidenceSettings:
             raise ValueError("signal_mad_multiplier and ridge_alpha must be positive")
         if not self.context_features:
             raise ValueError("context_features must not be empty")
-
-    @classmethod
-    def from_yaml(cls, path: Path) -> EvidenceSettings:
-        """Load the scientific fields used by Evidence from YAML."""
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(loaded, dict):
-            raise ValueError("Evidence settings must be a YAML mapping")
-        protocol_fields = {
-            "horizons_minutes",
-            "primary_horizon_minutes",
-            "event_thresholds",
-            "primary_event_threshold",
-        }
-        configured_protocol = sorted(protocol_fields & loaded.keys())
-        if configured_protocol:
-            raise ValueError(
-                f"Evidence protocol fields are fixed in code: {configured_protocol}"
-            )
-        return cls(
-            targets=tuple(loaded["targets"]),
-            primary_target=loaded["primary_target"],
-            minimum_feature_points=loaded["minimum_feature_points"],
-            minimum_feature_coverage=loaded["minimum_feature_coverage"],
-            minimum_valid_pairs=loaded["minimum_valid_pairs"],
-            minimum_pair_coverage=loaded["minimum_pair_coverage"],
-            eligible_statuses=tuple(loaded.get("eligible_statuses", ["valid"])),
-            minimum_cycle_minutes=float(loaded.get("minimum_cycle_minutes", 0.0)),
-            event_persistence_seconds=loaded["event_persistence_seconds"],
-            signal_reference_minutes=loaded["signal_reference_minutes"],
-            signal_smoothing_seconds=loaded["signal_smoothing_seconds"],
-            signal_mad_multiplier=loaded["signal_mad_multiplier"],
-            signal_persistence_seconds=loaded["signal_persistence_seconds"],
-            dynamic_window_minutes=loaded["dynamic_window_minutes"],
-            ridge_alpha=loaded["ridge_alpha"],
-            context_features=tuple(loaded["context_features"]),
-        )
 
     def normalized(self) -> dict[str, object]:
         """Return the path-independent mapping used for settings hashing."""

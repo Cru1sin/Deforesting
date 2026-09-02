@@ -18,7 +18,7 @@ from dataloader.images import (
     materialize_cycle_image_members,
     scan_cycle_images,
 )
-from src.frost_analysis.figures.visualization import (
+from plots.publication import (
     _plot_decision_image,
     match_decision_rgb_images,
     render_decision_publication,
@@ -103,6 +103,13 @@ plt.rcParams.update(
 def _save_png(fig: plt.Figure, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def _save_svg_png(fig: plt.Figure, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
+    fig.savefig(path.with_suffix(".png"), dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
 
 
@@ -824,6 +831,10 @@ def _render_cycle_sets(  # noqa: C901
 
 def _decision_title(algorithm: str) -> str:
     base = algorithm.split("__", 1)[0]
+    if algorithm == "v1":
+        return "Unit-heat V1 optimum"
+    if algorithm == "v2":
+        return "Updated V2 optimum"
     if base == "v3":
         return "V3 offline decision"
     if base in {"v2.6.6", "v2.6.7"}:
@@ -1045,11 +1056,33 @@ def generate_cost_function_figures(
     tables = _load_result_tables(result_dirs, loader)
     cycles = sorted(set().union(*(set(table["cycle_name"]) for table in tables.values())))
     records = {cycle: loader.get_cycle_record(str(cycle)) for cycle in cycles}
-    comparison = output / "comparison_all_runs_RB.png"
-    if comparison.exists() and not overwrite:
-        raise FileExistsError(f"comparison exists; pass --overwrite: {comparison}")
-    _save_png(_comparison_figure(tables, tuple(tables)), comparison)
-    _render_cycle_sets(tables, loader, records, output / "decision_publications")
+    algorithms = tuple(tables)
+    families = tuple((algorithm,) for algorithm in algorithms)
+    if len(algorithms) > 1:
+        families += (algorithms,)
+    comparisons = [
+        (
+            family,
+            output / f"comparison_{'_'.join(family)}_RB.png",
+            _save_svg_png
+            if any(algorithm.split("__", 1)[0] == "renewal_water" for algorithm in family)
+            else _save_png,
+        )
+        for family in families
+    ]
+    if not overwrite:
+        for _family, comparison, saver in comparisons:
+            targets = (
+                (comparison, comparison.with_suffix(".svg"))
+                if saver is _save_svg_png
+                else (comparison,)
+            )
+            for target in targets:
+                if target.exists():
+                    raise FileExistsError(f"comparison exists; pass --overwrite: {target}")
+    for family, comparison, saver in comparisons:
+        saver(_comparison_figure(tables, family), comparison)
+    _render_cycle_sets(tables, loader, records, output)
     for heat_basis in dict.fromkeys(table.attrs["heat_basis"] for table in tables.values()):
         _render_cost_curve_comparisons(
             {

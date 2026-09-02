@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from frost_analysis.dataset.loader import DatasetLoader
+from dataloader.dataloader import DatasetLoader
 from frost_analysis.evidence import EvidenceSettings
 
 

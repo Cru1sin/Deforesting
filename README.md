@@ -1,112 +1,120 @@
-# Frost Sensor Analysis
+# PINN4SOH Frost Sensor Workspace
 
-The repository has one production workflow:
+One Dataset-native path from frost-cycle measurements to reproducible image-model
+evaluation:
 
 ```text
-Raw data -> Dataset -> Cost v1/v2 -> RGB labels -> Training/evaluation
+Data -> Cost -> Labels -> Train -> Evaluate
 ```
 
-Exploration, evidence analysis, and figure rendering support this path but do
-not define production models. `Prepare` organizes raw observations and stage
-labels; `Process` produces the 10-second cycle time series used downstream.
+## Current scientific status
+
+- **Current cost under study:** V2.6.8
+- **Current label source:** canonical V1
+- **V2.6.8 status:** diagnostic-only; it must not generate training labels
+- **Validation:** leave-one-experiment-out (LOEO)
+
+V2.6.8 studies a corrected, fixed-nine-minute transition formulation. Its
+minimum is a diagnostic minimum, not a promoted decision label. Training and
+evaluation therefore remain anchored to the frozen canonical V1 labels.
+
+Run all commands from the repository root with the project `uv` environment.
+
+## 1. Data
+
+Validate the self-contained Dataset before downstream work:
+
+```bash
+uv run python main_data.py validate --dataset dataset
+```
+
+`main_data.py` also owns explicit Dataset maintenance actions: `add`, `replace`,
+`aggregate-original`, `remove`, `refresh`, `review-cycle`, `edit`, and `render`.
+
+## 2. Cost
+
+Calculate the current V2.6.8 diagnostic curves:
+
+```bash
+uv run python main_cost.py --action calculate --cost v2.6.8 --dataset dataset --output-root output
+```
+
+The result is written under `output/cost/v2.6.8/` as one standard `cost.csv`,
+per-cycle tables, and its recipe. This diagnostic output does not replace
+`output/cost/v1/cost.csv` as the label source.
+
+Cost versions are selected with `--cost` (`v1`, `v2.5`, or `v2.6.8`). Named
+variants use `--variant` together with the explicit supported recipe arguments.
+`--action compare --results ...` sends comparable runs through the shared cost
+plotter in `plots/cost.py`.
+
+## 3. Labels
+
+Build hard RGB labels from canonical V1 and render the default PNG figures:
+
+```bash
+uv run python main_labels.py --dataset dataset --cost-csv output/cost/v1/cost.csv --output output/labels/v1 --figures
+```
+
+The standard label tables are `image_cost_labels.parquet`, `label_balance.csv`,
+and `cycle_audit.csv`. The default thresholds are `0.01`, `0.02`, `0.05`, and
+`0.10`; override them with `--thresholds` when the analysis requires it.
+
+## 4. Train
+
+Train the baseline image model with LOEO folds:
+
+```bash
+uv run python main_train.py --dataset dataset --labels output/labels/v1/image_cost_labels.parquet --output output/models/current --task binary --representations handcrafted --heads rbf_svm --cameras front --modalities rgb --jobs 6
+```
+
+Parallel representations, heads, cameras, and modalities are selected
+explicitly through their matching arguments. Available values are listed by
+`--help`, and setting compatibility is validated before training; accepted
+settings share the same fold orchestration and standard `settings.csv`,
+`metrics.csv`, and `predictions.parquet` outputs.
+
+## 5. Evaluate
+
+Recompute summaries from the frozen LOEO predictions and render figures:
+
+```bash
+uv run python main_evaluate.py --results output/models/current --output output/models/evaluation --task binary --figures
+```
+
+Evaluation writes the standard `experiment_metrics.csv` and `summary.csv`
+tables and uses the shared model plotter in `plots/model.py`. Multiple runs can
+be compared by passing more directories to `--results`.
+
+## Figure formats
+
+Label and evaluation figures default to PNG. Request alternatives explicitly
+with `--figure-format svg`, `--figure-format pdf`, or multiple values. Cost
+comparisons use the shared publication renderer in `plots/cost.py`.
 
 ## Code map
 
-- `src/frost_analysis/dataset/`: raw inputs, cycle construction, validation, and loaders.
-- `src/frost_analysis/cost/`: shared energy integration and the selected v1/v2 models.
-- `src/frost_analysis/labels/`: image cost-state labels and target construction.
-- `src/frost_analysis/training/`: feature extraction, classifiers, and run state.
-- `src/frost_analysis/exploration/`: correlation and model-selection calculations.
-- `src/frost_analysis/figures/`: final publication plotting helpers.
-- `scripts/`: the same workflow layout; `tests/extra/` holds exploratory and figure checks.
-- `output/成本函数/`: published cost CSVs, cycle plots, and comparisons.
-- `output/label/` and `output/model/`: formal RGB labels and model runs.
-- `output/test/`: exploratory cost analyses, historical model experiments, and caches.
-- `report/`: human-readable Markdown reports only.
+Core:
 
-Read the project in this order:
+- `main_data.py`, `main_cost.py`, `main_labels.py`, `main_train.py`,
+  `main_evaluate.py`: the five primary workspace entry points.
+- `dataloader/`, `cost/`, `labels/`, `model/`: loading and scientific
+  calculations.
+- `plots/`: shared publication rendering for comparable outputs.
 
-1. **Dataset:** start with `src/frost_analysis/__main__.py` and `src/frost_analysis/dataset/`.
-2. **Economic defrost:** read `src/frost_analysis/cost/selected.py`, then `scripts/cost/`.
-3. **Labels and training:** continue with `src/frost_analysis/labels/`,
-   `src/frost_analysis/training/`, and their matching `scripts/` directories.
-4. **Exploration:** inspect `scripts/exploration/` only when revisiting model selection.
-5. **Figures:** finish with `scripts/figures/`.
+Supporting areas:
 
-Run commands from the repository root, for example:
+- `src/frost_analysis/cli.py` and the module-entry source remain as
+  legacy/compatibility code, but are not the current workspace CLI.
+- `src/frost_analysis/` still contains migrating or reused cost, labels,
+  training, evidence, and figures code.
+- `scripts/`, `configs/`, `docs/`, `archive/`: exploration, supporting material,
+  and historical utilities; not the primary workflow.
+- `tests/`: focused scientific and interface checks.
+- `output/`: generated results; exploratory evidence belongs under
+  `output/test/`, while formal cost, label, and model artifacts stay in their
+  named top-level output directories.
 
-```bash
-uv run python scripts/exploration/analyze_raw_optimal_defrost.py --output output/test/成本函数/其他/经验经济窗口
-uv run python scripts/cost/build.py --algorithm v1 v2 --output output/成本函数
-uv run python scripts/cost/plot.py --cost v1=output/成本函数/cost_function_v1.csv v2=output/成本函数/cost_function_v2.csv --output output/成本函数
-uv run python scripts/labels/build_rgb_cost_labels.py --cost-source output/成本函数/cost_function_v2.csv --output output/label/cost_function_v2_binary
-uv run python scripts/training/extract_rgb_feature_shards.py \
-  --labels output/label/cost_function_v2_binary/image_cost_labels.parquet \
-  --output output/test/model/RGB特征缓存/cost_function_v2
-uv run python scripts/training/evaluate_rgb_feature_shards.py \
-  --shards output/test/model/RGB特征缓存/cost_function_v2/cycles \
-  --candidates output/test/成本函数/其他/经验经济窗口/源数据/candidate_cost_curves.parquet \
-  --label-balance output/label/cost_function_v2_binary/label_balance.csv \
-  --labels output/label/cost_function_v2_binary/image_cost_labels.parquet \
-  --task binary --jobs 6 --run-id 20260828_v2_binary \
-  --output output/model/20260828_v2_binary
-uv run pytest tests/cost/test_core.py
-```
-
-The exploration command refreshes the shared candidate curves; `cost/build.py`
-writes the two comprehensive CSVs, and `cost/plot.py` renders the three
-69-cycle PNG sets plus v1/v2/RB comparisons under `output/成本函数/`.
-Existing completed RGB runs use historical v1 labels. Generate v2 labels and
-independent v2 feature shards before starting a v2 run. The evaluator's
-candidate parquet supplies only the shared cycle-time grid; targets and regret
-come from the v2 labels/shards. Report documents remain Markdown-only.
-
-## Dataset
-
-Add experiment dates in order:
-
-```bash
-python -m frost_analysis dataset add data/0714 --dataset dataset
-python -m frost_analysis dataset add data/0715 --dataset dataset
-```
-
-The Dataset CLI supports `add`, `remove`, `refresh`, `review-cycle`, `edit`,
-`validate`, and `render`. It deliberately has no destructive rebuild command.
-Use `python -m frost_analysis dataset --help` for arguments.
-
-`prepare()` and `process()` are internal transformations used while building a
-Dataset. They are not public commands and do not write standalone artifacts.
-
-## Evidence
-
-Analyze a schema v3 Dataset:
-
-```bash
-python -m frost_analysis evidence \
-  --dataset dataset \
-  --config configs/evidence.yaml \
-  --output output/test/成本函数/其他/历史证据/frost_cycle_evidence_v2_3
-```
-
-Evidence reads cycles only through `DatasetLoader` and never writes inside the
-Dataset. Dataset status is authoritative: human-reviewed `status` controls cycle
-eligibility, while metric availability is recorded locally inside Evidence.
-
-The current exploratory configuration includes `valid` cycles strictly longer
-than 30 minutes. The Evidence eligibility table records this inclusion and its
-reason. Use a frozen, stricter admission protocol before treating the future
-100+ cycle run as confirmatory.
-
-Each run writes nine auditable CSV tables and five Python/matplotlib figures in
-editable SVG, PDF, PNG, and 600-dpi TIFF. The scientific gates and interpretation
-rules are documented in
-[`docs/evidence_analysis_framework_cn.md`](docs/evidence_analysis_framework_cn.md).
-
-Configuration has one owner per workflow:
-
-- `configs/config.yaml`: channels and shared Raw-to-Dataset rules.
-- `configs/evidence.yaml`: Dataset-to-Evidence scientific analysis.
-
-The formal data contracts are documented in
-[`docs/pipeline_contract.md`](docs/pipeline_contract.md) and
-[`docs/dataset_contract.md`](docs/dataset_contract.md).
+Each stage exposes its authoritative interface through its `--help` flag.
+Run a retained script from the repository root as a module, for example
+`uv run python -m scripts.labels.audit_rgb_cycle_assets --help`.

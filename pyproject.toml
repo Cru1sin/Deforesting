@@ -9,7 +9,6 @@ dependencies = [
     "pandas>=2.1,<3",
     "pyarrow>=17,<22",
     "PyWavelets>=1.8,<2",
-    "PyYAML>=6,<7",
     "scipy>=1.14,<2",
     "scikit-learn>=1.6,<2",
     "tabulate>=0.9,<1",
@@ -25,7 +24,6 @@ dev = [
     "pytest-cov>=4.1",
     "ruff>=0.5",
     "scipy-stubs>=1.14",
-    "types-PyYAML>=6",
 ]
 ml = [
     "timm>=1.0,<2",

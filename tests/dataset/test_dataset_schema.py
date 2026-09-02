@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from frost_analysis.dataset.schema import (
+from dataloader.schema import (
     build_processed_frame,
     drop_image_columns,
     merge_registries,

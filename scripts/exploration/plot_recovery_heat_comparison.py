@@ -11,14 +11,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from dataloader.dataloader import DatasetLoader
+from dataloader.metadata import following_cycle_names
 from frost_analysis.cost.core import (
     integrate_energy_curve_kwh,
     integrate_energy_kwh,
     water_side_heating_kw,
 )
 from frost_analysis.cost.selected import MINIMUM_INTEGRATION_COVERAGE, RECOVERY
-from frost_analysis.dataset.loader import DatasetLoader
-from frost_analysis.dataset.metadata import following_cycle_names
 
 DATE_BANDS = ("#EAF2F8", "#FFF3E6")
 WATER_COLOR = "#2166AC"

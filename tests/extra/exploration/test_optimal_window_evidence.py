@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from dataloader.metadata import following_cycle_names
 from frost_analysis.cost.core import partial_pool_group_estimates
-from frost_analysis.dataset.metadata import following_cycle_names
 
 
 def _module():  # type: ignore[no-untyped-def]
@@ -1992,7 +1992,7 @@ def test_render_all_cost_publications_passes_explicit_cloud_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _module()
-    import frost_analysis.dataset.images as dataset_images
+    import dataloader.images as dataset_images
 
     class Loader:
         dataset_root = tmp_path / "dataset"

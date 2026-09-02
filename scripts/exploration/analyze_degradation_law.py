@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 
-from frost_analysis.dataset.loader import DatasetLoader
+from dataloader.dataloader import DatasetLoader
 from frost_analysis.exploration.degradation_law import (
     fit_hinge,
     leave_group_out_reference,

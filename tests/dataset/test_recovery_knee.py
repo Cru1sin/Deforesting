@@ -1,6 +1,6 @@
 import numpy as np
 
-from frost_analysis.dataset.knee import find_global_knee
+from dataloader.knee import find_global_knee
 
 
 def test_find_global_knee_prefers_larger_later_transition() -> None:

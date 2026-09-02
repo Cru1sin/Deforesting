@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from dataloader.dataloader import DatasetLoader
 from frost_analysis.cost.core import water_side_heating_kw
-from frost_analysis.dataset.loader import DatasetLoader
 
 plt.rcParams["font.family"] = "sans-serif"
 plt.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans", "Liberation Sans"]

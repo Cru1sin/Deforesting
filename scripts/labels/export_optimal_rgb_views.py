@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from frost_analysis.dataset.images import materialize_cycle_images
-from frost_analysis.dataset.loader import DatasetLoader
+from dataloader.dataloader import DatasetLoader
+from dataloader.images import materialize_cycle_images
 from frost_analysis.labels.assets import build_optimal_view_manifest, optimal_view_report
 from frost_analysis.labels.cost import complete_observed_cycle_names
 

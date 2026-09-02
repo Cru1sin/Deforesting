@@ -8,10 +8,195 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
-from src.frost_analysis.cost.core import integrate_energy_curve_kwh, integrate_energy_kwh
+from numpy.typing import NDArray
 
 MINIMUM_COVERAGE = 0.95
+
+
+def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
+    """Return raw water-side heating capacity in kW."""
+    return (
+        1.161
+        * pd.to_numeric(frame["water_flow"], errors="coerce")
+        * (
+            pd.to_numeric(frame["water_out_temperature"], errors="coerce")
+            - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
+        )
+    )
+
+
+def integrate_energy_kwh(
+    timestamps: pd.Series | pd.DatetimeIndex,
+    power_kw: pd.Series,
+    *,
+    maximum_gap_seconds: float = 5.0,
+) -> tuple[float, float]:
+    """Trapezoid-integrate valid adjacent raw points without bridging gaps."""
+    raw = pd.DataFrame(
+        {
+            "time": pd.to_datetime(timestamps, errors="coerce"),
+            "power": pd.to_numeric(power_kw, errors="coerce"),
+        }
+    )
+    span = (
+        (raw["time"].max() - raw["time"].min()).total_seconds()
+        if raw["time"].notna().any()
+        else 0.0
+    )
+    observed = raw.dropna().sort_values("time").drop_duplicates("time")
+    dt = observed["time"].diff().dt.total_seconds()
+    valid = dt.gt(0) & dt.le(maximum_gap_seconds)
+    energy = (
+        ((observed["power"] + observed["power"].shift()) / 2 * dt / 3600).where(valid, 0.0).sum()
+    )
+    coverage = float(dt.where(valid, 0.0).sum() / span) if span > 0 else 0.0
+    return float(energy), coverage
+
+
+def integrate_energy_curve_kwh(
+    timestamps: pd.Series | pd.DatetimeIndex,
+    power_kw: pd.Series,
+    candidate_times: pd.Series | pd.DatetimeIndex | list[pd.Timestamp],
+    *,
+    maximum_gap_seconds: float = 5.0,
+    bridge_internal_gaps: bool = False,
+    extrapolate_endpoints: bool = False,
+) -> pd.DataFrame:
+    """Return gap-aware cumulative energy and coverage at many candidate times."""
+    raw = pd.DataFrame(
+        {
+            "time": pd.to_datetime(timestamps, errors="coerce"),
+            "power": pd.to_numeric(power_kw, errors="coerce"),
+        }
+    )
+    raw_time = pd.DatetimeIndex(raw["time"].dropna().sort_values().drop_duplicates())
+    observed = raw.dropna().sort_values("time").drop_duplicates("time")
+    candidates = pd.DatetimeIndex(pd.to_datetime(candidate_times, errors="coerce"))
+    if observed.empty or raw_time.empty:
+        return pd.DataFrame(
+            {
+                "energy_kwh": 0.0,
+                "coverage": 0.0,
+                "bridged_internal_gap": False,
+                "extrapolated_endpoint": False,
+            },
+            index=range(len(candidates)),
+        )
+    endpoint_rows: NDArray[np.bool_] = np.zeros(len(raw), dtype=bool)
+    endpoint_ranges: list[tuple[pd.Timestamp, pd.Timestamp, bool]] = []
+    if extrapolate_endpoints and len(observed) >= 2:
+        first_observed_time = pd.Timestamp(observed["time"].iloc[0])
+        last_observed_time = pd.Timestamp(observed["time"].iloc[-1])
+        observed_time = observed["time"].astype("int64").to_numpy(dtype=float)
+        observed_power = observed["power"].to_numpy(dtype=float)
+        left_slope = (observed_power[1] - observed_power[0]) / (
+            observed_time[1] - observed_time[0]
+        )
+        right_slope = (observed_power[-1] - observed_power[-2]) / (
+            observed_time[-1] - observed_time[-2]
+        )
+        raw_time_ns = raw["time"].astype("int64").to_numpy(dtype=float)
+        left = raw["time"].lt(observed["time"].iloc[0]) & raw["power"].isna()
+        right = raw["time"].gt(observed["time"].iloc[-1]) & raw["power"].isna()
+        raw.loc[left, "power"] = observed_power[0] + left_slope * (
+            raw_time_ns[left.to_numpy()] - observed_time[0]
+        )
+        raw.loc[right, "power"] = observed_power[-1] + right_slope * (
+            raw_time_ns[right.to_numpy()] - observed_time[-1]
+        )
+        endpoint_rows = (left | right).to_numpy()
+        if left.any():
+            endpoint_ranges.append((pd.Timestamp(raw_time[0]), first_observed_time, False))
+        if right.any():
+            endpoint_ranges.append((last_observed_time, pd.Timestamp(raw_time[-1]), True))
+        observed = raw.dropna().sort_values("time").drop_duplicates("time")
+    dt = observed["time"].diff().dt.total_seconds()
+    short = dt.gt(0) & dt.le(maximum_gap_seconds)
+    bridged = bridge_internal_gaps & dt.gt(maximum_gap_seconds)
+    valid = short | bridged
+    increments = (
+        (observed["power"] + observed["power"].shift()) / 2 * dt / 3600
+    ).where(valid, 0.0)
+    energy = increments.cumsum().to_numpy()
+    covered_seconds = dt.where(valid, 0.0).cumsum().to_numpy()
+    observed_index = pd.DatetimeIndex(observed["time"])
+    positions: NDArray[np.intp] = observed_index.searchsorted(candidates, side="right") - 1
+    raw_positions: NDArray[np.intp] = raw_time.searchsorted(candidates, side="right") - 1
+    safe_positions = np.maximum(positions, 0)
+    spans = np.where(
+        raw_positions >= 0,
+        (raw_time[np.maximum(raw_positions, 0)] - raw_time[0]).total_seconds(),
+        0.0,
+    )
+    cumulative = np.where(positions >= 0, energy[safe_positions], 0.0)
+    covered = np.where(positions >= 0, covered_seconds[safe_positions], 0.0)
+    bridged_candidates: NDArray[np.bool_] = np.zeros(len(candidates), dtype=bool)
+    extrapolated_candidates: NDArray[np.bool_] = np.zeros(len(candidates), dtype=bool)
+    if bridge_internal_gaps:
+        candidate_ns = candidates.view("i8")
+        observed_ns = observed_index.view("i8")
+        next_positions: NDArray[np.intp] = positions + 1
+        bridged_segments = bridged.to_numpy()
+        inside = (
+            (positions >= 0)
+            & (next_positions < len(observed_index))
+            & (candidate_ns > observed_ns[np.maximum(positions, 0)])
+            & (candidate_ns < observed_ns[np.minimum(next_positions, len(observed_index) - 1)])
+            & bridged_segments[np.minimum(next_positions, len(observed_index) - 1)]
+        )
+        left = np.maximum(positions, 0)
+        right = np.minimum(next_positions, len(observed_index) - 1)
+        partial_seconds = np.where(
+            inside,
+            (candidate_ns - observed_ns[left]) / 1e9,
+            0.0,
+        )
+        segment_seconds = dt.to_numpy()[right]
+        left_power = observed["power"].to_numpy()[left]
+        right_power = observed["power"].to_numpy()[right]
+        fraction = np.divide(
+            partial_seconds,
+            segment_seconds,
+            out=np.zeros_like(partial_seconds),
+            where=segment_seconds > 0,
+        )
+        partial_power = left_power + (right_power - left_power) * fraction
+        cumulative += np.where(
+            inside,
+            (left_power + partial_power) / 2 * partial_seconds / 3600,
+            0.0,
+        )
+        covered += partial_seconds
+        bridged_candidates = inside.copy()
+        for gap_index in np.flatnonzero(bridged_segments):
+            bridged_candidates |= (
+                (candidate_ns > observed_ns[gap_index - 1])
+                & (candidate_ns < observed_ns[gap_index])
+            )
+        spans = np.where(
+            candidates >= raw_time[0],
+            (candidates - raw_time[0]).total_seconds(),
+            0.0,
+        )
+    if extrapolate_endpoints and endpoint_rows.any():
+        for endpoint_left, endpoint_right, right_inclusive in endpoint_ranges:
+            if right_inclusive:
+                extrapolated_candidates |= (candidates > endpoint_left) & (
+                    candidates <= endpoint_right
+                )
+            else:
+                extrapolated_candidates |= (candidates >= endpoint_left) & (
+                    candidates < endpoint_right
+                )
+    coverage = np.divide(covered, spans, out=np.zeros_like(covered), where=spans > 0)
+    return pd.DataFrame(
+        {
+            "energy_kwh": cumulative,
+            "coverage": coverage,
+            "bridged_internal_gap": bridged_candidates,
+            "extrapolated_endpoint": extrapolated_candidates,
+        }
+    )
 
 
 def load_parameters() -> dict[str, Any]:

@@ -51,56 +51,18 @@ def _table(algorithm: str) -> pd.DataFrame:
     )
 
 
-def _write_standard_run(
-    root: Path,
-    name: str,
-    table: pd.DataFrame,
-    *,
-    base_cost: str,
-    heat_basis: str,
-    variant: str | None = None,
-) -> Path:
-    run = root / name
-    run.mkdir()
-    (run / "recipe.json").write_text(
-        json.dumps({"base_cost": base_cost, "heat_basis": heat_basis, "variant": variant}),
-        encoding="utf-8",
-    )
-    table.to_csv(run / "cost.csv", index=False)
-    return run
-
-
-def test_standardized_public_entrypoint_renders_one_comparison_and_each_heat_basis(
+def test_standardized_public_entrypoint_preserves_existing_output_layout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     module = _module()
-    runs = [
-        _write_standard_run(
-            tmp_path,
-            "v1",
-            _table("v1").drop(
-                columns=[
-                    "water_reference_t_star",
-                    "water_reference_inverse_cop",
-                    "water_reference_relative_regret",
-                ]
-            ).assign(is_optimum=lambda values: values["relative_regret"].eq(0), supported=True),
-            base_cost="v1",
-            heat_basis="unit",
-        ),
-        _write_standard_run(
-            tmp_path,
-            "v2.5",
-            _table("v2.5").assign(
-                is_optimum=lambda values: values["relative_regret"].eq(0), supported=True
-            ),
-            base_cost="v2.5",
-            heat_basis="water",
-        ),
-    ]
+    tables = {"v1": _table("v1"), "v2.5": _table("v2.5")}
+    for algorithm, heat_basis in (("v1", "unit"), ("v2.5", "water")):
+        tables[algorithm].attrs["heat_basis"] = heat_basis
     saved: list[Path] = []
     suites: list[tuple[tuple[str, ...], Path]] = []
     curves: list[tuple[tuple[str, ...], Path]] = []
+    monkeypatch.setattr(module, "_load_result_tables", lambda *_args: tables)
+    monkeypatch.setattr(module, "_comparison_figure", lambda *_args: plt.figure())
     monkeypatch.setattr(
         module, "_save_png", lambda figure, path: (saved.append(path), plt.close(figure))
     )
@@ -118,20 +80,79 @@ def test_standardized_public_entrypoint_renders_one_comparison_and_each_heat_bas
     class Loader:
         @staticmethod
         def get_cycle_record(cycle_name: str) -> dict[str, object]:
-            return {
-                "cycle_name": cycle_name,
-                "boundaries": {"start_time": "2025-12-31 23:55:00"},
-            }
+            return {"cycle_name": cycle_name}
 
     output = tmp_path / "figures"
-    module.generate_cost_function_figures(runs, Loader(), output)
+    module.generate_cost_function_figures([tmp_path / "v1", tmp_path / "v2.5"], Loader(), output)
 
-    assert saved == [output / "comparison_all_runs_RB.png"]
-    assert suites == [(("v1", "v2.5"), output / "decision_publications")]
+    assert saved == [
+        output / "comparison_v1_RB.png",
+        output / "comparison_v2.5_RB.png",
+        output / "comparison_v1_v2.5_RB.png",
+    ]
+    assert suites == [(("v1", "v2.5"), output)]
     assert curves == [
         (("v1",), output / "cost_curves" / "unit"),
         (("v2.5",), output / "cost_curves" / "water"),
     ]
+
+
+def test_standardized_public_entrypoint_keeps_renewal_variant_svg_png(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    table = _table("renewal_water__trial")
+    table.attrs["heat_basis"] = "water"
+    saved: list[Path] = []
+    monkeypatch.setattr(module, "_load_result_tables", lambda *_args: {"renewal_water__trial": table})
+    monkeypatch.setattr(module, "_comparison_figure", lambda *_args: plt.figure())
+    monkeypatch.setattr(
+        module, "_save_svg_png", lambda figure, path: (saved.append(path), plt.close(figure))
+    )
+    monkeypatch.setattr(module, "_render_cycle_sets", lambda *_args: None)
+    monkeypatch.setattr(module, "_render_cost_curve_comparisons", lambda *_args: None)
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(cycle_name: str) -> dict[str, object]:
+            return {"cycle_name": cycle_name}
+
+    output = tmp_path / "figures"
+    module.generate_cost_function_figures([tmp_path / "renewal"], Loader(), output)
+
+    assert saved == [output / "comparison_renewal_water__trial_RB.png"]
+
+
+def test_standardized_public_entrypoint_preflights_existing_renewal_svg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    tables = {"v1": _table("v1"), "renewal_water__trial": _table("renewal_water__trial")}
+    for table in tables.values():
+        table.attrs["heat_basis"] = "water"
+    output = tmp_path / "figures"
+    existing = output / "comparison_renewal_water__trial_RB.svg"
+    existing.parent.mkdir()
+    existing.write_text("existing", encoding="utf-8")
+    monkeypatch.setattr(module, "_load_result_tables", lambda *_args: tables)
+    monkeypatch.setattr(
+        module,
+        "_comparison_figure",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("rendered before preflight")),
+    )
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(cycle_name: str) -> dict[str, object]:
+            return {"cycle_name": cycle_name}
+
+    with pytest.raises(FileExistsError, match=str(existing)):
+        module.generate_cost_function_figures(
+            [tmp_path / "v1", tmp_path / "renewal"], Loader(), output
+        )
+
+    assert existing.read_text(encoding="utf-8") == "existing"
+    assert not (output / "comparison_v1_RB.png").exists()
 
 
 def test_cycle_sets_render_variants_and_v268_as_diagnostic_minima(

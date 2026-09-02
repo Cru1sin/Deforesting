@@ -9,8 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from frost_analysis.dataset.loader import DatasetLoader
-from frost_analysis.figures.visualization import (
+from dataloader.dataloader import DatasetLoader
+from plots.publication import (
     _STAGE_COLORS,
     _observed_values,
     _stage_spans,

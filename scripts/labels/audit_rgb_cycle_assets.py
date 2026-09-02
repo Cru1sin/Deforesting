@@ -8,10 +8,9 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import yaml
 from PIL import Image
 
-from frost_analysis.dataset.images import RGB_CAMERA_ORDER
+from dataloader.images import RGB_CAMERA_ORDER
 
 ROLES = RGB_CAMERA_ORDER
 ALLOWED_MISSING = {
@@ -56,16 +55,9 @@ EMPTY_VIEW_COLUMNS = (
 
 
 def _read_catalog(dataset: Path) -> dict[str, dict[str, object]]:
-    for name in ("catalog.yml", "catalog.yaml", "cycle_catalog.json"):
-        path = dataset / name
-        if path.is_file():
-            payload = (
-                yaml.safe_load(path.read_text(encoding="utf-8"))
-                if path.suffix in {".yml", ".yaml"}
-                else json.loads(path.read_text(encoding="utf-8"))
-            )
-            return {str(row["cycle_name"]): row for row in payload["cycles"]}
-    raise FileNotFoundError(f"no cycle catalog found under {dataset}")
+    path = dataset / "cycle_catalog.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {str(row["cycle_name"]): row for row in payload["cycles"]}
 
 
 def _readable_image(path: Path) -> bool:

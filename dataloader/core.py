@@ -463,8 +463,7 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
     root = Path(dataset_dir).resolve()
     project_root = _resolve_project_root()
     registry = read_json(root / "channel_registry.json")
-    config_path = project_root / "configs/config.yaml"
-    configured = load_channels(config_path)
+    configured = load_channels()
     saved = registry.get("channels", {})
     channels = {
         name: {
@@ -483,7 +482,7 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
         date = str(record["experiment_date"])
         if date not in configs:
             config = load_config(
-                config_path,
+                project_root=project_root,
                 experiment_date=date,
                 input_dir=root / "cycles_original",
             )
@@ -683,7 +682,7 @@ def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
     if not matches or len(dates) != 1 or any(match is None for match in matches):
         raise ValueError("XLS filenames must contain one shared date")
     return load_config(
-        project_root / "configs/config.yaml",
+        project_root=project_root,
         experiment_date=dates.pop(),
         input_dir=input_path,
     )
@@ -695,7 +694,7 @@ def _build_date(input_path: Path, config: Any) -> _DateBuild:
     from .prepared import validate_prepared, validate_processed
     from .process import process
 
-    channels = load_channels(config.channels_path)
+    channels = load_channels()
     print("[add] prepare sensors", flush=True)
     prepared, initial_summary = prepare(config, channels)
     print("[add] validate prepared", flush=True)
@@ -729,10 +728,11 @@ def _materialize_cycle(
     summary_row: Mapping[str, Any],
 ) -> tuple[dict[str, Any], pd.DataFrame]:
     """Write one complete cycle and return its Catalog record."""
-    from ..figures.visualization import (
+    from plots.publication import (
         render_cycle_publication,
         render_rgb_panel,
     )
+
     from .edit import apply_baseline, apply_recovery
     from .files import write_csv, write_parquet
     from .images import (
@@ -1138,7 +1138,8 @@ def render_publication_asset(
     output_path: Path | None = None,
 ) -> None:
     """Render one Dataset publication, optionally with an analysis cost curve."""
-    from ..figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
+
     from .files import read_json
     from .images import (
         _sensor_coverage_intervals,
@@ -1182,7 +1183,8 @@ def _render_rgb_panel(
         Mapping[str, Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] | None
     ) = None,
 ) -> None:
-    from ..figures.visualization import render_rgb_panel
+    from plots.publication import render_rgb_panel
+
     from .images import scan_cycle_images
 
     cycle_name = str(record["cycle_name"])
@@ -1215,10 +1217,11 @@ def _refresh_cycle_record(
     registry: Mapping[str, Any],
     camera_roles: tuple[str, ...],
 ) -> None:
-    from ..figures.visualization import (
+    from plots.publication import (
         render_cycle_publication,
         render_rgb_panel,
     )
+
     from .images import (
         _cycle_image_summary,
         _sensor_coverage_intervals,
@@ -1322,7 +1325,8 @@ def edit_dataset(  # noqa: C901
     ):
         raise ValueError("dataset edit requires at least one edit")
 
-    from ..figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
+
     from .edit import apply_baseline, apply_defrost_preparation, apply_recovery
     from .files import read_json, write_csv, write_json, write_parquet
     from .images import (

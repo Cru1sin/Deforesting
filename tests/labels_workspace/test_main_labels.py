@@ -32,6 +32,9 @@ def test_parser_exposes_only_the_label_run_arguments() -> None:
         "output": Path("output/labels/v1"),
         "thresholds": [0.01, 0.02, 0.05, 0.10],
         "overwrite": False,
+        "figures": False,
+        "figure_output": None,
+        "figure_format": ["png"],
     }
 
 

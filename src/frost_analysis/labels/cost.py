@@ -10,6 +10,7 @@ from labels.build import (
     complete_catalog_cycle_names,
     complete_observed_cycle_names,
     curve_label_exclusion_reason,
+    high_confidence_coverage,
 )
 
 __all__ = [
@@ -33,16 +34,3 @@ def map_cost_state_targets(states: pd.Series, task: str) -> pd.Series:
     if task not in {"binary", "three"}:
         raise ValueError(f"unknown classification task: {task}")
     return states.map({name: index for index, name in enumerate(names)}).astype("Int64")
-
-
-def high_confidence_coverage(
-    label_balance: pd.DataFrame, camera_group: str, threshold: float
-) -> float:
-    """Return retained pre/post images as a fraction of candidate-domain images."""
-    rows = label_balance.loc[
-        label_balance["camera_group"].eq(camera_group)
-        & label_balance["regret_threshold"].eq(threshold)
-        & label_balance["cost_state"].isin(("pre_optimal", "near_optimal", "post_optimal"))
-    ]
-    retained = rows.loc[rows["cost_state"].ne("near_optimal"), "image_count"].sum()
-    return float(retained / rows["image_count"].sum())

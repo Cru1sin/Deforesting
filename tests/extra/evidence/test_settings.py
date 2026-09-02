@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-import yaml
 
 from frost_analysis.evidence import EvidenceSettings
 
@@ -16,7 +13,7 @@ def _payload() -> dict[str, object]:
         "minimum_feature_coverage": 0.8,
         "minimum_valid_pairs": 30,
         "minimum_pair_coverage": 0.8,
-        "eligible_statuses": ["valid", "incomplete"],
+        "eligible_statuses": ["valid"],
         "minimum_cycle_minutes": 30.0,
         "event_persistence_seconds": 120,
         "signal_reference_minutes": 5,
@@ -35,18 +32,15 @@ def _payload() -> dict[str, object]:
     }
 
 
-def test_settings_from_yaml_loads_only_scientific_contract(tmp_path: Path) -> None:
-    path = tmp_path / "evidence.yaml"
-    path.write_text(yaml.safe_dump(_payload()), encoding="utf-8")
-
-    settings = EvidenceSettings.from_yaml(path)
+def test_default_settings_preserve_the_frozen_scientific_contract() -> None:
+    settings = EvidenceSettings()
 
     assert settings.targets == ("heating_capacity", "cop")
     assert settings.primary_horizon_minutes == 10
     assert settings.minimum_feature_coverage == pytest.approx(0.8)
     assert settings.event_thresholds == (0.05, 0.1, 0.15)
     assert settings.context_features[-1] == "compressor_frequency"
-    assert settings.eligible_statuses == ("valid", "incomplete")
+    assert settings.eligible_statuses == ("valid",)
     assert settings.minimum_cycle_minutes == pytest.approx(30.0)
     assert settings.normalized() == {
         **_payload(),
@@ -55,21 +49,6 @@ def test_settings_from_yaml_loads_only_scientific_contract(tmp_path: Path) -> No
         "event_thresholds": [0.05, 0.1, 0.15],
         "primary_event_threshold": 0.1,
     }
-
-
-def test_settings_rejects_protocol_fields_in_yaml(tmp_path: Path) -> None:
-    payload = {
-        **_payload(),
-        "primary_horizon_minutes": 20,
-        "horizons_minutes": [1, 2, 3],
-        "event_thresholds": [0.9],
-        "primary_event_threshold": 0.9,
-    }
-    path = tmp_path / "legacy.yaml"
-    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="horizons_minutes"):
-        EvidenceSettings.from_yaml(path)
 
 
 def test_settings_post_init_checks_only_required_relationships() -> None:

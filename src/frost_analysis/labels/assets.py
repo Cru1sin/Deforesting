@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from frost_analysis.dataset.images import RGB_CAMERA_ORDER, RGB_PANEL_MAX_OFFSET
+from dataloader.images import RGB_CAMERA_ORDER, RGB_PANEL_MAX_OFFSET
 
 
 def optimal_view_report(manifest: pd.DataFrame) -> str:

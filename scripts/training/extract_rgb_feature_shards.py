@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from frost_analysis.dataset.images import RGB_CAMERA_ORDER, materialize_cycle_images
+from dataloader.images import RGB_CAMERA_ORDER, materialize_cycle_images
 from frost_analysis.labels.cost import map_cost_state_targets
 from frost_analysis.training.features import (
     DEEP_REPRESENTATIONS,

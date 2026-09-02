@@ -26,7 +26,7 @@ def _panel_frame() -> tuple[pd.DataFrame, pd.Series[float]]:
 
 
 def test_stage_spans_keeps_a_single_sample_first_stage() -> None:
-    from frost_analysis.figures.visualization import _stage_spans
+    from plots.publication import _stage_spans
 
     frame, minutes = _panel_frame()
 
@@ -34,7 +34,7 @@ def test_stage_spans_keeps_a_single_sample_first_stage() -> None:
 
 
 def test_cycle_panel_legend_labels_are_arranged_horizontally() -> None:
-    from frost_analysis.figures.visualization import _plot_cycle_panel
+    from plots.publication import _plot_cycle_panel
 
     frame, minutes = _panel_frame()
     figure, axis = plt.subplots()
@@ -55,14 +55,14 @@ def test_cycle_panel_legend_labels_are_arranged_horizontally() -> None:
 
 
 def test_publication_display_label_hides_machine_field_formatting() -> None:
-    from frost_analysis.figures.visualization import _display_label
+    from plots.publication import _display_label
 
     assert _display_label("environment_relative_humidity") == "Relative Humidity"
     assert _display_label("ambient_temperature") == "Ambient Temperature"
 
 
 def test_publication_combines_heating_and_evaporator_capacity() -> None:
-    from frost_analysis.figures.visualization import _COLORS, _PANELS
+    from plots.publication import _COLORS, _PANELS
 
     assert (
         (
@@ -81,7 +81,7 @@ def test_publication_combines_heating_and_evaporator_capacity() -> None:
 
 
 def test_cycle_panel_uses_stage_colors_and_hatched_missing_state() -> None:
-    from frost_analysis.figures.visualization import _STAGE_COLORS, _plot_cycle_panel
+    from plots.publication import _STAGE_COLORS, _plot_cycle_panel
 
     frame, minutes = _panel_frame()
     figure, axis = plt.subplots()
@@ -115,7 +115,7 @@ def test_cycle_panel_uses_stage_colors_and_hatched_missing_state() -> None:
 
 
 def test_cop_panel_focuses_normal_range_without_inset() -> None:
-    from frost_analysis.figures.visualization import _plot_cycle_panel
+    from plots.publication import _plot_cycle_panel
 
     frame = pd.DataFrame(
         {
@@ -155,7 +155,7 @@ def test_cop_panel_focuses_normal_range_without_inset() -> None:
 
 
 def test_cost_panel_display_extension_does_not_change_formal_minimum() -> None:
-    from frost_analysis.figures.visualization import _plot_cost_panel
+    from plots.publication import _plot_cost_panel
 
     start = pd.Timestamp("2026-01-01")
     curve = pd.DataFrame(
@@ -193,7 +193,7 @@ def test_cost_panel_display_extension_does_not_change_formal_minimum() -> None:
 
 
 def test_cost_panel_does_not_mark_unknown_model_support_as_unsupported() -> None:
-    from frost_analysis.figures.visualization import _plot_cost_panel
+    from plots.publication import _plot_cost_panel
 
     start = pd.Timestamp("2026-01-01")
     curve = pd.DataFrame(

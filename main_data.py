@@ -7,8 +7,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from dataloader import DatasetLoader
-from src.frost_analysis.dataset.check import validate_dataset
-from src.frost_analysis.dataset.core import (
+from dataloader.check import validate_dataset
+from dataloader.core import (
     add_dataset,
     aggregate_original,
     edit_dataset,

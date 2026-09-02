@@ -30,7 +30,7 @@ from sklearn.svm import SVC
 from sklearn.utils.parallel import Parallel, delayed
 from threadpoolctl import threadpool_limits
 
-from frost_analysis.dataset.images import RGB_CAMERA_ORDER
+from dataloader.images import RGB_CAMERA_ORDER
 
 from .features import DEEP_REPRESENTATIONS
 

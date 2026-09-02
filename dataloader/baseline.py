@@ -57,10 +57,9 @@ def add_baseline_residuals(
     frame: pd.DataFrame,
     cycle_summary: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
-    settings: BaselineSettings | Mapping[str, Any],
+    settings: BaselineSettings,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Add common-window baselines and return the enriched cycle summary."""
-    rules = _settings(settings)
     result = frame.copy()
     summary = cycle_summary.copy()
     eligible = _eligible_channels(channels)
@@ -72,7 +71,7 @@ def add_baseline_residuals(
         cycle_mask = result["experiment_id"].eq(cycle["experiment_id"]) & result[
             "cycle_id"
         ].eq(cycle["cycle_id"])
-        window, reason = _find_common_window(result.loc[cycle_mask], cycle, rules)
+        window, reason = _find_common_window(result.loc[cycle_mask], cycle, settings)
         if window is None:
             summary.loc[index, "baseline_status"] = "unavailable"
             summary.loc[index, "baseline_failure_reason"] = reason
@@ -87,20 +86,14 @@ def add_baseline_residuals(
             eligible,
             start=start,
             end=end,
-            minimum_observed_coverage=rules.minimum_observed_coverage,
-            stage=rules.stage,
+            minimum_observed_coverage=settings.minimum_observed_coverage,
+            stage=settings.stage,
         )
         for column in updated.columns:
             if str(column).endswith("__baseline") or str(column).endswith("__baseline_residual"):
                 result.loc[cycle_mask, column] = updated[column].to_numpy()
         summary.at[index, "baseline_unavailable_channels"] = cast(Any, unavailable)
     return result, summary
-
-
-def _settings(settings: BaselineSettings | Mapping[str, Any]) -> BaselineSettings:
-    if isinstance(settings, BaselineSettings):
-        return settings
-    return BaselineSettings.from_mapping(settings)
 
 
 def _eligible_channels(channels: Mapping[str, Mapping[str, Any]]) -> list[str]:

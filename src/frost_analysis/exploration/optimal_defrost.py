@@ -17,6 +17,8 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 from scipy.stats import wilcoxon
 
+from dataloader.dataloader import DatasetLoader
+from dataloader.metadata import following_cycle_names
 from frost_analysis.cost.core import (
     count_true_runs,
     find_recovery_time,
@@ -26,8 +28,6 @@ from frost_analysis.cost.core import (
     optimize_renewal_cost,
     water_side_heating_kw,
 )
-from frost_analysis.dataset.loader import DatasetLoader
-from frost_analysis.dataset.metadata import following_cycle_names
 
 RAW_COLUMNS = [
     "timestamp",

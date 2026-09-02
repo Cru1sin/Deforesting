@@ -23,6 +23,13 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
+from dataloader.core import render_publication_asset
+from dataloader.dataloader import DatasetLoader
+from dataloader.images import (
+    materialize_cycle_image_members,
+    scan_cycle_images,
+)
+from dataloader.metadata import following_cycle_names
 from frost_analysis.cost.core import (
     build_partial_pool_curves,
     count_true_runs,
@@ -36,18 +43,11 @@ from frost_analysis.cost.selected import (
     QD_COEFFICIENTS,
     QD_SUPPORT,
 )
-from frost_analysis.dataset.core import render_publication_asset
-from frost_analysis.dataset.images import (
-    materialize_cycle_image_members,
-    scan_cycle_images,
-)
-from frost_analysis.dataset.loader import DatasetLoader
-from frost_analysis.dataset.metadata import following_cycle_names
-from frost_analysis.figures.visualization import (
+from frost_analysis.labels.cost import complete_observed_cycle_names
+from plots.publication import (
     match_decision_rgb_images,
     render_decision_publication,
 )
-from frost_analysis.labels.cost import complete_observed_cycle_names
 
 RAW_COLUMNS = [
     "timestamp",
@@ -3130,7 +3130,7 @@ def render_all_cost_publications(  # noqa: C901
                         if index == 0:
                             matches.append(rendered)
             elif initial_matches["status"].eq("physical_image_missing").any():
-                from frost_analysis.dataset.images import materialize_cycle_images
+                from dataloader.images import materialize_cycle_images
 
                 with materialize_cycle_images(
                     loader.dataset_root,

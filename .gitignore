@@ -10,6 +10,8 @@
 !main_cost.py
 !cost/
 !cost/**
+!plots/
+!plots/**
 !dataloader/
 !dataloader/**
 !src/

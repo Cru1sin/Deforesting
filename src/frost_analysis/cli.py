@@ -6,10 +6,10 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
-from frost_analysis.dataset import DatasetLoader
-from frost_analysis.dataset.check import validate_dataset
-from frost_analysis.dataset.config import find_project_root
-from frost_analysis.dataset.core import (
+from dataloader import DatasetLoader
+from dataloader.check import validate_dataset
+from dataloader.config import find_project_root
+from dataloader.core import (
     add_dataset,
     aggregate_original,
     edit_dataset,
@@ -27,14 +27,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     _add_dataset_commands(subparsers)
     evidence_parser = subparsers.add_parser("evidence")
     evidence_parser.add_argument("--dataset", type=Path)
-    evidence_parser.add_argument("--config", required=True, type=Path)
     evidence_parser.add_argument("--output", required=True, type=Path)
     arguments = parser.parse_args(argv)
     if arguments.command == "dataset":
         return _run_dataset_command(arguments)
     dataset_path = arguments.dataset or (_project_root() / "dataset")
     loader = DatasetLoader(dataset_path)
-    settings = EvidenceSettings.from_yaml(arguments.config)
+    settings = EvidenceSettings()
     bundle = build_evidence(loader, settings)
     print(write_evidence(bundle, arguments.output, loader=loader, settings=settings))
     return 0
@@ -105,7 +104,7 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
         print(add_dataset(arguments.input_dir, arguments.dataset))
         return 0
     if arguments.dataset_command == "replace":
-        from frost_analysis.dataset.core import replace_dataset
+        from dataloader.core import replace_dataset
 
         print(replace_dataset(arguments.input_dir, arguments.dataset))
         return 0

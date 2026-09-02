@@ -35,15 +35,11 @@ def test_dataset_validate_command_remains_registered(monkeypatch, tmp_path: Path
 def test_evidence_command_uses_dataset_loader_and_new_settings(tmp_path: Path) -> None:
     dataset = tmp_path / "dataset"
     write_dataset(dataset, [("c1", "2026-07-01", "valid", frame_for())])
-    config = Path(__file__).parents[3] / "configs" / "evidence.yaml"
-
     result = cli.main(
         [
             "evidence",
             "--dataset",
             str(dataset),
-            "--config",
-            str(config),
             "--output",
             str(tmp_path / "evidence"),
         ]

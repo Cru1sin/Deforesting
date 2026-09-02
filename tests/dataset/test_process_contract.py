@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from frost_analysis.dataset.config import Config
-from frost_analysis.dataset.process import process
+from dataloader.config import BaselineSettings, Config, ProcessSettings
+from dataloader.process import process
 
 
 def _config(
@@ -22,26 +22,20 @@ def _config(
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=root / "data",
-        channels_path=root / "channels.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
         timestamp_column="时间",
         expected_sensor_interval_seconds=expected_interval,
         image_match_tolerance_seconds=2,
         edf_pair_tolerance_seconds=1.0,
-        cycles={},
-        process={
-            "resample_interval_seconds": interval,
-            "continuous_max_gap_seconds": continuous_gap,
-            "control_max_gap_seconds": 30,
-            "baseline": {
-                "stage": "frost_development",
-                "baseline_seconds": 60,
-                "minimum_observed_coverage": 0.8,
-                "required_anchor_channels": ["anchor"],
-                "anchor_maximum_std": {"anchor": 1.0},
-            },
-        },
+        process=ProcessSettings(
+            resample_interval_seconds=interval,
+            continuous_max_gap_seconds=continuous_gap,
+            baseline=BaselineSettings(
+                required_anchor_channels=("anchor",),
+                anchor_maximum_std={"anchor": 1.0},
+            ),
+        ),
     )
 
 

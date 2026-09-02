@@ -5,7 +5,7 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from frost_analysis.dataset.alignment import match_nearest_one_to_one
+from dataloader.alignment import match_nearest_one_to_one
 
 
 def test_match_maximizes_cardinality_before_offset() -> None:

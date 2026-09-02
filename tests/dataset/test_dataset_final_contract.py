@@ -10,12 +10,12 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from frost_analysis.dataset.config import Config
-from frost_analysis.dataset.core import assign_final_cycle_names_by_time
+from dataloader.config import Config, ProcessSettings
+from dataloader.core import assign_final_cycle_names_by_time
 
 
 def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(
@@ -28,7 +28,7 @@ def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_collect_cycle_images_uses_cycle_window_without_sensor_match(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset.images import collect_cycle_images
+    from dataloader.images import collect_cycle_images
 
     camera = tmp_path / "front_center"
     camera.mkdir()
@@ -72,7 +72,7 @@ def test_collect_cycle_images_uses_cycle_window_without_sensor_match(
 
 
 def test_image_metadata_has_no_sensor_alignment_fields() -> None:
-    from frost_analysis.dataset.images import image_metadata_frame
+    from dataloader.images import image_metadata_frame
 
     metadata = image_metadata_frame(
         [
@@ -100,7 +100,7 @@ def test_image_metadata_has_no_sensor_alignment_fields() -> None:
 def test_materialize_cycle_images_prefers_and_preserves_local_images(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset.images import materialize_cycle_images
+    from dataloader.images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     local = tmp_path / "dataset" / "images" / cycle_name
@@ -122,7 +122,7 @@ def test_materialize_cycle_images_prefers_and_preserves_local_images(
 def test_materialize_cycle_images_treats_missing_cloud_zip_as_no_images(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset.images import materialize_cycle_images
+    from dataloader.images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     cloud = tmp_path / "cloud"
@@ -139,7 +139,7 @@ def test_materialize_cycle_images_copies_extracts_and_preserves_local_copy(
 ) -> None:
     from zipfile import ZipFile
 
-    from frost_analysis.dataset.images import materialize_cycle_images
+    from dataloader.images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -167,7 +167,7 @@ def test_materialize_cycle_images_cleans_only_fresh_download_after_success(
 ) -> None:
     from zipfile import ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     cycle_name = "frost_cycle_000021"
     dataset = tmp_path / "dataset"
@@ -196,7 +196,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 ) -> None:
     from zipfile import ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     cycle_name = "frost_cycle_000022"
     dataset = tmp_path / "dataset"
@@ -225,7 +225,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 def test_materialize_cycle_images_never_cleans_preexisting_local_directory(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset.images import materialize_cycle_images
+    from dataloader.images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000023"
     local = tmp_path / "dataset" / "images" / cycle_name
@@ -248,7 +248,7 @@ def test_materialize_cycle_images_stops_before_crossing_free_space_floor(
     from collections import namedtuple
     from zipfile import ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -277,7 +277,7 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
 ) -> None:
     from zipfile import ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -313,7 +313,7 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
 ) -> None:
     from zipfile import ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     cycle_name = "frost_cycle_000020"
     monkeypatch.setattr(dataset_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
@@ -388,7 +388,7 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
 def test_materialize_cycle_images_treats_missing_default_remote_as_no_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     calls: list[list[str]] = []
 
@@ -411,7 +411,7 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
 ) -> None:
     from zipfile import ZIP_DEFLATED, ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
+    from dataloader import images as dataset_images
 
     cycle_name = "frost_cycle_000006"
     archive_path = tmp_path / f"{cycle_name}.zip"
@@ -469,7 +469,7 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
 
 
 def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
-    from frost_analysis.dataset.files import write_json
+    from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
     assets = {
@@ -561,9 +561,9 @@ def test_materialize_cycle_builds_one_catalog_record(
 ) -> None:
     from types import SimpleNamespace
 
-    import frost_analysis.dataset.core as dataset_module
-    from frost_analysis.dataset import metadata as dataset_metadata
-    from frost_analysis.dataset.core import _DateBuild, add_dataset
+    import dataloader.core as dataset_module
+    from dataloader import metadata as dataset_metadata
+    from dataloader.core import _DateBuild, add_dataset
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -691,23 +691,21 @@ def test_materialize_cycle_builds_one_catalog_record(
 def test_load_config_for_input_gets_date_from_xls_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.config as config_module
-    from frost_analysis.dataset.core import _load_config_for_input
+    import dataloader.config as config_module
+    from dataloader.core import _load_config_for_input
 
     original = Config(
         project_root=tmp_path,
         experiment_id="exp_test",
         experiment_date="2027-01-02",
         input_dir=tmp_path / "old-input",
-        channels_path=tmp_path / "channels.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
         timestamp_column="时间",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
         edf_pair_tolerance_seconds=1.0,
-        cycles={},
-        process={"resample_interval_seconds": 10},
+        process=ProcessSettings(resample_interval_seconds=10),
     )
     new_input = tmp_path / "input"
     new_input.mkdir()
@@ -718,13 +716,10 @@ def test_load_config_for_input_gets_date_from_xls_names(
         "2027-01-03_09-00-00-CC_AllSensors.edf",
     ):
         (new_input / name).touch()
-    (tmp_path / "configs").mkdir()
-    (tmp_path / "configs" / "config.yaml").write_text("channels: {}\n", encoding="utf-8")
+    calls: list[dict[str, object]] = []
 
-    calls: list[tuple[Path, dict[str, object]]] = []
-
-    def fake_load(path: Path, **kwargs: object) -> Config:
-        calls.append((path, kwargs))
+    def fake_load(**kwargs: object) -> Config:
+        calls.append(kwargs)
         return original
 
     monkeypatch.setattr(config_module, "load_config", fake_load)
@@ -733,15 +728,16 @@ def test_load_config_for_input_gets_date_from_xls_names(
 
     assert loaded is original
     assert calls == [
-        (
-            tmp_path / "configs/config.yaml",
-            {"experiment_date": "2027-01-02", "input_dir": new_input},
-        )
+        {
+            "project_root": tmp_path,
+            "experiment_date": "2027-01-02",
+            "input_dir": new_input,
+        }
     ]
 
 
 def test_load_config_for_input_rejects_multiple_xls_dates(tmp_path: Path) -> None:
-    from frost_analysis.dataset.core import _load_config_for_input
+    from dataloader.core import _load_config_for_input
 
     (tmp_path / "2026-07-24参数1.xls").touch()
     (tmp_path / "2026-07-25参数2.xls").touch()
@@ -755,20 +751,20 @@ def test_build_date_prints_processing_stages(
 ) -> None:
     from types import SimpleNamespace
 
-    from frost_analysis.dataset import channels, prepare, process
-    from frost_analysis.dataset import prepared as validation
-    from frost_analysis.dataset.core import _build_date
+    from dataloader import channels, prepare, process
+    from dataloader import prepared as validation
+    from dataloader.core import _build_date
 
     frame = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
     summary = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
-    monkeypatch.setattr(channels, "load_channels", lambda _path: {})
+    monkeypatch.setattr(channels, "load_channels", lambda: {})
     monkeypatch.setattr(prepare, "prepare", lambda _config, _channels: (frame, summary))
     monkeypatch.setattr(process, "process", lambda *_args: (frame, summary))
     monkeypatch.setattr(prepare, "prepare_original", lambda _config, _frame: frame)
     monkeypatch.setattr(validation, "validate_prepared", lambda *_args: None)
     monkeypatch.setattr(validation, "validate_processed", lambda *_args: None)
 
-    _build_date(tmp_path, SimpleNamespace(channels_path=tmp_path / "config.yaml"))
+    _build_date(tmp_path, SimpleNamespace())
 
     assert capsys.readouterr().out.splitlines() == [
         "[add] prepare sensors",
@@ -781,8 +777,8 @@ def test_build_date_prints_processing_stages(
 
 
 def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
-    from frost_analysis.dataset.files import write_json
-    from frost_analysis.dataset.metadata import read_catalog, read_manifest, write_catalog
+    from dataloader.files import write_json
+    from dataloader.metadata import read_catalog, read_manifest, write_catalog
 
     write_json(
         {
@@ -818,9 +814,9 @@ def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
 def test_review_cycle_does_not_scan_images_or_update_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.dataset import images as dataset_images
-    from frost_analysis.dataset.core import review_cycle
-    from frost_analysis.figures import visualization
+    from dataloader import images as dataset_images
+    from dataloader.core import review_cycle
+    from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     manifest_before = (tmp_path / "dataset_manifest.json").read_bytes()
@@ -855,14 +851,14 @@ def test_review_cycle_does_not_scan_images_or_update_manifest(
 
 
 def test_review_cycle_rejects_nonbinary_status(tmp_path: Path) -> None:
-    from frost_analysis.dataset.core import review_cycle
+    from dataloader.core import review_cycle
 
     with pytest.raises(ValueError, match="invalid Dataset status"):
         review_cycle(tmp_path, "frost_cycle_000001", status="incomplete")
 
 
 def test_validate_dataset_rejects_nonbinary_status(tmp_path: Path) -> None:
-    from frost_analysis.dataset.check import validate_dataset
+    from dataloader.check import validate_dataset
 
     _write_renderable_dataset(tmp_path)
     catalog = json.loads((tmp_path / "cycle_catalog.json").read_text())
@@ -876,9 +872,9 @@ def test_validate_dataset_rejects_nonbinary_status(tmp_path: Path) -> None:
 def test_render_only_draws_without_writing_catalog_or_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.dataset import files as dataset_io
-    from frost_analysis.dataset.core import render_dataset
-    from frost_analysis.figures import visualization
+    from dataloader import files as dataset_io
+    from dataloader.core import render_dataset
+    from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     catalog_before = (tmp_path / "cycle_catalog.json").read_bytes()
@@ -919,9 +915,9 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
 ) -> None:
     from zipfile import ZipFile
 
-    from frost_analysis.dataset import images as dataset_images
-    from frost_analysis.dataset.core import render_dataset
-    from frost_analysis.figures import visualization
+    from dataloader import images as dataset_images
+    from dataloader.core import render_dataset
+    from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     shutil.rmtree(tmp_path / "images" / cycle_name)
@@ -984,7 +980,7 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
 
 
 def test_cycle_assets_has_publication_and_panel_without_coverage() -> None:
-    from frost_analysis.dataset.metadata import cycle_assets
+    from dataloader.metadata import cycle_assets
 
     assets = cycle_assets("frost_cycle_000001")
 
@@ -995,9 +991,9 @@ def test_cycle_assets_has_publication_and_panel_without_coverage() -> None:
 def test_validate_scientific_schema_ignores_catalog_counts(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset.check import validate_dataset
-    from frost_analysis.dataset.core import make_cycle_uid
-    from frost_analysis.dataset.files import write_json
+    from dataloader.check import validate_dataset
+    from dataloader.core import make_cycle_uid
+    from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
     cycle_uid = make_cycle_uid("exp", "cycle_001")
@@ -1170,7 +1166,7 @@ def test_cli_edit_can_skip_rgb_panel_rendering(monkeypatch: object, tmp_path: Pa
 
 
 def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -> None:
-    from frost_analysis.dataset.edit import apply_recovery
+    from dataloader.edit import apply_recovery
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=12, freq="10s")
     stages = [
@@ -1239,8 +1235,8 @@ def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -
 
 
 def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
-    from frost_analysis.dataset.baseline import apply_fixed_baseline
-    from frost_analysis.dataset.cycles import resolve_stable_heating_start
+    from dataloader.baseline import apply_fixed_baseline
+    from dataloader.cycles import resolve_stable_heating_start
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=6, freq="10s")
     frame = pd.DataFrame(
@@ -1294,7 +1290,7 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
 
 
 def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence() -> None:
-    from frost_analysis.dataset.cycles import _partial_stage_context
+    from dataloader.cycles import _partial_stage_context
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=5, freq="10s")
     segment = pd.DataFrame(
@@ -1316,7 +1312,7 @@ def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence(
 
 
 def test_sensor_coverage_keeps_required_channels_in_the_mask() -> None:
-    from frost_analysis.dataset.images import _sensor_coverage_intervals
+    from dataloader.images import _sensor_coverage_intervals
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
     frame = pd.DataFrame(
@@ -1346,10 +1342,10 @@ def test_sensor_coverage_keeps_required_channels_in_the_mask() -> None:
 def test_refresh_dataset_does_not_modify_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.check as validation
-    from frost_analysis.dataset.core import refresh_dataset
-    from frost_analysis.dataset.files import write_json
-    from frost_analysis.figures import visualization
+    import dataloader.check as validation
+    from dataloader.core import refresh_dataset
+    from dataloader.files import write_json
+    from plots import publication as visualization
 
     (tmp_path / "cycles").mkdir()
     (tmp_path / "cycles_original").mkdir()
@@ -1432,10 +1428,10 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 ) -> None:
     from types import SimpleNamespace
 
-    import frost_analysis.dataset.core as dataset_module
-    from frost_analysis.dataset.check import validate_dataset
-    from frost_analysis.dataset.core import _DateBuild, add_dataset
-    from frost_analysis.dataset.loader import DatasetLoader
+    import dataloader.core as dataset_module
+    from dataloader.check import validate_dataset
+    from dataloader.core import _DateBuild, add_dataset
+    from dataloader.dataloader import DatasetLoader
 
     def make_build(input_dir: Path) -> _DateBuild:
         date = {
@@ -1550,8 +1546,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
     assert all("source_fingerprint" not in item for item in manifest["experiments"])
 
-    from frost_analysis.dataset import images as dataset_images
-    from frost_analysis.dataset.core import edit_dataset, refresh_dataset
+    from dataloader import images as dataset_images
+    from dataloader.core import edit_dataset, refresh_dataset
 
     read_parquet = dataset_module.pd.read_parquet
     scan_cycle_images = dataset_images.scan_cycle_images
@@ -1599,7 +1595,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 
 
 def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
-    import frost_analysis.dataset.files as dataset_io
+    import dataloader.files as dataset_io
 
     assert hasattr(dataset_io, "write_json")
     assert hasattr(dataset_io, "write_csv")
@@ -1609,7 +1605,7 @@ def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
 
 
 def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture[str]) -> None:
-    import frost_analysis.dataset.core as dataset_module
+    import dataloader.core as dataset_module
     from frost_analysis.cli import main
 
     with pytest.raises(SystemExit):
@@ -1622,7 +1618,7 @@ def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture
 def test_dataset_replace_is_a_public_one_input_operation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import frost_analysis.dataset.core as dataset_module
+    import dataloader.core as dataset_module
     from frost_analysis.cli import main
 
     with pytest.raises(SystemExit):
@@ -1638,8 +1634,8 @@ def test_dataset_remove_deletes_only_selected_experiment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import frost_analysis.dataset.check as validation
-    from frost_analysis.dataset.core import remove_dataset
+    import dataloader.check as validation
+    from dataloader.core import remove_dataset
 
     first_name, _ = _write_renderable_dataset(tmp_path)
     second_name = "frost_cycle_000002"
@@ -1714,9 +1710,9 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import frost_analysis.dataset.check as validation
-    from frost_analysis.dataset.core import refresh_dataset
-    from frost_analysis.figures import visualization
+    import dataloader.check as validation
+    from dataloader.core import refresh_dataset
+    from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "front_center"
@@ -1769,9 +1765,9 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
 def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.check as validation
-    from frost_analysis.dataset.core import refresh_dataset
-    from frost_analysis.figures import visualization
+    import dataloader.check as validation
+    from dataloader.core import refresh_dataset
+    from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "top_center"
@@ -1799,8 +1795,8 @@ def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
 def test_refresh_images_refuses_file_outside_its_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.check as validation
-    from frost_analysis.dataset.core import refresh_dataset
+    import dataloader.check as validation
+    from dataloader.core import refresh_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "front"
@@ -1818,9 +1814,9 @@ def test_refresh_images_refuses_file_outside_its_cycle(
 def test_refresh_figures_does_not_rewrite_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.check as validation
-    from frost_analysis.dataset.core import refresh_dataset
-    from frost_analysis.figures import visualization
+    import dataloader.check as validation
+    from dataloader.core import refresh_dataset
+    from plots import publication as visualization
 
     _write_renderable_dataset(tmp_path)
     before = (tmp_path / "image_metadata.parquet").read_bytes()
@@ -1842,7 +1838,7 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
 
 
 def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Path) -> None:
-    from frost_analysis.dataset.loader import DatasetLoader
+    from dataloader.dataloader import DatasetLoader
 
     dataset_dir = tmp_path / "dataset"
     cycle_name, _ = _write_renderable_dataset(dataset_dir)
@@ -1877,8 +1873,8 @@ def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Pat
 def test_baseline_edit_does_not_require_original_or_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.dataset.core import edit_dataset
-    from frost_analysis.dataset.files import write_json
+    from dataloader.core import edit_dataset
+    from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
     cycles_dir = tmp_path / "cycles"
@@ -1928,7 +1924,7 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
         tmp_path / "channel_registry.json",
     )
     monkeypatch.setattr(
-        "frost_analysis.figures.visualization.render_cycle_publication",
+        "plots.publication.render_cycle_publication",
         lambda *_args, **_kwargs: None,
     )
 
@@ -1938,8 +1934,8 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
 def test_loader_uses_camera_directory_as_role(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.dataset.files import write_json
-    from frost_analysis.dataset.loader import DatasetLoader
+    from dataloader.dataloader import DatasetLoader
+    from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
     camera_dir = tmp_path / "images" / cycle_name / "front"
@@ -2025,7 +2021,7 @@ def test_loader_uses_camera_directory_as_role(
 
 
 def test_rgb_stage_metrics_require_all_expected_roles() -> None:
-    from frost_analysis.dataset.images import rgb_stage_metrics
+    from dataloader.images import rgb_stage_metrics
 
     times = pd.date_range("2026-07-14 10:00:00", periods=5, freq="10s")
     frame = pd.DataFrame(
@@ -2048,7 +2044,7 @@ def test_rgb_stage_metrics_require_all_expected_roles() -> None:
 
 
 def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
-    from frost_analysis.dataset.images import rgb_stage_metrics
+    from dataloader.images import rgb_stage_metrics
 
     times = pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s")
     frame = pd.DataFrame(
@@ -2065,7 +2061,7 @@ def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
 
 
 def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path) -> None:
-    from frost_analysis.dataset.core import update_cycle_columns
+    from dataloader.core import update_cycle_columns
 
     cycle_name = "frost_cycle_000001"
     cycles = tmp_path / "cycles"
@@ -2107,9 +2103,9 @@ def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path
 def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.core as dataset_module
-    from frost_analysis.dataset.core import add_dataset
-    from frost_analysis.dataset.files import write_json
+    import dataloader.core as dataset_module
+    from dataloader.core import add_dataset
+    from dataloader.files import write_json
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -2153,48 +2149,47 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
 def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import frost_analysis.dataset.config as config_module
-    import frost_analysis.dataset.core as dataset_module
-    from frost_analysis.dataset.core import aggregate_original
-    from frost_analysis.dataset.files import write_json
+    import dataloader.channels as channels_module
+    import dataloader.config as config_module
+    import dataloader.core as dataset_module
+    from dataloader.core import aggregate_original
+    from dataloader.files import write_json
 
     dataset = tmp_path / "dataset"
     (dataset / "cycles").mkdir(parents=True)
     (dataset / "cycles_original").mkdir()
-    (tmp_path / "configs").mkdir()
-    channels_path = tmp_path / "configs/config.yaml"
-    channels_path.write_text(
-        """channels:
-  added_temperature:
-    source_names: [p1__new_point]
-    unit: degC
-    kind: continuous
-    role: sensor
-    resample: mean
-    missing: interpolate
-    analysis_candidate: false
-    coverage_required: true
-    valid_range: [-50, 120]
-""",
-        encoding="utf-8",
-    )
     config = Config(
         project_root=tmp_path,
         experiment_id="exp_20260715",
         experiment_date="2026-07-15",
         input_dir=tmp_path / "data-that-must-not-be-read",
-        channels_path=channels_path,
         sensor_globs=("*.xls",),
         image_extensions=(),
         timestamp_column="时间",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
         edf_pair_tolerance_seconds=1,
-        cycles={},
-        process={"resample_interval_seconds": 10},
+        process=ProcessSettings(resample_interval_seconds=10),
     )
     monkeypatch.setattr(dataset_module, "_resolve_project_root", lambda: tmp_path)
-    monkeypatch.setattr(config_module, "load_config", lambda _path, **_kwargs: config)
+    monkeypatch.setattr(config_module, "load_config", lambda **_kwargs: config)
+    monkeypatch.setattr(
+        channels_module,
+        "load_channels",
+        lambda: {
+            "added_temperature": {
+                "source_names": ["p1__new_point"],
+                "unit": "degC",
+                "kind": "continuous",
+                "role": "sensor",
+                "resample": "mean",
+                "missing": "interpolate",
+                "analysis_candidate": False,
+                "coverage_required": True,
+                "valid_range": [-50, 120],
+            }
+        },
+    )
 
     cycle_name = "frost_cycle_000001"
     original = pd.DataFrame(

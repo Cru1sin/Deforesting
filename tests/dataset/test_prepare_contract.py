@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from frost_analysis.dataset.channels import load_channels
-from frost_analysis.dataset.config import Config, load_config
-from frost_analysis.dataset.cycles import (
+from dataloader.channels import load_channels
+from dataloader.config import Config, CycleSettings, ProcessSettings, load_config
+from dataloader.cycles import (
     _build_cycles,
     _debounce_state,
     _defrost_runs,
@@ -19,16 +19,16 @@ from frost_analysis.dataset.cycles import (
     find_stable_heating_start,
     label_cycles,
 )
-from frost_analysis.dataset.matching import match_images
-from frost_analysis.dataset.prepare import (
+from dataloader.matching import match_images
+from dataloader.prepare import (
     _expected_row_count,
     _maximum_gap,
     _observed_fraction,
     prepare,
 )
-from frost_analysis.dataset.sensors import read_edf_environment
+from dataloader.sensors import read_edf_environment
 
-prepare_module = import_module("frost_analysis.dataset.prepare")
+prepare_module = import_module("dataloader.prepare")
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -38,24 +38,20 @@ def _config(root: Path, raw: Path, *, sensor_globs: tuple[str, ...] = ("*.xls",)
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=raw,
-        channels_path=root / "channels.yaml",
         sensor_globs=sensor_globs,
         image_extensions=(".jpg",),
         timestamp_column="时间",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
         edf_pair_tolerance_seconds=1.0,
-        cycles={
-            "defrost_channel": "defrost_active",
-            "maximum_state_gap_seconds": 5,
-            "debounce_seconds": 20,
-            "minimum_defrost_seconds": 1,
-            "maximum_defrost_seconds": 100,
-            "minimum_heating_seconds": 1,
-            "maximum_heating_seconds": 100,
-            "stable_heating_seconds": 2,
-        },
-        process={"resample_interval_seconds": 10},
+        cycles=CycleSettings(
+            minimum_defrost_seconds=1,
+            maximum_defrost_seconds=100,
+            minimum_heating_seconds=1,
+            maximum_heating_seconds=100,
+            stable_heating_seconds=2,
+        ),
+        process=ProcessSettings(resample_interval_seconds=10),
     )
 
 
@@ -407,7 +403,7 @@ def test_label_cycles_does_not_invent_defrost_preparation_without_frequency_drop
 
 
 def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
-    from frost_analysis.dataset.cycles import find_defrost_preparation_start
+    from dataloader.cycles import find_defrost_preparation_start
 
     defrost_start = pd.Timestamp("2026-07-15 00:01:00")
     frame = pd.DataFrame(
@@ -433,7 +429,7 @@ def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
 
 
 def test_defrost_preparation_uses_frequency_channels_own_sampling_interval() -> None:
-    from frost_analysis.dataset.cycles import find_defrost_preparation_start
+    from dataloader.cycles import find_defrost_preparation_start
 
     defrost_start = pd.Timestamp("2026-07-15 00:01:00")
     timestamps = pd.date_range(defrost_start - pd.Timedelta(seconds=50), periods=5, freq="10s")
@@ -1045,11 +1041,11 @@ def test_short_state_gap_with_irregular_timestamps_does_not_split_defrost_event(
 )
 def test_0715_raw_data_has_four_defrost_events_and_three_formal_cycles() -> None:
     config = load_config(
-        ROOT / "configs/config.yaml",
+        project_root=ROOT,
         experiment_date="2026-07-15",
         input_dir=ROOT / "data/0715",
     )
-    channels = load_channels(config.channels_path)
+    channels = load_channels()
     prepared, summary = prepare(config, channels)
 
     raw_state = prepared["defrost_active"].map(_normalize_state).astype("object")
@@ -1452,7 +1448,7 @@ def test_observed_fraction_uses_source_discovery_denominator() -> None:
 
 
 def test_sensor_sample_may_end_midway_through_gb18030_character(tmp_path: Path) -> None:
-    from frost_analysis.dataset.prepare import _read_sensor_table
+    from dataloader.prepare import _read_sensor_table
 
     path = tmp_path / "sample参数1.xls"
     prefix = "时间\t值\n2026-07-14 10:00:00\t".encode("gb18030")
@@ -1521,7 +1517,7 @@ def test_prepare_original_preserves_all_raw_points_and_duplicate_rows(tmp_path: 
 def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="ISO"):
         load_config(
-            ROOT / "configs/config.yaml",
+            project_root=ROOT,
             experiment_date="2026-02-31",
             input_dir=tmp_path,
         )

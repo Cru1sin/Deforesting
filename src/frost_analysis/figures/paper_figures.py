@@ -4,28 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from ..labels.cost import high_confidence_coverage
-
-
-def regret_threshold_summary(
-    bands: pd.DataFrame, label_balance: pd.DataFrame
-) -> pd.DataFrame:
-    """Summarize timing ambiguity and retained image coverage by regret threshold."""
-    summary = (
-        bands.groupby("relative_regret_threshold", as_index=False)["band_width_minutes"]
-        .median()
-        .rename(
-            columns={
-                "relative_regret_threshold": "regret_threshold",
-                "band_width_minutes": "median_width_minutes",
-            }
-        )
-    )
-    summary["eligible_image_coverage"] = [
-        high_confidence_coverage(label_balance, "all", threshold)
-        for threshold in summary["regret_threshold"]
-    ]
-    return summary
+from plots.labels import regret_threshold_summary as regret_threshold_summary
 
 
 def full_cohort_figure_3_sources(

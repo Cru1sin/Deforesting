@@ -87,7 +87,8 @@ See [`dataset_contract.md`](dataset_contract.md) for the persisted schema.
 
 ## Evidence
 
-Evidence accepts one schema v3 `DatasetLoader` and `configs/evidence.yaml`.
+Evidence accepts one schema v3 `DatasetLoader` and uses the explicit defaults in
+`EvidenceSettings`.
 Calculations use Dataset values as stored; Evidence does not interpolate,
 resample, recompute baselines, or reinterpret cycle status.
 

@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from cost import energy_models
 from frost_analysis.cost.core import (
     build_partial_pool_curves,
     candidate_domain_end,
@@ -15,6 +16,12 @@ from frost_analysis.cost.core import (
     optimize_renewal_cost,
     water_side_heating_kw,
 )
+
+
+def test_legacy_energy_helpers_reexport_root_implementations() -> None:
+    assert water_side_heating_kw is energy_models.water_side_heating_kw
+    assert integrate_energy_kwh is energy_models.integrate_energy_kwh
+    assert integrate_energy_curve_kwh is energy_models.integrate_energy_curve_kwh
 
 
 def test_partial_pool_curves_reuse_existing_experiment_identity() -> None:

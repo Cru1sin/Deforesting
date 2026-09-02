@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from frost_analysis.dataset.config import Config
-from frost_analysis.dataset.raw import discover_inputs
+from dataloader.config import Config
+from dataloader.raw import discover_inputs
 
 
 def test_discover_inputs_reads_root_sensors_and_one_level_images(tmp_path: Path) -> None:
@@ -19,15 +19,12 @@ def test_discover_inputs_reads_root_sensors_and_one_level_images(tmp_path: Path)
         experiment_id="exp_test",
         experiment_date="2026-07-15",
         input_dir=raw,
-        channels_path=tmp_path / "channels.yaml",
         sensor_globs=("*.xls",),
         image_extensions=(".jpg",),
         timestamp_column="time",
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
         edf_pair_tolerance_seconds=1.0,
-        cycles={},
-        process={},
     )
 
     inputs = discover_inputs(config)

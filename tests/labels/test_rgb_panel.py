@@ -10,7 +10,7 @@ from matplotlib.colors import to_hex
 
 
 def test_build_rgb_panel_targets_uses_stages_boundaries_and_fallbacks() -> None:
-    from frost_analysis.figures.visualization import build_rgb_panel_targets
+    from plots.publication import build_rgb_panel_targets
 
     times = pd.date_range("2026-07-14 10:00:00", periods=13, freq="10s")
     frame = pd.DataFrame(
@@ -55,7 +55,7 @@ def test_build_rgb_panel_targets_uses_stages_boundaries_and_fallbacks() -> None:
 
 
 def test_rgb_overall_intervals_requires_every_expected_role() -> None:
-    from frost_analysis.dataset.images import rgb_overall_intervals
+    from dataloader.images import rgb_overall_intervals
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
     frame = pd.DataFrame({"timestamp": times})
@@ -76,7 +76,7 @@ def test_rgb_overall_intervals_requires_every_expected_role() -> None:
 def test_publication_contains_sensor_and_rgb_availability_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
     frame = pd.DataFrame(
@@ -111,7 +111,7 @@ def test_publication_contains_sensor_and_rgb_availability_rows(
 def test_publication_cost_panel_uses_full_cycle_axis_but_only_plots_frosting(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
     frame = pd.DataFrame(
@@ -159,7 +159,7 @@ def test_publication_cost_panel_uses_full_cycle_axis_but_only_plots_frosting(
 def test_publication_cost_panel_preserves_support_holes_and_preparation_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=5, freq="1min")
     frame = pd.DataFrame(
@@ -208,7 +208,7 @@ def test_publication_cost_panel_preserves_support_holes_and_preparation_boundary
 
 
 def test_publication_cost_panel_marks_extrapolation_without_breaking_the_curve() -> None:
-    from frost_analysis.figures.visualization import _plot_cost_panel
+    from plots.publication import _plot_cost_panel
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
     cost = pd.DataFrame(
@@ -245,7 +245,7 @@ def test_publication_cost_panel_marks_extrapolation_without_breaking_the_curve()
 def test_publication_cost_panel_marks_triggered_rb_at_nearest_valid_cost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=5, freq="1min")
     frame = pd.DataFrame(
@@ -292,7 +292,7 @@ def test_publication_cost_panel_marks_triggered_rb_at_nearest_valid_cost(
 def test_publication_cost_panel_does_not_fake_right_censored_rb_trigger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
     frame = pd.DataFrame(
@@ -329,7 +329,7 @@ def test_publication_cost_panel_does_not_fake_right_censored_rb_trigger(
 def test_publication_cost_panel_does_not_attach_rb_to_distant_eligible_cost(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
     frame = pd.DataFrame(
@@ -368,7 +368,7 @@ def test_publication_cost_panel_does_not_attach_rb_to_distant_eligible_cost(
 def test_publication_cost_panel_labels_zero_joint_eligibility(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="1min")
     frame = pd.DataFrame(
@@ -409,7 +409,7 @@ def test_publication_cost_panel_labels_zero_joint_eligibility(
 def test_publication_humidity_uses_stage_and_missing_backgrounds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_cycle_publication
+    from plots.publication import render_cycle_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
     frame = pd.DataFrame(
@@ -442,7 +442,7 @@ def test_publication_humidity_uses_stage_and_missing_backgrounds(
 
 
 def test_build_rgb_panel_targets_leaves_absent_stages_empty_but_keeps_frost() -> None:
-    from frost_analysis.figures.visualization import build_rgb_panel_targets
+    from plots.publication import build_rgb_panel_targets
 
     times = pd.date_range("2026-07-14 10:00:00", periods=9, freq="10s")
     frame = pd.DataFrame(
@@ -472,7 +472,7 @@ def test_build_rgb_panel_targets_leaves_absent_stages_empty_but_keeps_frost() ->
 
 
 def test_select_rgb_panel_cells_chooses_nearest_image_per_camera() -> None:
-    from frost_analysis.figures.visualization import select_rgb_panel_cells
+    from plots.publication import select_rgb_panel_cells
 
     target = pd.Timestamp("2026-07-14 10:00:10")
     images = pd.DataFrame(
@@ -499,7 +499,7 @@ def test_select_rgb_panel_cells_chooses_nearest_image_per_camera() -> None:
 
 
 def test_select_rgb_panel_cells_requires_image_within_two_minutes() -> None:
-    from frost_analysis.figures.visualization import select_rgb_panel_cells
+    from plots.publication import select_rgb_panel_cells
 
     target = pd.Timestamp("2026-07-14 10:10:00")
     images = pd.DataFrame(
@@ -531,8 +531,8 @@ def test_select_rgb_panel_cells_requires_image_within_two_minutes() -> None:
 
 
 def test_render_rgb_panel_writes_review_png_with_role_order(tmp_path: Path) -> None:
-    from frost_analysis.dataset.images import build_rgb_coverage_intervals
-    from frost_analysis.figures.visualization import render_rgb_panel
+    from dataloader.images import build_rgb_coverage_intervals
+    from plots.publication import render_rgb_panel
 
     times = pd.date_range("2026-07-14 10:00:00", periods=9, freq="10s")
     frame = pd.DataFrame(
@@ -578,7 +578,7 @@ def test_render_rgb_panel_writes_review_png_with_role_order(tmp_path: Path) -> N
 def test_rgb_panel_available_segments_use_stage_colors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_rgb_panel
+    from plots.publication import render_rgb_panel
 
     times = pd.date_range("2026-07-14 10:00:00", periods=6, freq="10s")
     frame = pd.DataFrame(
@@ -627,7 +627,7 @@ def test_rgb_panel_available_segments_use_stage_colors(
 
 
 def test_stage_ribbon_omits_labels_that_do_not_fit() -> None:
-    from frost_analysis.figures.visualization import _plot_stage_ribbon
+    from plots.publication import _plot_stage_ribbon
 
     figure, axis = plt.subplots()
     _plot_stage_ribbon(
@@ -651,7 +651,7 @@ def test_stage_ribbon_omits_labels_that_do_not_fit() -> None:
 def test_match_decision_rgb_images_keeps_target_status_and_two_minute_limit(
     tmp_path: Path,
 ) -> None:
-    from frost_analysis.figures.visualization import match_decision_rgb_images
+    from plots.publication import match_decision_rgb_images
 
     target = pd.Timestamp("2026-07-14 10:00:10")
     metadata = pd.DataFrame(
@@ -682,7 +682,7 @@ def test_match_decision_rgb_images_keeps_target_status_and_two_minute_limit(
 def test_render_decision_publication_has_rgb_and_three_aligned_time_panels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis.figures.visualization import render_decision_publication
+    from plots.publication import render_decision_publication
 
     times = pd.date_range("2026-07-14 10:00:00", periods=6, freq="1min")
     frame = pd.DataFrame(
@@ -765,7 +765,7 @@ def test_render_decision_publication_has_rgb_and_three_aligned_time_panels(
 
 
 def test_cost_curve_optimal_time_includes_observed_frost_right_boundary() -> None:
-    from frost_analysis.figures.visualization import cost_curve_optimal_time
+    from plots.publication import cost_curve_optimal_time
 
     origin = pd.Timestamp("2026-01-01 00:00")
     curve = pd.DataFrame(
@@ -782,7 +782,7 @@ def test_cost_curve_optimal_time_includes_observed_frost_right_boundary() -> Non
 
 
 def test_unit_cost_panel_uses_full_candidate_domain_past_processed_frost_span() -> None:
-    from frost_analysis.figures.visualization import _plot_cost_panel
+    from plots.publication import _plot_cost_panel
 
     origin = pd.Timestamp("2026-01-01 00:00")
     curve = pd.DataFrame(
