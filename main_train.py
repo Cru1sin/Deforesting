@@ -261,12 +261,19 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
 
     metrics: list[dict[str, Any]] = []
     predictions: list[pd.DataFrame] = []
-    completed: list[tuple[int, dict[str, Any]]] = []
     if args.jobs > 1:
         with threadpool_limits(1), concurrent.futures.ThreadPoolExecutor(
             max_workers=args.jobs
         ) as executor:
-            completed = list(executor.map(_train_frozen_task, folds))
+            for index, result in executor.map(_train_frozen_task, folds):
+                _write_result(
+                    args.output,
+                    index,
+                    result,
+                    metrics,
+                    predictions,
+                    save_model=args.save_models,
+                )
     else:
         for fold in folds:
             index, experiment, setting, selected, _, _, _ = fold
@@ -287,19 +294,16 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                     ),
                     camera=setting.camera,
                 )
-                completed.append((index, result))
             else:
-                completed.append(_train_frozen_task(fold))
-
-    for index, result in completed:
-        _write_result(
-            args.output,
-            index,
-            result,
-            metrics,
-            predictions,
-            save_model=args.save_models,
-        )
+                index, result = _train_frozen_task(fold)
+            _write_result(
+                args.output,
+                index,
+                result,
+                metrics,
+                predictions,
+                save_model=args.save_models,
+            )
 
     pd.DataFrame(metrics).sort_values("task_index").to_csv(
         args.output / "metrics.csv", index=False

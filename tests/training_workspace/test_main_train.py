@@ -257,6 +257,52 @@ def test_parallel_handcrafted_run_writes_complete_artifacts_from_main(
     assert (tmp_path / "output/models/_cache/handcrafted/front/features.parquet").is_file()
 
 
+def test_parallel_run_writes_progress_before_all_results_are_consumed(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    labels = tmp_path / "labels.parquet"
+    _labels().to_parquet(labels, index=False)
+    output = tmp_path / "trained"
+
+    class Executor:
+        def __init__(self, *, max_workers: int) -> None:
+            assert max_workers == 2
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def map(self, function, folds):  # type: ignore[no-untyped-def]
+            for index, *_ in folds:
+                if index == 1:
+                    assert len((output / "progress.jsonl").read_text().splitlines()) == 1
+                yield index, {
+                    "metrics": {"status": "ok"},
+                    "predictions": pd.DataFrame(),
+                    "model": None,
+                }
+
+    monkeypatch.setattr(main_train.concurrent.futures, "ThreadPoolExecutor", Executor)
+    args = main_train.build_parser().parse_args(
+        [
+            "--labels",
+            str(labels),
+            "--output",
+            str(output),
+            "--heads",
+            "logistic",
+            "--modalities",
+            "time",
+            "--jobs",
+            "2",
+        ]
+    )
+
+    assert main_train.run(args) == 0
+
+
 def test_all_invalid_folds_still_write_the_prediction_schema(
     tmp_path: Path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
