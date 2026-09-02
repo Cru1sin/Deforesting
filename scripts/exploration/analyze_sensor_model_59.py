@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from dataloader.dataloader import DatasetLoader
+from dataloader.loader import DatasetLoader
 from frost_analysis.exploration.degradation_law import fit_hinge
 from frost_analysis.exploration.sensor_model import (
     ReferenceModel,

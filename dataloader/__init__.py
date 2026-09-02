@@ -1,5 +1,5 @@
 """Dataset construction and read-only loading."""
 
-from .dataloader import DatasetLoader
+from .loader import DatasetLoader
 
 __all__ = ["DatasetLoader"]

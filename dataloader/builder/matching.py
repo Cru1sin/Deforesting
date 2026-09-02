@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from ..images import _image_timestamp
 from .alignment import match_nearest_one_to_one
-
-_TIMESTAMP_RE = re.compile(r"(?<!\d)(\d{17})(?!\d)")
 
 
 def image_roles(frame: pd.DataFrame) -> tuple[str, ...]:
@@ -75,11 +73,3 @@ def match_images(
         columns[f"image_{role}_time"] = image_times_out
         columns[f"image_{role}_offset_seconds"] = offsets
     return pd.DataFrame(columns, index=sensor_times.index)
-
-
-def _image_timestamp(path: Path) -> pd.Timestamp | None:
-    match = _TIMESTAMP_RE.search(path.stem)
-    if match is None:
-        return None
-    value = pd.to_datetime(match.group(1), format="%Y%m%d%H%M%S%f", errors="coerce")
-    return None if pd.isna(value) else pd.Timestamp(value)

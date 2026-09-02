@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dataloader.channels import load_channels
-from dataloader.config import Config, CycleSettings, ProcessSettings, load_config
-from dataloader.cycles import (
+from dataloader.builder.channels import load_channels
+from dataloader.builder.config import Config, CycleSettings, ProcessSettings, load_config
+from dataloader.builder.cycles import (
     _build_cycles,
     _debounce_state,
     _defrost_runs,
@@ -19,16 +19,16 @@ from dataloader.cycles import (
     find_stable_heating_start,
     label_cycles,
 )
-from dataloader.matching import match_images
-from dataloader.prepare import (
+from dataloader.builder.matching import match_images
+from dataloader.builder.prepare import (
     _expected_row_count,
     _maximum_gap,
     _observed_fraction,
     prepare,
 )
-from dataloader.sensors import read_edf_environment
+from dataloader.builder.sensors import read_edf_environment
 
-prepare_module = import_module("dataloader.prepare")
+prepare_module = import_module("dataloader.builder.prepare")
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -403,7 +403,7 @@ def test_label_cycles_does_not_invent_defrost_preparation_without_frequency_drop
 
 
 def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
-    from dataloader.cycles import find_defrost_preparation_start
+    from dataloader.builder.cycles import find_defrost_preparation_start
 
     defrost_start = pd.Timestamp("2026-07-15 00:01:00")
     frame = pd.DataFrame(
@@ -429,7 +429,7 @@ def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
 
 
 def test_defrost_preparation_uses_frequency_channels_own_sampling_interval() -> None:
-    from dataloader.cycles import find_defrost_preparation_start
+    from dataloader.builder.cycles import find_defrost_preparation_start
 
     defrost_start = pd.Timestamp("2026-07-15 00:01:00")
     timestamps = pd.date_range(defrost_start - pd.Timedelta(seconds=50), periods=5, freq="10s")
@@ -1448,7 +1448,7 @@ def test_observed_fraction_uses_source_discovery_denominator() -> None:
 
 
 def test_sensor_sample_may_end_midway_through_gb18030_character(tmp_path: Path) -> None:
-    from dataloader.prepare import _read_sensor_table
+    from dataloader.builder.prepare import _read_sensor_table
 
     path = tmp_path / "sample参数1.xls"
     prefix = "时间\t值\n2026-07-14 10:00:00\t".encode("gb18030")

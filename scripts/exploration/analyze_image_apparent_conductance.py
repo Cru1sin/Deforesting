@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from dataloader.dataloader import DatasetLoader
+from dataloader.loader import DatasetLoader
 from frost_analysis.exploration.evaporator_ua import analyze_evaporator_ua
 
 ROOT = Path(__file__).resolve().parents[2]

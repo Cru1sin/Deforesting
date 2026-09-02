@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dataloader.config import BaselineSettings, Config, ProcessSettings
-from dataloader.process import process
+from dataloader.builder.config import BaselineSettings, Config, ProcessSettings
+from dataloader.builder.process import process
 
 
 def _config(

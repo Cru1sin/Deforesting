@@ -10,10 +10,10 @@ from pathlib import Path
 import pandas as pd
 from PIL import Image
 
-from dataloader.core import render_dataset
-from dataloader.dataloader import DatasetLoader
 from dataloader.images import RGB_CAMERA_ORDER, materialize_cycle_images
+from dataloader.loader import DatasetLoader
 from dataloader.metadata import read_catalog
+from dataloader.operations import render_dataset
 from frost_analysis.labels.assets import build_optimal_view_manifest
 from frost_analysis.labels.cost import map_cost_state_targets
 from frost_analysis.training.features import (

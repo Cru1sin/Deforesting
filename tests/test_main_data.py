@@ -205,7 +205,7 @@ def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) ->
 
 
 def test_dataset_loader_reads_catalog_from_absolute_path_without_writing(tmp_path: Path) -> None:
-    from dataloader.dataloader import DatasetLoader
+    from dataloader.loader import DatasetLoader
 
     dataset = tmp_path / "external-dataset"
     (dataset / "cycles").mkdir(parents=True)

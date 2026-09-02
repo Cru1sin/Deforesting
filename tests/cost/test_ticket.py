@@ -236,7 +236,7 @@ def test_q_target_survives_invalid_e_and_uses_raw_preparation_heat() -> None:
 def test_catalog_restores_cycles_excluded_by_legacy_preparation_table() -> None:
     from pathlib import Path
 
-    from dataloader.dataloader import DatasetLoader
+    from dataloader.loader import DatasetLoader
     from frost_analysis.cost.ticket import _default_sources, _ticket_events
 
     events = _ticket_events(DatasetLoader(Path("dataset")), _default_sources(), {})

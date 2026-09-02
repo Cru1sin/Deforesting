@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from dataloader.dataloader import DatasetLoader
+from dataloader.loader import DatasetLoader
 from dataloader.metadata import following_cycle_names
 from frost_analysis.cost.core import (
     integrate_energy_curve_kwh,

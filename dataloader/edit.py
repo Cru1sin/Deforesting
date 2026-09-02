@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from .cycles import find_defrost_preparation_start, resolve_stable_heating_start
+from .builder.cycles import find_defrost_preparation_start, resolve_stable_heating_start
 
 
 def apply_recovery(
@@ -152,7 +152,7 @@ def apply_baseline(
     seconds: int,
 ) -> pd.DataFrame:
     """Apply the fixed stable-start baseline window to one frame."""
-    from .baseline import apply_fixed_baseline
+    from .builder.baseline import apply_fixed_baseline
 
     if seconds < 0:
         raise ValueError("baseline seconds must be nonnegative")
@@ -242,7 +242,7 @@ def _recompute_stage_dependent_fields(
     record: Mapping[str, Any],
     registry: Mapping[str, Any],
 ) -> pd.DataFrame:
-    from .process import recompute_cycle_coordinates
+    from .builder.process import recompute_cycle_coordinates
 
     boundaries = record.get("boundaries", {})
     if not isinstance(boundaries, Mapping):

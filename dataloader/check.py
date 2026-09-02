@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .dataloader import DatasetLoader
+from .loader import DatasetLoader
 from .metadata import image_root
 
 

@@ -10,8 +10,8 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from dataloader.config import Config, ProcessSettings
-from dataloader.core import assign_final_cycle_names_by_time
+from dataloader.builder.config import Config, ProcessSettings
+from dataloader.operations import assign_final_cycle_names_by_time
 
 
 def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -561,9 +561,9 @@ def test_materialize_cycle_builds_one_catalog_record(
 ) -> None:
     from types import SimpleNamespace
 
-    import dataloader.core as dataset_module
+    import dataloader.operations as dataset_module
     from dataloader import metadata as dataset_metadata
-    from dataloader.core import _DateBuild, add_dataset
+    from dataloader.operations import _DateBuild, add_dataset
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -691,8 +691,8 @@ def test_materialize_cycle_builds_one_catalog_record(
 def test_load_config_for_input_gets_date_from_xls_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.config as config_module
-    from dataloader.core import _load_config_for_input
+    import dataloader.builder.config as config_module
+    from dataloader.operations import _load_config_for_input
 
     original = Config(
         project_root=tmp_path,
@@ -737,7 +737,7 @@ def test_load_config_for_input_gets_date_from_xls_names(
 
 
 def test_load_config_for_input_rejects_multiple_xls_dates(tmp_path: Path) -> None:
-    from dataloader.core import _load_config_for_input
+    from dataloader.operations import _load_config_for_input
 
     (tmp_path / "2026-07-24参数1.xls").touch()
     (tmp_path / "2026-07-25参数2.xls").touch()
@@ -751,9 +751,9 @@ def test_build_date_prints_processing_stages(
 ) -> None:
     from types import SimpleNamespace
 
-    from dataloader import channels, prepare, process
-    from dataloader import prepared as validation
-    from dataloader.core import _build_date
+    from dataloader.builder import channels, prepare, process
+    from dataloader.builder import prepared as validation
+    from dataloader.operations import _build_date
 
     frame = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
     summary = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
@@ -815,7 +815,7 @@ def test_review_cycle_does_not_scan_images_or_update_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataloader import images as dataset_images
-    from dataloader.core import review_cycle
+    from dataloader.operations import review_cycle
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -851,7 +851,7 @@ def test_review_cycle_does_not_scan_images_or_update_manifest(
 
 
 def test_review_cycle_rejects_nonbinary_status(tmp_path: Path) -> None:
-    from dataloader.core import review_cycle
+    from dataloader.operations import review_cycle
 
     with pytest.raises(ValueError, match="invalid Dataset status"):
         review_cycle(tmp_path, "frost_cycle_000001", status="incomplete")
@@ -873,7 +873,7 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataloader import files as dataset_io
-    from dataloader.core import render_dataset
+    from dataloader.operations import render_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -916,7 +916,7 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
     from zipfile import ZipFile
 
     from dataloader import images as dataset_images
-    from dataloader.core import render_dataset
+    from dataloader.operations import render_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -992,7 +992,7 @@ def test_validate_scientific_schema_ignores_catalog_counts(
     tmp_path: Path,
 ) -> None:
     from dataloader.check import validate_dataset
-    from dataloader.core import make_cycle_uid
+    from dataloader.operations import make_cycle_uid
     from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
@@ -1235,8 +1235,8 @@ def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -
 
 
 def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
-    from dataloader.baseline import apply_fixed_baseline
-    from dataloader.cycles import resolve_stable_heating_start
+    from dataloader.builder.baseline import apply_fixed_baseline
+    from dataloader.builder.cycles import resolve_stable_heating_start
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=6, freq="10s")
     frame = pd.DataFrame(
@@ -1290,7 +1290,7 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
 
 
 def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence() -> None:
-    from dataloader.cycles import _partial_stage_context
+    from dataloader.builder.cycles import _partial_stage_context
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=5, freq="10s")
     segment = pd.DataFrame(
@@ -1343,7 +1343,7 @@ def test_refresh_dataset_does_not_modify_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataloader.check as validation
-    from dataloader.core import refresh_dataset
+    from dataloader.operations import refresh_dataset
     from dataloader.files import write_json
     from plots import publication as visualization
 
@@ -1428,10 +1428,10 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 ) -> None:
     from types import SimpleNamespace
 
-    import dataloader.core as dataset_module
+    import dataloader.operations as dataset_module
     from dataloader.check import validate_dataset
-    from dataloader.core import _DateBuild, add_dataset
-    from dataloader.dataloader import DatasetLoader
+    from dataloader.operations import _DateBuild, add_dataset
+    from dataloader.loader import DatasetLoader
 
     def make_build(input_dir: Path) -> _DateBuild:
         date = {
@@ -1547,7 +1547,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     assert all("source_fingerprint" not in item for item in manifest["experiments"])
 
     from dataloader import images as dataset_images
-    from dataloader.core import edit_dataset, refresh_dataset
+    from dataloader.operations import edit_dataset, refresh_dataset
 
     read_parquet = dataset_module.pd.read_parquet
     scan_cycle_images = dataset_images.scan_cycle_images
@@ -1605,7 +1605,7 @@ def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
 
 
 def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture[str]) -> None:
-    import dataloader.core as dataset_module
+    import dataloader.operations as dataset_module
     from frost_analysis.cli import main
 
     with pytest.raises(SystemExit):
@@ -1618,7 +1618,7 @@ def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture
 def test_dataset_replace_is_a_public_one_input_operation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import dataloader.core as dataset_module
+    import dataloader.operations as dataset_module
     from frost_analysis.cli import main
 
     with pytest.raises(SystemExit):
@@ -1635,7 +1635,7 @@ def test_dataset_remove_deletes_only_selected_experiment(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     import dataloader.check as validation
-    from dataloader.core import remove_dataset
+    from dataloader.operations import remove_dataset
 
     first_name, _ = _write_renderable_dataset(tmp_path)
     second_name = "frost_cycle_000002"
@@ -1711,7 +1711,7 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     import dataloader.check as validation
-    from dataloader.core import refresh_dataset
+    from dataloader.operations import refresh_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -1766,7 +1766,7 @@ def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataloader.check as validation
-    from dataloader.core import refresh_dataset
+    from dataloader.operations import refresh_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -1796,7 +1796,7 @@ def test_refresh_images_refuses_file_outside_its_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataloader.check as validation
-    from dataloader.core import refresh_dataset
+    from dataloader.operations import refresh_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "front"
@@ -1815,7 +1815,7 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataloader.check as validation
-    from dataloader.core import refresh_dataset
+    from dataloader.operations import refresh_dataset
     from plots import publication as visualization
 
     _write_renderable_dataset(tmp_path)
@@ -1838,7 +1838,7 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
 
 
 def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Path) -> None:
-    from dataloader.dataloader import DatasetLoader
+    from dataloader.loader import DatasetLoader
 
     dataset_dir = tmp_path / "dataset"
     cycle_name, _ = _write_renderable_dataset(dataset_dir)
@@ -1873,7 +1873,7 @@ def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Pat
 def test_baseline_edit_does_not_require_original_or_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader.core import edit_dataset
+    from dataloader.operations import edit_dataset
     from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
@@ -1934,7 +1934,7 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
 def test_loader_uses_camera_directory_as_role(
     tmp_path: Path,
 ) -> None:
-    from dataloader.dataloader import DatasetLoader
+    from dataloader.loader import DatasetLoader
     from dataloader.files import write_json
 
     cycle_name = "frost_cycle_000001"
@@ -2061,7 +2061,7 @@ def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
 
 
 def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path) -> None:
-    from dataloader.core import update_cycle_columns
+    from dataloader.operations import update_cycle_columns
 
     cycle_name = "frost_cycle_000001"
     cycles = tmp_path / "cycles"
@@ -2103,8 +2103,8 @@ def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path
 def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.core as dataset_module
-    from dataloader.core import add_dataset
+    import dataloader.operations as dataset_module
+    from dataloader.operations import add_dataset
     from dataloader.files import write_json
 
     input_dir = tmp_path / "0714"
@@ -2149,10 +2149,10 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
 def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.channels as channels_module
-    import dataloader.config as config_module
-    import dataloader.core as dataset_module
-    from dataloader.core import aggregate_original
+    import dataloader.builder.channels as channels_module
+    import dataloader.builder.config as config_module
+    import dataloader.operations as dataset_module
+    from dataloader.operations import aggregate_original
     from dataloader.files import write_json
 
     dataset = tmp_path / "dataset"

@@ -17,7 +17,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 from scipy.stats import wilcoxon
 
-from dataloader.dataloader import DatasetLoader
+from dataloader.loader import DatasetLoader
 from dataloader.metadata import following_cycle_names
 from frost_analysis.cost.core import (
     count_true_runs,

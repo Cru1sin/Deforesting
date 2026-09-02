@@ -9,9 +9,10 @@ from typing import Any
 
 import pandas as pd
 
-from .core import DATASET_ID, DATASET_SCHEMA_VERSION
 from .files import write_json
 
+DATASET_SCHEMA_VERSION = 3
+DATASET_ID = "frost_cycle_dataset"
 CATALOG_FILENAME = "cycle_catalog.json"
 MANIFEST_FILENAME = "dataset_manifest.json"
 

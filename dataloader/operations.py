@@ -14,10 +14,9 @@ from typing import Any, cast
 
 import pandas as pd
 
-from .config import find_project_root
+from .builder.config import find_project_root
+from .metadata import DATASET_ID, DATASET_SCHEMA_VERSION
 
-DATASET_SCHEMA_VERSION = 3
-DATASET_ID = "frost_cycle_dataset"
 CYCLE_NAME_WIDTH = 6
 CycleKey = tuple[str, str]
 
@@ -102,18 +101,18 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
     import shutil
     import tempfile
 
-    from .check import validate_dataset
-    from .files import read_json, write_csv, write_json, write_parquet
-    from .images import collect_cycle_images, copy_image, image_metadata_frame
-    from .metadata import read_catalog
-    from .raw import discover_inputs
-    from .schema import (
+    from .builder.raw import discover_inputs
+    from .builder.schema import (
         align_original_schema,
         build_processed_frame,
         build_registry,
         merge_original_columns,
         merge_registries,
     )
+    from .check import validate_dataset
+    from .files import read_json, write_csv, write_json, write_parquet
+    from .images import collect_cycle_images, copy_image, image_metadata_frame
+    from .metadata import read_catalog
 
     input_path = Path(input_dir).resolve()
     project_root = _resolve_project_root()
@@ -451,12 +450,12 @@ def update_cycle_columns(
 
 def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
     """Rebuild Processed cycles from the published Original sensor rows."""
-    from .channels import load_channels
-    from .config import load_config
+    from .builder.channels import load_channels
+    from .builder.config import load_config
+    from .builder.process import process
+    from .builder.schema import build_processed_frame, merge_registries, registry_from_frame
     from .edit import apply_baseline
     from .files import read_json, write_csv, write_json, write_parquet
-    from .process import process
-    from .schema import build_processed_frame, merge_registries, registry_from_frame
 
     if seconds <= 0:
         raise ValueError("aggregate seconds must be positive")
@@ -533,7 +532,7 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
 def _prepared_from_original(
     original: pd.DataFrame, channels: Mapping[str, Mapping[str, Any]]
 ) -> pd.DataFrame:
-    from .prepare import _combine_channel
+    from .builder.prepare import _combine_channel
 
     identity = [
         "experiment_id",
@@ -674,7 +673,7 @@ def _validate_date_input(input_path: Path) -> None:
 
 
 def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
-    from .config import load_config
+    from .builder.config import load_config
 
     # EDF 可能分段或补录；实验日期只认 XLS 参数文件名。
     matches = [re.search(r"\d{4}-\d{2}-\d{2}", path.name) for path in input_path.glob("*.xls")]
@@ -689,10 +688,10 @@ def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
 
 
 def _build_date(input_path: Path, config: Any) -> _DateBuild:
-    from .channels import load_channels
-    from .prepare import prepare, prepare_original
-    from .prepared import validate_prepared, validate_processed
-    from .process import process
+    from .builder.channels import load_channels
+    from .builder.prepare import prepare, prepare_original
+    from .builder.prepared import validate_prepared, validate_processed
+    from .builder.process import process
 
     channels = load_channels()
     print("[add] prepare sensors", flush=True)
@@ -733,6 +732,7 @@ def _materialize_cycle(
         render_rgb_panel,
     )
 
+    from .builder.schema import build_processed_frame, export_original_frame
     from .edit import apply_baseline, apply_recovery
     from .files import write_csv, write_parquet
     from .images import (
@@ -743,7 +743,6 @@ def _materialize_cycle(
         scan_cycle_images,
     )
     from .metadata import build_cycle_record
-    from .schema import build_processed_frame, export_original_frame
 
     original_source = build.original if build.original is not None else build.prepared
     original = export_original_frame(
@@ -843,11 +842,11 @@ def _materialize_builds(  # noqa: C901
     dataset_dir: Path,
     builds: Sequence[_DateBuild],
 ) -> None:
+    from .builder.raw import discover_inputs
+    from .builder.schema import build_registry, merge_original_columns
     from .files import write_json, write_parquet
     from .images import collect_cycle_images, copy_image, image_metadata_frame
     from .metadata import experiment_record
-    from .raw import discover_inputs
-    from .schema import build_registry, merge_original_columns
 
     if not builds:
         raise ValueError("Dataset requires at least one date")
@@ -997,17 +996,17 @@ def _append_build(  # noqa: C901
     dataset_dir: Path,
     build: _DateBuild,
 ) -> None:
-    from .files import read_json, write_csv, write_json, write_parquet
-    from .images import collect_cycle_images, copy_image, image_metadata_frame
-    from .metadata import experiment_record, read_catalog, read_manifest
-    from .raw import discover_inputs
-    from .schema import (
+    from .builder.raw import discover_inputs
+    from .builder.schema import (
         align_original_schema,
         build_processed_frame,
         build_registry,
         merge_original_columns,
         merge_registries,
     )
+    from .files import read_json, write_csv, write_json, write_parquet
+    from .images import collect_cycle_images, copy_image, image_metadata_frame
+    from .metadata import experiment_record, read_catalog, read_manifest
 
     manifest = read_manifest(dataset_dir)
     catalog = read_catalog(dataset_dir)
@@ -1442,8 +1441,7 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
     """Refresh only the Dataset layer named by the user's physical edit."""
     from .check import validate_dataset
     from .files import read_json, write_json, write_parquet
-    from .images import collect_cycle_images, image_metadata_frame
-    from .matching import _image_timestamp
+    from .images import _image_timestamp, collect_cycle_images, image_metadata_frame
     from .metadata import image_root, read_catalog, read_manifest, write_catalog
 
     if mode not in {"roles", "images", "figures", "all"}:

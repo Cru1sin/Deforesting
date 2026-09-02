@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from dataloader.channels import load_channels
-from dataloader.config import CycleSettings, load_config
+from dataloader.builder.channels import load_channels
+from dataloader.builder.config import CycleSettings, load_config
 
 
 def test_python_defaults_match_the_frozen_raw_dataset_contract(tmp_path: Path) -> None:

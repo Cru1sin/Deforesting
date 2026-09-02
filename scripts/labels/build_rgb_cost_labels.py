@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from dataloader.dataloader import DatasetLoader
 from dataloader.images import RGB_CAMERA_ORDER
+from dataloader.loader import DatasetLoader
 from frost_analysis.labels.cost import (
     assign_image_cost_states,
     complete_catalog_cycle_names,

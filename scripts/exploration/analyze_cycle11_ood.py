@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from dataloader.dataloader import DatasetLoader
+from dataloader.loader import DatasetLoader
 from frost_analysis.cost.core import optimize_cycle_cop_cost
 from frost_analysis.exploration.optimal_defrost import (
     MINIMUM_INTEGRATION_COVERAGE,

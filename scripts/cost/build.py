@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from dataloader.dataloader import DatasetLoader
+from dataloader.loader import DatasetLoader
 from frost_analysis.cost.selected import (
     build_cost_function_table,
     write_cost_function_csv,

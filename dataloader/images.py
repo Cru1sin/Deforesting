@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import binascii
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -18,11 +19,18 @@ from zipfile import ZipFile
 
 import pandas as pd
 
-from .matching import _image_timestamp
-
 DEFAULT_CLOUD_IMAGES_REMOTE = "onedrive_hkust:HKUST/Project/Defrost/dataset/images"
 RGB_CAMERA_ORDER = ("top", "top_close", "left", "left_close", "front", "extreme")
 RGB_PANEL_MAX_OFFSET = pd.Timedelta(minutes=2)
+_TIMESTAMP_RE = re.compile(r"(?<!\d)(\d{17})(?!\d)")
+
+
+def _image_timestamp(path: Path) -> pd.Timestamp | None:
+    match = _TIMESTAMP_RE.search(path.stem)
+    if match is None:
+        return None
+    value = pd.to_datetime(match.group(1), format="%Y%m%d%H%M%S%f", errors="coerce")
+    return None if pd.isna(value) else pd.Timestamp(value)
 
 
 def _direct_rclone_env() -> dict[str, str]:

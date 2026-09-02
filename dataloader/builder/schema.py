@@ -158,7 +158,7 @@ def align_original_schema(
     records: Sequence[dict[str, Any]],
     original_columns: Sequence[str],
 ) -> None:
-    from .files import write_csv
+    from ..files import write_csv
 
     expected = [str(name) for name in original_columns]
     for record in records:

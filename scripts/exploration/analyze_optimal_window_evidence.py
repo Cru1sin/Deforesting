@@ -23,13 +23,13 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from dataloader.core import render_publication_asset
-from dataloader.dataloader import DatasetLoader
 from dataloader.images import (
     materialize_cycle_image_members,
     scan_cycle_images,
 )
+from dataloader.loader import DatasetLoader
 from dataloader.metadata import following_cycle_names
+from dataloader.operations import render_publication_asset
 from frost_analysis.cost.core import (
     build_partial_pool_curves,
     count_true_runs,

@@ -7,9 +7,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from dataloader import DatasetLoader
+from dataloader.builder.config import find_project_root
 from dataloader.check import validate_dataset
-from dataloader.config import find_project_root
-from dataloader.core import (
+from dataloader.operations import (
     add_dataset,
     aggregate_original,
     edit_dataset,
@@ -104,7 +104,7 @@ def _run_dataset_command(arguments: argparse.Namespace) -> int:  # noqa: C901
         print(add_dataset(arguments.input_dir, arguments.dataset))
         return 0
     if arguments.dataset_command == "replace":
-        from dataloader.core import replace_dataset
+        from dataloader.operations import replace_dataset
 
         print(replace_dataset(arguments.input_dir, arguments.dataset))
         return 0

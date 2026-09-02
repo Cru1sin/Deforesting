@@ -8,7 +8,7 @@ from pathlib import Path
 
 from dataloader import DatasetLoader
 from dataloader.check import validate_dataset
-from dataloader.core import (
+from dataloader.operations import (
     add_dataset,
     aggregate_original,
     edit_dataset,
