@@ -1,7 +1,7 @@
 # 默认忽略所有内容，避免误上传数据、缓存、文档和大型材料。
 *
 
-# 仅允许项目代码、测试、配置和 README 进入 Git。
+# 仅允许当前项目代码、测试、文档和 README 进入 Git。
 !.gitignore
 !.python-version
 !README.md
@@ -23,16 +23,10 @@
 !dataloader/**
 !analysis/
 !analysis/**
-!src/
-!src/**
 !tests/
 !tests/**
-!configs/
-!configs/**
 !docs/
 !docs/**
-!scripts/
-!scripts/**
 docs/superpowers/
 
 # 即使位于允许上传的目录中，也不上传系统文件和缓存。

@@ -5,7 +5,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import frost_analysis.labels.cost as legacy_cost
 from labels import build
 
 
@@ -47,14 +46,6 @@ def test_build_rejects_threshold_suffix_collision_before_dataset_loading(
             _canonical_cost(),
             thresholds,
         )
-
-
-def test_legacy_module_reexports_the_single_label_algorithm_owner() -> None:
-    assert legacy_cost._curve_support is build._curve_support
-    assert legacy_cost.curve_label_exclusion_reason is build.curve_label_exclusion_reason
-    assert legacy_cost.complete_catalog_cycle_names is build.complete_catalog_cycle_names
-    assert legacy_cost.complete_observed_cycle_names is build.complete_observed_cycle_names
-    assert legacy_cost.assign_image_cost_states is build.assign_image_cost_states
 
 
 def test_build_rejects_an_all_unsupported_cycle_with_images(

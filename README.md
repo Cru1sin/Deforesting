@@ -1,156 +1,139 @@
-# PINN4SOH Frost Sensor Workspace
+# Image-guided defrost timing for air-source heat pumps
 
-One Dataset-native path from frost-cycle measurements to reproducible image-model
-evaluation:
+This repository implements one Dataset-native scientific workflow:
 
 ```text
 Data -> Cost -> Labels -> Train -> Evaluate
 ```
 
-## Current scientific status
+Current scientific status:
 
-- **Current cost under study:** V2.6.8
-- **Current label source:** canonical V1
-- **V2.6.8 status:** diagnostic-only; it must not generate training labels
-- **Validation:** leave-one-experiment-out (LOEO)
+- Canonical V1 remains the only source of hard RGB training labels.
+- V2.5 and V2.6.8 are diagnostic cost definitions and are not label-eligible.
+- V2.6.8 evaluates a corrected fixed-nine-minute post-defrost formulation with
+  empirical-support gating; its minimum is diagnostic only.
+- Image models are evaluated with leave-one-experiment-out (LOEO) validation.
 
-V2.6.8 studies a corrected, fixed-nine-minute transition formulation. Its
-minimum is a diagnostic minimum, not a promoted decision label. Training and
-evaluation therefore remain anchored to the frozen canonical V1 labels.
-
-Run all commands from the repository root with the project `uv` environment.
-Prerequisite: an existing Dataset is available at `dataset/`.
+Run commands from the repository root. An existing Dataset is expected at
+`dataset/`.
 
 ```bash
-uv sync --extra ml
+uv sync
 ```
 
-## 1. Data
+Add `--extra ml` only when training `resnet50_finetune`.
 
-Validate the self-contained Dataset before downstream work:
+## Data
+
+Daily Dataset reads use `dataloader/`. Raw-data construction and processing live
+under `dataloader/builder/`.
 
 ```bash
 uv run python main_data.py validate --dataset dataset
 ```
 
-`main_data.py` also owns explicit Dataset maintenance actions: `add`, `replace`,
-`aggregate-original`, `remove`, `refresh`, `review-cycle`, `edit`, and `render`.
+`main_data.py` also provides `add`, `replace`, `aggregate-original`, `remove`,
+`refresh`, `review-cycle`, `edit`, and `render`. See the complete arguments with
+`uv run python main_data.py --help`.
 
-## 2. Cost
+## Cost
 
-Calculate canonical V1 before building the current RGB labels:
+All three versions minimize inverse cycle COP,
+
+\[
+J(\tau)=\frac{E_H(\tau)+E_T(\tau)}{Q_H(\tau)+Q_T(\tau)},
+\]
+
+but preserve separate scientific definitions and decision policies:
+
+| Version | Formula components | Decision policy | Labels |
+| --- | --- | --- | --- |
+| V1 | measured unit heat; quadratic transition electricity plus fixed recovery; \(Q_T=0\) | historical extrapolation allowed; eligible argmin | canonical |
+| V2.5 | measured water heat; quadratic transition electricity; linear preparation plus signed quadratic defrost heat | historical extrapolation allowed; eligible argmin | diagnostic |
+| V2.6.8 | measured water heat from fixed post-defrost minute 9; independently fitted full-transition \(E_T\) and \(Q_T\) | empirical support and continuous five-minute eligibility required | diagnostic |
+
+Calculate the canonical label source:
 
 ```bash
 uv run python main_cost.py --action calculate --cost v1 --dataset dataset --output-root output
 ```
 
-The result is written under `output/cost/v1/` as one standard `cost.csv`,
-per-cycle tables, and its recipe.
-
-V2.6.8 is a separate cost-research branch, not the upstream stage of the V1
-label workflow:
+Select `v2.5` or `v2.6.8` with `--cost` for diagnostic calculations. Named
+variants require `--variant` plus explicit supported recipe overrides. Compare
+completed runs through the shared renderer:
 
 ```bash
-uv run python main_cost.py --action calculate --cost v2.6.8 --dataset dataset --output-root output
+uv run python main_cost.py --action compare --results RUN_A RUN_B --dataset dataset --output-root output
 ```
 
-Its output is written under `output/cost/v2.6.8/`. It does not replace
-`output/cost/v1/cost.csv` as the label source.
-
-Cost versions are selected with `--cost` (`v1`, `v2.5`, or `v2.6.8`). Named
-variants use `--variant` together with the explicit supported recipe arguments.
-`--action compare --results ...` sends comparable runs through the shared cost
-plotter in `plots/cost.py`.
-
-Cost tables distinguish calculation availability from empirical model support:
-
-- `ET_evaluable` / `QT_evaluable`: the required inputs and windows exist.
-- `ET_in_support` / `QT_in_support`: model features lie inside empirical support.
-- `QT_physical_valid`: predicted transition heat has the required physical sign.
-- `optimization_eligible`: the version-specific decision mask.
-
-Frozen V1/V2.5 preserve their historical extrapolation policy
-(`allow_historical_extrapolation`); diagnostic V2.6.8 requires empirical support
-(`require_empirical_support`).
-
-## 3. Labels
-
-Build hard RGB labels from canonical V1 and render the default PNG figures:
+## Labels
 
 ```bash
-uv run python main_labels.py --dataset dataset --cost-csv output/cost/v1/cost.csv --output output/labels/v1 --figures
+uv run python main_labels.py \
+  --dataset dataset \
+  --cost-csv output/cost/v1/cost.csv \
+  --output output/labels/v1 \
+  --figures
 ```
 
-The standard label tables are `image_cost_labels.parquet`, `label_balance.csv`,
-and `cycle_audit.csv`. The default thresholds are `0.01`, `0.02`, `0.05`, and
-`0.10`; override them with `--thresholds` when the analysis requires it.
+The standard outputs are `image_cost_labels.parquet`, `label_balance.csv`, and
+`cycle_audit.csv`. Default relative-cost thresholds are 0.01, 0.02, 0.05, and
+0.10.
 
-## 4. Train
-
-Train the baseline image model with LOEO folds:
+## Train
 
 ```bash
-uv run python main_train.py --dataset dataset --labels output/labels/v1/image_cost_labels.parquet --output output/models/current --task binary --representations handcrafted --heads rbf_svm --cameras front --modalities rgb --jobs 6
+uv run python main_train.py \
+  --dataset dataset \
+  --labels output/labels/v1/image_cost_labels.parquet \
+  --output output/models/current \
+  --task binary \
+  --representations handcrafted \
+  --heads rbf_svm \
+  --cameras front \
+  --modalities rgb \
+  --jobs 6 \
+  --seed 0
 ```
 
-Parallel representations, heads, cameras, and modalities are selected
-explicitly through their matching arguments. Available values are listed by
-`--help`, and setting compatibility is validated before training; accepted
-settings share the same fold orchestration and standard `settings.csv`,
-`metrics.csv`, and `predictions.parquet` outputs.
+The trainer writes `settings.csv`, `metrics.csv`, `predictions.parquet`, and a
+fold-completion `task_log.jsonl`. Available representations, heads, cameras,
+modalities, and compatibility rules are listed by `--help`.
 
-`task_log.jsonl` records folds as they finish for observation and diagnosis. It
-is not a resume checkpoint; the current entry point requires a new empty output
-directory when rerun.
-
-For live W&B monitoring, install it with `uv sync --extra tracking`, log in once
-with `uv run wandb login`, then add
-`--wandb-project rgb-feature-matrix` and optionally `--wandb-run-name NAME` to
-the training command. One W&B run represents the whole matrix; only the main
-process logs completed folds. W&B is observational and does not replace local
-outputs or task recovery. Without `--wandb-project`, W&B is not imported.
-
-## 5. Evaluate
-
-Recompute summaries from the frozen LOEO predictions and render figures:
+W&B tracking is optional. Install and authenticate it only when needed:
 
 ```bash
-uv run python main_evaluate.py --results output/models/current --output output/models/evaluation --task binary --figures
+uv sync --extra tracking
+uv run wandb login
+uv run python main_train.py ... --seed 0 --wandb-project PROJECT --wandb-run-name NAME
 ```
 
-Evaluation writes the standard `experiment_metrics.csv` and `summary.csv`
-tables and uses the shared model plotter in `plots/model.py`. Multiple runs can
-be compared by passing more directories to `--results`.
+Without `--wandb-project`, W&B is not imported; local outputs remain
+authoritative.
 
-## Figure formats
+## Evaluate
 
-Label and evaluation figures default to PNG. Request alternatives explicitly
-with `--figure-format svg`, `--figure-format pdf`, or multiple values. Cost
-comparisons use the shared publication renderer in `plots/cost.py`.
+```bash
+uv run python main_evaluate.py \
+  --results output/models/current \
+  --output output/models/evaluation \
+  --task binary \
+  --figures
+```
+
+Evaluation recomputes `experiment_metrics.csv` and `summary.csv` from frozen
+LOEO predictions. Label and evaluation figures default to PNG and accept
+`--figure-format svg` or `--figure-format pdf`.
 
 ## Code map
 
-Core:
-
 - `main_data.py`, `main_cost.py`, `main_labels.py`, `main_train.py`,
-  `main_evaluate.py`: the five primary workspace entry points.
-- `dataloader/`, `cost/`, `labels/`, `model/`: loading and scientific
-  calculations.
-- `plots/`: shared publication rendering for comparable outputs.
-
-Supporting areas:
-
-- `src/frost_analysis/cli.py` and the module-entry source remain as
-  legacy/compatibility code, but are not the current workspace CLI.
-- `src/frost_analysis/` still contains migrating or reused cost, labels,
-  training, evidence, and figures code.
-- `scripts/`, `configs/`, `docs/`, `archive/`: exploration, supporting material,
-  and historical utilities; not the primary workflow.
+  `main_evaluate.py`: primary command-line entry points.
+- `dataloader/`: Dataset reading, validation, maintenance, and raw-data builders.
+- `cost/`: versioned cost definitions, boundaries, component models, and fitting.
+- `labels/`: canonical cost-to-image label construction.
+- `model/`: feature extraction, model fitting, and evaluation.
+- `plots/`: shared publication rendering.
+- `docs/`: Dataset and first-principles scientific contracts.
+- `paper_zh/`: Chinese manuscript and publication figures.
 - `tests/`: focused scientific and interface checks.
-- `output/`: generated results; exploratory evidence belongs under
-  `output/test/`, while formal cost, label, and model artifacts stay in their
-  named top-level output directories.
-
-Each stage exposes its authoritative interface through its `--help` flag.
-Run a retained script from the repository root as a module, for example
-`uv run python -m scripts.labels.audit_rgb_cycle_assets --help`.

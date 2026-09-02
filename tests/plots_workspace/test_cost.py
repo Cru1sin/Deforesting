@@ -104,7 +104,9 @@ def test_standardized_public_entrypoint_keeps_renewal_variant_svg_png(
     table = _table("renewal_water__trial")
     table.attrs["heat_basis"] = "water"
     saved: list[Path] = []
-    monkeypatch.setattr(module, "_load_result_tables", lambda *_args: {"renewal_water__trial": table})
+    monkeypatch.setattr(
+        module, "_load_result_tables", lambda *_args: {"renewal_water__trial": table}
+    )
     monkeypatch.setattr(module, "_comparison_figure", lambda *_args: plt.figure())
     monkeypatch.setattr(
         module, "_save_svg_png", lambda figure, path: (saved.append(path), plt.close(figure))

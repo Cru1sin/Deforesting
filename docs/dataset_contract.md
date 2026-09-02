@@ -88,27 +88,27 @@ roles 的交集。Publication 的 stage ribbon 下固定绘制 Sensor/RGB 两行
 ## CLI
 
 ```bash
-python -m frost_analysis dataset add data/0714
-python -m frost_analysis dataset add data/0715
-python -m frost_analysis dataset aggregate-original --seconds 10
-python -m frost_analysis dataset aggregate-original --seconds 30
-python -m frost_analysis dataset edit --defrost-preparation
-python -m frost_analysis dataset remove 0722 --dataset dataset
-python -m frost_analysis dataset validate --dataset dataset
-python -m frost_analysis dataset refresh roles --dataset dataset
-python -m frost_analysis dataset refresh images --dataset dataset
-python -m frost_analysis dataset refresh figures --dataset dataset
-python -m frost_analysis dataset review-cycle frost_cycle_000001 \
+uv run python main_data.py add data/0714
+uv run python main_data.py add data/0715
+uv run python main_data.py aggregate-original --seconds 10
+uv run python main_data.py aggregate-original --seconds 30
+uv run python main_data.py edit --defrost-preparation
+uv run python main_data.py remove 0722 --dataset dataset
+uv run python main_data.py validate --dataset dataset
+uv run python main_data.py refresh roles --dataset dataset
+uv run python main_data.py refresh images --dataset dataset
+uv run python main_data.py refresh figures --dataset dataset
+uv run python main_data.py review-cycle frost_cycle_000001 \
   --status valid --reason manual_review_confirmed
-python -m frost_analysis dataset edit --dataset dataset --baseline-seconds 60
-python -m frost_analysis dataset edit --dataset dataset --recovery-seconds 180
-python -m frost_analysis dataset render --dataset dataset frost_cycle_000001 \
+uv run python main_data.py edit --dataset dataset --baseline-seconds 60
+uv run python main_data.py edit --dataset dataset --recovery-seconds 180
+uv run python main_data.py render --dataset dataset frost_cycle_000001 \
   --publication --panel
-python -m frost_analysis dataset render frost_cycle_000020 \
+uv run python main_data.py render frost_cycle_000020 \
   --panel --fetch-cloud-images
 ```
 
-`dataset render` 默认只使用本地 `dataset/images/<cycle_name>`，不会访问云端。只有显式
+`main_data.py render` 默认只使用本地 `dataset/images/<cycle_name>`，不会访问云端。只有显式
 增加 `--fetch-cloud-images` 时，RGB panel 才检查 OneDrive 中精确命名的
 `<cycle_name>.zip`。存在时使用 `rclone` 直接下载到 `dataset/images` 下的独立临时
 目录，校验 ZIP 路径、解压并绘图，然后在 `finally` 中删除临时 ZIP 和解压目录；云端
@@ -120,7 +120,7 @@ Python 图像训练代码可复用 `dataset_images.materialize_cycle_images(...)
 `aggregate-original` 不读取 Data 或图片。Dataset 当前间隔（默认 10 秒）写回
 `cycles/`；其他间隔写入 `cycles_<seconds>s/`。
 
-`dataset add` 对相同实验 identity 直接 no-op，新日期必须晚于 Dataset 最后日期。
+`main_data.py add` 对相同实验 identity 直接 no-op，新日期必须晚于 Dataset 最后日期。
 实验日期自动取自 XLS 参数文件名；EDF 日期不参与判断，多个 XLS 日期会直接报错。
 `remove` 只删除匹配日期/experiment 的循环且不重编号其他循环；后续 `add` 从现有最大
 cycle 编号加一。`refresh roles/images/all` 自动更新所有图片派生结果并保留人工状态；
@@ -129,7 +129,7 @@ cycle 编号加一。`refresh roles/images/all` 自动更新所有图片派生�
 某日切分逻辑修正后，用原日期目录重新发布；循环增减和后续编号顺延自动完成：
 
 ```bash
-python -m frost_analysis dataset replace data/0729 --dataset dataset
+uv run python main_data.py replace data/0729 --dataset dataset
 ```
 
 科学 edit 的当前规则保存在 `channel_registry.json`。后续 `add` 会对新 cycle 应用同一
@@ -144,7 +144,7 @@ Dataset 直接写入目标目录，不持久化 staging、hardlink、rollback �
 真的需要从零恢复时，明确删除或另建 Dataset 目录，再逐日期执行 `add`。
 
 科学构建阶段由 `validate_prepared()` 和 `validate_processed()` 检查 Prepared/Processed
-数据。显式 `dataset validate` 才读取已发布 Dataset，检查非空数据、schema、时间顺序、
+数据。显式 `main_data.py validate` 才读取已发布 Dataset，检查非空数据、schema、时间顺序、
 cycle identity、row count 和 Original 的质量列合同。Dataset 不保存或核对资产 SHA，
 图片也不做内容哈希、闭包或 orphan 校验。
 

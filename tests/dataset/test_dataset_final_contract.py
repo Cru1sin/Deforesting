@@ -992,8 +992,8 @@ def test_validate_scientific_schema_ignores_catalog_counts(
     tmp_path: Path,
 ) -> None:
     from dataloader.check import validate_dataset
-    from dataloader.operations import make_cycle_uid
     from dataloader.files import write_json
+    from dataloader.operations import make_cycle_uid
 
     cycle_name = "frost_cycle_000001"
     cycle_uid = make_cycle_uid("exp", "cycle_001")
@@ -1124,34 +1124,31 @@ def test_final_cycle_names_skip_summary_only_cycles() -> None:
     assert names == {("exp_20260714", "cycle_001"): "frost_cycle_000001"}
 
 
-def test_cli_default_dataset_path_uses_project_root(monkeypatch: object, tmp_path: Path) -> None:
-    from frost_analysis import cli
+def test_cli_default_dataset_path_is_local(monkeypatch: object) -> None:
+    import main_data
 
     calls: list[tuple[str, Path]] = []
-    dataset = tmp_path / "dataset"
-    monkeypatch.setattr(cli, "_project_root", lambda: tmp_path)
     monkeypatch.setattr(
-        cli,
+        main_data,
         "edit_dataset",
         lambda path, **kwargs: calls.append(("edit", path)) or path,
     )
 
-    assert cli.main(["dataset", "edit", "--baseline-seconds", "60"]) == 0
-    assert calls == [("edit", dataset)]
+    assert main_data.main(["edit", "--baseline-seconds", "60"]) == 0
+    assert calls == [("edit", Path("dataset"))]
 
 
 def test_cli_edit_can_skip_rgb_panel_rendering(monkeypatch: object, tmp_path: Path) -> None:
-    from frost_analysis import cli
+    import main_data
 
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        cli, "edit_dataset", lambda _path, **kwargs: calls.append(kwargs) or tmp_path
+        main_data, "edit_dataset", lambda _path, **kwargs: calls.append(kwargs) or tmp_path
     )
 
     assert (
-        cli.main(
+        main_data.main(
             [
-                "dataset",
                 "edit",
                 "--dataset",
                 str(tmp_path),
@@ -1343,8 +1340,8 @@ def test_refresh_dataset_does_not_modify_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataloader.check as validation
-    from dataloader.operations import refresh_dataset
     from dataloader.files import write_json
+    from dataloader.operations import refresh_dataset
     from plots import publication as visualization
 
     (tmp_path / "cycles").mkdir()
@@ -1430,8 +1427,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 
     import dataloader.operations as dataset_module
     from dataloader.check import validate_dataset
-    from dataloader.operations import _DateBuild, add_dataset
     from dataloader.loader import DatasetLoader
+    from dataloader.operations import _DateBuild, add_dataset
 
     def make_build(input_dir: Path) -> _DateBuild:
         date = {
@@ -1606,10 +1603,10 @@ def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
 
 def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture[str]) -> None:
     import dataloader.operations as dataset_module
-    from frost_analysis.cli import main
+    from main_data import main
 
     with pytest.raises(SystemExit):
-        main(["dataset", "--help"])
+        main(["--help"])
 
     assert "rebuild" not in capsys.readouterr().out
     assert not hasattr(dataset_module, "rebuild_dataset")
@@ -1619,10 +1616,10 @@ def test_dataset_replace_is_a_public_one_input_operation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     import dataloader.operations as dataset_module
-    from frost_analysis.cli import main
+    from main_data import main
 
     with pytest.raises(SystemExit):
-        main(["dataset", "replace", "--help"])
+        main(["replace", "--help"])
 
     help_text = capsys.readouterr().out
     assert "input_dir" in help_text
@@ -1873,8 +1870,8 @@ def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Pat
 def test_baseline_edit_does_not_require_original_or_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader.operations import edit_dataset
     from dataloader.files import write_json
+    from dataloader.operations import edit_dataset
 
     cycle_name = "frost_cycle_000001"
     cycles_dir = tmp_path / "cycles"
@@ -1934,8 +1931,8 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
 def test_loader_uses_camera_directory_as_role(
     tmp_path: Path,
 ) -> None:
-    from dataloader.loader import DatasetLoader
     from dataloader.files import write_json
+    from dataloader.loader import DatasetLoader
 
     cycle_name = "frost_cycle_000001"
     camera_dir = tmp_path / "images" / cycle_name / "front"
@@ -2104,8 +2101,8 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataloader.operations as dataset_module
-    from dataloader.operations import add_dataset
     from dataloader.files import write_json
+    from dataloader.operations import add_dataset
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -2152,8 +2149,8 @@ def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
     import dataloader.builder.channels as channels_module
     import dataloader.builder.config as config_module
     import dataloader.operations as dataset_module
-    from dataloader.operations import aggregate_original
     from dataloader.files import write_json
+    from dataloader.operations import aggregate_original
 
     dataset = tmp_path / "dataset"
     (dataset / "cycles").mkdir(parents=True)
@@ -2245,20 +2242,19 @@ def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
 def test_cli_aggregates_original_at_requested_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis import cli
+    import main_data
 
     calls: list[tuple[Path, int]] = []
     monkeypatch.setattr(
-        cli,
+        main_data,
         "aggregate_original",
         lambda dataset, *, seconds: calls.append((dataset, seconds)) or dataset,
         raising=False,
     )
 
     assert (
-        cli.main(
+        main_data.main(
             [
-                "dataset",
                 "aggregate-original",
                 "--dataset",
                 str(tmp_path),
@@ -2274,36 +2270,35 @@ def test_cli_aggregates_original_at_requested_interval(
 def test_cli_add_needs_no_date_argument(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis import cli
+    import main_data
 
-    calls: list[tuple[Path, Path | None]] = []
+    calls: list[tuple[Path, Path]] = []
     monkeypatch.setattr(
-        cli,
+        main_data,
         "add_dataset",
         lambda input_dir, dataset: calls.append((input_dir, dataset)) or input_dir,
     )
 
     assert (
-        cli.main(
+        main_data.main(
             [
-                "dataset",
                 "add",
                 str(tmp_path),
             ]
         )
         == 0
     )
-    assert calls == [(tmp_path, None)]
+    assert calls == [(tmp_path, Path("dataset"))]
 
 
 def test_cli_render_cloud_fetch_is_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from frost_analysis import cli
+    import main_data
 
     calls: list[bool] = []
     monkeypatch.setattr(
-        cli,
+        main_data,
         "render_dataset",
         lambda _dataset, _cycle, **options: calls.append(
             bool(options["fetch_cloud_images"])
@@ -2311,10 +2306,9 @@ def test_cli_render_cloud_fetch_is_explicit(
         or tmp_path,
     )
 
-    cli.main(["dataset", "render", "frost_cycle_000020", "--panel"])
-    cli.main(
+    main_data.main(["render", "frost_cycle_000020", "--panel"])
+    main_data.main(
         [
-            "dataset",
             "render",
             "frost_cycle_000020",
             "--panel",
