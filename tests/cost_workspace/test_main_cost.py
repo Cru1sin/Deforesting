@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 import main_cost
+from plots import cost as cost_plots
 
 
 class MetadataOnlyDataset:
@@ -512,7 +513,14 @@ def test_cycle_artifact_name_must_be_a_safe_basename(
         )
 
 
-def test_compare_separates_absolute_inverse_cop_by_heat_basis(tmp_path: Path) -> None:
+def test_compare_separates_absolute_inverse_cop_by_heat_basis(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class NoImages:
+        def load_image_metadata(self) -> pd.DataFrame:
+            return pd.DataFrame(columns=["cycle_name", "camera_role", "file_name", "image_time"])
+
+    monkeypatch.setattr(cost_plots, "DatasetLoader", lambda _: NoImages())
     runs = []
     for name, basis, cost in (("v1", "unit", 0.5), ("v25", "water", 0.4)):
         run = tmp_path / name
@@ -521,20 +529,25 @@ def test_compare_separates_absolute_inverse_cop_by_heat_basis(tmp_path: Path) ->
         pd.DataFrame(
             {
                 "cycle_name": ["cycle_a", "cycle_a"],
+                "candidate_time": ["2026-01-01 00:10:00", "2026-01-01 00:11:00"],
                 "candidate_elapsed_minutes": [10, 11],
+                "optimization_eligible": [True, True],
                 "relative_regret": [0.1, 0.0],
+                "near_optimal_1pct": [False, True],
                 "inverse_cop": [cost + 0.1, cost],
             }
         ).to_csv(run / "cost.csv", index=False)
         runs.append(run)
 
-    figure, path = main_cost.compare_results(runs, tmp_path / "plots")
+    optima = main_cost.compare_results(
+        runs, tmp_path / "dataset", tmp_path / "plots", camera="front"
+    )
 
-    assert path.exists()
-    assert figure.axes[0].get_ylabel() == "Relative regret"
-    assert {axis.get_title() for axis in figure.axes[1:]} == {
-        "Absolute inverse COP — unit heat basis",
-        "Absolute inverse COP — water heat basis",
-    }
+    assert isinstance(optima, pd.DataFrame)
+    assert (tmp_path / "plots/optimum_comparison.png").exists()
+    cycle_svg = (tmp_path / "plots/cycles/cycle_a.svg").read_text(encoding="utf-8")
+    assert "Relative regret" in cycle_svg
+    assert "Absolute inverse COP — unit heat basis" in cycle_svg
+    assert "Absolute inverse COP — water heat basis" in cycle_svg
     with pytest.raises(FileExistsError, match="overwrite"):
-        main_cost.compare_results(runs, tmp_path / "plots")
+        main_cost.compare_results(runs, tmp_path / "dataset", tmp_path / "plots", camera="front")
