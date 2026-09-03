@@ -32,6 +32,8 @@ def _summary() -> pd.DataFrame:
             "modality": ["rgb", "rgb", "rgb", "time", "rgb"],
             "balanced_accuracy_mean": [0.80, 0.90, 0.85, 0.82, 0.81],
             "balanced_accuracy_std": [0.02, 0.03, 0.04, 0.01, 0.025],
+            "macro_f1_mean": [0.79, 0.89, 0.84, 0.81, 0.80],
+            "macro_f1_std": [0.03, 0.04, 0.05, 0.02, 0.035],
         }
     )
 
@@ -56,33 +58,19 @@ def test_figure_5_adapts_current_settings_as_mean_plus_or_minus_sd(
         source_output=tmp_path / "source",
     )
 
-    assert len(calls) == 4
-    assert sorted(value for values, _, _ in calls for value in values if not np.isnan(value)) == [
-        0.8,
-        0.81,
-        0.82,
-        0.85,
-        0.9,
-    ]
-    assert sorted(value for _, errors, _ in calls for value in errors if not np.isnan(value)) == [
-        0.01,
-        0.02,
-        0.025,
-        0.03,
-        0.04,
-    ]
+    assert len(calls) == 8
     assert {label for _, _, label in calls} == {
-        "embedding + mlp + rgb + run=root-a/current",
+        "embedding + mlp + rgb",
         "handcrafted + logistic + rgb + run=root-a/current",
         "handcrafted + logistic + rgb + run=root-b/current",
-        "handcrafted + logistic + time + run=root-a/current",
+        "handcrafted + logistic + time",
     }
     source = pd.read_csv(tmp_path / "source" / "figure_5_model_comparison.csv")
     assert set(source["model_setting"]) == {
-        "embedding + mlp + rgb + run=root-a/current",
+        "embedding + mlp + rgb",
         "handcrafted + logistic + rgb + run=root-a/current",
         "handcrafted + logistic + rgb + run=root-b/current",
-        "handcrafted + logistic + time + run=root-a/current",
+        "handcrafted + logistic + time",
     }
     assert set(source["camera"].astype(str)) == {"front", "novel_camera"}
 

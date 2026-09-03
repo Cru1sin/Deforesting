@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 import main_evaluate
+from plots.model import two_of_three_trigger
 
 SETTING = {
     "representation": "handcrafted",
@@ -53,6 +54,22 @@ def test_parser_defaults() -> None:
     assert args.output == Path("output/models/evaluation")
     assert args.task == "binary"
     assert args.overwrite is False
+
+
+def test_two_of_three_trigger_allows_one_negative_between_positive_frames() -> None:
+    times = pd.date_range("2026-01-01", periods=5, freq="min")
+    trigger, rolling = two_of_three_trigger(times, pd.Series([0.1, 0.8, 0.2, 0.9, 0.1]))
+
+    assert trigger == times[3]
+    assert rolling.tolist() == [False, False, False, True, False]
+
+
+def test_two_of_three_trigger_fires_on_the_second_adjacent_positive() -> None:
+    times = pd.date_range("2026-01-01", periods=3, freq="min")
+    trigger, rolling = two_of_three_trigger(times, pd.Series([0.8, 0.9, 0.1]))
+
+    assert trigger == times[1]
+    assert rolling.tolist() == [False, True, True]
 
 
 def test_main_reads_multiple_runs_and_writes_exactly_four_outputs(tmp_path: Path) -> None:

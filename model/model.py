@@ -82,9 +82,11 @@ def train_frozen_fold(
     task: str,
     return_model: bool = False,
     seed: int = 0,
+    test_rows: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Fit one frozen-feature fold and return data for the main process to write."""
-    train, test = split_heldout(rows, heldout_experiment)
+    train, _ = split_heldout(rows, heldout_experiment)
+    _, test = split_heldout(rows if test_rows is None else test_rows, heldout_experiment)
     expected = set(range(2 if task == "binary" else 3))
     metrics = _base_metrics(
         train_images=len(train),
@@ -106,10 +108,12 @@ def train_frozen_fold(
     model = make_head(head, seed=seed)
     model.fit(train[feature_columns], train["target"])
     prediction = model.predict(test[feature_columns]).astype(int)
-    if hasattr(model, "decision_function"):
-        scores = np.asarray(model.decision_function(test[feature_columns]))
-    else:
+    if hasattr(model, "predict_proba"):
         scores = np.asarray(model.predict_proba(test[feature_columns]))
+    else:
+        scores = np.asarray(model.decision_function(test[feature_columns]))
+        if scores.ndim == 1:
+            scores = 1 / (1 + np.exp(-scores))
 
     prediction_columns = [
         column
@@ -121,6 +125,7 @@ def train_frozen_fold(
             "file_name",
             "image_time",
             "relative_regret",
+            "selected_time",
             "target",
         )
         if column in test

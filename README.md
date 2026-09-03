@@ -150,6 +150,20 @@ The standard outputs are `image_cost_labels.parquet`, `label_balance.csv`, and
 `cycle_audit.csv`. Default relative-cost thresholds are 0.01, 0.02, 0.05, and
 0.10.
 
+After the C-H Pareto policy has been reviewed, its selected knee can be used as
+an experimental binary boundary (`pre_optimal` / `post_optimal`):
+
+```bash
+uv run python main_labels.py \
+  --mode policy \
+  --dataset dataset \
+  --cost-csv output/cost/policy/VARIANT/cost.csv \
+  --output output/labels/ch_pareto
+```
+
+Abstained cycles are excluded. These experimental policy labels do not replace
+the canonical V1 labels.
+
 ## Train
 
 ### Fast CPU baseline
@@ -171,6 +185,30 @@ uv run python main_train.py \
 The trainer writes `settings.csv`, `metrics.csv`, `predictions.parquet`, and a
 fold-completion `task_log.jsonl`. Available representations, heads, cameras,
 modalities, and compatibility rules are listed by `--help`.
+
+Previously extracted DINOv2 features can be compared without rerunning the
+backbone. The three modalities share the same LOEO folds and train one head per
+camera:
+
+```bash
+uv run python main_train.py \
+  --dataset dataset \
+  --labels output/labels/ch_pareto/image_cost_labels.parquet \
+  --state-column policy_state \
+  --feature-shards PATH/TO/FEATURE_SHARDS \
+  --output output/models/ch_pareto_dinov2 \
+  --task binary \
+  --representations dinov2 \
+  --heads logistic rbf_svm \
+  --cameras top top_close left left_close front extreme \
+  --modalities rgb rgb_sensor rgb_sensor_slope \
+  --jobs 6 \
+  --seed 0
+```
+
+`rgb_sensor_slope` adds causal five-minute slopes; it never uses a sensor row
+later than the image. Use feature shards that retain boundary images rather
+than shards created after dropping an older task's near-optimal class.
 
 ### End-to-end ResNet50
 
@@ -214,6 +252,12 @@ uv run python main_evaluate.py \
 Evaluation recomputes `experiment_metrics.csv` and `summary.csv` from frozen
 LOEO predictions. Label and evaluation figures default to PNG and accept
 `--figure-format svg` or `--figure-format pdf`.
+
+For logistic Pareto classifiers, add `--policy-cost ... --probability-curves`.
+Add `--continuous-stream` only when predictions cover consecutive source
+frames. It marks the first time at which at least two of the latest three images
+have `p >= 0.5`; one intervening negative image is allowed. Sampled feature
+shards still produce probability plots but correctly withhold control triggers.
 
 ## Code map
 

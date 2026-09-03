@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from model.evaluate import evaluate_run
-from plots.model import plot_model_figures
+from plots.model import plot_model_figures, plot_probability_curves
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,12 +38,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--optima", type=Path)
     parser.add_argument("--concentration", type=Path)
+    parser.add_argument("--policy-cost", type=Path)
+    parser.add_argument("--probability-curves", action="store_true")
+    parser.add_argument("--curve-representation", default="dinov2")
+    parser.add_argument("--curve-head", default="logistic")
+    parser.add_argument("--curve-window-minutes", type=float, default=10)
+    parser.add_argument(
+        "--continuous-stream",
+        action="store_true",
+        help="apply the 2-of-3 rule only when predictions cover consecutive source frames",
+    )
     return parser
 
 
 def run(args: argparse.Namespace, *, command: list[str] | None = None) -> int:
     if (args.optima is None) != (args.concentration is None):
         raise ValueError("--optima and --concentration must be provided together")
+    if args.probability_curves and args.policy_cost is None:
+        raise ValueError("--probability-curves requires --policy-cost")
     if args.output.exists() and not args.output.is_dir():
         raise FileExistsError(f"output exists and is not a directory: {args.output}")
     if args.overwrite and args.output.is_dir():
@@ -92,6 +104,22 @@ def run(args: argparse.Namespace, *, command: list[str] | None = None) -> int:
                 pd.read_csv(args.concentration) if args.concentration is not None else None
             ),
         )
+        if args.probability_curves:
+            predictions = pd.concat(
+                [pd.read_parquet(path / "predictions.parquet") for path in args.results],
+                ignore_index=True,
+            )
+            plot_probability_curves(
+                predictions=predictions,
+                policy=pd.read_csv(args.policy_cost, low_memory=False),
+                output=args.figure_output or args.output / "figures",
+                source_output=args.output / "figure_source_data",
+                representation=args.curve_representation,
+                head=args.curve_head,
+                window_minutes=args.curve_window_minutes,
+                figure_formats=tuple(args.figure_format),
+                continuous_stream=args.continuous_stream,
+            )
     return 0
 
 

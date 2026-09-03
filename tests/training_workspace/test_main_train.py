@@ -10,6 +10,7 @@ import pytest
 from PIL import Image
 
 import main_train
+from model.features import causal_sensor_features
 
 
 def test_parser_defaults_to_one_primary_setting() -> None:
@@ -146,6 +147,48 @@ def test_label_rows_requires_canonical_stable_heating_start() -> None:
             state_column="cost_state_01pct",
             camera="front",
         )
+
+
+def test_policy_binary_rows_do_not_require_cost_regret() -> None:
+    labels = _labels().drop(columns=["relative_regret", "cost_state_01pct"])
+    labels["policy_state"] = [
+        "pre_optimal",
+        "pre_optimal",
+        "post_optimal",
+        "pre_optimal",
+        "post_optimal",
+        "post_optimal",
+        "pre_optimal",
+    ]
+
+    rows = main_train.label_rows(
+        labels, task="binary", state_column="policy_state", camera="front"
+    )
+
+    assert rows["target"].tolist() == [0, 0, 1, 0, 1, 1]
+
+
+def test_sensor_slope_uses_only_the_value_five_minutes_in_the_past() -> None:
+    frame = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_a", "cycle_a"],
+            "timestamp": pd.to_datetime(["2026-01-01 00:00", "2026-01-01 00:05"]),
+            "evaporating_pressure": [2.0, 1.5],
+            "evaporating_pressure__imputed": [False, False],
+        }
+    )
+
+    result = causal_sensor_features(
+        frame,
+        current_sensors=("evaporating_pressure",),
+        slope_sensors=("evaporating_pressure",),
+    )
+
+    assert result["sensor_timestamp"].tolist() == pd.to_datetime(
+        ["2026-01-01 00:00:10", "2026-01-01 00:05:10"]
+    ).tolist()
+    assert pd.isna(result.loc[0, "evaporating_pressure__slope_5min"])
+    assert result.loc[1, "evaporating_pressure__slope_5min"] == pytest.approx(-0.1)
 
 
 def test_dry_run_reads_labels_and_prints_task_total_without_touching_images(

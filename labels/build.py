@@ -54,6 +54,23 @@ def validate_cost(cost: pd.DataFrame) -> None:
         raise ValueError("named cost variant cannot produce hard labels")
 
 
+def validate_policy(policy: pd.DataFrame) -> None:
+    """Require the shared selector contract used by policy boundary labels."""
+    required = {
+        "cycle_name",
+        "candidate_time",
+        "selected",
+        "selected_time",
+        "selection_policy",
+        "selection_status",
+    }
+    missing = sorted(required.difference(policy.columns))
+    if missing:
+        raise ValueError(f"policy is missing required columns: {', '.join(missing)}")
+    if policy["selection_policy"].astype(str).ne("ch_pareto_knee").any():
+        raise ValueError("policy labels require ch_pareto_knee")
+
+
 def threshold_suffix(threshold: float) -> str:
     """Format a regret threshold as an exact readable column suffix."""
     whole, dot, fraction = f"{threshold * 100:.12g}".partition(".")
@@ -280,3 +297,89 @@ def build_labels(  # noqa: C901 - explicit cycle labeling and audit flow.
 
     audit.sort(key=lambda row: str(row["cycle_name"]))
     return labels, pd.DataFrame(balance_rows), pd.DataFrame(audit)
+
+
+def build_policy_labels(
+    dataset_root: Path, policy: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Label frost-development images before or after each selected Pareto knee."""
+    validate_policy(policy)
+    loader = DatasetLoader(dataset_root)
+    catalog = loader.list_cycles()
+    metadata = loader.load_image_metadata()
+    selected_times: dict[str, pd.Timestamp] = {}
+    audit: list[dict[str, object]] = []
+    for cycle_name, curve in policy.groupby("cycle_name", sort=True):
+        selected = curve.loc[curve["selected"].fillna(False)]
+        stored = pd.to_datetime(curve["selected_time"], errors="coerce", format="mixed").dropna()
+        if selected.empty and stored.empty:
+            audit.append(
+                {
+                    "cycle_name": cycle_name,
+                    "included": False,
+                    "reason": "policy_abstained",
+                    "labeled_image_count": 0,
+                }
+            )
+            continue
+        if len(selected) != 1 or stored.nunique() != 1:
+            raise ValueError(f"{cycle_name}: invalid CH Pareto selection")
+        selected_time = pd.Timestamp(selected["candidate_time"].iloc[0])
+        if selected_time != pd.Timestamp(stored.iloc[0]):
+            raise ValueError(f"{cycle_name}: invalid CH Pareto selection")
+        selected_times[str(cycle_name)] = selected_time
+
+    rows = metadata.loc[
+        metadata["cycle_name"].astype(str).isin(selected_times)
+        & metadata["cycle_stage"].eq("frost_development")
+    ].merge(catalog, on="cycle_name", how="left", validate="many_to_one")
+    rows["image_time"] = pd.to_datetime(rows["image_time"], errors="coerce", format="mixed")
+    rows["selected_time"] = rows["cycle_name"].astype(str).map(selected_times)
+    rows = rows.loc[rows["image_time"].notna()].copy()
+    rows["policy_state"] = np.where(
+        rows["image_time"].lt(rows["selected_time"]), "pre_optimal", "post_optimal"
+    )
+    rows["label_source"] = "ch_pareto_knee"
+    rows["image_path"] = (
+        "images/"
+        + rows["cycle_name"].astype(str)
+        + "/"
+        + rows["camera_role"].astype(str)
+        + "/"
+        + rows["file_name"].astype(str)
+    )
+    rows["local_available"] = rows["image_path"].map(
+        lambda value: (dataset_root / value).is_file()
+    )
+    counts = rows.groupby("cycle_name").size()
+    for cycle_name in selected_times:
+        count = int(counts.get(cycle_name, 0))
+        audit.append(
+            {
+                "cycle_name": cycle_name,
+                "included": count > 0,
+                "reason": "labeled" if count else "no_frost_development_images",
+                "labeled_image_count": count,
+            }
+        )
+    balance = []
+    for group_name, roles in CAMERA_GROUPS.items():
+        scoped = rows.loc[rows["camera_role"].isin(roles)]
+        for state, values in scoped.groupby("policy_state", observed=True):
+            balance.append(
+                {
+                    "label_source": "ch_pareto_knee",
+                    "camera_group": group_name,
+                    "policy_state": state,
+                    "image_count": len(values),
+                    "cycle_count": values["cycle_name"].nunique(),
+                    "local_image_count": int(values["local_available"].sum()),
+                }
+            )
+    if rows.empty:
+        raise RuntimeError("no selected Pareto RGB labels")
+    return (
+        rows.reset_index(drop=True),
+        pd.DataFrame(balance),
+        pd.DataFrame(audit).sort_values("cycle_name").reset_index(drop=True),
+    )

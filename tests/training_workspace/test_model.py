@@ -143,3 +143,24 @@ def test_binary_random_forest_decision_score_is_positive_class_probability() -> 
 
     expected = result["model"].predict_proba(test[columns])[:, 1]
     assert np.allclose(result["predictions"]["decision_score"], expected)
+
+
+def test_binary_logistic_decision_score_is_positive_class_probability() -> None:
+    rows = _rows()
+    columns = ["feature_000", "feature_001"]
+    result = train_frozen_fold(
+        rows,
+        columns,
+        heldout_experiment="c",
+        head="logistic",
+        representation="handcrafted",
+        camera="front",
+        modality="rgb",
+        task="binary",
+        return_model=True,
+    )
+    _, test = split_heldout(rows, "c")
+
+    expected = result["model"].predict_proba(test[columns])[:, 1]
+    assert np.allclose(result["predictions"]["decision_score"], expected)
+    assert result["predictions"]["decision_score"].between(0, 1).all()

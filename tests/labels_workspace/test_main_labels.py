@@ -28,6 +28,7 @@ def test_parser_exposes_only_the_label_run_arguments() -> None:
 
     assert vars(args) == {
         "dataset": Path("dataset"),
+        "mode": "cost",
         "cost_csv": Path("output/cost/v1/cost.csv"),
         "output": Path("output/labels/v1"),
         "thresholds": [0.01, 0.02, 0.05, 0.10],
@@ -43,7 +44,7 @@ def test_main_gates_cost_before_calling_build(
 ) -> None:
     cost = _canonical_cost()
     cost.loc[0, "label_eligible"] = False
-    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: cost)
+    monkeypatch.setattr(main_labels.pd, "read_csv", lambda *_args, **_kwargs: cost)
     calls = 0
 
     def forbidden_build(*_: object, **__: object) -> None:
@@ -64,7 +65,7 @@ def test_main_calls_build_once_and_records_copyable_invocation(
 ) -> None:
     cost = _canonical_cost()
     read_csv = pd.read_csv
-    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: cost)
+    monkeypatch.setattr(main_labels.pd, "read_csv", lambda *_args, **_kwargs: cost)
     calls: list[tuple[object, ...]] = []
 
     def fake_build(
@@ -116,6 +117,7 @@ def test_main_calls_build_once_and_records_copyable_invocation(
     assert json.loads((output / "args.json").read_text(encoding="utf-8")) == {
         "cost_csv": "chosen_cost.csv",
         "dataset": "chosen_dataset",
+        "mode": "cost",
         "output": str(output),
         "overwrite": True,
         "thresholds": [0.02, 0.05],
@@ -130,7 +132,9 @@ def test_main_rejects_existing_output_before_building_labels(
 ) -> None:
     output = tmp_path / "labels"
     output.mkdir()
-    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: _canonical_cost())
+    monkeypatch.setattr(
+        main_labels.pd, "read_csv", lambda *_args, **_kwargs: _canonical_cost()
+    )
 
     def forbidden_build(*_: object, **__: object) -> None:
         raise AssertionError("build_labels must not run for an existing output")
@@ -145,7 +149,9 @@ def test_main_does_not_create_output_when_label_build_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     output = tmp_path / "labels"
-    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _: _canonical_cost())
+    monkeypatch.setattr(
+        main_labels.pd, "read_csv", lambda *_args, **_kwargs: _canonical_cost()
+    )
 
     def failed_build(*_: object, **__: object) -> None:
         raise RuntimeError("label build failed")

@@ -8,8 +8,15 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 
-__all__ = ["plot_model_figures"]
+__all__ = ["plot_model_figures", "plot_probability_curves", "two_of_three_trigger"]
+
+_MODALITY_COLORS = {
+    "rgb": "#3775BA",
+    "rgb_sensor": "#E28E2C",
+    "rgb_sensor_slope": "#2E7D5B",
+}
 
 _CAMERA_ORDER = [
     "top",
@@ -56,6 +63,154 @@ def _ordered(values: pd.Series, preferred: list[str]) -> list[str]:
     )
 
 
+def two_of_three_trigger(
+    times: pd.Series | pd.DatetimeIndex,
+    probabilities: pd.Series,
+    threshold: float = 0.5,
+) -> tuple[pd.Timestamp, pd.Series]:
+    """Return the first frame where at least two of the latest three are positive."""
+    positive = probabilities.ge(threshold)
+    rolling = positive.rolling(3, min_periods=2).sum().ge(2)
+    positions = np.flatnonzero(rolling.to_numpy())
+    trigger = pd.NaT
+    if len(positions):
+        trigger = pd.Timestamp(
+            times.iloc[positions[0]] if hasattr(times, "iloc") else times[positions[0]]
+        )
+    return trigger, rolling
+
+
+def plot_probability_curves(
+    *,
+    predictions: pd.DataFrame,
+    policy: pd.DataFrame,
+    output: Path,
+    source_output: Path,
+    representation: str,
+    head: str,
+    window_minutes: float = 10,
+    figure_formats: tuple[str, ...] = ("png",),
+    continuous_stream: bool = False,
+) -> None:
+    """Plot held-out probabilities and the 2-of-3 trigger around each Pareto knee."""
+    values = predictions.loc[
+        predictions["representation"].eq(representation)
+        & predictions["head"].eq(head)
+        & predictions["modality"].isin(_MODALITY_COLORS)
+    ].copy()
+    values["image_time"] = pd.to_datetime(values["image_time"], errors="coerce", format="mixed")
+    selected = policy.loc[policy["selected"].fillna(False)].copy()
+    selected["selected_time"] = pd.to_datetime(
+        selected["selected_time"], errors="coerce", format="mixed"
+    )
+    selected_times = selected.set_index("cycle_name")["selected_time"]
+    cameras = [camera for camera in _CAMERA_ORDER[:6] if camera in set(values["camera"])]
+    source_rows: list[pd.DataFrame] = []
+    trigger_rows: list[dict[str, object]] = []
+    cycle_output = output / "probability_cycles"
+    for cycle_name, cycle in values.groupby("cycle_name", sort=True):
+        if cycle_name not in selected_times:
+            continue
+        optimum = pd.Timestamp(selected_times[cycle_name])
+        figure, axes = plt.subplots(2, 3, figsize=(7.2, 4.6), sharex=True, sharey=True)
+        for axis, camera in zip(axes.flat, cameras, strict=False):
+            camera_rows = cycle.loc[cycle["camera"].eq(camera)]
+            for modality, rows in camera_rows.groupby("modality", sort=False):
+                rows = rows.sort_values("image_time", kind="stable").copy()
+                trigger, rolling = (
+                    two_of_three_trigger(rows["image_time"], rows["decision_score"])
+                    if continuous_stream
+                    else (pd.NaT, pd.Series(False, index=rows.index))
+                )
+                rows["two_of_three"] = rolling.to_numpy()
+                rows["minutes_from_selected"] = (
+                    rows["image_time"] - optimum
+                ).dt.total_seconds() / 60
+                rows["trigger_time"] = trigger
+                source_rows.append(rows)
+                trigger_rows.append(
+                    {
+                        "cycle_name": cycle_name,
+                        "camera": camera,
+                        "modality": modality,
+                        "selected_time": optimum,
+                        "trigger_time": trigger,
+                        "continuous_stream": continuous_stream,
+                        "trigger_error_minutes": (
+                            (trigger - optimum).total_seconds() / 60
+                            if pd.notna(trigger)
+                            else np.nan
+                        ),
+                    }
+                )
+                shown = rows.loc[
+                    rows["minutes_from_selected"].between(-window_minutes, window_minutes)
+                ]
+                color = _MODALITY_COLORS[str(modality)]
+                axis.plot(
+                    shown["minutes_from_selected"],
+                    shown["decision_score"],
+                    color=color,
+                    lw=1.0,
+                    label=str(modality).replace("_", " + "),
+                )
+                if pd.notna(trigger):
+                    trigger_minute = (trigger - optimum).total_seconds() / 60
+                    if -window_minutes <= trigger_minute <= window_minutes:
+                        axis.axvline(trigger_minute, color=color, lw=0.7, ls=":")
+            axis.axhline(0.5, color="#555555", lw=0.7, ls="--")
+            axis.axvline(0, color="#B64342", lw=1.0)
+            axis.axvspan(-window_minutes, 0, color="#3775BA", alpha=0.04)
+            axis.axvspan(0, window_minutes, color="#B64342", alpha=0.04)
+            axis.set_title(camera.replace("_", " "))
+            axis.grid(axis="y", color="#DDDDDD", lw=0.45)
+        for axis in axes.flat[len(cameras) :]:
+            axis.set_visible(False)
+        axes[1, 0].set_xlabel("Minutes from Pareto knee")
+        axes[1, 1].set_xlabel("Minutes from Pareto knee")
+        axes[1, 2].set_xlabel("Minutes from Pareto knee")
+        axes[0, 0].set_ylabel("Post-knee probability")
+        axes[1, 0].set_ylabel("Post-knee probability")
+        axes[0, 0].set_ylim(0, 1.02)
+        handles = [
+            Line2D([0], [0], color=color, lw=1.2, label=name.replace("_", " + "))
+            for name, color in _MODALITY_COLORS.items()
+        ]
+        handles += [
+            Line2D([0], [0], color="#B64342", lw=1.0, label="Pareto knee"),
+            Line2D([0], [0], color="#555555", lw=0.7, ls="--", label="p = 0.5"),
+        ]
+        if continuous_stream:
+            handles.append(
+                Line2D([0], [0], color="#555555", lw=0.7, ls=":", label="2-of-3 trigger")
+            )
+        figure.legend(handles=handles, loc="upper center", ncol=len(handles), fontsize=5.7)
+        figure.suptitle(
+            f"{cycle_name}: held-out probabilities"
+            + (" and 2-of-3 triggers" if continuous_stream else " (sampled cached features)"),
+            fontsize=8,
+        )
+        figure.text(
+            0.5,
+            0.005,
+            (
+                "Question: can each held-out camera reproduce the C-H Pareto decision boundary?"
+                if continuous_stream
+                else "Sampled cached features: the 2-of-3 control trigger is not evaluated."
+            ),
+            ha="center",
+            fontsize=5.8,
+        )
+        figure.tight_layout(rect=(0, 0.035, 1, 0.91))
+        _export(figure, cycle_output / cycle_name, figure_formats)
+    source_output.mkdir(parents=True, exist_ok=True)
+    if source_rows:
+        pd.concat(source_rows, ignore_index=True).to_parquet(
+            source_output / "probability_curves.parquet", index=False
+        )
+    pd.DataFrame(trigger_rows).to_csv(source_output / "two_of_three_triggers.csv", index=False)
+
+
 def _plot_model_comparison(
     summary: pd.DataFrame,
     output: Path,
@@ -63,19 +218,22 @@ def _plot_model_comparison(
     figure_formats: tuple[str, ...],
 ) -> None:
     values = summary.copy()
-    values["model_setting"] = (
-        values["representation"].astype(str)
-        + " + "
-        + values["head"].astype(str)
-        + " + "
-        + values["modality"].astype(str)
-    )
+    values["model_setting"] = values["head"].str.replace("_", " ") + " + " + values[
+        "modality"
+    ].str.replace("_", " ")
+    if values["representation"].nunique() > 1:
+        values["model_setting"] = (
+            values["representation"].str.replace("_", " ")
+            + " + "
+            + values["model_setting"]
+        )
     if "source" in values and values["source"].nunique() > 1:
         sources = values["source"].astype(str)
         run_names = sources.map(lambda source: Path(source).name)
         if run_names.nunique() != sources.nunique():
             run_names = sources
-        values["model_setting"] += " + run=" + run_names
+        duplicated = values.groupby("model_setting")["source"].transform("nunique").gt(1)
+        values.loc[duplicated, "model_setting"] += " + run=" + run_names[duplicated]
     cameras = _ordered(values["camera"], _CAMERA_ORDER)
     settings = values["model_setting"].drop_duplicates().tolist()
     values["camera"] = pd.Categorical(values["camera"], cameras, ordered=True)
@@ -86,42 +244,29 @@ def _plot_model_comparison(
     figure, axes = plt.subplots(1, 2, figsize=(7.2, 3.4), gridspec_kw={"wspace": 0.32})
     colors = dict(zip(settings, plt.cm.tab10(np.linspace(0, 0.85, len(settings))), strict=True))
     offsets = np.linspace(-0.26, 0.26, len(settings))
-    for offset, setting in zip(offsets, settings, strict=True):
-        rows = values.loc[values["model_setting"].eq(setting)]
-        x = rows["camera"].cat.codes.to_numpy() + offset
-        axes[0].errorbar(
-            x,
-            rows["balanced_accuracy_mean"],
-            yerr=rows["balanced_accuracy_std"],
-            fmt="o",
-            ms=2.8,
-            capsize=1.5,
-            lw=0.7,
-            color=colors[setting],
-            label=setting.replace("_", " "),
-        )
-    axes[0].set_xticks(range(len(cameras)), cameras, rotation=45, ha="right")
-    axes[0].set(ylabel="Balanced accuracy (mean ± SD)", xlabel="Camera")
-    axes[0].set_ylim(0.0, 1.01)
+    metrics = (
+        ("macro_f1", "Macro-F1 (mean ± SD)"),
+        ("balanced_accuracy", "Balanced accuracy (mean ± SD)"),
+    )
+    for axis, (metric, ylabel) in zip(axes, metrics, strict=True):
+        for offset, setting in zip(offsets, settings, strict=True):
+            rows = values.loc[values["model_setting"].eq(setting)]
+            x = rows["camera"].cat.codes.to_numpy() + offset
+            axis.errorbar(
+                x,
+                rows[f"{metric}_mean"],
+                yerr=rows[f"{metric}_std"],
+                fmt="o",
+                ms=2.8,
+                capsize=1.5,
+                lw=0.7,
+                color=colors[setting],
+                label=setting,
+            )
+        axis.set_xticks(range(len(cameras)), cameras, rotation=45, ha="right")
+        axis.set(ylabel=ylabel, xlabel="Camera")
+        axis.set_ylim(0.0, 1.01)
     axes[0].legend(fontsize=5.4, ncol=2, loc="lower left")
-
-    camera_colors = plt.cm.tab10(np.linspace(0, 0.85, len(cameras)))
-    offsets = np.linspace(-0.3, 0.3, len(cameras))
-    for offset, camera, color in zip(offsets, cameras, camera_colors, strict=True):
-        rows = values.loc[values["camera"].eq(camera)]
-        x = rows["model_setting"].cat.codes.to_numpy() + offset
-        axes[1].plot(
-            x,
-            rows["balanced_accuracy_mean"],
-            "o",
-            ms=2.5,
-            color=color,
-            label=camera,
-        )
-    axes[1].set_xticks(range(len(settings)), [name.replace(" + ", "\n+ ") for name in settings])
-    axes[1].set(ylabel="Balanced accuracy (mean)", xlabel="Model setting")
-    axes[1].set_ylim(0.0, 1.01)
-    axes[1].legend(fontsize=4.8, ncol=3, loc="lower left")
     for label, axis in zip("ab", axes, strict=True):
         axis.text(
             -0.16,
@@ -131,7 +276,10 @@ def _plot_model_comparison(
             fontsize=9,
             fontweight="bold",
         )
-    figure.suptitle("Leave-one-experiment-out model and camera comparison", fontsize=8)
+    title = "Leave-one-experiment-out model and camera comparison"
+    if values["representation"].astype(str).eq("dinov2").all():
+        title += "\nExisting cached-feature cohort; error bars span held-out experiments"
+    figure.suptitle(title, fontsize=8)
     _export(figure, output / "figure_5_model_camera_comparison", figure_formats)
 
 

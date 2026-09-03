@@ -18,12 +18,17 @@ import pandas as pd
 from threadpoolctl import threadpool_limits  # type: ignore[import-untyped]
 
 from labels.build import CAMERA_GROUPS
-from model.features import prepare_features
+from model.features import (
+    attach_causal_sensors,
+    load_feature_shards,
+    prepare_cached_features,
+    prepare_features,
+)
 from model.model import train_frozen_fold
 
-REPRESENTATIONS = ("handcrafted", "resnet50_finetune")
+REPRESENTATIONS = ("handcrafted", "dinov2", "resnet50_finetune")
 HEADS = ("logistic", "random_forest", "rbf_svm", "paper_mlp")
-MODALITIES = ("rgb", "time", "rgb_time")
+MODALITIES = ("rgb", "time", "rgb_time", "rgb_sensor", "rgb_sensor_slope")
 PREDICTION_COLUMNS = (
     "experiment_id",
     "cycle_name",
@@ -56,6 +61,7 @@ class FoldTask(NamedTuple):
     task: str
     save_model: bool
     seed: int
+    test_rows: pd.DataFrame | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("output/labels/v1/image_cost_labels.parquet"),
     )
+    parser.add_argument("--feature-shards", type=Path)
     parser.add_argument("--output", type=Path, default=Path("output/models/current"))
     parser.add_argument("--task", choices=("binary", "three"), default="binary")
     parser.add_argument("--state-column", default="cost_state_01pct")
@@ -102,6 +109,11 @@ def validate_setting(setting: Setting, jobs: int) -> None:
             raise ValueError("resnet50_finetune requires jobs=1")
     elif setting.head == "paper_mlp":
         raise ValueError("paper_mlp is only valid with resnet50_finetune")
+    if (
+        setting.modality in {"rgb_sensor", "rgb_sensor_slope"}
+        and setting.representation != "dinov2"
+    ):
+        raise ValueError("sensor modalities require cached dinov2 features")
 
 
 def expand_settings(args: argparse.Namespace) -> list[Setting]:
@@ -126,15 +138,13 @@ def label_rows(
         "image_time",
         "image_path",
         "stable_heating_start",
-        "relative_regret",
         state_column,
     }
     missing = sorted(required.difference(labels.columns))
     if missing:
         raise ValueError(f"labels are missing required columns: {', '.join(missing)}")
     rows = labels.loc[
-        labels["relative_regret"].notna()
-        & labels["camera_role"].isin(CAMERA_GROUPS[camera])
+        labels[state_column].notna() & labels["camera_role"].isin(CAMERA_GROUPS[camera])
     ].copy()
     mapping = (
         {"pre_optimal": 0, "post_optimal": 1}
@@ -160,6 +170,7 @@ def _train_frozen_task(task: FoldTask) -> tuple[int, dict[str, Any]]:
         task=task.task,
         return_model=task.save_model,
         seed=task.seed,
+        test_rows=task.test_rows,
     )
     return task.index, result
 
@@ -284,10 +295,17 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
 
     metrics: list[dict[str, Any]] = []
     predictions: list[pd.DataFrame] = []
+    deep_features: pd.DataFrame | None = None
+    if any(setting.representation == "dinov2" for setting in settings):
+        if args.feature_shards is None:
+            raise ValueError("dinov2 requires --feature-shards")
+        deep_features = load_feature_shards(labels, args.feature_shards, "dinov2")
+        if any(setting.modality.startswith("rgb_sensor") for setting in settings):
+            deep_features = attach_causal_sensors(deep_features, args.dataset)
     task_index = 0
     for setting in settings:
         selected = label_rows(
-            labels,
+            deep_features if setting.representation == "dinov2" else labels,
             task=args.task,
             state_column=args.state_column,
             camera=setting.camera,
@@ -297,6 +315,15 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                 lambda value: str((args.dataset / str(value)).resolve())
             )
             feature_columns: list[str] = []
+        elif setting.representation == "dinov2":
+            selected, full_stream, feature_columns = prepare_cached_features(
+                selected,
+                representation="dinov2",
+                camera=setting.camera,
+                modality=setting.modality,
+                state_column=args.state_column,
+                maximum_per_group=args.maximum_per_group,
+            )
         else:
             selected, feature_columns = prepare_features(
                 selected,
@@ -307,6 +334,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                 state_column=args.state_column,
                 maximum_per_group=args.maximum_per_group,
             )
+            full_stream = selected
         experiments = [str(value) for value in selected["experiment_id"].unique()]
         if setting.representation == "resnet50_finetune":
             from model.resnet import train_resnet_fold
@@ -352,6 +380,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
                     task=args.task,
                     save_model=args.save_models,
                     seed=args.seed,
+                    test_rows=full_stream,
                 )
             )
         for index, result in run_folds(folds, args.jobs):

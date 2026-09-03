@@ -188,3 +188,70 @@ def test_build_returns_labels_balance_and_cycle_audit(
     top = balance.loc[balance["regret_threshold"].eq(0.01) & balance["camera_group"].eq("top")]
     assert top["image_count"].sum() == 2
     assert set(balance["camera_group"]) >= {"top", "top_pair", "all"}
+
+
+def test_policy_labels_use_only_selected_cycles_and_the_selected_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = pd.DataFrame(
+        {
+            "cycle_name": ["selected", "abstained"],
+            "experiment_id": ["e1", "e2"],
+            "status": ["valid", "valid"],
+            "stable_heating_start": pd.to_datetime(
+                ["2026-01-01 00:00", "2026-01-02 00:00"]
+            ),
+            "defrost_start": pd.to_datetime(
+                ["2026-01-01 00:30", "2026-01-02 00:30"]
+            ),
+            "defrost_end": pd.to_datetime(
+                ["2026-01-01 00:35", "2026-01-02 00:35"]
+            ),
+        }
+    )
+    metadata = pd.DataFrame(
+        {
+            "cycle_name": ["selected", "selected", "abstained"],
+            "cycle_stage": ["frost_development"] * 3,
+            "image_time": pd.to_datetime(
+                ["2026-01-01 00:09", "2026-01-01 00:11", "2026-01-02 00:10"]
+            ),
+            "camera_role": ["front"] * 3,
+            "file_name": ["before.jpg", "after.jpg", "unused.jpg"],
+        }
+    )
+
+    class FakeLoader:
+        def __init__(self, _: Path) -> None:
+            pass
+
+        def list_cycles(self) -> pd.DataFrame:
+            return catalog
+
+        def load_image_metadata(self) -> pd.DataFrame:
+            return metadata
+
+    monkeypatch.setattr(build, "DatasetLoader", FakeLoader)
+    policy = pd.DataFrame(
+        {
+            "cycle_name": ["selected", "selected", "abstained"],
+            "candidate_time": pd.to_datetime(
+                ["2026-01-01 00:05", "2026-01-01 00:10", "2026-01-02 00:05"]
+            ),
+            "selected": [False, True, False],
+            "selected_time": pd.to_datetime(
+                ["2026-01-01 00:10", "2026-01-01 00:10", None]
+            ),
+            "selection_policy": ["ch_pareto_knee"] * 3,
+            "selection_status": ["selected", "selected", "abstain"],
+        }
+    )
+
+    labels, balance, audit = build.build_policy_labels(tmp_path / "dataset", policy)
+
+    assert labels["policy_state"].tolist() == ["pre_optimal", "post_optimal"]
+    assert labels["selected_time"].nunique() == 1
+    assert set(balance["camera_group"]) >= {"front", "all"}
+    reasons = audit.set_index("cycle_name")["reason"]
+    assert reasons["selected"] == "labeled"
+    assert reasons["abstained"] == "policy_abstained"
