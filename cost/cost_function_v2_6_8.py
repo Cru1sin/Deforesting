@@ -58,6 +58,8 @@ def calculate_cycle(
     cycle_name: str,
     recipe: Mapping[str, object] | None = None,
     artifacts: Mapping[str, Any] | None = None,
+    *,
+    candidate_step_seconds: int = 60,
 ) -> pd.DataFrame:
     """Execute boundary/cohort → EH → QH → ET → QT → final curve."""
     checked = validate_recipe(DEFAULT_RECIPE if recipe is None else recipe)
@@ -70,7 +72,11 @@ def calculate_cycle(
         raise ValueError(f"V2.6.8 boundaries are incomplete for {cycle_name}")
 
     boundary = build_candidate_boundaries(
-        cycle_name, str(record["experiment_id"]), heating, preparation
+        cycle_name,
+        str(record["experiment_id"]),
+        heating,
+        preparation,
+        step_seconds=candidate_step_seconds,
     )
     frame = loader.load_cycle_original(cycle_name, columns=list(RAW_COLUMNS)).copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
@@ -85,6 +91,13 @@ def calculate_cycle(
     qh_audit = candidate_integral_table(frame, start, candidates, "water_heat")
     qh = pd.DataFrame(
         {"heating_heat_kwh": qh_audit["energy"], "heating_heat_supported": qh_audit["valid"]}
+    )
+    compressor_audit = candidate_integral_table(frame, start, candidates, "compressor_power")
+    compressor = pd.DataFrame(
+        {
+            "heating_compressor_energy_kwh": compressor_audit["energy"],
+            "heating_compressor_measurement_valid": compressor_audit["valid"],
+        }
     )
     features = pre_action_features(frame, candidates, heating)
     source = dict(load_artifacts() if artifacts is None else artifacts)
@@ -110,7 +123,9 @@ def calculate_cycle(
         ]
     ]
 
-    curve = pd.concat([boundary, eh, qh, features, et, qt], axis=1)
+    curve = pd.concat([boundary, eh, qh, compressor, features, et, qt], axis=1)
+    curve["heating_energy_measurement_valid"] = eh_audit["valid"]
+    curve["heating_heat_measurement_valid"] = qh_audit["valid"]
     curve["heating_measurement_valid"] = eh_audit["valid"] & qh_audit["valid"]
     curve = cycle_ratio(curve)
     curve["physical_valid"] = curve["total_energy_kwh"].gt(0) & curve["total_heat_kwh"].gt(

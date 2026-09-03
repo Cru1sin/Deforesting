@@ -22,6 +22,7 @@ INTEGRAL_SAMPLING_CONVENTION = (
 RAW_COLUMNS = (
     "timestamp",
     "power_total",
+    "compressor_power",
     "water_flow",
     "water_in_temperature",
     "water_out_temperature",
@@ -227,11 +228,17 @@ def build_candidate_boundaries(
     experiment_id: str,
     heating_start: pd.Timestamp,
     preparation_start: pd.Timestamp,
+    *,
+    step_seconds: int = 60,
 ) -> pd.DataFrame:
+    if not isinstance(step_seconds, int) or step_seconds <= 0:
+        raise ValueError("step_seconds must be a positive integer")
     first = heating_start + pd.Timedelta(minutes=10)
     if preparation_start < first:
         raise ValueError(f"candidate interval is empty for {cycle_name}")
-    candidates = list(pd.date_range(first, preparation_start, freq="min"))
+    candidates = list(
+        pd.date_range(first, preparation_start, freq=pd.Timedelta(seconds=step_seconds))
+    )
     if not candidates or candidates[-1] != preparation_start:
         candidates.append(preparation_start)
     return pd.DataFrame(
@@ -267,7 +274,11 @@ def event_outcomes(
     }
     result: dict[str, object] = {}
     for phase, (frame, start, end) in windows.items():
-        for quantity, column in (("E", "power_total"), ("Q", "water_heat")):
+        for quantity, column in (
+            ("E", "power_total"),
+            ("Q", "water_heat"),
+            ("E_comp", "compressor_power"),
+        ):
             audit = window_audit(frame, start, end, column)
             result[f"{quantity}_{phase}_kwh"] = audit["energy"]
             for field in ("coverage", "maximum_gap_seconds", "start_fresh", "end_fresh", "valid"):
@@ -279,10 +290,20 @@ def event_outcomes(
     result["Q_T_observed_kwh"] = float(
         np.sum([float(result[f"Q_{phase}_kwh"]) for phase in windows])  # type: ignore[arg-type]
     )
-    result["event_duration_minutes"] = (recovery_end - preparation_start).total_seconds() / 60
+    compressor_valid = partition and all(
+        bool(result[f"E_comp_{phase}_valid"]) for phase in windows
+    )
+    result["E_comp_T_observed_kwh"] = (
+        float(np.sum([float(result[f"E_comp_{phase}_kwh"]) for phase in windows]))
+        if compressor_valid
+        else np.nan
+    )
+    result["D_T_observed_minutes"] = (recovery_end - preparation_start).total_seconds() / 60
+    result["event_duration_minutes"] = result["D_T_observed_minutes"]
     result["phase_partition_valid"] = bool(partition)
     result["phase_interval_convention"] = PHASE_INTERVAL_CONVENTION
     result["integral_sampling_convention"] = INTEGRAL_SAMPLING_CONVENTION
+    result["compressor_event_valid"] = compressor_valid
     result["event_valid"] = bool(
         partition
         and all(

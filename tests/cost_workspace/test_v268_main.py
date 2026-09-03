@@ -36,6 +36,8 @@ def _events() -> pd.DataFrame:
                     "evaporating_pressure_slope_5m": -0.01 + value / 1000,
                     "E_T_observed_kwh": 0.3 + value / 100,
                     "Q_T_observed_kwh": -0.1 + value / 100,
+                    "E_comp_T_observed_kwh": 0.2 + value / 100,
+                    "D_T_observed_minutes": 12 + value,
                 }
             )
     rows.append(
@@ -47,7 +49,9 @@ def _events() -> pd.DataFrame:
             "event_invalid_reason": "missing_defrost_preparation_start",
         }
     )
-    return pd.DataFrame(rows)
+    result = pd.DataFrame(rows)
+    result.loc[result["event_id"].eq("a_0"), "E_comp_T_observed_kwh"] = float("nan")
+    return result
 
 
 def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> None:
@@ -112,8 +116,14 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
         "ticket_ridge_dynamic8",
     }
     assert set(artifact["models"]) == model_names
+    for model in artifact["models"].values():
+        assert set(model) == {"energy", "heat", "compressor_energy", "duration"}
+    dynamic = artifact["models"]["ticket_ridge_dynamic8"]
+    assert dynamic["energy"]["full_data_model"]["training_event_count"] == 8
+    assert dynamic["compressor_energy"]["full_data_model"]["training_event_count"] == 7
     promoted = load_artifacts()
     assert set(promoted["models"]) == model_names
+    assert set(promoted["models"]["ticket_ridge_dynamic8"]) == {"energy", "heat"}
     for model_name in model_names - {"experiment_mean"}:
         for target in ("energy", "heat"):
             folds = promoted["models"][model_name][target]["folds"]

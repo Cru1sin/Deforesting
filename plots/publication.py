@@ -17,6 +17,7 @@ from matplotlib.patches import Rectangle
 
 from cost.energy_models import water_side_heating_kw
 from dataloader.images import RGB_PANEL_MAX_OFFSET
+from plots.pareto import plot_ch_pareto, plot_normalized, plot_objectives
 
 _PANELS = (
     (("compressor_frequency", "compressor_frequency_setpoint"), "Compressor frequency [Hz]"),
@@ -555,8 +556,9 @@ def render_decision_publication(
     display_metric: str | None = None,
     minimum_label: str = "Minimum",
     minimum_support_label: str | None = None,
+    parallel_curve: pd.DataFrame | None = None,
 ) -> None:
-    """Render two decision frames above the reusable COP, water and cost panels."""
+    """Render two decision frames above the shared historical or policy panels."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     frame = frame.dropna(subset=["timestamp"])
@@ -581,12 +583,15 @@ def render_decision_publication(
         else np.nan
     )
 
-    figure = plt.figure(figsize=(7.2, 8.25), dpi=300)
+    parallel = parallel_curve is not None
+    figure = plt.figure(figsize=(10.4, 16.8) if parallel else (7.2, 8.25), dpi=300)
     grid = figure.add_gridspec(
-        4,
+        6 if parallel else 4,
         2,
-        height_ratios=[2.15, 0.92, 1.05, 1.08],
-        hspace=0.62,
+        height_ratios=[2.15, 0.92, 1.05, 1.45, 1.05, 10.0]
+        if parallel
+        else [2.15, 0.92, 1.05, 1.08],
+        hspace=0.42 if parallel else 0.62,
         wspace=0.08,
     )
     image_axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 1])]
@@ -600,6 +605,10 @@ def render_decision_publication(
         figure.add_subplot(grid[2, :]),
         figure.add_subplot(grid[3, :]),
     ]
+    if parallel:
+        panel_axes.extend(
+            [figure.add_subplot(grid[4, :]), figure.add_subplot(grid[5, :])]
+        )
     _plot_cycle_panel(
         panel_axes[0],
         frame,
@@ -622,23 +631,40 @@ def render_decision_publication(
         baseline_left,
         baseline_right,
     )
-    curve = cost_curve if cost_curve is not None else pd.DataFrame()
-    _plot_cost_panel(
-        panel_axes[2],
-        curve,
-        origin,
-        stage_spans,
-        cost_label=cost_label,
-        full_candidate_domain=full_candidate_domain,
-        display_metric=display_metric,
-        minimum_label=minimum_label,
-        minimum_support_label=minimum_support_label,
-    )
-    for axis in panel_axes:
+    if parallel_curve is not None:
+        plot_objectives(panel_axes[2], parallel_curve, origin, stage_spans, _shade_cycle_stages)
+        plot_normalized(panel_axes[3], parallel_curve, origin, stage_spans, _shade_cycle_stages)
+        plot_ch_pareto(
+            panel_axes[4],
+            parallel_curve,
+            origin,
+            rb_time=decision_images.get("rb", {}).get("target_time"),
+        )
+    else:
+        curve = cost_curve if cost_curve is not None else pd.DataFrame()
+        _plot_cost_panel(
+            panel_axes[2],
+            curve,
+            origin,
+            stage_spans,
+            cost_label=cost_label,
+            full_candidate_domain=full_candidate_domain,
+            display_metric=display_metric,
+            minimum_label=minimum_label,
+            minimum_support_label=minimum_support_label,
+        )
+    time_axes = panel_axes[:4] if parallel else panel_axes
+    for axis in time_axes:
         axis.set_xlim(0.0, duration)
-    _plot_decision_markers(panel_axes, decision_images, origin, optimal_label)
+    _plot_decision_markers(
+        time_axes,
+        decision_images,
+        origin,
+        optimal_label,
+        target_times=parallel,
+    )
     labels = panel_axes[2].get_legend_handles_labels()
-    if labels[0]:
+    if labels[0] and not parallel:
         panel_axes[2].legend(
             *labels,
             frameon=False,
@@ -649,8 +675,13 @@ def render_decision_publication(
         )
     cycle_name = str(cycle_record.get("cycle_name", cycle_record.get("cycle_id", "Cycle")))
     figure.suptitle(cycle_name, x=0.08, ha="left", fontsize=10, fontweight="bold")
-    panel_axes[-1].set_xlabel("Time from cycle start [min]", fontsize=8)
-    figure.subplots_adjust(left=0.14, right=0.98, bottom=0.06, top=0.92)
+    panel_axes[3 if parallel else 2].set_xlabel("Time from cycle start [min]", fontsize=8)
+    figure.subplots_adjust(
+        left=0.12 if parallel else 0.14,
+        right=0.82 if parallel else 0.98,
+        bottom=0.06,
+        top=0.92,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(figure)
@@ -715,6 +746,8 @@ def _plot_decision_markers(
     decision_images: Mapping[str, Mapping[str, object]],
     origin: pd.Timestamp,
     optimal_label: str,
+    *,
+    target_times: bool = False,
 ) -> None:
     markers = (
         ("rb", "RB RGB frame", "#2E7D5B"),
@@ -722,10 +755,15 @@ def _plot_decision_markers(
     )
     for target_type, label, color in markers:
         info = decision_images.get(target_type, {})
-        image_time = pd.to_datetime(info.get("image_time"), errors="coerce")
-        if not bool(info.get("available")) or pd.isna(image_time):
+        if target_times:
+            label = "RB trigger" if target_type == "rb" else optimal_label
+        marker_time = pd.to_datetime(
+            info.get("target_time") if target_times else info.get("image_time"),
+            errors="coerce",
+        )
+        if (not target_times and not bool(info.get("available"))) or pd.isna(marker_time):
             continue
-        x = (pd.Timestamp(image_time) - origin).total_seconds() / 60.0
+        x = (pd.Timestamp(marker_time) - origin).total_seconds() / 60.0
         for axis_index, axis in enumerate(axes):
             axis.axvline(
                 x,

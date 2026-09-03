@@ -8,7 +8,14 @@ import numpy as np
 import pandas as pd
 
 from .cost_function_v2_6_8 import five_minute_support_runs
-from .fit_v2_6_8 import fit_weighted_ridge, predict_from_artifact
+from .fit_v2_6_8 import OUTCOME_TARGETS, fit_weighted_ridge, predict_from_artifact
+
+_VALIDATION_COLUMNS = {
+    "energy": ("E_T_prediction_kwh", "E_support_distance"),
+    "heat": ("Q_T_prediction_kwh", "Q_support_distance"),
+    "compressor_energy": ("E_comp_T_prediction_kwh", "Ecomp_support_distance"),
+    "duration": ("D_T_prediction_minutes", "D_support_distance"),
+}
 
 
 def build_validation_table(events: pd.DataFrame, artifacts: dict[str, Any]) -> pd.DataFrame:
@@ -16,25 +23,27 @@ def build_validation_table(events: pd.DataFrame, artifacts: dict[str, Any]) -> p
     valid = events.loc[events["event_valid"].fillna(False)]
     for experiment, group in valid.groupby("experiment_id", sort=False):
         for model_name, model_set in artifacts["models"].items():
-            energy = predict_from_artifact(model_set["energy"], group, str(experiment))
-            heat = predict_from_artifact(model_set["heat"], group, str(experiment))
+            predictions = {
+                name: predict_from_artifact(model_set[name], group, str(experiment))
+                for name in OUTCOME_TARGETS
+                if name in model_set
+            }
             for position, (_, event) in enumerate(group.iterrows()):
-                rows.append(
-                    {
-                        "event_id": event["event_id"],
-                        "cycle_name": event["cycle_name"],
-                        "experiment_id": str(experiment),
-                        "model_name": model_name,
-                        "E_T_observed_kwh": event["E_T_observed_kwh"],
-                        "Q_T_observed_kwh": event["Q_T_observed_kwh"],
-                        "E_T_prediction_kwh": energy.iloc[position]["prediction"],
-                        "Q_T_prediction_kwh": heat.iloc[position]["prediction"],
-                        "E_support_distance": energy.iloc[position]["support_distance"],
-                        "Q_support_distance": heat.iloc[position]["support_distance"],
-                        "event_valid": True,
-                        "event_invalid_reason": "",
-                    }
-                )
+                row: dict[str, object] = {
+                    "event_id": event["event_id"],
+                    "cycle_name": event["cycle_name"],
+                    "experiment_id": str(experiment),
+                    "model_name": model_name,
+                    "event_valid": True,
+                    "event_invalid_reason": "",
+                }
+                for name, prediction in predictions.items():
+                    target = OUTCOME_TARGETS[name]
+                    prediction_column, support_column = _VALIDATION_COLUMNS[name]
+                    row[target] = event.get(target, np.nan)
+                    row[prediction_column] = prediction.iloc[position]["prediction"]
+                    row[support_column] = prediction.iloc[position]["support_distance"]
+                rows.append(row)
     for _, event in events.loc[~events["event_valid"].fillna(False)].iterrows():
         rows.append(
             {

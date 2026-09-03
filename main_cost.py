@@ -13,12 +13,15 @@ from types import ModuleType
 from typing import Any, cast
 
 import pandas as pd
+from joblib import parallel_config
+from sklearn.utils.parallel import Parallel, delayed
 
-from cost import cost_function_v1, cost_function_v2_5, cost_function_v2_6_8
+from cost import cho, cost_function_v1, cost_function_v2_5, cost_function_v2_6_8
 from cost.boundaries import catalog_exclusion_reason, clean_anchor_exclusion_reason
 from cost.energy_models import load_parameters
 from cost.fit_v2_6_8 import (
     MODEL_FEATURES,
+    OUTCOME_TARGETS,
     assemble_target_artifact,
     fit_full_outcome,
     fit_outcome_fold,
@@ -39,13 +42,21 @@ COST_MODULES: dict[str, ModuleType] = {
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--action", required=True, choices=("calculate", "fit", "compare"))
+    parser.add_argument(
+        "--action", required=True, choices=("calculate", "fit", "compare", "policy")
+    )
     parser.add_argument("--cost", choices=tuple(COST_MODULES), default="v1")
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument("--cycles", nargs="*")
     parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--results", nargs="+", type=Path)
     parser.add_argument("--variant")
+    parser.add_argument("--parameters", type=Path)
+    parser.add_argument("--candidate-step-seconds", type=int, default=10)
+    parser.add_argument("--n-jobs", type=int, default=6)
+    parser.add_argument(
+        "--allow-extrapolation", action=argparse.BooleanOptionalAction, default=True
+    )
     parser.add_argument(
         "--integration-protocol", choices=("historical_reconstruction", "strict_causal")
     )
@@ -85,6 +96,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     args = build_parser().parse_args(arguments)
     if args.action == "fit":
         return _fit_v268(args, arguments)
+    if args.action == "policy":
+        return _run_policy(args, arguments)
     if args.action == "compare":
         if not args.results:
             raise ValueError("compare requires --results run directories")
@@ -153,11 +166,24 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     cycles, anchor_excluded = _clean_anchor_cycles(loader, cycles, explicit=bool(args.cycles))
     print(f"Selected {len(cycles)} cycle(s); excluded {anchor_excluded} by raw clean-anchor gate")
     table = module.calculate(loader, cycles, recipe)
+    _write_run(run, table, recipe, arguments, overwrite=args.overwrite)
+    print(f"Cost result written: {run}")
+    return 0
+
+
+def _write_run(
+    run: Path,
+    table: pd.DataFrame,
+    recipe: dict[str, object],
+    arguments: list[str],
+    *,
+    overwrite: bool,
+) -> None:
     run.mkdir(parents=True, exist_ok=True)
     table.to_csv(run / "cost.csv", index=False)
     cycles_dir = run / "cycles"
     cycles_dir.mkdir(exist_ok=True)
-    if args.overwrite:
+    if overwrite:
         for stale in cycles_dir.glob("*.csv"):
             stale.unlink()
     for cycle_name, cycle in table.groupby("cycle_name", sort=False):
@@ -169,7 +195,80 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
         shlex.join(["uv", "run", "python", "main_cost.py", *arguments]) + "\n",
         encoding="utf-8",
     )
-    print(f"Cost result written: {run}")
+
+
+def _run_policy(args: argparse.Namespace, arguments: list[str]) -> int:
+    if args.parameters is None:
+        raise ValueError("policy requires --parameters ARTIFACT.json")
+    if not args.variant:
+        raise ValueError("policy requires --variant NAME")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", str(args.variant)):
+        raise ValueError("variant may contain only letters, numbers, dot, underscore, and hyphen")
+    if args.n_jobs <= 0:
+        raise ValueError("--n-jobs must be greater than zero")
+    if args.candidate_step_seconds <= 0:
+        raise ValueError("--candidate-step-seconds must be greater than zero")
+
+    artifact = load_artifacts(args.parameters)
+    model_name = str(cho.DEFAULT_POLICY_RECIPE["outcome_model"])
+    model_set = artifact.get("models", {}).get(model_name)
+    required = tuple(OUTCOME_TARGETS)
+    if not isinstance(model_set, dict) or not set(required) <= set(model_set):
+        raise ValueError(f"policy requires {model_name} with all four outcome targets")
+    experiment_folds = set.intersection(
+        *(set(model_set[name].get("folds", {})) for name in required)
+    )
+    recipe = {
+        **cho.DEFAULT_POLICY_RECIPE,
+        "working_mode": "offline_policy",
+        "variant": str(args.variant),
+        "candidate_step_seconds": args.candidate_step_seconds,
+        "allow_extrapolation": args.allow_extrapolation,
+    }
+    run = args.output_root / "cost" / "policy" / str(args.variant)
+    if run.exists() and not args.overwrite:
+        raise FileExistsError(f"run directory exists; pass --overwrite: {run}")
+    loader = DatasetLoader(args.dataset)
+    cycles = _cycle_names(loader, args.cycles, experiment_folds)
+    if args.dry_run:
+        print(
+            f"Policy dry-run: variant={args.variant}, candidate_step_seconds="
+            f"{args.candidate_step_seconds}, n_jobs={args.n_jobs}, "
+            f"allow_extrapolation={args.allow_extrapolation}; "
+            f"{len(cycles)} metadata-eligible cycle(s) checked"
+        )
+        return 0
+
+    cycles, anchor_excluded = _clean_anchor_cycles(loader, cycles, explicit=bool(args.cycles))
+    print(f"Selected {len(cycles)} cycle(s); excluded {anchor_excluded} by raw clean-anchor gate")
+    tables = []
+    with parallel_config(backend="loky", n_jobs=args.n_jobs, inner_max_num_threads=1):
+        results = Parallel(
+            return_as="generator_unordered",
+            batch_size="auto",
+            pre_dispatch="2*n_jobs",
+        )(
+            delayed(cho.calculate_cycle)(
+                loader,
+                cycle_name,
+                artifact,
+                step_seconds=args.candidate_step_seconds,
+                allow_extrapolation=args.allow_extrapolation,
+            )
+            for cycle_name in cycles
+        )
+        for completed, table in enumerate(results, start=1):
+            tables.append(table)
+            print(f"Policy cycles complete: {completed}/{len(cycles)}")
+    combined = (
+        pd.concat(tables, ignore_index=True)
+        .sort_values(["cycle_name", "candidate_time"], kind="stable")
+        .reset_index(drop=True)
+        if tables
+        else pd.DataFrame()
+    )
+    _write_run(run, combined, recipe, arguments, overwrite=args.overwrite)
+    print(f"Policy result written: {run}")
     return 0
 
 
@@ -274,10 +373,7 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
         raise ValueError("V2.6.8 fit has no valid observed events")
     experiments = sorted(valid["experiment_id"].astype(str).unique())
     mean_models: dict[str, dict[str, object]] = {}
-    for target_name, target in (
-        ("energy", "E_T_observed_kwh"),
-        ("heat", "Q_T_observed_kwh"),
-    ):
+    for target_name, target in OUTCOME_TARGETS.items():
         folds = {
             heldout: mean_outcome_artifact(
                 valid.loc[~valid["experiment_id"].astype(str).eq(heldout)], target
@@ -302,23 +398,15 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
         },
     }
     for model_name, features in MODEL_FEATURES.items():
-        energy_folds = {}
-        heat_folds = {}
-        for heldout_experiment in experiments:
-            energy_folds[heldout_experiment] = fit_outcome_fold(
-                valid, heldout_experiment, features, "E_T_observed_kwh"
+        artifact["models"][model_name] = {}
+        for target_name, target in OUTCOME_TARGETS.items():
+            folds = {
+                heldout: fit_outcome_fold(valid, heldout, features, target)
+                for heldout in experiments
+            }
+            artifact["models"][model_name][target_name] = assemble_target_artifact(
+                target, features, folds, fit_full_outcome(valid, features, target)
             )
-            heat_folds[heldout_experiment] = fit_outcome_fold(
-                valid, heldout_experiment, features, "Q_T_observed_kwh"
-            )
-        energy_full = fit_full_outcome(valid, features, "E_T_observed_kwh")
-        heat_full = fit_full_outcome(valid, features, "Q_T_observed_kwh")
-        artifact["models"][model_name] = {
-            "energy": assemble_target_artifact(
-                "E_T_observed_kwh", features, energy_folds, energy_full
-            ),
-            "heat": assemble_target_artifact("Q_T_observed_kwh", features, heat_folds, heat_full),
-        }
 
     validation = build_validation_table(events, artifact)
     cohort, candidate_rows = candidate_cohort(loader, set(experiments))

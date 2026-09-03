@@ -3,12 +3,30 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import main_cost
+
+
+def _policy_artifact(path: Path) -> Path:
+    targets = ("energy", "heat", "compressor_energy", "duration")
+    path.write_text(
+        json.dumps(
+            {
+                "artifact_version": "v2.6.8",
+                "models": {
+                    "ticket_ridge_dynamic8": {
+                        name: {"folds": {"exp_20260714": {}}} for name in targets
+                    }
+                },
+            }
+        )
+    )
+    return path
 
 
 class MetadataOnlyDataset:
@@ -352,6 +370,162 @@ def test_action_is_a_required_option_not_a_positional() -> None:
     assert parsed.state_protocol == "strict_causal"
     with pytest.raises(SystemExit):
         parser.parse_args(["calculate"])
+
+
+def test_policy_dry_run_validates_four_targets_and_defaults_without_raw_data(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: MetadataOnlyDataset())
+    parameters = _policy_artifact(tmp_path / "models.json")
+
+    status = main_cost.main(
+        [
+            "--action",
+            "policy",
+            "--parameters",
+            str(parameters),
+            "--variant",
+            "offline_a",
+            "--cycles",
+            "cycle_a",
+            "--output-root",
+            str(tmp_path / "output"),
+            "--dry-run",
+        ]
+    )
+
+    assert status == 0
+    output = capsys.readouterr().out
+    assert "Policy dry-run" in output
+    assert "candidate_step_seconds=10" in output
+    assert "n_jobs=6" in output
+    assert not (tmp_path / "output").exists()
+
+
+def test_policy_requires_parameters_variant_and_positive_jobs(tmp_path: Path) -> None:
+    parameters = _policy_artifact(tmp_path / "models.json")
+    with pytest.raises(ValueError, match="--parameters"):
+        main_cost.main(["--action", "policy", "--variant", "x", "--dry-run"])
+    with pytest.raises(ValueError, match="--variant"):
+        main_cost.main(
+            ["--action", "policy", "--parameters", str(parameters), "--dry-run"]
+        )
+    with pytest.raises(ValueError, match="n-jobs"):
+        main_cost.main(
+            [
+                "--action",
+                "policy",
+                "--parameters",
+                str(parameters),
+                "--variant",
+                "x",
+                "--n-jobs",
+                "0",
+                "--dry-run",
+            ]
+        )
+
+
+def test_policy_uses_single_parallel_layer_and_shared_run_writer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    parameters = _policy_artifact(tmp_path / "models.json")
+    calls: dict[str, object] = {}
+    monkeypatch.setattr(main_cost, "DatasetLoader", lambda _: AnchorDataset())
+    monkeypatch.setattr(
+        main_cost,
+        "_clean_anchor_cycles",
+        lambda _loader, cycles, *, explicit: (cycles, 0),
+    )
+    monkeypatch.setattr(
+        main_cost.cho,
+        "calculate_cycle",
+        lambda _loader, cycle, _artifacts, **kwargs: (
+            calls.setdefault("workers", []).append((cycle, kwargs))
+            or pd.DataFrame(
+                {
+                    "cycle_name": [cycle, cycle],
+                    "candidate_time": ["2026-01-01 00:00:20", "2026-01-01 00:00:10"],
+                    "C": [2.0, 2.1],
+                    "H": [3.0, 2.9],
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        main_cost,
+        "parallel_config",
+        lambda **kwargs: calls.update(config=kwargs) or nullcontext(),
+    )
+
+    def fake_parallel(**kwargs):
+        calls["parallel"] = kwargs
+
+        def run(tasks):
+            for function, args, keywords in reversed(list(tasks)):
+                yield function(*args, **keywords)
+
+        return run
+
+    monkeypatch.setattr(main_cost, "Parallel", fake_parallel)
+    monkeypatch.setattr(
+        main_cost,
+        "delayed",
+        lambda function: lambda *args, **kwargs: (function, args, kwargs),
+    )
+
+    assert (
+        main_cost.main(
+            [
+                "--action",
+                "policy",
+                "--parameters",
+                str(parameters),
+                "--variant",
+                "offline_a",
+                "--candidate-step-seconds",
+                "20",
+                "--n-jobs",
+                "2",
+                "--output-root",
+                str(tmp_path / "output"),
+            ]
+        )
+        == 0
+    )
+
+    assert calls["config"] == {"backend": "loky", "n_jobs": 2, "inner_max_num_threads": 1}
+    assert calls["parallel"] == {
+        "return_as": "generator_unordered",
+        "batch_size": "auto",
+        "pre_dispatch": "2*n_jobs",
+    }
+    assert calls["workers"] == [
+        ("cycle_b", {"step_seconds": 20, "allow_extrapolation": True}),
+        ("cycle_a", {"step_seconds": 20, "allow_extrapolation": True}),
+    ]
+    run = tmp_path / "output/cost/policy/offline_a"
+    assert {path.name for path in run.iterdir()} == {
+        "cost.csv",
+        "cycles",
+        "recipe.json",
+        "command.txt",
+    }
+    assert (run / "cycles/cycle_a.csv").exists()
+    assert (run / "cycles/cycle_b.csv").exists()
+    cost = pd.read_csv(run / "cost.csv")
+    assert list(zip(cost["cycle_name"], cost["candidate_time"], strict=True)) == [
+        ("cycle_a", "2026-01-01 00:00:10"),
+        ("cycle_a", "2026-01-01 00:00:20"),
+        ("cycle_b", "2026-01-01 00:00:10"),
+        ("cycle_b", "2026-01-01 00:00:20"),
+    ]
+    recipe = json.loads((run / "recipe.json").read_text())
+    assert recipe["working_mode"] == "offline_policy"
+    assert recipe["O_role"] == "reference_only"
+    assert recipe["label_eligible"] is False
 
 
 def test_calculate_writes_cost_command_and_recipe(

@@ -32,6 +32,7 @@ STYLES = {
     "v2.6": ("#333333", "h", "V2.6 unit-heat optimum"),
     "v3": ("#1B7F79", ">", "V3 robust optimum"),
     "renewal_water": ("#B2182B", "*", "Renewal-water optimum"),
+    "ch_pareto_knee": ("#D97706", "D", "CH Pareto knee"),
     "v2.6.8": ("#333333", "h", "V2.6.8 diagnostic minimum"),
     "RB": ("#2E7D5B", "o", "Rule defrost"),
 }
@@ -120,9 +121,9 @@ def _style(algorithm: str) -> tuple[str, str, str]:
 
 
 def _run_key(recipe: Mapping[str, object]) -> tuple[str, str]:
-    base_cost = str(recipe.get("base_cost", "")).strip().lower()
+    base_cost = str(recipe.get("base_method") or recipe.get("base_cost", "")).strip().lower()
     if not base_cost:
-        raise ValueError("result recipe has no base_cost")
+        raise ValueError("result recipe has no base_method or base_cost")
     variant = recipe.get("variant")
     key = base_cost if variant in (None, "") else f"{base_cost}__{variant}"
     label = base_cost.upper() if variant in (None, "") else f"{base_cost.upper()} ({variant})"
@@ -149,7 +150,41 @@ def _load_result_tables(
         if "rb_status" not in table:
             table["rb_status"] = "unavailable"
         for _cycle_name, curve in table.groupby("cycle_name", sort=False):
-            if key.split("__", 1)[0] == "v2.6.8":
+            base = key.split("__", 1)[0]
+            if base == "ch_pareto_knee":
+                selected_times = pd.to_datetime(
+                    curve.get("selected_time", pd.Series(dtype=object)),
+                    errors="coerce",
+                    format="mixed",
+                ).dropna().drop_duplicates()
+                knee = curve.get("pareto_knee", pd.Series(False, index=curve.index))
+                selected = curve.loc[knee.fillna(False).astype(bool)]
+                if selected.empty and selected_times.empty:
+                    table.loc[curve.index, "t_star"] = pd.NaT
+                    table.loc[curve.index, "t_star_model_supported"] = pd.NA
+                    continue
+                candidate_time = pd.to_datetime(
+                    selected["candidate_time"], errors="coerce", format="mixed"
+                )
+                if (
+                    len(selected) != 1
+                    or len(selected_times) != 1
+                    or pd.isna(candidate_time.iloc[0])
+                    or candidate_time.iloc[0] != selected_times.iloc[0]
+                ):
+                    raise ValueError(f"{_cycle_name}: invalid CH Pareto selection")
+                selected_row = selected.iloc[0]
+                c_supported = selected_row.get("C_model_supported", pd.NA)
+                h_supported = selected_row.get("H_model_supported", pd.NA)
+                supported = (
+                    pd.NA
+                    if pd.isna(c_supported) or pd.isna(h_supported)
+                    else bool(c_supported) and bool(h_supported)
+                )
+                table.loc[curve.index, "t_star"] = candidate_time.iloc[0]
+                table.loc[curve.index, "t_star_model_supported"] = supported
+                continue
+            if base == "v2.6.8":
                 minimum = pd.to_datetime(
                     curve["diagnostic_minimum"], errors="coerce", format="mixed"
                 ).dropna()
@@ -365,6 +400,11 @@ def _comparison_figure(  # noqa: C901
                 zorder=3,
             )
         if no_minimum.any():
+            missing_label = (
+                "CH Pareto policy (policy abstained)"
+                if base == "ch_pareto_knee"
+                else f"{label} (no diagnostic minimum)"
+            )
             axis.scatter(
                 (x + offset)[no_minimum],
                 np.full(int(no_minimum.sum()), -0.04),
@@ -374,7 +414,7 @@ def _comparison_figure(  # noqa: C901
                 s=24,
                 linewidths=0.8,
                 clip_on=False,
-                label=f"{label} (no diagnostic minimum)",
+                label=missing_label,
                 zorder=4,
             )
     rb = points[algorithms[0]].reindex(cycles)["rb_minutes"]
@@ -810,7 +850,11 @@ def _render_cycle_sets(  # noqa: C901
                 _decision_images(metadata, images, curve),
                 output / label / filename,
                 optimal_label=(
-                    f"{title} ({str(curve.iloc[0]['cycle_status']).replace('_', ' ')})"
+                    "CH Pareto knee ("
+                    f"{str(curve.iloc[0].get('pareto_knee_method', 'unknown')).replace('_', ' ')}"
+                    ")"
+                    if algorithm == "ch_pareto_knee"
+                    else f"{title} ({str(curve.iloc[0]['cycle_status']).replace('_', ' ')})"
                     if algorithm in STATUS_MARKERS
                     else title
                 ),
@@ -824,6 +868,7 @@ def _render_cycle_sets(  # noqa: C901
                     else "Minimum"
                 ),
                 minimum_support_label=minimum_support_label,
+                parallel_curve=curve if algorithm == "ch_pareto_knee" else None,
             )
 
 
@@ -1082,12 +1127,14 @@ def generate_cost_function_figures(
         saver(_comparison_figure(tables, family), comparison)
     _render_cycle_sets(tables, loader, records, output)
     for heat_basis in dict.fromkeys(table.attrs["heat_basis"] for table in tables.values()):
-        _render_cost_curve_comparisons(
-            {
-                algorithm: table
-                for algorithm, table in tables.items()
-                if table.attrs["heat_basis"] == heat_basis
-            },
-            loader,
-            output / "cost_curves" / heat_basis,
-        )
+        cost_tables = {
+            algorithm: table
+            for algorithm, table in tables.items()
+            if table.attrs["heat_basis"] == heat_basis and "inverse_cop" in table
+        }
+        if cost_tables:
+            _render_cost_curve_comparisons(
+                cost_tables,
+                loader,
+                output / "cost_curves" / heat_basis,
+            )

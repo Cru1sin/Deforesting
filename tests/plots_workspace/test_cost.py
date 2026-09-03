@@ -385,11 +385,7 @@ def test_optimal_rgb_figures_paginate_four_methods_per_page() -> None:
     )
 
     assert len(pages) == 3
-    assert [sum(axis.get_visible() for axis in figure.axes) for figure in pages] == [
-        4,
-        4,
-        3,
-    ]
+    assert [sum(axis.get_visible() for axis in figure.axes) for figure in pages] == [4, 4, 4]
     for figure in pages:
         plt.close(figure)
 
@@ -948,6 +944,217 @@ def test_variants_reuse_their_base_style_independent_of_input_order() -> None:
     assert module._style("v1__alpha")[2] == "V1 (alpha) optimum"
 
 
+def test_policy_loader_uses_authoritative_knee_and_preserves_abstention(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    run = tmp_path / "policy"
+    run.mkdir()
+    (run / "recipe.json").write_text(
+        json.dumps({"base_method": "ch_pareto_knee", "heat_basis": "water"}),
+        encoding="utf-8",
+    )
+    rows = []
+    for cycle_name, selected_minute, method in (
+        ("cycle_003", 11, "relative_ideal_distance_fallback"),
+        ("cycle_005", None, "abstain_no_common_domain"),
+    ):
+        for minute, c_value, h_value in ((10, 99.0, 1.0), (11, 1.0, 99.0)):
+            rows.append(
+                {
+                    "cycle_name": cycle_name,
+                    "candidate_time": start + pd.Timedelta(minutes=minute),
+                    "C": c_value,
+                    "H": h_value,
+                    "C_eligible": True,
+                    "H_eligible": True,
+                    "C_model_supported": minute == 11,
+                    "H_model_supported": minute != 11,
+                    "pareto_knee": minute == selected_minute,
+                    "pareto_knee_method": method,
+                    "selected_time": (
+                        start + pd.Timedelta(minutes=selected_minute)
+                        if selected_minute is not None
+                        else pd.NaT
+                    ),
+                }
+            )
+    pd.DataFrame(rows).to_csv(run / "cost.csv", index=False)
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(_: str) -> dict[str, object]:
+            return {"boundaries": {"start_time": start}}
+
+    table = module._load_result_tables([run], Loader())["ch_pareto_knee"]
+    selected = table.loc[table["cycle_name"].eq("cycle_003")]
+    abstained = table.loc[table["cycle_name"].eq("cycle_005")]
+
+    assert selected["t_star"].eq(start + pd.Timedelta(minutes=11)).all()
+    assert selected["t_star_model_supported"].eq(False).all()
+    assert selected["pareto_knee_method"].eq("relative_ideal_distance_fallback").all()
+    assert abstained["t_star"].isna().all()
+    assert abstained["t_star_model_supported"].isna().all()
+    assert abstained["pareto_knee_method"].eq("abstain_no_common_domain").all()
+
+
+@pytest.mark.parametrize(
+    ("knees", "selected_times"),
+    [
+        ([True, False], [pd.NaT, pd.NaT]),
+        ([False, False], [pd.Timestamp("2026-01-01 00:10"), pd.NaT]),
+        ([True, True], [pd.Timestamp("2026-01-01 00:10")] * 2),
+        (
+            [True, False],
+            [pd.Timestamp("2026-01-01 00:11"), pd.Timestamp("2026-01-01 00:11")],
+        ),
+        (
+            [True, False],
+            [pd.Timestamp("2026-01-01 00:10"), pd.Timestamp("2026-01-01 00:11")],
+        ),
+    ],
+)
+def test_policy_loader_rejects_inconsistent_stored_selection(
+    tmp_path: Path,
+    knees: list[bool],
+    selected_times: list[pd.Timestamp | pd.NaT],
+) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    run = tmp_path / "policy"
+    run.mkdir()
+    (run / "recipe.json").write_text(
+        json.dumps({"base_method": "ch_pareto_knee", "heat_basis": "water"}),
+        encoding="utf-8",
+    )
+    pd.DataFrame(
+        {
+            "cycle_name": "cycle_003",
+            "candidate_time": [
+                start + pd.Timedelta(minutes=10),
+                start + pd.Timedelta(minutes=11),
+            ],
+            "pareto_knee": knees,
+            "selected_time": selected_times,
+            "C_model_supported": True,
+            "H_model_supported": True,
+        }
+    ).to_csv(run / "cost.csv", index=False)
+
+    with pytest.raises(ValueError, match="invalid CH Pareto selection"):
+        module._load_result_tables(
+            [run],
+            type(
+                "Loader",
+                (),
+                {"get_cycle_record": staticmethod(lambda _: {"boundaries": {"start_time": start}})},
+            )(),
+        )
+
+
+def test_cycle_sets_pass_policy_curve_only_to_shared_parallel_renderer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _module()
+    historical = _table("v1").loc[lambda values: values["cycle_name"].eq("cycle_003")]
+    policy = historical.assign(algorithm="ch_pareto_knee", C=1.0, H=2.0, O=3.0)
+    seen: dict[str, pd.DataFrame | None] = {}
+    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
+    monkeypatch.setattr(
+        module,
+        "render_decision_publication",
+        lambda _frame, _record, curve, _images, _output, **kwargs: seen.update(
+            {str(curve.iloc[0]["algorithm"]): kwargs["parallel_curve"]}
+        ),
+    )
+
+    class Loader:
+        load_cycle = load_image_metadata = load_cycle_images = staticmethod(
+            lambda _cycle_name: pd.DataFrame()
+        )
+
+    module._render_cycle_sets(
+        {"v1": historical, "ch_pareto_knee": policy},
+        Loader(),
+        {"cycle_003": {"cycle_name": "cycle_003"}},
+        tmp_path,
+    )
+
+    assert seen["v1"] is None
+    assert seen["ch_pareto_knee"] is not None
+    assert seen["ch_pareto_knee"]["candidate_time"].equals(policy["candidate_time"])
+
+
+def test_parallel_publication_calls_shared_panels_when_rgb_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from plots import publication
+
+    start = pd.Timestamp("2026-01-01")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(start, periods=3, freq="min"),
+            "cycle_stage": "frost_development",
+            "cop": [2.0, 2.1, 2.2],
+            "water_flow": [1.0, 1.0, 1.0],
+            "water_in_temperature": [20.0, 20.1, 20.2],
+            "water_out_temperature": [25.0, 25.1, 25.2],
+            "water_temperature_setpoint": [30.0, 30.0, 30.0],
+            "power_total": [2.0, 2.0, 2.0],
+        }
+    )
+    policy = pd.DataFrame(
+        {
+            "candidate_time": pd.date_range(start, periods=3, freq="min"),
+            "C": [2.0, 2.1, 2.05],
+            "H": [4.0, 3.9, 4.1],
+            "O": [3.0, 3.1, 3.2],
+            "C_eligible": True,
+            "H_eligible": True,
+            "O_eligible": True,
+            "pareto": [True, True, False],
+            "pareto_knee": [False, True, False],
+        }
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        publication,
+        "plot_objectives",
+        lambda *_args, **_kwargs: calls.append("raw"),
+    )
+    monkeypatch.setattr(
+        publication,
+        "plot_normalized",
+        lambda *_args, **_kwargs: calls.append("normalized"),
+    )
+    monkeypatch.setattr(
+        publication,
+        "plot_ch_pareto",
+        lambda *_args, **_kwargs: calls.append("pareto"),
+    )
+    output = tmp_path / "parallel.png"
+
+    publication.render_decision_publication(
+        frame,
+        {"cycle_name": "cycle_003", "boundaries": {}},
+        policy,
+        {
+            "rb": {"available": False, "target_time": start, "status": "unavailable"},
+            "optimal": {
+                "available": False,
+                "target_time": start + pd.Timedelta(minutes=1),
+                "status": "unavailable",
+            },
+        },
+        output,
+        parallel_curve=policy,
+    )
+
+    assert output.is_file()
+    assert calls == ["raw", "normalized", "pareto"]
+
+
 def test_common_comparison_marks_any_unselected_cycle_off_the_data_axis() -> None:
     module = _module()
     table = _table("v2.6.8").assign(
@@ -965,4 +1172,22 @@ def test_common_comparison_marks_any_unselected_cycle_off_the_data_axis() -> Non
     )
     assert marker.get_offsets().tolist() == [[0.0, -0.04], [1.0, -0.04]]
     assert marker.get_offset_transform() == figure.axes[0].get_xaxis_transform()
+    plt.close(figure)
+
+
+def test_policy_comparison_labels_unselected_cycle_as_abstained() -> None:
+    module = _module()
+    table = _table("ch_pareto_knee").assign(
+        cycle_start=pd.Timestamp("2025-12-31 23:55:00"),
+        t_star=pd.NaT,
+        t_star_model_supported=pd.NA,
+    )
+
+    figure = module._comparison_figure(
+        {"ch_pareto_knee": table}, ("ch_pareto_knee",)
+    )
+
+    labels = {collection.get_label() for collection in figure.axes[0].collections}
+    assert "CH Pareto policy (policy abstained)" in labels
+    assert not any("diagnostic minimum" in label for label in labels)
     plt.close(figure)

@@ -35,6 +35,12 @@ MODEL_FEATURES = {
     "ticket_ridge_physical6": PHYSICAL_STATIC_6,
     "ticket_ridge_dynamic8": DYNAMIC_8,
 }
+OUTCOME_TARGETS = {
+    "energy": "E_T_observed_kwh",
+    "heat": "Q_T_observed_kwh",
+    "compressor_energy": "E_comp_T_observed_kwh",
+    "duration": "D_T_observed_minutes",
+}
 
 
 def experiment_weights(groups: pd.Series) -> np.ndarray:

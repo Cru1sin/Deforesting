@@ -12,6 +12,9 @@ Current scientific status:
 - V2.5 and V2.6.8 are diagnostic cost definitions and are not label-eligible.
 - V2.6.8 evaluates a corrected fixed-nine-minute post-defrost formulation with
   empirical-support gating; its minimum is diagnostic only.
+- The current offline policy fits four V2.6.8 transition outcomes, constructs
+  independent C/H/O objectives, and selects a knee from the C-H Pareto front.
+  O is reference-only and cannot move the selected time.
 - Image models are evaluated with leave-one-experiment-out (LOEO) validation.
 
 The project-specific method is:
@@ -20,6 +23,9 @@ The project-specific method is:
 Observed transition events -> measured ET and QT
 Candidate pre-action state -> nested-LOEO Ridge -> predicted ET(tau), QT(tau)
 Measured EH(tau), QH(tau) + predicted transition -> support gate -> diagnostic minimum
+
+V2.6.8 candidates + predicted ET, QT, compressor ET and transition duration
+-> independent C/H/O objectives -> C-H Pareto front -> knee policy
 
 Candidate cost curve -> interpolate regret at image times
 -> before optimum | near optimum | after optimum
@@ -92,6 +98,32 @@ uv run python main_cost.py \
 This writes `events.csv`, `validation.csv`, `bootstrap.csv`, and
 `params_candidate.json` under `output/cost/fit/dynamic8_refit/`. The candidate
 parameters never replace the frozen model automatically.
+
+Apply a reviewed four-outcome artifact to the offline C-H Pareto policy:
+
+```bash
+uv run python main_cost.py \
+  --action policy \
+  --dataset dataset \
+  --parameters output/cost/fit/dynamic8_refit/params_candidate.json \
+  --variant dynamic8_refit \
+  --output-root output \
+  --n-jobs 6
+```
+
+For each candidate time, the policy calculates
+
+\[
+C=\frac{Q_H+\hat Q_T}{E_H+\hat E_T},\qquad
+H=\frac{Q_H+\hat Q_T}{t_H+\hat D_T},\qquad
+O=\frac{Q_H-E_{comp,H}+\hat Q_T-\hat E_{comp,T}}{t_H+\hat D_T}.
+\]
+
+It maximizes C and H, constructs their Pareto front, and selects its
+normalized-chord knee (or the relative ideal-point fallback for a degenerate
+front). O is plotted for physical interpretation only. The policy writes one
+shared `cost.csv` plus per-cycle tables under `output/cost/policy/<variant>/`;
+it is an offline working policy and cannot yet generate hard RGB labels.
 
 Compare completed runs through the shared renderer:
 
@@ -196,6 +228,7 @@ LOEO predictions. Label and evaluation figures default to PNG and accept
 | V1 or V2.5 cost | `main_cost.py` -> matching `cost_function_*.py` -> component model |
 | V2.6.8 candidate cost | `main_cost.py` -> `cost/cost_function_v2_6_8.py` |
 | V2.6.8 targets and Ridge validation | `cost/v2_6_8_data.py` -> `cost/fit_v2_6_8.py` -> `cost/validate_v2_6_8.py` |
+| C/H/O Pareto policy | `main_cost.py` -> `cost/cho.py` -> `cost/objectives.py` -> `cost/policy.py` |
 | RGB labels | `main_labels.py` -> `labels/build.py` |
 | Frozen-feature training | `main_train.py` -> `model/features.py` -> `model/model.py` |
 | ResNet50 fine-tuning | `main_train.py` -> `model/resnet.py` |

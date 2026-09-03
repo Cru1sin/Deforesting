@@ -93,6 +93,16 @@ def test_fixed9_candidates_start_at_heating_plus_ten_and_keep_exact_end() -> Non
         preparation,
     ]
 
+    ten_seconds = build_candidate_boundaries(
+        "cycle", "experiment", heating, preparation - pd.Timedelta(seconds=5), step_seconds=10
+    )
+    assert ten_seconds["candidate_time"].iloc[:3].tolist() == [
+        heating + pd.Timedelta(minutes=10),
+        heating + pd.Timedelta(minutes=10, seconds=10),
+        heating + pd.Timedelta(minutes=10, seconds=20),
+    ]
+    assert ten_seconds["candidate_time"].iloc[-1] == preparation - pd.Timedelta(seconds=5)
+
 
 def test_measurement_gate_breaks_support_run_and_connected_basin() -> None:
     from cost.cost_function_v2_6_8 import finalize_v268_curve
@@ -190,14 +200,14 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
         def load_cycle_original(self, _: str, *, columns: list[str] | None = None) -> pd.DataFrame:
             return pd.DataFrame({"timestamp": [heating]})
 
-    monkeypatch.setattr(
-        module,
-        "candidate_integral_table",
-        lambda _frame, _start, candidates, quantity: pd.DataFrame(
-            {"energy": 1.0 if quantity == "power_total" else 3.0, "valid": True},
-            index=range(len(candidates)),
-        ),
-    )
+    audited: list[tuple[str, int]] = []
+
+    def integral(_frame, _start, candidates, quantity):
+        audited.append((quantity, len(candidates)))
+        energy = {"power_total": 1.0, "water_heat": 3.0, "compressor_power": 0.5}[quantity]
+        return pd.DataFrame({"energy": energy, "valid": True}, index=range(len(candidates)))
+
+    monkeypatch.setattr(module, "candidate_integral_table", integral)
     monkeypatch.setattr(
         module,
         "pre_action_features",
@@ -238,7 +248,9 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
         transition_heat_model="experiment_mean",
     )
 
-    result = module.calculate_cycle(Loader(), "cycle", recipe, artifacts)
+    result = module.calculate_cycle(
+        Loader(), "cycle", recipe, artifacts, candidate_step_seconds=10
+    )
 
     assert selected == {
         "energy": static_energy,
@@ -247,6 +259,69 @@ def test_calculate_cycle_executes_declared_independent_ticket_components(
     }
     assert result["transition_energy_kwh"].eq(1.0).all()
     assert result["transition_heat_kwh"].eq(2.0).all()
+    assert audited == [("power_total", 31), ("water_heat", 31), ("compressor_power", 31)]
+    assert result["heating_compressor_energy_kwh"].eq(0.5).all()
+    assert result["heating_compressor_measurement_valid"].all()
+
+
+def test_event_compressor_audit_has_independent_validity() -> None:
+    from cost.v2_6_8_data import event_outcomes
+
+    start = pd.Timestamp("2026-01-01")
+    current = _raw_frame(start, 120)
+    recovery = _raw_frame(start + pd.Timedelta(minutes=2), 60)
+    boundaries = {
+        "preparation_start": start,
+        "defrost_start": start + pd.Timedelta(minutes=1),
+        "defrost_end": start + pd.Timedelta(minutes=2),
+        "recovery_end": start + pd.Timedelta(minutes=3),
+    }
+
+    valid = event_outcomes(current, recovery, **boundaries)
+    assert valid["E_comp_prep_kwh"] == pytest.approx(1 / 60)
+    assert valid["E_comp_T_observed_kwh"] == pytest.approx(3 / 60)
+    assert valid["D_T_observed_minutes"] == 3
+    assert valid["event_valid"]
+    assert valid["compressor_event_valid"]
+
+    current.loc[current["timestamp"].ge(boundaries["defrost_start"]), "compressor_power"] = np.nan
+    invalid = event_outcomes(current, recovery, **boundaries)
+    assert invalid["event_valid"]
+    assert not invalid["compressor_event_valid"]
+    assert np.isnan(invalid["E_comp_T_observed_kwh"])
+
+
+def test_compressor_event_valid_requires_phase_partition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cost import v2_6_8_data as module
+
+    monkeypatch.setattr(
+        module,
+        "window_audit",
+        lambda *_args: {
+            "energy": 1.0,
+            "coverage": 1.0,
+            "maximum_gap_seconds": 1.0,
+            "start_fresh": True,
+            "end_fresh": True,
+            "valid": True,
+        },
+    )
+    start = pd.Timestamp("2026-01-01")
+    result = module.event_outcomes(
+        pd.DataFrame(),
+        pd.DataFrame(),
+        preparation_start=start,
+        defrost_start=start + pd.Timedelta(minutes=2),
+        defrost_end=start + pd.Timedelta(minutes=1),
+        recovery_end=start + pd.Timedelta(minutes=3),
+    )
+
+    assert not result["phase_partition_valid"]
+    assert not result["event_valid"]
+    assert not result["compressor_event_valid"]
+    assert np.isnan(result["E_comp_T_observed_kwh"])
 
 
 def test_event_audit_retains_any_defrost_with_missing_preparation() -> None:
