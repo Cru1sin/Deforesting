@@ -43,8 +43,6 @@ def test_validate_recipe_accepts_canonical_v1_defaults() -> None:
     ("change", "message"),
     [
         ({"heat_basis": "water"}, "heat basis"),
-        ({"event_scope": "heating_start_to_actual_preparation"}, "does not implement"),
-        ({"heating_start_rule": "heating_start"}, "does not implement"),
         ({"variant": "trial"}, "variant"),
     ],
 )
@@ -96,21 +94,25 @@ def test_noncanonical_measurement_protocol_requires_label_ineligible_variant(
     assert checked["label_eligible"] is False
 
 
-def test_variant_still_rejects_unknown_or_incompatible_parameters() -> None:
+def test_variant_still_rejects_unknown_or_incompatible_components() -> None:
     with pytest.raises(ValueError, match="transition heat model"):
         validate_recipe(_recipe(variant="trial", transition_heat_model="experimental"))
     with pytest.raises(ValueError, match="heat basis.*heating heat model"):
         validate_recipe(_recipe(variant="trial", heat_basis="water"))
-    with pytest.raises(ValueError, match="does not implement"):
-        validate_recipe(
-            _recipe(
-                variant="trial",
-                heating_start_rule="bogus",
-                event_scope="bogus_to_actual_preparation",
-            )
+
+
+def test_fixed_recipe_metadata_is_not_a_runtime_component() -> None:
+    checked = validate_recipe(
+        _recipe(
+            heating_start_rule="bogus",
+            event_scope="bogus_to_actual_preparation",
+            unexpected_parameter=True,
         )
-    with pytest.raises(ValueError, match="unexpected"):
-        validate_recipe(_recipe(unexpected_parameter=True))
+    )
+
+    assert checked["heating_start_rule"] == "stable_heating_start"
+    assert checked["event_scope"] == "stable_heating_start_to_actual_preparation"
+    assert "unexpected_parameter" not in checked
 
 
 def test_build_historical_cost_curve_uses_joint_support_positive_heat_and_argmin() -> None:

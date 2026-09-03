@@ -47,6 +47,17 @@ class Setting(NamedTuple):
     modality: str
 
 
+class FoldTask(NamedTuple):
+    index: int
+    heldout_experiment: str
+    setting: Setting
+    rows: pd.DataFrame
+    feature_columns: list[str]
+    task: str
+    save_model: bool
+    seed: int
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
@@ -137,27 +148,24 @@ def label_rows(
     return rows.reset_index(drop=True)
 
 
-def _train_frozen_task(
-    task: tuple[int, str, Setting, pd.DataFrame, list[str], str, bool, int],
-) -> tuple[int, dict[str, Any]]:
-    index, experiment, setting, rows, feature_columns, task_name, return_model, seed = task
+def _train_frozen_task(task: FoldTask) -> tuple[int, dict[str, Any]]:
     result = train_frozen_fold(
-        rows,
-        feature_columns,
-        heldout_experiment=experiment,
-        head=setting.head,
-        representation=setting.representation,
-        camera=setting.camera,
-        modality=setting.modality,
-        task=task_name,
-        return_model=return_model,
-        seed=seed,
+        task.rows,
+        task.feature_columns,
+        heldout_experiment=task.heldout_experiment,
+        head=task.setting.head,
+        representation=task.setting.representation,
+        camera=task.setting.camera,
+        modality=task.setting.modality,
+        task=task.task,
+        return_model=task.save_model,
+        seed=task.seed,
     )
-    return index, result
+    return task.index, result
 
 
 def run_folds(
-    folds: list[tuple[int, str, Setting, pd.DataFrame, list[str], str, bool, int]],
+    folds: list[FoldTask],
     jobs: int,
 ) -> Any:
     if jobs == 1:
@@ -335,15 +343,15 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         folds = []
         for experiment in experiments:
             folds.append(
-                (
-                    task_index + len(folds),
-                    experiment,
-                    setting,
-                    selected,
-                    feature_columns,
-                    args.task,
-                    args.save_models,
-                    args.seed,
+                FoldTask(
+                    index=task_index + len(folds),
+                    heldout_experiment=experiment,
+                    setting=setting,
+                    rows=selected,
+                    feature_columns=feature_columns,
+                    task=args.task,
+                    save_model=args.save_models,
+                    seed=args.seed,
                 )
             )
         for index, result in run_folds(folds, args.jobs):

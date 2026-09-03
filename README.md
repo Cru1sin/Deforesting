@@ -14,6 +14,22 @@ Current scientific status:
   empirical-support gating; its minimum is diagnostic only.
 - Image models are evaluated with leave-one-experiment-out (LOEO) validation.
 
+The project-specific method is:
+
+```text
+Observed transition events -> measured ET and QT
+Candidate pre-action state -> nested-LOEO Ridge -> predicted ET(tau), QT(tau)
+Measured EH(tau), QH(tau) + predicted transition -> support gate -> diagnostic minimum
+
+Candidate cost curve -> interpolate regret at image times
+-> before optimum | near optimum | after optimum
+-> binary labels omit near-optimal images
+
+For each representation x head x camera x modality
+-> hold out one experiment -> fit on the others -> predict the held-out experiment
+-> repeat for every experiment -> experiment-weighted summary
+```
+
 Run commands from the repository root. An existing Dataset is expected at
 `dataset/`.
 
@@ -137,3 +153,12 @@ LOEO predictions. Label and evaluation figures default to PNG and accept
 - `docs/`: Dataset and first-principles scientific contracts.
 - `paper_zh/`: Chinese manuscript and publication figures.
 - `tests/`: focused scientific and interface checks.
+
+| Question | Reading order |
+| --- | --- |
+| V1 or V2.5 cost | `main_cost.py` -> matching `cost_function_*.py` -> component model |
+| V2.6.8 candidate cost | `main_cost.py` -> `cost/cost_function_v2_6_8.py` |
+| V2.6.8 targets and Ridge validation | `cost/v2_6_8_data.py` -> `cost/fit_v2_6_8.py` -> `cost/validate_v2_6_8.py` |
+| RGB labels | `main_labels.py` -> `labels/build.py` |
+| Frozen-feature training | `main_train.py` -> `model/features.py` -> `model/model.py` |
+| ResNet50 fine-tuning | `main_train.py` -> `model/resnet.py` |

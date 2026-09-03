@@ -650,6 +650,8 @@ def test_comparison_marks_extrapolated_renewal_optima() -> None:
 def test_cost_curve_rgb_fetches_only_missing_optimal_front_members(
     tmp_path: Path, monkeypatch
 ) -> None:
+    import dataloader.cloud_images as cloud_images
+
     module = _module()
     tables = {
         algorithm: _table(algorithm).assign(cycle_start=pd.Timestamp("2025-12-31 23:55:00"))
@@ -692,7 +694,7 @@ def test_cost_curve_rgb_fetches_only_missing_optimal_front_members(
             }
         )
 
-    monkeypatch.setattr(module, "materialize_cycle_image_members", materialize)
+    monkeypatch.setattr(cloud_images, "materialize_cycle_image_members", materialize)
     monkeypatch.setattr(module, "scan_cycle_images", scan)
     monkeypatch.setattr(module, "_save_png", lambda figure, _path: plt.close(figure))
 

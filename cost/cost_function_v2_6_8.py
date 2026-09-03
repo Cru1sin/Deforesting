@@ -15,11 +15,7 @@ import numpy as np
 import pandas as pd
 
 from .cost_curve import cycle_ratio
-from .fit_v2_6_8 import (
-    five_minute_support_runs,
-    load_artifacts,
-    predict_independent_targets,
-)
+from .fit_v2_6_8 import load_artifacts, predict_independent_targets
 from .v2_6_8_data import (
     RAW_COLUMNS,
     build_candidate_boundaries,
@@ -137,18 +133,23 @@ def calculate(
 
 
 def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
-    """Validate only recipe combinations implemented by the V2.6.8 executor."""
-    value = dict(recipe)
-    if value.keys() != DEFAULT_RECIPE.keys():
-        missing = DEFAULT_RECIPE.keys() - value.keys()
-        issue = (
-            f"missing parameters: {sorted(missing)}"
-            if missing
-            else (f"unexpected parameters: {sorted(value.keys() - DEFAULT_RECIPE.keys())}")
-        )
-        raise ValueError(f"recipe is {issue}")
-    if value["base_cost"] != "v2.6.8" or value["version"] != "v2.6.8":
+    """Validate the V2.6.8 model choices exposed by ``main_cost.py``."""
+    if recipe.get("base_cost", "v2.6.8") != "v2.6.8" or recipe.get(
+        "version", "v2.6.8"
+    ) != "v2.6.8":
         raise ValueError("V2.6.8 module requires base_cost and version v2.6.8")
+    fixed_components = {
+        "heat_basis",
+        "integration_protocol",
+        "state_protocol",
+        "heating_heat_model",
+    }
+    if any(recipe.get(key, DEFAULT_RECIPE[key]) != DEFAULT_RECIPE[key] for key in fixed_components):
+        raise ValueError("v2.6.8 does not implement the selected measurement component")
+    value = dict(DEFAULT_RECIPE)
+    for key in ("variant", "transition_energy_model", "transition_heat_model"):
+        if key in recipe:
+            value[key] = recipe[key]
     variant = value["variant"]
     if variant is not None and (not isinstance(variant, str) or not variant.strip()):
         raise ValueError("variant must be a non-empty string")
@@ -169,16 +170,6 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
     if invalid:
         raise ValueError(f"v2.6.8 does not implement {invalid.replace('_', ' ')}={value[invalid]}")
     allowed_overrides = {"transition_energy_model", "transition_heat_model"}
-    fixed_changes = {
-        key
-        for key in DEFAULT_RECIPE.keys() - allowed_overrides - {"variant", "label_eligible"}
-        if value[key] != DEFAULT_RECIPE[key]
-    }
-    if fixed_changes:
-        raise ValueError(f"v2.6.8 does not implement recipe override(s): {sorted(fixed_changes)}")
-    value["transition_scope"] = DEFAULT_RECIPE["transition_scope"]
-    value["transition_window"] = DEFAULT_RECIPE["transition_window"]
-    value["transition_provenance"] = DEFAULT_RECIPE["transition_provenance"]
     differences = {key for key in allowed_overrides if value[key] != DEFAULT_RECIPE[key]}
     if bool(differences) != (variant is not None):
         message = (
@@ -187,9 +178,29 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
             else ("canonical recipe cannot set variant")
         )
         raise ValueError(message)
-    if value["label_eligible"] is not False:
-        raise ValueError("V2.6.8 label_eligible status cannot be changed")
+    value["label_eligible"] = False
     return value
+
+
+def five_minute_support_runs(times: pd.Series, selected: pd.Series) -> pd.Series:
+    """Keep supported candidate runs spanning at least five continuous minutes."""
+    result = pd.Series(False, index=selected.index)
+    chosen = np.flatnonzero(selected.to_numpy(dtype=bool))
+    if not chosen.size:
+        return result
+    parsed = pd.to_datetime(times, errors="coerce")
+    breaks = np.flatnonzero(
+        (np.diff(chosen) != 1)
+        | (
+            parsed.iloc[chosen[1:]].to_numpy() - parsed.iloc[chosen[:-1]].to_numpy()
+            > np.timedelta64(90, "s")
+        )
+    )
+    for left, right in zip(np.r_[0, breaks + 1], np.r_[breaks, len(chosen) - 1], strict=True):
+        positions = chosen[left : right + 1]
+        if parsed.iloc[positions[-1]] - parsed.iloc[positions[0]] >= pd.Timedelta(minutes=5):
+            result.iloc[positions] = True
+    return result
 
 
 def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:

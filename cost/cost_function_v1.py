@@ -88,12 +88,19 @@ def calculate(
 
 
 def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
-    """Validate only recipe combinations implemented by the V1 executor."""
-    value = dict(recipe)
-    if value.keys() != DEFAULT_RECIPE.keys():
-        raise ValueError("recipe has missing or unexpected parameters")
-    if value["base_cost"] != "v1" or value["version"] != "v1":
+    """Validate the V1 components exposed by ``main_cost.py``."""
+    if recipe.get("base_cost", "v1") != "v1" or recipe.get("version", "v1") != "v1":
         raise ValueError("V1 module requires base_cost and version v1")
+    components = {
+        "heat_basis",
+        "integration_protocol",
+        "state_protocol",
+        "heating_heat_model",
+        "transition_energy_model",
+        "transition_heat_model",
+    }
+    value = dict(DEFAULT_RECIPE)
+    value.update({key: recipe[key] for key in components | {"variant"} if key in recipe})
     if (value["heat_basis"], value["heating_heat_model"]) not in {
         ("unit", "measured_unit_heat"),
         ("water", "measured_water_heat"),
@@ -124,23 +131,11 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
         value["transition_provenance"] = "candidate_time_state" + (
             "_plus_fixed_recovery" if fixed_recovery else ""
         )
-    optional = {
-        *choices,
-        "heat_basis",
-        "heating_heat_model",
-        "transition_window",
-        "transition_provenance",
-    }
-    fixed = DEFAULT_RECIPE.keys() - optional - {"variant", "label_eligible"}
-    if any(value[key] != DEFAULT_RECIPE[key] for key in fixed):
-        raise ValueError("v1 does not implement fixed recipe overrides")
     variant = value["variant"]
     if variant is not None and (not isinstance(variant, str) or not variant.strip()):
         raise ValueError("variant must be a non-empty string")
-    changed = any(value[key] != DEFAULT_RECIPE[key] for key in optional)
+    changed = any(value[key] != DEFAULT_RECIPE[key] for key in components)
     if changed != (variant is not None):
         raise ValueError("named variant is inconsistent with recipe overrides")
-    if variant is None and value["label_eligible"] is not True:
-        raise ValueError("canonical label_eligible status cannot be changed")
     value["label_eligible"] = variant is None
     return value

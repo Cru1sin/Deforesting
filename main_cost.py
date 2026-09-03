@@ -20,14 +20,13 @@ from cost.energy_models import load_parameters
 from cost.fit_v2_6_8 import (
     MODEL_FEATURES,
     assemble_target_artifact,
-    bootstrap_minima,
-    build_validation_table,
     fit_full_outcome,
     fit_outcome_fold,
     load_artifacts,
     mean_outcome_artifact,
 )
 from cost.v2_6_8_data import build_event_table, candidate_cohort
+from cost.validate_v2_6_8 import bootstrap_minima, build_validation_table
 from dataloader import DatasetLoader
 from plots.cost import generate_cost_function_figures
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -33,17 +34,13 @@ CAMERA_GROUPS: dict[str, tuple[str, ...]] = {
 }
 
 
-def high_confidence_coverage(
-    label_balance: pd.DataFrame, camera_group: str, threshold: float
-) -> float:
-    """Return retained pre/post images as a fraction of candidate-domain images."""
-    rows = label_balance.loc[
-        label_balance["camera_group"].eq(camera_group)
-        & label_balance["regret_threshold"].eq(threshold)
-        & label_balance["cost_state"].isin(("pre_optimal", "near_optimal", "post_optimal"))
-    ]
-    retained = rows.loc[rows["cost_state"].ne("near_optimal"), "image_count"].sum()
-    return float(retained / rows["image_count"].sum())
+class _CurveSupport(NamedTuple):
+    ordered: pd.DataFrame
+    regret: pd.Series
+    eligible: pd.Series
+    eligible_run: pd.Series
+    interpolatable: pd.Series
+    optimum_index: int | None
 
 
 def validate_cost(cost: pd.DataFrame) -> None:
@@ -65,7 +62,7 @@ def threshold_suffix(threshold: float) -> str:
 
 def _curve_support(
     curve: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series, int | None]:
+) -> _CurveSupport:
     ordered = (
         curve.assign(
             candidate_time=pd.to_datetime(
@@ -80,15 +77,17 @@ def _curve_support(
     run = eligible.ne(eligible.shift(fill_value=False)).cumsum()
     support = eligible & eligible.groupby(run).transform("sum").ge(2)
     optimum = int(regret.loc[eligible].idxmin()) if eligible.any() else None
-    return ordered, regret, eligible, run, support, optimum
+    return _CurveSupport(ordered, regret, eligible, run, support, optimum)
 
 
 def curve_label_exclusion_reason(curve: pd.DataFrame) -> str | None:
     """Return why a candidate curve cannot support hard image labels."""
-    _, _, eligible, _, support, optimum = _curve_support(curve)
-    if not eligible.any():
+    prepared = _curve_support(curve)
+    if not prepared.eligible.any():
         return "no_eligible_candidates"
-    if optimum is None or not support.iloc[optimum]:
+    if prepared.optimum_index is None or not prepared.interpolatable.iloc[
+        prepared.optimum_index
+    ]:
         return "t_star_not_in_interpolatable_run"
     return None
 
@@ -100,14 +99,19 @@ def assign_image_cost_states(
     regret_threshold: float,
 ) -> pd.DataFrame:
     """Interpolate regret within eligible runs and assign image states."""
-    ordered, candidate_regret, _, run, support, optimum = _curve_support(curve)
+    prepared = _curve_support(curve)
     times = pd.Series(pd.to_datetime(image_times, errors="coerce", format="mixed")).reset_index(
         drop=True
     )
     regret = pd.Series(np.nan, index=times.index, dtype=float)
     state = pd.Series(pd.NA, index=times.index, dtype="string")
-    if optimum is not None and support.iloc[optimum]:
-        for _, positions in ordered.loc[support].groupby(run.loc[support], sort=False):
+    if (
+        prepared.optimum_index is not None
+        and prepared.interpolatable.iloc[prepared.optimum_index]
+    ):
+        for _, positions in prepared.ordered.loc[prepared.interpolatable].groupby(
+            prepared.eligible_run.loc[prepared.interpolatable], sort=False
+        ):
             inside = times.between(
                 positions["candidate_time"].iloc[0],
                 positions["candidate_time"].iloc[-1],
@@ -115,10 +119,10 @@ def assign_image_cost_states(
             regret.loc[inside] = np.interp(
                 times.loc[inside].astype("int64"),
                 positions["candidate_time"].astype("int64"),
-                candidate_regret.loc[positions.index],
+                prepared.regret.loc[positions.index],
             )
         labeled = regret.notna()
-        optimum_time = ordered.loc[optimum, "candidate_time"]
+        optimum_time = prepared.ordered.loc[prepared.optimum_index, "candidate_time"]
         state.loc[labeled & times.lt(optimum_time)] = "pre_optimal"
         state.loc[labeled & times.ge(optimum_time)] = "post_optimal"
         state.loc[labeled & regret.le(regret_threshold)] = "near_optimal"

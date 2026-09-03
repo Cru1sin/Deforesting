@@ -15,11 +15,11 @@ from dataloader.operations import assign_final_cycle_names_by_time
 
 
 def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(
-        dataset_images.shutil,
+        cloud_images.shutil,
         "disk_usage",
         lambda _path: usage(200 * 1024**3, 100 * 1024**3, 100 * 1024**3),
     )
@@ -100,7 +100,7 @@ def test_image_metadata_has_no_sensor_alignment_fields() -> None:
 def test_materialize_cycle_images_prefers_and_preserves_local_images(
     tmp_path: Path,
 ) -> None:
-    from dataloader.images import materialize_cycle_images
+    from dataloader.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     local = tmp_path / "dataset" / "images" / cycle_name
@@ -122,7 +122,7 @@ def test_materialize_cycle_images_prefers_and_preserves_local_images(
 def test_materialize_cycle_images_treats_missing_cloud_zip_as_no_images(
     tmp_path: Path,
 ) -> None:
-    from dataloader.images import materialize_cycle_images
+    from dataloader.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     cloud = tmp_path / "cloud"
@@ -139,7 +139,7 @@ def test_materialize_cycle_images_copies_extracts_and_preserves_local_copy(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader.images import materialize_cycle_images
+    from dataloader.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -167,7 +167,7 @@ def test_materialize_cycle_images_cleans_only_fresh_download_after_success(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     cycle_name = "frost_cycle_000021"
     dataset = tmp_path / "dataset"
@@ -178,7 +178,7 @@ def test_materialize_cycle_images_cleans_only_fresh_download_after_success(
         bundle.writestr(f"{cycle_name}/front/frame.jpg", b"rgb")
     _allow_image_download(monkeypatch)
 
-    with dataset_images.materialize_cycle_images(
+    with cloud_images.materialize_cycle_images(
         dataset,
         cycle_name,
         fetch_cloud=True,
@@ -196,7 +196,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     cycle_name = "frost_cycle_000022"
     dataset = tmp_path / "dataset"
@@ -208,7 +208,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 
     with (
         pytest.raises(RuntimeError, match="shard failed"),
-        dataset_images.materialize_cycle_images(
+        cloud_images.materialize_cycle_images(
             dataset,
             cycle_name,
             fetch_cloud=True,
@@ -225,7 +225,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 def test_materialize_cycle_images_never_cleans_preexisting_local_directory(
     tmp_path: Path,
 ) -> None:
-    from dataloader.images import materialize_cycle_images
+    from dataloader.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000023"
     local = tmp_path / "dataset" / "images" / cycle_name
@@ -248,7 +248,7 @@ def test_materialize_cycle_images_stops_before_crossing_free_space_floor(
     from collections import namedtuple
     from zipfile import ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -258,14 +258,14 @@ def test_materialize_cycle_images_stops_before_crossing_free_space_floor(
         bundle.writestr(f"{cycle_name}/front/frame.jpg", b"rgb")
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(
-        dataset_images.shutil,
+        cloud_images.shutil,
         "disk_usage",
         lambda _path: usage(100 * 1024**3, 51 * 1024**3, 49 * 1024**3),
     )
 
     with (
         pytest.raises(OSError, match="50 GiB safety floor"),
-        dataset_images.materialize_cycle_images(
+        cloud_images.materialize_cycle_images(
             dataset, cycle_name, fetch_cloud=True, cloud_root=cloud
         ),
     ):
@@ -277,7 +277,7 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -288,7 +288,7 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
     usage = namedtuple("usage", "total used free")
     free = iter((6 * 1024**3, 4 * 1024**3))
     monkeypatch.setattr(
-        dataset_images.shutil,
+        cloud_images.shutil,
         "disk_usage",
         lambda _path: usage(10 * 1024**3, 0, next(free)),
     )
@@ -297,7 +297,7 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
         pytest.raises(
             OSError, match=r"extracting frost_cycle_000020\.zip.*5 GiB safety floor"
         ),
-        dataset_images.materialize_cycle_images(
+        cloud_images.materialize_cycle_images(
             dataset,
             cycle_name,
             fetch_cloud=True,
@@ -313,10 +313,10 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     cycle_name = "frost_cycle_000020"
-    monkeypatch.setattr(dataset_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
+    monkeypatch.setattr(cloud_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
     calls: list[tuple[list[str], dict[str, str]]] = []
 
     for name in (
@@ -344,10 +344,10 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
             bundle.writestr(f"{cycle_name}/front_center/frame.jpg", b"rgb")
         return subprocess.CompletedProcess(command, 0)
 
-    monkeypatch.setattr(dataset_images.subprocess, "run", fake_run)
+    monkeypatch.setattr(cloud_images.subprocess, "run", fake_run)
     _allow_image_download(monkeypatch)
 
-    with dataset_images.materialize_cycle_images(
+    with cloud_images.materialize_cycle_images(
         tmp_path / "dataset", cycle_name, fetch_cloud=True
     ) as available:
         assert (available / "front_center" / "frame.jpg").read_bytes() == b"rgb"
@@ -388,7 +388,7 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
 def test_materialize_cycle_images_treats_missing_default_remote_as_no_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     calls: list[list[str]] = []
 
@@ -396,9 +396,9 @@ def test_materialize_cycle_images_treats_missing_default_remote_as_no_images(
         calls.append(command)
         return subprocess.CompletedProcess(command, 1, stdout="")
 
-    monkeypatch.setattr(dataset_images.subprocess, "run", fake_run)
+    monkeypatch.setattr(cloud_images.subprocess, "run", fake_run)
 
-    with dataset_images.materialize_cycle_images(
+    with cloud_images.materialize_cycle_images(
         tmp_path / "dataset", "frost_cycle_000099", fetch_cloud=True
     ) as available:
         assert not available.exists()
@@ -411,7 +411,7 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
 ) -> None:
     from zipfile import ZIP_DEFLATED, ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
 
     cycle_name = "frost_cycle_000006"
     archive_path = tmp_path / f"{cycle_name}.zip"
@@ -430,10 +430,10 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
         count = int(command[command.index("--count") + 1])
         return subprocess.CompletedProcess(command, 0, stdout=archive[offset : offset + count])
 
-    monkeypatch.setattr(dataset_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
-    monkeypatch.setattr(dataset_images.subprocess, "run", fake_run)
+    monkeypatch.setattr(cloud_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
+    monkeypatch.setattr(cloud_images.subprocess, "run", fake_run)
 
-    with dataset_images.materialize_cycle_image_members(
+    with cloud_images.materialize_cycle_image_members(
         tmp_path / "dataset",
         cycle_name,
         ["rb.jpg"],
@@ -446,7 +446,7 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
     local = tmp_path / "dataset" / "images" / cycle_name
     assert (local / "front" / "rb.jpg").read_bytes() == b"rb-image"
 
-    with dataset_images.materialize_cycle_image_members(
+    with cloud_images.materialize_cycle_image_members(
         tmp_path / "dataset",
         cycle_name,
         ["rb.jpg", "unused.jpg"],
@@ -563,7 +563,8 @@ def test_materialize_cycle_builds_one_catalog_record(
 
     import dataloader.operations as dataset_module
     from dataloader import metadata as dataset_metadata
-    from dataloader.operations import _DateBuild, add_dataset
+    from dataloader.builder.build import ExperimentBuild
+    from dataloader.operations import add_dataset
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -600,7 +601,7 @@ def test_materialize_cycle_builds_one_catalog_record(
             }
         ]
     )
-    build = _DateBuild(
+    build = ExperimentBuild(
         input_dir=input_dir,
         config=SimpleNamespace(
             experiment_id="exp_0714",
@@ -635,7 +636,7 @@ def test_materialize_cycle_builds_one_catalog_record(
         "_load_config_for_input",
         lambda *_args: build.config,
     )
-    monkeypatch.setattr(dataset_module, "_build_date", lambda *_args: build)
+    monkeypatch.setattr(dataset_module, "build_experiment", lambda *_args: build)
     original_builder = dataset_metadata.build_cycle_record
     call_count = 0
 
@@ -746,14 +747,14 @@ def test_load_config_for_input_rejects_multiple_xls_dates(tmp_path: Path) -> Non
         _load_config_for_input(tmp_path, tmp_path)
 
 
-def test_build_date_prints_processing_stages(
+def test_build_experiment_prints_processing_stages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from types import SimpleNamespace
 
     from dataloader.builder import channels, prepare, process
     from dataloader.builder import prepared as validation
-    from dataloader.operations import _build_date
+    from dataloader.builder.build import build_experiment
 
     frame = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
     summary = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
@@ -764,7 +765,7 @@ def test_build_date_prints_processing_stages(
     monkeypatch.setattr(validation, "validate_prepared", lambda *_args: None)
     monkeypatch.setattr(validation, "validate_processed", lambda *_args: None)
 
-    _build_date(tmp_path, SimpleNamespace())
+    build_experiment(tmp_path, SimpleNamespace())
 
     assert capsys.readouterr().out.splitlines() == [
         "[add] prepare sensors",
@@ -915,7 +916,7 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import images as dataset_images
+    from dataloader import cloud_images
     from dataloader.operations import render_dataset
     from plots import publication as visualization
 
@@ -951,7 +952,7 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
         shutil.copyfile(archive, Path(command[3]))
         return subprocess.CompletedProcess(command, 0)
 
-    monkeypatch.setattr(dataset_images.subprocess, "run", fake_rclone)
+    monkeypatch.setattr(cloud_images.subprocess, "run", fake_rclone)
     _allow_image_download(monkeypatch)
     seen: list[list[Path]] = []
     monkeypatch.setattr(
@@ -1426,11 +1427,12 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     from types import SimpleNamespace
 
     import dataloader.operations as dataset_module
+    from dataloader.builder.build import ExperimentBuild
     from dataloader.check import validate_dataset
     from dataloader.loader import DatasetLoader
-    from dataloader.operations import _DateBuild, add_dataset
+    from dataloader.operations import add_dataset
 
-    def make_build(input_dir: Path) -> _DateBuild:
+    def make_build(input_dir: Path) -> ExperimentBuild:
         date = {
             "0714": "2026-07-14",
             "0715": "2026-07-15",
@@ -1510,7 +1512,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
                 "unit": "1",
             }
         }
-        return _DateBuild(
+        return ExperimentBuild(
             input_dir=input_dir,
             config=config,
             channels=channels,
@@ -1528,7 +1530,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     monkeypatch.setattr(dataset_module, "_validate_date_input", lambda *_args: None)
     monkeypatch.setattr(
         dataset_module,
-        "_build_date",
+        "build_experiment",
         lambda input_dir, _project_root: make_build(input_dir),
     )
     dataset_dir = tmp_path / "dataset"
@@ -2133,7 +2135,7 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     )
     monkeypatch.setattr(
         dataset_module,
-        "_build_date",
+        "build_experiment",
         lambda *_args: pytest.fail("same experiment must not rerun Prepare/Process"),
     )
 

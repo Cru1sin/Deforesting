@@ -14,10 +14,7 @@ import numpy as np
 import pandas as pd
 
 from dataloader import DatasetLoader
-from dataloader.images import (
-    materialize_cycle_image_members,
-    scan_cycle_images,
-)
+from dataloader.images import scan_cycle_images
 from plots.publication import (
     _plot_decision_image,
     match_decision_rgb_images,
@@ -704,17 +701,18 @@ def _render_cost_curve_comparisons(
                 if info.get("status") == "physical_image_missing" and info.get("file_name")
             }
         )
-        source = (
-            materialize_cycle_image_members(
+        if fetch_cloud and missing:
+            from dataloader.cloud_images import materialize_cycle_image_members
+
+            source = materialize_cycle_image_members(
                 loader.dataset_root,
                 cycle_name,
                 missing,
                 fetch_cloud=True,
                 minimum_free_gib=minimum_free_gib,
             )
-            if fetch_cloud and missing
-            else nullcontext(None)
-        )
+        else:
+            source = nullcontext(None)
         with source as cycle_dir:
             if cycle_dir is not None:
                 downloaded = scan_cycle_images(

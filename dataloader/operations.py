@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pandas as pd
 
+from .builder.build import ExperimentBuild, build_experiment
 from .builder.config import find_project_root
 from .metadata import DATASET_ID, DATASET_SCHEMA_VERSION
 
@@ -36,17 +37,6 @@ def parse_cycle_name(name: str) -> int:
     if match is None or int(match.group(1)) < 1:
         raise ValueError(f"invalid cycle_name: {name!r}")
     return int(match.group(1))
-
-
-@dataclass(frozen=True)
-class _DateBuild:
-    input_dir: Path
-    config: Any
-    channels: Mapping[str, Mapping[str, Any]]
-    prepared: pd.DataFrame
-    summary: pd.DataFrame
-    processed: pd.DataFrame
-    original: pd.DataFrame | None = None
 
 
 def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
@@ -84,13 +74,13 @@ def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
                 )
 
         print("[add] preparing and processing")
-        build = _build_date(input_path, config)
+        build = build_experiment(input_path, config)
         _append_build(target, build)
         print("[add] done")
         return target
 
     print("[add] preparing and processing")
-    build = _build_date(input_path, config)
+    build = build_experiment(input_path, config)
     _materialize_builds(target, [build])
     print("[add] done")
     return target
@@ -127,7 +117,7 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
         raise ValueError(f"experiment is not published: {experiment_id}")
 
     print(f"[replace] rebuilding {experiment_id}")
-    build = _build_date(input_path, config)
+    build = build_experiment(input_path, config)
     start = min(parse_cycle_name(str(record["cycle_name"])) for record in replaced)
     old_end = max(parse_cycle_name(str(record["cycle_name"])) for record in replaced)
     names = assign_final_cycle_names_by_time(
@@ -687,38 +677,9 @@ def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
     )
 
 
-def _build_date(input_path: Path, config: Any) -> _DateBuild:
-    from .builder.channels import load_channels
-    from .builder.prepare import prepare, prepare_original
-    from .builder.prepared import validate_prepared, validate_processed
-    from .builder.process import process
-
-    channels = load_channels()
-    print("[add] prepare sensors", flush=True)
-    prepared, initial_summary = prepare(config, channels)
-    print("[add] validate prepared", flush=True)
-    validate_prepared(prepared, initial_summary)
-    print("[add] process cycles", flush=True)
-    processed, final_summary = process(prepared, initial_summary, config, channels)
-    print("[add] validate processed", flush=True)
-    validate_processed(processed, final_summary)
-    print("[add] preserve original sensors", flush=True)
-    original = prepare_original(config, prepared)
-    print(f"[add] cycles={final_summary['cycle_id'].nunique()}", flush=True)
-    return _DateBuild(
-        input_dir=input_path.resolve(),
-        config=config,
-        channels=channels,
-        prepared=prepared,
-        summary=final_summary,
-        processed=processed,
-        original=original,
-    )
-
-
 def _materialize_cycle(
     dataset_dir: Path,
-    build: _DateBuild,
+    build: ExperimentBuild,
     key: CycleKey,
     cycle_name: str,
     registry: Mapping[str, Any],
@@ -840,7 +801,7 @@ def _materialize_cycle(
 
 def _materialize_builds(  # noqa: C901
     dataset_dir: Path,
-    builds: Sequence[_DateBuild],
+    builds: Sequence[ExperimentBuild],
 ) -> None:
     from .builder.raw import discover_inputs
     from .builder.schema import build_registry, merge_original_columns
@@ -947,7 +908,7 @@ def _materialize_builds(  # noqa: C901
 
 
 def processed_counts_by_key(
-    builds: Sequence[_DateBuild],
+    builds: Sequence[ExperimentBuild],
 ) -> dict[CycleKey, int]:
     counts: dict[CycleKey, int] = {}
     for build in builds:
@@ -960,7 +921,7 @@ def processed_counts_by_key(
 
 
 def _image_cycle_windows(
-    build: _DateBuild,
+    build: ExperimentBuild,
     names: Mapping[CycleKey, str],
 ) -> list[dict[str, object]]:
     """Build the minimal cycle boundaries used to preserve Raw images."""
@@ -994,7 +955,7 @@ def _image_cycle_windows(
 
 def _append_build(  # noqa: C901
     dataset_dir: Path,
-    build: _DateBuild,
+    build: ExperimentBuild,
 ) -> None:
     from .builder.raw import discover_inputs
     from .builder.schema import (
@@ -1626,22 +1587,29 @@ def render_dataset(
     if publication:
         render_publication_asset(dataset_dir, record)
     if panel:
-        from .images import materialize_cycle_images, scan_cycle_images
+        from .images import scan_cycle_images
 
         registry = read_json(dataset_dir / "channel_registry.json")
         if not isinstance(registry, dict):
             raise ValueError("channel_registry.json must contain an object")
         metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
         roles = _experiment_camera_roles(catalog, metadata, str(record["experiment_id"]))
-        with materialize_cycle_images(
-            dataset_dir, cycle_name, fetch_cloud=fetch_cloud_images
-        ) as cycle_dir:
+        if fetch_cloud_images:
+            from .cloud_images import materialize_cycle_images
+
+            with materialize_cycle_images(
+                dataset_dir, cycle_name, fetch_cloud=True
+            ) as cycle_dir:
+                images = scan_cycle_images(
+                    dataset_dir, cycle_name, metadata, cycle_dir=cycle_dir
+                )
+        else:
             images = scan_cycle_images(
-                dataset_dir, cycle_name, metadata, cycle_dir=cycle_dir
+                dataset_dir, cycle_name, metadata
             )
-            _render_rgb_panel(
-                dataset_dir, record, metadata, registry, roles, images=images
-            )
+        _render_rgb_panel(
+            dataset_dir, record, metadata, registry, roles, images=images
+        )
     return dataset_dir
 
 

@@ -10,8 +10,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from labels.build import high_confidence_coverage
-
 __all__ = ["plot_label_figures"]
 
 plt.rcParams["font.family"] = "sans-serif"
@@ -23,6 +21,19 @@ _BLUE = "#3775BA"
 _ORANGE = "#E28E2C"
 _GREY = "#767676"
 _PALE = "#DDEAF4"
+
+
+def high_confidence_coverage(
+    label_balance: pd.DataFrame, camera_group: str, threshold: float
+) -> float:
+    """Return retained pre/post images as a fraction of candidate-domain images."""
+    rows = label_balance.loc[
+        label_balance["camera_group"].eq(camera_group)
+        & label_balance["regret_threshold"].eq(threshold)
+        & label_balance["cost_state"].isin(("pre_optimal", "near_optimal", "post_optimal"))
+    ]
+    retained = rows.loc[rows["cost_state"].ne("near_optimal"), "image_count"].sum()
+    return float(retained / rows["image_count"].sum())
 
 
 def regret_threshold_summary(

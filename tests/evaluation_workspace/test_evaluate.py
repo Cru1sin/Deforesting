@@ -173,6 +173,21 @@ def test_prediction_count_must_match_test_images_before_scoring() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("targets", "predictions"),
+    [([0, 2], [0, 1]), ([0, 1], [0, 0.5])],
+)
+def test_fold_values_must_belong_to_the_task_label_set(
+    targets: list[float], predictions: list[float]
+) -> None:
+    with pytest.raises(ValueError, match="must use binary labels"):
+        evaluate_run(
+            _metrics(held_out="a", test_images=2),
+            _predictions("a", targets, predictions),
+            task="binary",
+        )
+
+
 def test_evaluation_module_imports_without_torch() -> None:
     code = """
 import builtins

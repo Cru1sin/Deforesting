@@ -86,8 +86,11 @@ def _prediction_groups(predictions: pd.DataFrame) -> dict[tuple[str, ...], list[
 
 
 def _fold_metrics(predictions: pd.DataFrame, task: str) -> dict[str, float]:
-    target = pd.to_numeric(predictions["target"], errors="raise").astype(int)
-    prediction = pd.to_numeric(predictions["prediction"], errors="raise").astype(int)
+    target = pd.to_numeric(predictions["target"], errors="raise")
+    prediction = pd.to_numeric(predictions["prediction"], errors="raise")
+    labels = _expected_labels(task)
+    if not target.isin(labels).all() or not prediction.isin(labels).all():
+        raise ValueError(f"target and prediction must use {task} labels {labels}")
     return classification_metrics(target, prediction, task)
 
 

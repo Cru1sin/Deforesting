@@ -143,12 +143,14 @@ def test_v268_accepts_independent_ticket_component_selection() -> None:
     assert recipe["transition_heat_model"] == "experiment_mean"
 
 
-def test_v268_rejects_unimplemented_candidate_rule_even_for_named_variant() -> None:
+def test_v268_fixed_metadata_is_not_a_runtime_component() -> None:
     recipe = dict(main_cost.cost_function_v2_6_8.DEFAULT_RECIPE)
     recipe.update(
-        variant="fake",
         candidate_start_rule="stable_heating_start_plus_10_minutes",
+        unexpected_parameter=True,
     )
 
-    with pytest.raises(ValueError, match="v2.6.8 does not implement"):
-        validate_recipe(recipe)
+    checked = validate_recipe(recipe)
+
+    assert checked["candidate_start_rule"] == "heating_start_plus_10_minutes"
+    assert "unexpected_parameter" not in checked
