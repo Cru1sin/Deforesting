@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
             "ticket_ridge_dynamic8",
         ),
     )
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="show the selected action only")
     parser.add_argument("--overwrite", action="store_true")
     return parser
 
@@ -88,6 +88,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     if args.action == "compare":
         if not args.results:
             raise ValueError("compare requires --results run directories")
+        if args.dry_run:
+            print(
+                f"Compare dry-run: results={args.results}, "
+                f"output={args.output_root / 'plots'}"
+            )
+            return 0
         generate_cost_function_figures(
             args.results,
             DatasetLoader(args.dataset),
@@ -255,6 +261,12 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     run = args.output_root / "cost" / "fit" / str(args.variant)
     if run.exists() and not args.overwrite:
         raise FileExistsError(f"fit directory exists; pass --overwrite: {run}")
+    if args.dry_run:
+        print(
+            f"Fit V2.6.8: variant={args.variant}, models={list(MODEL_FEATURES)}, "
+            f"bootstrap_replicates=200, bootstrap_seed=268, output={run}"
+        )
+        return 0
     loader = DatasetLoader(args.dataset)
     events = build_event_table(loader)
     valid = events.loc[events["event_valid"].fillna(False)].copy()

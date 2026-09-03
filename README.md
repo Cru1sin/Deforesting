@@ -75,8 +75,25 @@ uv run python main_cost.py --action calculate --cost v1 --dataset dataset --outp
 ```
 
 Select `v2.5` or `v2.6.8` with `--cost` for diagnostic calculations. Named
-variants require `--variant` plus explicit supported recipe overrides. Compare
-completed runs through the shared renderer:
+variants require `--variant` plus explicit supported recipe overrides.
+
+Refit the diagnostic V2.6.8 transition models when its training data or feature
+definition changes:
+
+```bash
+uv run python main_cost.py \
+  --action fit \
+  --cost v2.6.8 \
+  --dataset dataset \
+  --variant dynamic8_refit \
+  --output-root output
+```
+
+This writes `events.csv`, `validation.csv`, `bootstrap.csv`, and
+`params_candidate.json` under `output/cost/fit/dynamic8_refit/`. The candidate
+parameters never replace the frozen model automatically.
+
+Compare completed runs through the shared renderer:
 
 ```bash
 uv run python main_cost.py --action compare --results RUN_A RUN_B --dataset dataset --output-root output
@@ -98,6 +115,8 @@ The standard outputs are `image_cost_labels.parquet`, `label_balance.csv`, and
 
 ## Train
 
+### Fast CPU baseline
+
 ```bash
 uv run python main_train.py \
   --dataset dataset \
@@ -115,6 +134,24 @@ uv run python main_train.py \
 The trainer writes `settings.csv`, `metrics.csv`, `predictions.parquet`, and a
 fold-completion `task_log.jsonl`. Available representations, heads, cameras,
 modalities, and compatibility rules are listed by `--help`.
+
+### End-to-end ResNet50
+
+```bash
+uv sync --extra ml
+uv run python main_train.py \
+  --dataset dataset \
+  --labels output/labels/v1/image_cost_labels.parquet \
+  --output output/models/resnet50_front \
+  --task binary \
+  --representations resnet50_finetune \
+  --heads paper_mlp \
+  --cameras front \
+  --modalities rgb \
+  --jobs 1 \
+  --epochs 5 \
+  --seed 0
+```
 
 W&B tracking is optional. Install and authenticate it only when needed:
 

@@ -15,8 +15,8 @@ import main_train  # noqa: E402
 from model import resnet  # noqa: E402
 
 
-def test_binary_resnet50_weights_none_forward() -> None:
-    network = resnet.BinaryResNet50(weights=None).eval()
+def test_resnet50_classifier_weights_none_forward() -> None:
+    network = resnet.ResNet50Classifier(weights=None).eval()
 
     with torch.no_grad():
         logits, features = network(torch.zeros(1, 3, 64, 64))
@@ -37,7 +37,7 @@ def test_one_resnet_fold_trains_for_fixed_epochs_without_validation_selection(
             flat = images.flatten(1)
             return self.classifier(flat), flat
 
-    monkeypatch.setattr(resnet, "BinaryResNet50", TinyNetwork)
+    monkeypatch.setattr(resnet, "ResNet50Classifier", TinyNetwork)
     conversion = transforms.Compose([transforms.Resize((8, 8)), transforms.ToTensor()])
     monkeypatch.setattr(resnet, "image_transforms", lambda: (conversion, conversion))
     rows: list[dict[str, object]] = []
@@ -93,7 +93,9 @@ def test_one_resnet_fold_trains_for_fixed_epochs_without_validation_selection(
     assert len(result["predictions"]) == 2
     assert result["predictions"]["camera"].eq("front").all()
     assert checkpoint.is_file()
-    assert "model_state_dict" in torch.load(checkpoint, map_location="cpu")
+    saved = torch.load(checkpoint, map_location="cpu")
+    assert saved["num_classes"] == 2
+    assert saved["task"] == "binary"
     assert manual_seeds == [19]
     assert generator_seeds == [19]
 
@@ -202,7 +204,7 @@ def test_resnet_fold_evaluates_missing_test_class_with_full_label_metrics(
             )
             return logits, images.flatten(1)
 
-    monkeypatch.setattr(resnet, "BinaryResNet50", AlwaysZero)
+    monkeypatch.setattr(resnet, "ResNet50Classifier", AlwaysZero)
     conversion = transforms.Compose([transforms.Resize((8, 8)), transforms.ToTensor()])
     monkeypatch.setattr(resnet, "image_transforms", lambda: (conversion, conversion))
     rows = []
@@ -261,6 +263,35 @@ def test_resnet_fold_still_rejects_missing_training_class() -> None:
 
     assert result["metrics"]["status"] == "invalid"
     assert "train classes" in result["metrics"]["message"]
+
+
+def test_three_class_checkpoint_reloads_matching_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class TinyNetwork(nn.Module):
+        def __init__(self, num_classes: int = 2, weights: object = None) -> None:
+            super().__init__()
+            self.classifier = nn.Linear(4, num_classes)
+
+        def forward(self, images):  # type: ignore[no-untyped-def]
+            features = images.flatten(1)[:, :4]
+            return self.classifier(features), features
+
+    monkeypatch.setattr(resnet, "ResNet50Classifier", TinyNetwork)
+    checkpoint = tmp_path / "three_class.pt"
+    model = TinyNetwork(num_classes=3)
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "num_classes": 3,
+            "task": "three",
+        },
+        checkpoint,
+    )
+
+    loaded = resnet.load_checkpoint(checkpoint, weights=None)
+
+    assert loaded.classifier.out_features == 3
 
 
 @pytest.mark.slow

@@ -35,7 +35,7 @@ class ImageRows(Dataset):  # type: ignore[misc]
         return tensor, int(row["target"])
 
 
-class BinaryResNet50(nn.Module):  # type: ignore[misc]
+class ResNet50Classifier(nn.Module):  # type: ignore[misc]
     """ResNet50 features plus the existing 2048→1000→64→classes paper MLP."""
 
     def __init__(
@@ -96,10 +96,12 @@ def load_checkpoint(
     *,
     weights: models.ResNet50_Weights | None = None,
     device: torch.device | None = None,
-) -> BinaryResNet50:
+) -> ResNet50Classifier:
     destination = device or torch.device("cpu")
-    model = BinaryResNet50(weights=weights)
     checkpoint = torch.load(path, map_location=destination, weights_only=True)
+    model = ResNet50Classifier(
+        num_classes=int(checkpoint.get("num_classes", 2)), weights=weights
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(destination)
     return model
@@ -147,7 +149,7 @@ def train_resnet_fold(
 
     destination = device or preferred_device()
     torch.manual_seed(seed)
-    model = BinaryResNet50(num_classes=len(expected), weights=weights).to(destination)
+    model = ResNet50Classifier(num_classes=len(expected), weights=weights).to(destination)
     train_transform, evaluation_transform = image_transforms()
     loader = DataLoader(
         ImageRows(train, train_transform),
@@ -173,7 +175,14 @@ def train_resnet_fold(
 
     if save_path is not None:
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model_state_dict": model.state_dict()}, save_path)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "num_classes": len(expected),
+                "task": task,
+            },
+            save_path,
+        )
 
     probabilities: list[np.ndarray] = []
     model.eval()

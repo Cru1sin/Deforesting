@@ -273,6 +273,67 @@ def test_fit_is_scoped_to_named_v268_candidates() -> None:
         main_cost.main(["--action", "fit", "--cost", "v2.6.8"])
 
 
+def test_fit_dry_run_stops_before_reading_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        main_cost,
+        "DatasetLoader",
+        lambda _: (_ for _ in ()).throw(AssertionError("dry-run must not read Dataset")),
+    )
+
+    status = main_cost.main(
+        [
+            "--action",
+            "fit",
+            "--cost",
+            "v2.6.8",
+            "--variant",
+            "dry_run",
+            "--output-root",
+            str(tmp_path / "output"),
+            "--dry-run",
+        ]
+    )
+
+    assert status == 0
+    assert "Fit V2.6.8" in capsys.readouterr().out
+    assert not (tmp_path / "output").exists()
+
+
+def test_compare_dry_run_stops_before_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        main_cost,
+        "generate_cost_function_figures",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dry-run must not render")
+        ),
+    )
+
+    status = main_cost.main(
+        [
+            "--action",
+            "compare",
+            "--results",
+            str(tmp_path / "run_a"),
+            str(tmp_path / "run_b"),
+            "--output-root",
+            str(tmp_path / "output"),
+            "--dry-run",
+        ]
+    )
+
+    assert status == 0
+    assert "Compare dry-run" in capsys.readouterr().out
+    assert not (tmp_path / "output").exists()
+
+
 def test_action_is_a_required_option_not_a_positional() -> None:
     parser = main_cost.build_parser()
 
