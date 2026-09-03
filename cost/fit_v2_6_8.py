@@ -41,6 +41,20 @@ OUTCOME_TARGETS = {
     "compressor_energy": "E_comp_T_observed_kwh",
     "duration": "D_T_observed_minutes",
 }
+OUTCOME_VALIDITY = {
+    "energy": "energy_event_valid",
+    "heat": "heat_event_valid",
+    "compressor_energy": "compressor_event_valid",
+    "duration": "duration_event_valid",
+}
+
+
+def valid_outcome_events(events: pd.DataFrame, outcome: str) -> pd.DataFrame:
+    """Select only rows valid for one observed transition target."""
+    target = OUTCOME_TARGETS[outcome]
+    validity = OUTCOME_VALIDITY[outcome]
+    valid = events[validity] if validity in events else events["event_valid"]
+    return events.loc[valid.fillna(False) & events[target].notna()].copy()
 
 
 def experiment_weights(groups: pd.Series) -> np.ndarray:

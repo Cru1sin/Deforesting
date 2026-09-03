@@ -22,6 +22,64 @@ def cycle_ratio(curve: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def five_minute_support_runs(times: pd.Series, selected: pd.Series) -> pd.Series:
+    """Keep candidate runs spanning at least five continuous minutes."""
+    result = pd.Series(False, index=selected.index)
+    chosen = np.flatnonzero(selected.to_numpy(dtype=bool))
+    if not chosen.size:
+        return result
+    parsed = pd.to_datetime(times, errors="coerce")
+    breaks = np.flatnonzero(
+        (np.diff(chosen) != 1)
+        | (
+            parsed.iloc[chosen[1:]].to_numpy() - parsed.iloc[chosen[:-1]].to_numpy()
+            > np.timedelta64(90, "s")
+        )
+    )
+    for left, right in zip(np.r_[0, breaks + 1], np.r_[breaks, len(chosen) - 1], strict=True):
+        positions = chosen[left : right + 1]
+        if parsed.iloc[positions[-1]] - parsed.iloc[positions[0]] >= pd.Timedelta(minutes=5):
+            result.iloc[positions] = True
+    return result
+
+
+def add_selection_contract(
+    curve: pd.DataFrame,
+    selected: pd.Series,
+    *,
+    policy: str,
+    selected_reason: str,
+    abstain_reason: str,
+    score: pd.Series,
+    model_supported: pd.Series,
+) -> pd.DataFrame:
+    """Expose one common decision interface without removing method-specific fields."""
+    result = curve.copy()
+    result["selected"] = selected.fillna(False).astype(bool)
+    result["selected_time"] = pd.NaT
+    result["selection_policy"] = policy
+    result["selection_status"] = "abstain"
+    result["selection_reason"] = abstain_reason
+    result["selection_score"] = np.nan
+    result["selection_model_supported"] = pd.NA
+    groups = (
+        result.groupby("cycle_name", sort=False).groups.values()
+        if "cycle_name" in result
+        else [result.index]
+    )
+    for positions in groups:
+        chosen = result.index.intersection(positions)[result.loc[positions, "selected"]]
+        if chosen.empty:
+            continue
+        index = chosen[0]
+        result.loc[positions, "selected_time"] = pd.Timestamp(result.loc[index, "candidate_time"])
+        result.loc[positions, "selection_status"] = "selected"
+        result.loc[positions, "selection_reason"] = selected_reason
+        result.loc[index, "selection_score"] = score.loc[index]
+        result.loc[positions, "selection_model_supported"] = bool(model_supported.loc[index])
+    return result
+
+
 def build_historical_cost_curve(  # noqa: C901
     boundaries: pd.DataFrame,
     heating_energy: pd.DataFrame,
@@ -89,4 +147,15 @@ def build_historical_cost_curve(  # noqa: C901
     curve["base_cost"] = checked["base_cost"]
     curve["variant"] = checked["variant"]
     curve["label_eligible"] = checked["label_eligible"]
-    return curve
+    return add_selection_contract(
+        curve,
+        curve["is_optimum"],
+        policy="argmin_inverse_cop",
+        selected_reason="historical_eligible_minimum",
+        abstain_reason="no_eligible_candidate",
+        score=curve["inverse_cop"],
+        model_supported=curve.get("ET_in_support", pd.Series(False, index=curve.index)).fillna(
+            False
+        )
+        & curve.get("QT_in_support", pd.Series(False, index=curve.index)).fillna(False),
+    )

@@ -5,13 +5,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .cost_curve import add_selection_contract, five_minute_support_runs
+
+TIE_BREAK = "earliest_candidate"
+
 
 def select_ch_pareto_knee(
     objectives: pd.DataFrame,
     *,
     minimum_time: object = None,
-    allow_extrapolation: bool = True,
-    guardrail: float = 0.05,
+    allow_extrapolation: bool = False,
 ) -> pd.DataFrame:
     """Select a two-objective C/H Pareto knee without allowing O to move it."""
     result = objectives.sort_values("candidate_time", kind="stable").reset_index(drop=True).copy()
@@ -33,22 +36,23 @@ def select_ch_pareto_knee(
             & state_valid
             & finite
         )
-        eligible = after_minimum & state_valid & finite & (native | extrapolated)
+        candidate = after_minimum & state_valid & finite & (native | extrapolated)
+        eligible = candidate & five_minute_support_runs(result["candidate_time"], candidate)
         result[f"{prefix}_eligible"] = eligible
         result[f"{prefix}_extrapolated"] = eligible & ~native
 
-    result["within_guardrail"] = False
+    result["within_5pct_of_both_ideals"] = False
     c_eligible = result["C_eligible"]
     if c_eligible.any():
         best_c = float(result.loc[c_eligible, "C"].max())
         h_eligible = result["H_eligible"]
         if h_eligible.any():
             best_h = float(result.loc[h_eligible, "H"].max())
-            result["within_guardrail"] = (
+            result["within_5pct_of_both_ideals"] = (
                 c_eligible
                 & h_eligible
-                & result["C"].ge((1 - guardrail) * best_c)
-                & result["H"].ge((1 - guardrail) * best_h)
+                & result["C"].ge(0.95 * best_c)
+                & result["H"].ge(0.95 * best_h)
             )
 
     result["pareto"] = False
@@ -56,10 +60,17 @@ def select_ch_pareto_knee(
     result["pareto_knee"] = False
     result["pareto_knee_score"] = np.nan
     result["pareto_knee_method"] = "abstain_no_common_domain"
-    result["selected_time"] = pd.NaT
     common = result["C_eligible"] & result["H_eligible"]
     if not common.any():
-        return result
+        return add_selection_contract(
+            result,
+            result["pareto_knee"],
+            policy="ch_pareto_knee",
+            selected_reason="normalized_chord_distance",
+            abstain_reason="no_common_domain",
+            score=result["pareto_knee_score"],
+            model_supported=result["C_model_supported"] & result["H_model_supported"],
+        )
 
     positions = result.index[common].to_numpy()
     c_values = result.loc[positions, "C"].to_numpy(dtype=float)
@@ -94,8 +105,16 @@ def select_ch_pareto_knee(
             scores = chord
             method = "normalized_chord_distance"
     result.loc[front_positions, "pareto_knee_score"] = scores
-    knee = int(front_positions[int(np.argmax(scores))])
+    best = float(scores.max())
+    knee = int(front_positions[np.flatnonzero(scores == best)[0]])
     result.loc[knee, "pareto_knee"] = True
     result["pareto_knee_method"] = method
-    result["selected_time"] = result.loc[knee, "candidate_time"]
-    return result
+    return add_selection_contract(
+        result,
+        result["pareto_knee"],
+        policy="ch_pareto_knee",
+        selected_reason=method,
+        abstain_reason="no_common_domain",
+        score=result["pareto_knee_score"],
+        model_supported=result["C_model_supported"] & result["H_model_supported"],
+    )

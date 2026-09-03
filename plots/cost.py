@@ -151,6 +151,30 @@ def _load_result_tables(
             table["rb_status"] = "unavailable"
         for _cycle_name, curve in table.groupby("cycle_name", sort=False):
             base = key.split("__", 1)[0]
+            if "selected" in curve and "selected_time" in curve:
+                selected = curve.loc[curve["selected"].fillna(False).astype(bool)]
+                selected_times = pd.to_datetime(
+                    curve["selected_time"], errors="coerce", format="mixed"
+                ).dropna().drop_duplicates()
+                if selected.empty and selected_times.empty:
+                    table.loc[curve.index, "t_star"] = pd.NaT
+                    table.loc[curve.index, "t_star_model_supported"] = pd.NA
+                    continue
+                candidate_time = pd.to_datetime(
+                    selected["candidate_time"], errors="coerce", format="mixed"
+                )
+                if (
+                    len(selected) != 1
+                    or len(selected_times) != 1
+                    or pd.isna(candidate_time.iloc[0])
+                    or candidate_time.iloc[0] != selected_times.iloc[0]
+                ):
+                    raise ValueError(f"{_cycle_name}: invalid stored selection")
+                table.loc[curve.index, "t_star"] = candidate_time.iloc[0]
+                table.loc[curve.index, "t_star_model_supported"] = selected.iloc[0].get(
+                    "selection_model_supported", pd.NA
+                )
+                continue
             if base == "ch_pareto_knee":
                 selected_times = pd.to_datetime(
                     curve.get("selected_time", pd.Series(dtype=object)),

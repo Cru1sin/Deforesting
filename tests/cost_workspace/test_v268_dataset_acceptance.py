@@ -9,6 +9,7 @@ import pytest
 
 import main_cost
 from cost import cost_function_v2_6_8
+from cost.fit_v2_6_8 import OUTCOME_VALIDITY
 from cost.v2_6_8_data import candidate_cohort
 from dataloader import DatasetLoader
 
@@ -44,7 +45,11 @@ def test_current_dataset_freezes_v268_review_counts_and_outcomes(tmp_path: Path)
     bootstrap = pd.read_csv(run / "bootstrap.csv")
     assert (len(events), int(events["event_valid"].sum())) == (83, 72)
     assert int((~events["event_valid"]).sum()) == 11
-    assert len(validation) == 299
+    assert {
+        name: int(events[column].sum())
+        for name, column in OUTCOME_VALIDITY.items()
+    } == {"energy": 77, "heat": 72, "compressor_energy": 73, "duration": 77}
+    assert len(validation) == 314
     assert len(bootstrap) == 69
     assert bootstrap["repeat_count"].eq(200).all()
     assert bootstrap["seed"].eq(268).all()

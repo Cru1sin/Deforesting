@@ -290,9 +290,9 @@ def event_outcomes(
     result["Q_T_observed_kwh"] = float(
         np.sum([float(result[f"Q_{phase}_kwh"]) for phase in windows])  # type: ignore[arg-type]
     )
-    compressor_valid = partition and all(
-        bool(result[f"E_comp_{phase}_valid"]) for phase in windows
-    )
+    energy_valid = partition and all(bool(result[f"E_{phase}_valid"]) for phase in windows)
+    heat_valid = partition and all(bool(result[f"Q_{phase}_valid"]) for phase in windows)
+    compressor_valid = partition and all(bool(result[f"E_comp_{phase}_valid"]) for phase in windows)
     result["E_comp_T_observed_kwh"] = (
         float(np.sum([float(result[f"E_comp_{phase}_kwh"]) for phase in windows]))
         if compressor_valid
@@ -303,15 +303,11 @@ def event_outcomes(
     result["phase_partition_valid"] = bool(partition)
     result["phase_interval_convention"] = PHASE_INTERVAL_CONVENTION
     result["integral_sampling_convention"] = INTEGRAL_SAMPLING_CONVENTION
+    result["energy_event_valid"] = energy_valid
+    result["heat_event_valid"] = heat_valid
     result["compressor_event_valid"] = compressor_valid
-    result["event_valid"] = bool(
-        partition
-        and all(
-            bool(result[f"{quantity}_{phase}_valid"])
-            for quantity in ("E", "Q")
-            for phase in windows
-        )
-    )
+    result["duration_event_valid"] = bool(partition)
+    result["event_valid"] = energy_valid and heat_valid
     return result
 
 
@@ -355,7 +351,14 @@ def build_event_table(loader: Any) -> pd.DataFrame:  # noqa: C901
             if next_start is None or abs((next_start - recorded_end).total_seconds()) > 60:
                 reasons.append("following_cycle_not_adjacent")
         if reasons:
-            row.update(event_valid=False, event_invalid_reason=";".join(reasons))
+            row.update(
+                event_valid=False,
+                energy_event_valid=False,
+                heat_event_valid=False,
+                compressor_event_valid=False,
+                duration_event_valid=False,
+                event_invalid_reason=";".join(reasons),
+            )
             rows.append(row)
             continue
         heating, preparation = row["heating_start"], row["defrost_preparation_start"]

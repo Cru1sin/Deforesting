@@ -7,8 +7,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .cost_function_v2_6_8 import five_minute_support_runs
-from .fit_v2_6_8 import OUTCOME_TARGETS, fit_weighted_ridge, predict_from_artifact
+from .cost_curve import five_minute_support_runs
+from .fit_v2_6_8 import (
+    OUTCOME_TARGETS,
+    OUTCOME_VALIDITY,
+    fit_weighted_ridge,
+    predict_from_artifact,
+    valid_outcome_events,
+)
 
 _VALIDATION_COLUMNS = {
     "energy": ("E_T_prediction_kwh", "E_support_distance"),
@@ -20,31 +26,44 @@ _VALIDATION_COLUMNS = {
 
 def build_validation_table(events: pd.DataFrame, artifacts: dict[str, Any]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    valid = events.loc[events["event_valid"].fillna(False)]
-    for experiment, group in valid.groupby("experiment_id", sort=False):
+    for experiment, group in events.groupby("experiment_id", sort=False):
         for model_name, model_set in artifacts["models"].items():
-            predictions = {
-                name: predict_from_artifact(model_set[name], group, str(experiment))
-                for name in OUTCOME_TARGETS
-                if name in model_set
-            }
-            for position, (_, event) in enumerate(group.iterrows()):
-                row: dict[str, object] = {
-                    "event_id": event["event_id"],
-                    "cycle_name": event["cycle_name"],
-                    "experiment_id": str(experiment),
-                    "model_name": model_name,
-                    "event_valid": True,
-                    "event_invalid_reason": "",
-                }
-                for name, prediction in predictions.items():
+            event_rows: dict[str, dict[str, object]] = {}
+            for name in OUTCOME_TARGETS:
+                if name not in model_set:
+                    continue
+                selected = valid_outcome_events(group, name)
+                if selected.empty:
+                    continue
+                prediction = predict_from_artifact(model_set[name], selected, str(experiment))
+                for position, (_, event) in enumerate(selected.iterrows()):
+                    event_id = str(event["event_id"])
+                    row = event_rows.setdefault(
+                        event_id,
+                        {
+                            "event_id": event_id,
+                            "cycle_name": event["cycle_name"],
+                            "experiment_id": str(experiment),
+                            "model_name": model_name,
+                            "event_valid": bool(event.get("event_valid", False)),
+                            "event_invalid_reason": event.get("event_invalid_reason", ""),
+                            **{
+                                column: bool(event.get(column, event.get("event_valid", False)))
+                                for column in OUTCOME_VALIDITY.values()
+                            },
+                        },
+                    )
                     target = OUTCOME_TARGETS[name]
                     prediction_column, support_column = _VALIDATION_COLUMNS[name]
                     row[target] = event.get(target, np.nan)
                     row[prediction_column] = prediction.iloc[position]["prediction"]
                     row[support_column] = prediction.iloc[position]["support_distance"]
-                rows.append(row)
-    for _, event in events.loc[~events["event_valid"].fillna(False)].iterrows():
+            rows.extend(event_rows.values())
+    any_valid = pd.Series(False, index=events.index)
+    for name, target in OUTCOME_TARGETS.items():
+        if target in events:
+            any_valid.loc[valid_outcome_events(events, name).index] = True
+    for _, event in events.loc[~any_valid].iterrows():
         rows.append(
             {
                 "event_id": event.get("event_id", event["cycle_name"]),

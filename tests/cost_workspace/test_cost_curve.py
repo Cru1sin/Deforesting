@@ -180,6 +180,13 @@ def test_build_historical_cost_curve_uses_joint_support_positive_heat_and_argmin
     assert result["support_policy"].eq("allow_historical_extrapolation").all()
     assert result["inverse_cop"].iloc[:2].tolist() == pytest.approx([1.0, 0.5])
     assert result["is_optimum"].tolist() == [False, True, False, False]
+    assert result["selected"].equals(result["is_optimum"])
+    assert result["selected_time"].eq(times[1]).all()
+    assert result["selection_policy"].eq("argmin_inverse_cop").all()
+    assert result["selection_status"].eq("selected").all()
+    assert result["selection_reason"].eq("historical_eligible_minimum").all()
+    assert result.loc[result["selected"], "selection_score"].item() == 0.5
+    assert not result["selection_model_supported"].any()
     assert result["relative_regret"].iloc[:2].tolist() == pytest.approx([1.0, 0.0])
     assert result["near_optimal_1pct"].tolist() == [False, True, False, False]
     assert result["near_optimal_5pct"].tolist() == [False, True, False, False]

@@ -10,8 +10,8 @@ import pandas as pd
 
 from . import cost_function_v2_6_8
 from .fit_v2_6_8 import predict_from_artifact
-from .objectives import build_objectives
-from .policy import select_ch_pareto_knee
+from .objectives import add_single_objective_diagnostics, build_objectives
+from .policy import TIE_BREAK, select_ch_pareto_knee
 
 DEFAULT_POLICY_RECIPE: dict[str, object] = {
     "base_method": "ch_pareto_knee",
@@ -19,10 +19,11 @@ DEFAULT_POLICY_RECIPE: dict[str, object] = {
     "label_eligible": False,
     "outcome_model": "ticket_ridge_dynamic8",
     "candidate_step_seconds": 10,
-    "allow_extrapolation": True,
-    "guardrail": 0.05,
+    "allow_extrapolation": False,
+    "reference_window": "within_5pct_of_both_ideals",
     "minimum_time_boundary": "stable_heating_start_when_available",
     "O_role": "reference_only",
+    "tie_break": TIE_BREAK,
 }
 
 
@@ -48,12 +49,12 @@ def calculate_cycle(
     artifacts: Mapping[str, Any],
     *,
     step_seconds: int = 10,
-    allow_extrapolation: bool = True,
+    allow_extrapolation: bool = False,
 ) -> pd.DataFrame:
     """Build shared candidates, add EcompT/DT, then apply objectives and CH policy."""
     model_name = str(DEFAULT_POLICY_RECIPE["outcome_model"])
     model_set = artifacts["models"][model_name]
-    candidates = cost_function_v2_6_8.calculate_cycle(
+    candidates = cost_function_v2_6_8.build_candidate_outcomes(
         loader,
         cycle_name,
         cost_function_v2_6_8.DEFAULT_RECIPE,
@@ -79,10 +80,9 @@ def calculate_cycle(
     nested = record.get("boundaries")
     boundary_source = nested if isinstance(nested, Mapping) else record
     result = select_ch_pareto_knee(
-        build_objectives(candidates),
+        add_single_objective_diagnostics(build_objectives(candidates)),
         minimum_time=boundary_source.get("stable_heating_start"),
         allow_extrapolation=allow_extrapolation,
-        guardrail=float(DEFAULT_POLICY_RECIPE["guardrail"]),
     )
     result["algorithm"] = result["base_method"] = "ch_pareto_knee"
     result["label_eligible"] = result["hard_label_eligible"] = False

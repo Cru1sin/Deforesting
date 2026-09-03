@@ -129,6 +129,10 @@ def test_measurement_gate_breaks_support_run_and_connected_basin() -> None:
     result = finalize_v268_curve(curve)
     assert result["diagnostic_minimum"].iloc[0] == times[5]
     assert result["basin_1pct_width_minutes"].iloc[0] == 0
+    assert result["selected"].sum() == 1
+    assert result["selected_time"].eq(times[5]).all()
+    assert result["selection_policy"].eq("supported_inverse_cop_minimum").all()
+    assert result["selection_reason"].eq("continuous_supported_minimum").all()
 
 
 def test_v268_requires_in_support_even_when_transition_is_evaluable() -> None:
@@ -282,12 +286,18 @@ def test_event_compressor_audit_has_independent_validity() -> None:
     assert valid["E_comp_T_observed_kwh"] == pytest.approx(3 / 60)
     assert valid["D_T_observed_minutes"] == 3
     assert valid["event_valid"]
+    assert valid["energy_event_valid"]
+    assert valid["heat_event_valid"]
     assert valid["compressor_event_valid"]
+    assert valid["duration_event_valid"]
 
     current.loc[current["timestamp"].ge(boundaries["defrost_start"]), "compressor_power"] = np.nan
     invalid = event_outcomes(current, recovery, **boundaries)
     assert invalid["event_valid"]
+    assert invalid["energy_event_valid"]
+    assert invalid["heat_event_valid"]
     assert not invalid["compressor_event_valid"]
+    assert invalid["duration_event_valid"]
     assert np.isnan(invalid["E_comp_T_observed_kwh"])
 
 

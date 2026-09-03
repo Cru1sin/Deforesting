@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .cost_curve import cycle_ratio
+from .cost_curve import add_selection_contract, cycle_ratio, five_minute_support_runs
 from .fit_v2_6_8 import load_artifacts, predict_independent_targets
 from .v2_6_8_data import (
     RAW_COLUMNS,
@@ -53,7 +53,7 @@ DEFAULT_RECIPE: dict[str, object] = {
 }
 
 
-def calculate_cycle(
+def build_candidate_outcomes(
     loader: Any,
     cycle_name: str,
     recipe: Mapping[str, object] | None = None,
@@ -61,7 +61,7 @@ def calculate_cycle(
     *,
     candidate_step_seconds: int = 60,
 ) -> pd.DataFrame:
-    """Execute boundary/cohort → EH → QH → ET → QT → final curve."""
+    """Build neutral measured and predicted candidate outcomes without selecting a time."""
     checked = validate_recipe(DEFAULT_RECIPE if recipe is None else recipe)
     record = loader.get_cycle_record(cycle_name)
     nested = record.get("boundaries")
@@ -127,14 +127,33 @@ def calculate_cycle(
     curve["heating_energy_measurement_valid"] = eh_audit["valid"]
     curve["heating_heat_measurement_valid"] = qh_audit["valid"]
     curve["heating_measurement_valid"] = eh_audit["valid"] & qh_audit["valid"]
+    curve["variant"] = checked["variant"]
+    curve["transition_scope"] = "preparation_defrost_recovery"
+    curve["transition_breakdown"] = "not_decomposed"
+    return curve
+
+
+def calculate_cycle(
+    loader: Any,
+    cycle_name: str,
+    recipe: Mapping[str, object] | None = None,
+    artifacts: Mapping[str, Any] | None = None,
+    *,
+    candidate_step_seconds: int = 60,
+) -> pd.DataFrame:
+    """Build V2.6.8 candidates, then apply its frozen inverse-COP selector."""
+    curve = build_candidate_outcomes(
+        loader,
+        cycle_name,
+        recipe,
+        artifacts,
+        candidate_step_seconds=candidate_step_seconds,
+    )
     curve = cycle_ratio(curve)
     curve["physical_valid"] = curve["total_energy_kwh"].gt(0) & curve["total_heat_kwh"].gt(
         Q_MIN_KWH
     )
     curve["algorithm"] = curve["base_cost"] = "v2.6.8"
-    curve["variant"] = checked["variant"]
-    curve["transition_scope"] = "preparation_defrost_recovery"
-    curve["transition_breakdown"] = "not_decomposed"
     return finalize_v268_curve(curve)
 
 
@@ -197,27 +216,6 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
     return value
 
 
-def five_minute_support_runs(times: pd.Series, selected: pd.Series) -> pd.Series:
-    """Keep supported candidate runs spanning at least five continuous minutes."""
-    result = pd.Series(False, index=selected.index)
-    chosen = np.flatnonzero(selected.to_numpy(dtype=bool))
-    if not chosen.size:
-        return result
-    parsed = pd.to_datetime(times, errors="coerce")
-    breaks = np.flatnonzero(
-        (np.diff(chosen) != 1)
-        | (
-            parsed.iloc[chosen[1:]].to_numpy() - parsed.iloc[chosen[:-1]].to_numpy()
-            > np.timedelta64(90, "s")
-        )
-    )
-    for left, right in zip(np.r_[0, breaks + 1], np.r_[breaks, len(chosen) - 1], strict=True):
-        positions = chosen[left : right + 1]
-        if parsed.iloc[positions[-1]] - parsed.iloc[positions[0]] >= pd.Timedelta(minutes=5):
-            result.iloc[positions] = True
-    return result
-
-
 def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
     """Apply the corrected measurement gate and connected optimum basins."""
     result = curve.sort_values("candidate_time", kind="stable").reset_index(drop=True).copy()
@@ -275,4 +273,15 @@ def finalize_v268_curve(curve: pd.DataFrame) -> pd.DataFrame:
     result["recommended_time"] = pd.NaT
     result["hard_label_eligible"] = False
     result["label_eligible"] = False
-    return result
+    selected = pd.to_datetime(result["candidate_time"]).eq(
+        pd.to_datetime(result["diagnostic_minimum"]).iloc[0]
+    )
+    return add_selection_contract(
+        result,
+        selected,
+        policy="supported_inverse_cop_minimum",
+        selected_reason="continuous_supported_minimum",
+        abstain_reason="no_continuous_supported_minimum",
+        score=inverse,
+        model_supported=result["model_supported"],
+    )

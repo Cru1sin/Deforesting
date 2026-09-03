@@ -21,6 +21,10 @@ def _events() -> pd.DataFrame:
                     "cycle_name": f"{experiment}_{index}",
                     "experiment_id": experiment,
                     "event_valid": True,
+                    "energy_event_valid": True,
+                    "heat_event_valid": True,
+                    "compressor_event_valid": True,
+                    "duration_event_valid": True,
                     "event_invalid_reason": "",
                     "water_in_temperature": 35 + value,
                     "water_out_temperature": 40 + value,
@@ -46,11 +50,18 @@ def _events() -> pd.DataFrame:
             "cycle_name": "excluded",
             "experiment_id": "a",
             "event_valid": False,
+            "energy_event_valid": False,
+            "heat_event_valid": False,
+            "compressor_event_valid": False,
+            "duration_event_valid": False,
             "event_invalid_reason": "missing_defrost_preparation_start",
         }
     )
     result = pd.DataFrame(rows)
-    result.loc[result["event_id"].eq("a_0"), "E_comp_T_observed_kwh"] = float("nan")
+    result.loc[result["event_id"].eq("a_0"), ["event_valid", "heat_event_valid"]] = False
+    result.loc[result["event_id"].eq("a_0"), "Q_T_observed_kwh"] = float("nan")
+    result.loc[result["event_id"].eq("b_0"), "compressor_event_valid"] = False
+    result.loc[result["event_id"].eq("b_0"), "E_comp_T_observed_kwh"] = float("nan")
     return result
 
 
@@ -120,7 +131,9 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
         assert set(model) == {"energy", "heat", "compressor_energy", "duration"}
     dynamic = artifact["models"]["ticket_ridge_dynamic8"]
     assert dynamic["energy"]["full_data_model"]["training_event_count"] == 8
+    assert dynamic["heat"]["full_data_model"]["training_event_count"] == 7
     assert dynamic["compressor_energy"]["full_data_model"]["training_event_count"] == 7
+    assert dynamic["duration"]["full_data_model"]["training_event_count"] == 8
     promoted = load_artifacts()
     assert set(promoted["models"]) == model_names
     assert set(promoted["models"]["ticket_ridge_dynamic8"]) == {"energy", "heat"}

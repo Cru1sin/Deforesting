@@ -124,6 +124,11 @@ normalized-chord knee (or the relative ideal-point fallback for a degenerate
 front). O is plotted for physical interpretation only. The policy writes one
 shared `cost.csv` plus per-cycle tables under `output/cost/policy/<variant>/`;
 it is an offline working policy and cannot yet generate hard RGB labels.
+Model extrapolation is disabled by default; use `--allow-extrapolation` only
+when intentionally reviewing candidates outside the empirical support domain.
+Every newly calculated method exposes the same `selected`, `selected_time`,
+`selection_policy`, `selection_status`, `selection_reason`, and
+`selection_score` fields; method-specific diagnostic columns remain available.
 
 Compare completed runs through the shared renderer:
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .cost_function_v2_6_8 import five_minute_support_runs
+from .cost_curve import five_minute_support_runs
 
 
 def _connected_basin(
@@ -89,6 +89,13 @@ def build_objectives(candidate_table: pd.DataFrame) -> pd.DataFrame:
             result["candidate_time"], base
         )
         result[f"{prefix}_native_eligible"] = base & result[f"{prefix}_continuous_support"]
+    return result
+
+
+def add_single_objective_diagnostics(objectives: pd.DataFrame) -> pd.DataFrame:
+    """Add each objective's own optimum and connected near-optimal basins."""
+    result = objectives.copy()
+    for prefix in ("C", "H", "O"):
         result[f"{prefix}_t_star"] = pd.NaT
         for percent in (1, 2, 5):
             result[f"{prefix}_basin_{percent}pct_start"] = pd.NaT

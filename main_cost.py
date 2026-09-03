@@ -27,6 +27,7 @@ from cost.fit_v2_6_8 import (
     fit_outcome_fold,
     load_artifacts,
     mean_outcome_artifact,
+    valid_outcome_events,
 )
 from cost.v2_6_8_data import build_event_table, candidate_cohort
 from cost.validate_v2_6_8 import bootstrap_minima, build_validation_table
@@ -54,9 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parameters", type=Path)
     parser.add_argument("--candidate-step-seconds", type=int, default=10)
     parser.add_argument("--n-jobs", type=int, default=6)
-    parser.add_argument(
-        "--allow-extrapolation", action=argparse.BooleanOptionalAction, default=True
-    )
+    parser.add_argument("--allow-extrapolation", action="store_true")
     parser.add_argument(
         "--integration-protocol", choices=("historical_reconstruction", "strict_causal")
     )
@@ -368,15 +367,20 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
         return 0
     loader = DatasetLoader(args.dataset)
     events = build_event_table(loader)
-    valid = events.loc[events["event_valid"].fillna(False)].copy()
+    outcome_events = {name: valid_outcome_events(events, name) for name in OUTCOME_TARGETS}
+    valid = pd.concat(outcome_events.values()).drop_duplicates("event_id")
     if valid.empty:
         raise ValueError("V2.6.8 fit has no valid observed events")
-    experiments = sorted(valid["experiment_id"].astype(str).unique())
     mean_models: dict[str, dict[str, object]] = {}
     for target_name, target in OUTCOME_TARGETS.items():
+        target_events = outcome_events[target_name]
+        experiments = sorted(target_events["experiment_id"].astype(str).unique())
         folds = {
             heldout: mean_outcome_artifact(
-                valid.loc[~valid["experiment_id"].astype(str).eq(heldout)], target
+                target_events.loc[
+                    ~target_events["experiment_id"].astype(str).eq(heldout)
+                ],
+                target,
             )
             for heldout in experiments
         }
@@ -386,7 +390,7 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
             "feature_order": [],
             "support_policy": "all_candidates_for_experiment_balanced_mean",
             "folds": folds,
-            "full_data_model": mean_outcome_artifact(valid, target),
+            "full_data_model": mean_outcome_artifact(target_events, target),
         }
     artifact: dict[str, Any] = {
         "artifact_version": "v2.6.8",
@@ -400,16 +404,23 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
     for model_name, features in MODEL_FEATURES.items():
         artifact["models"][model_name] = {}
         for target_name, target in OUTCOME_TARGETS.items():
+            target_events = outcome_events[target_name]
+            experiments = sorted(target_events["experiment_id"].astype(str).unique())
             folds = {
-                heldout: fit_outcome_fold(valid, heldout, features, target)
+                heldout: fit_outcome_fold(target_events, heldout, features, target)
                 for heldout in experiments
             }
             artifact["models"][model_name][target_name] = assemble_target_artifact(
-                target, features, folds, fit_full_outcome(valid, features, target)
+                target,
+                features,
+                folds,
+                fit_full_outcome(target_events, features, target),
             )
 
     validation = build_validation_table(events, artifact)
-    cohort, candidate_rows = candidate_cohort(loader, set(experiments))
+    dynamic = artifact["models"]["ticket_ridge_dynamic8"]
+    candidate_experiments = set(dynamic["energy"]["folds"]) & set(dynamic["heat"]["folds"])
+    cohort, candidate_rows = candidate_cohort(loader, candidate_experiments)
     curves = pd.concat(
         [
             cost_function_v2_6_8.calculate_cycle(
@@ -419,7 +430,6 @@ def _fit_v268(args: argparse.Namespace, arguments: list[str]) -> int:  # noqa: C
         ],
         ignore_index=True,
     )
-    dynamic = artifact["models"]["ticket_ridge_dynamic8"]
     bootstrap = bootstrap_minima(curves, events, dynamic["energy"], dynamic["heat"])
     recipe = dict(cost_function_v2_6_8.DEFAULT_RECIPE)
     run.mkdir(parents=True, exist_ok=True)

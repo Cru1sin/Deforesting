@@ -25,7 +25,7 @@ def _events() -> pd.DataFrame:
 
 
 def test_outcome_targets_are_the_single_explicit_four_target_contract() -> None:
-    from cost.fit_v2_6_8 import OUTCOME_TARGETS
+    from cost.fit_v2_6_8 import OUTCOME_TARGETS, OUTCOME_VALIDITY
 
     assert OUTCOME_TARGETS == {
         "energy": "E_T_observed_kwh",
@@ -33,6 +33,29 @@ def test_outcome_targets_are_the_single_explicit_four_target_contract() -> None:
         "compressor_energy": "E_comp_T_observed_kwh",
         "duration": "D_T_observed_minutes",
     }
+    assert OUTCOME_VALIDITY == {
+        "energy": "energy_event_valid",
+        "heat": "heat_event_valid",
+        "compressor_energy": "compressor_event_valid",
+        "duration": "duration_event_valid",
+    }
+
+
+def test_each_outcome_selects_its_own_valid_events() -> None:
+    from cost.fit_v2_6_8 import valid_outcome_events
+
+    events = pd.DataFrame(
+        {
+            "event_id": ["energy_only", "heat_only"],
+            "energy_event_valid": [True, False],
+            "heat_event_valid": [False, True],
+            "E_T_observed_kwh": [1.0, np.nan],
+            "Q_T_observed_kwh": [np.nan, 2.0],
+        }
+    )
+
+    assert valid_outcome_events(events, "energy")["event_id"].tolist() == ["energy_only"]
+    assert valid_outcome_events(events, "heat")["event_id"].tolist() == ["heat_only"]
 
 
 def test_experiment_weights_equalize_group_mass() -> None:
@@ -182,6 +205,37 @@ def test_validation_replays_only_targets_present_in_each_model(monkeypatch) -> N
     ]
 
 
+def test_validation_keeps_an_event_valid_for_only_one_outcome(monkeypatch) -> None:
+    from cost import validate_v2_6_8
+
+    events = pd.DataFrame(
+        {
+            "event_id": ["energy_only"],
+            "cycle_name": ["cycle"],
+            "experiment_id": ["a"],
+            "event_valid": [False],
+            "energy_event_valid": [True],
+            "heat_event_valid": [False],
+            "E_T_observed_kwh": [1.0],
+            "Q_T_observed_kwh": [np.nan],
+            "event_invalid_reason": ["Q_R_coverage"],
+        }
+    )
+    artifacts = {"models": {"model": {"energy": {"name": "energy"}}}}
+    monkeypatch.setattr(
+        validate_v2_6_8,
+        "predict_from_artifact",
+        lambda *_: pd.DataFrame({"prediction": [1.1], "support_distance": [0.2]}),
+    )
+
+    result = validate_v2_6_8.build_validation_table(events, artifacts)
+
+    assert result.loc[0, "model_name"] == "model"
+    assert result.loc[0, "E_T_prediction_kwh"] == 1.1
+    assert result.loc[0, "energy_event_valid"]
+    assert not result.loc[0, "heat_event_valid"]
+
+
 def test_cho_composes_shared_candidates_four_predictions_objectives_and_policy(monkeypatch) -> None:
     from cost import cho
 
@@ -212,7 +266,7 @@ def test_cho_composes_shared_candidates_four_predictions_objectives_and_policy(m
     calls: dict[str, object] = {}
     monkeypatch.setattr(
         cho.cost_function_v2_6_8,
-        "calculate_cycle",
+        "build_candidate_outcomes",
         lambda loader, cycle, recipe, source, *, candidate_step_seconds: (
             calls.update(step=candidate_step_seconds, recipe=recipe, source=source) or base.copy()
         ),
@@ -228,6 +282,7 @@ def test_cho_composes_shared_candidates_four_predictions_objectives_and_policy(m
         "build_objectives",
         lambda values: calls.update(objectives=values.copy()) or values.assign(C=1.0, H=2.0),
     )
+    monkeypatch.setattr(cho, "add_single_objective_diagnostics", lambda values: values)
     monkeypatch.setattr(
         cho,
         "select_ch_pareto_knee",
@@ -243,8 +298,7 @@ def test_cho_composes_shared_candidates_four_predictions_objectives_and_policy(m
     assert objectives["DT_in_support"].tolist() == [True, False]
     assert calls["policy"] == {
         "minimum_time": "2026-01-01 00:00:10",
-        "allow_extrapolation": True,
-        "guardrail": 0.05,
+        "allow_extrapolation": False,
     }
     assert calls["step"] == 10
     assert result["algorithm"].eq("ch_pareto_knee").all()

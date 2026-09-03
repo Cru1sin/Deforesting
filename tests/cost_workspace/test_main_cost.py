@@ -503,8 +503,8 @@ def test_policy_uses_single_parallel_layer_and_shared_run_writer(
         "pre_dispatch": "2*n_jobs",
     }
     assert calls["workers"] == [
-        ("cycle_b", {"step_seconds": 20, "allow_extrapolation": True}),
-        ("cycle_a", {"step_seconds": 20, "allow_extrapolation": True}),
+        ("cycle_b", {"step_seconds": 20, "allow_extrapolation": False}),
+        ("cycle_a", {"step_seconds": 20, "allow_extrapolation": False}),
     ]
     run = tmp_path / "output/cost/policy/offline_a"
     assert {path.name for path in run.iterdir()} == {

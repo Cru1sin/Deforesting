@@ -999,6 +999,37 @@ def test_policy_loader_uses_authoritative_knee_and_preserves_abstention(
     assert abstained["pareto_knee_method"].eq("abstain_no_common_domain").all()
 
 
+def test_loader_prefers_the_common_selection_contract(tmp_path: Path) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    run = tmp_path / "policy"
+    run.mkdir()
+    (run / "recipe.json").write_text(
+        json.dumps({"base_method": "ch_pareto_knee", "heat_basis": "water"}),
+        encoding="utf-8",
+    )
+    selected_time = start + pd.Timedelta(minutes=11)
+    pd.DataFrame(
+        {
+            "cycle_name": "cycle_003",
+            "candidate_time": [start + pd.Timedelta(minutes=10), selected_time],
+            "selected": [False, True],
+            "selected_time": [selected_time, selected_time],
+            "selection_model_supported": [False, False],
+        }
+    ).to_csv(run / "cost.csv", index=False)
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(_: str) -> dict[str, object]:
+            return {"boundaries": {"start_time": start}}
+
+    table = module._load_result_tables([run], Loader())["ch_pareto_knee"]
+
+    assert table["t_star"].eq(selected_time).all()
+    assert not table["t_star_model_supported"].any()
+
+
 @pytest.mark.parametrize(
     ("knees", "selected_times"),
     [
