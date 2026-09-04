@@ -17,7 +17,7 @@ REQUIRED_BOUNDARIES = (
 
 
 def catalog_exclusion_reason(
-    record: Mapping[str, object], parameter_experiments: set[str]
+    record: Mapping[str, object], parameter_experiments: set[str] | None
 ) -> str | None:
     """Return why catalog metadata cannot enter the frozen science cohort."""
     nested = record.get("boundaries")
@@ -34,8 +34,8 @@ def catalog_exclusion_reason(
     if not (values[0] <= values[1] < values[2] <= values[3] < values[4]):
         return "required boundaries are not ordered"
     experiment = str(record.get("experiment_id"))
-    if experiment not in parameter_experiments:
-        return f"missing Pe parameters for experiment {experiment}"
+    if parameter_experiments is not None and experiment not in parameter_experiments:
+        return f"missing retrospective model fold for experiment {experiment}"
     return None
 
 
@@ -106,7 +106,8 @@ def build_candidate_boundaries(loader: Any, cycle_name: str, start_rule: str) ->
             "experiment_id": str(record["experiment_id"]),
             "candidate_defrost_time": candidates,
             "minutes_since_heating_start": [
-                (candidate - heating_accounting_start).total_seconds() / 60 for candidate in candidates
+                (candidate - heating_accounting_start).total_seconds() / 60
+                for candidate in candidates
             ],
             "heating_accounting_start": heating_accounting_start,
             "heating_accounting_start_rule": start_rule,
@@ -119,9 +120,9 @@ def build_candidate_boundaries(loader: Any, cycle_name: str, start_rule: str) ->
 def metadata_eligible_cycles(
     loader: Any,
     requested: list[str] | None,
-    model_experiments: set[str],
+    model_experiments: set[str] | None,
 ) -> list[str]:
-    """Return valid cycles whose boundaries and retrospective model fold exist."""
+    """Return valid cycles with boundaries and, when requested, retrospective folds."""
     catalog = loader.list_cycles(statuses={"valid"})
     available = [str(value) for value in catalog["cycle_name"].tolist()]
     selected = available if not requested else requested

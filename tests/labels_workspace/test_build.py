@@ -187,7 +187,7 @@ def test_build_returns_labels_balance_and_cycle_audit(
     assert set(balance["camera_group"]) >= {"top", "top_pair", "all"}
 
 
-def test_policy_labels_use_only_selected_cycles_and_the_selected_defrost_time(
+def test_selected_time_labels_preserve_the_source_selection_method(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog = pd.DataFrame(
@@ -231,7 +231,7 @@ def test_policy_labels_use_only_selected_cycles_and_the_selected_defrost_time(
             ),
             "is_selected": [False, True, False],
             "selected_defrost_time": pd.to_datetime(["2026-01-01 00:10", "2026-01-01 00:10", None]),
-            "selection_method": ["cop_heating_rate_pareto_knee"] * 3,
+            "selection_method": ["future_selected_time_method"] * 3,
             "selection_status": ["selected", "selected", "abstain"],
         }
     )
@@ -241,7 +241,7 @@ def test_policy_labels_use_only_selected_cycles_and_the_selected_defrost_time(
     assert labels["timing_state"].tolist() == ["before_reference", "after_reference"]
     assert labels["binary_target"].tolist() == ["before_reference", "after_reference"]
     assert labels["reference_time"].nunique() == 1
-    assert labels["reference_method"].eq("cop_heating_rate_pareto_knee").all()
+    assert labels["reference_method"].eq("future_selected_time_method").all()
     assert set(balance["camera_group"]) >= {"front", "all"}
     reasons = audit.set_index("cycle_name")["reason"]
     assert reasons["selected"] == "labeled"

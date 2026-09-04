@@ -47,6 +47,25 @@ OUTCOME_VALIDITY = {
     "event_compressor_electricity": "compressor_event_valid",
     "event_duration": "duration_event_valid",
 }
+TRAINING_COHORT_RULE = "complete_case_across_all_four_outcomes"
+
+
+def select_events_complete_for_all_outcomes(events: pd.DataFrame) -> pd.DataFrame:
+    """Use one complete-case cohort so all released models share an empirical domain."""
+    valid = pd.Series(True, index=events.index)
+    for outcome, target in OUTCOME_TARGETS.items():
+        if target not in events:
+            return events.iloc[0:0].copy()
+        validity = OUTCOME_VALIDITY[outcome]
+        if validity not in events and "event_valid" not in events:
+            return events.iloc[0:0].copy()
+        valid &= (
+            events[validity].fillna(False)
+            if validity in events
+            else events["event_valid"].fillna(False)
+        )
+        valid &= events[target].notna()
+    return events.loc[valid].copy()
 
 
 def select_valid_events_for_quantity(events: pd.DataFrame, outcome: str) -> pd.DataFrame:
@@ -269,24 +288,54 @@ def load_defrost_event_models(path: Path | None = None) -> dict[str, Any]:
     return value
 
 
+def predict_with_model_parameters(parameters: dict[str, Any], values: pd.DataFrame) -> pd.DataFrame:
+    """Apply one fitted parameter set and report its training-domain distance."""
+    features = [str(name) for name in parameters["feature_order"]]
+    x = values.reindex(columns=features).to_numpy(dtype=float)
+    medians = np.asarray(parameters["imputer_median"], dtype=float)
+    x = np.where(np.isnan(x), medians, x)
+    mean = np.asarray(parameters["scaler_mean"], dtype=float)
+    scale = np.asarray(parameters["scaler_scale"], dtype=float)
+    z = (x - mean) / scale
+    coefficients = np.asarray(parameters["coefficients"], dtype=float)
+    prediction = z @ coefficients + float(parameters["intercept"])
+    references = np.asarray(parameters["training_standardized_references"], dtype=float)
+    distance = np.sqrt(np.square(z[:, None, :] - references[None, :, :]).sum(axis=2)).min(axis=1)
+    return pd.DataFrame(
+        {
+            "prediction": prediction,
+            "support_distance": distance,
+            "support_threshold": float(parameters["support_threshold"]),
+        }
+    )
+
+
+def predict_with_event_model(
+    model: dict[str, Any],
+    values: pd.DataFrame,
+    experiment_id: str,
+    *,
+    prediction_mode: str,
+) -> pd.DataFrame:
+    """Use a held-out fold for retrospective replay or the full model for new data."""
+    if prediction_mode == "cross-fitted":
+        parameters = model.get("folds", {}).get(str(experiment_id))
+        if not isinstance(parameters, dict):
+            raise ValueError(f"no retrospective fold for experiment {experiment_id}")
+    elif prediction_mode == "full-model":
+        parameters = model.get("full_data_model")
+        if not isinstance(parameters, dict):
+            raise ValueError("event model has no full-data parameters")
+    else:
+        raise ValueError(f"unknown prediction mode: {prediction_mode}")
+    return predict_with_model_parameters(parameters, values)
+
+
 def predict_with_heldout_event_model(
     model: dict[str, Any], values: pd.DataFrame, experiment_id: str
 ) -> pd.DataFrame:
-    fold = model.get("folds", {}).get(str(experiment_id))
-    if not isinstance(fold, dict):
-        raise ValueError(f"no retrospective fold for experiment {experiment_id}")
-    features = [str(name) for name in fold["feature_order"]]
-    x = values.reindex(columns=features).to_numpy(dtype=float)
-    medians = np.asarray(fold["imputer_median"], dtype=float)
-    x = np.where(np.isnan(x), medians, x)
-    mean = np.asarray(fold["scaler_mean"], dtype=float)
-    scale = np.asarray(fold["scaler_scale"], dtype=float)
-    z = (x - mean) / scale
-    coefficients = np.asarray(fold["coefficients"], dtype=float)
-    prediction = z @ coefficients + float(fold["intercept"])
-    references = np.asarray(fold["training_standardized_references"], dtype=float)
-    distance = np.sqrt(np.square(z[:, None, :] - references[None, :, :]).sum(axis=2)).min(axis=1)
-    return pd.DataFrame({"prediction": prediction, "support_distance": distance})
+    """Replay the held-out fold used for retrospective LOEO validation."""
+    return predict_with_event_model(model, values, experiment_id, prediction_mode="cross-fitted")
 
 
 def predict_independent_targets(
@@ -294,13 +343,17 @@ def predict_independent_targets(
     heat_model: dict[str, Any],
     values: pd.DataFrame,
     experiment_id: str,
+    *,
+    prediction_mode: str = "cross-fitted",
 ) -> pd.DataFrame:
-    energy = predict_with_heldout_event_model(energy_model, values, experiment_id)
-    heat = predict_with_heldout_event_model(heat_model, values, experiment_id)
-    e_fold = energy_model["folds"][experiment_id]
-    q_fold = heat_model["folds"][experiment_id]
-    e_supported = energy["support_distance"].le(float(e_fold["support_threshold"]))
-    q_supported = heat["support_distance"].le(float(q_fold["support_threshold"]))
+    energy = predict_with_event_model(
+        energy_model, values, experiment_id, prediction_mode=prediction_mode
+    )
+    heat = predict_with_event_model(
+        heat_model, values, experiment_id, prediction_mode=prediction_mode
+    )
+    e_supported = energy["support_distance"].le(energy["support_threshold"])
+    q_supported = heat["support_distance"].le(heat["support_threshold"])
     e_evaluable = np.isfinite(energy["prediction"])
     q_evaluable = np.isfinite(heat["prediction"])
     return pd.DataFrame(

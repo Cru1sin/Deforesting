@@ -10,7 +10,11 @@ import pytest
 from PIL import Image
 
 import train_image_models
-from image_models.sensor_features import build_past_only_sensor_features
+from image_models.sensor_features import (
+    CURRENT_SENSORS,
+    SLOPE_SENSORS,
+    build_past_only_sensor_features,
+)
 
 
 def test_parser_defaults_to_one_primary_setting() -> None:
@@ -320,6 +324,55 @@ def test_parallel_color_gradient_run_writes_complete_artifacts_from_main(
     assert set(predictions["held_out_experiment"]) == {"a", "b", "c"}
     assert set(predictions["classifier"]) == {"logistic_regression", "random_forest"}
     assert (tmp_path / "output/image_models/_cache/color_gradient/front/features.parquet").is_file()
+
+
+def test_sensor_slope_setting_attaches_sensor_rows_from_the_public_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    labels_path = tmp_path / "labels.parquet"
+    labels = _training_labels(tmp_path / "unused_dataset")
+    labels.to_parquet(labels_path, index=False)
+    attached = 0
+
+    def load_cache(rows: pd.DataFrame, *_: object) -> pd.DataFrame:
+        return rows.assign(dinov2_0=range(len(rows)))
+
+    def attach(rows: pd.DataFrame, _dataset: Path) -> pd.DataFrame:
+        nonlocal attached
+        attached += 1
+        result = rows.assign(sensor_timestamp=rows["image_time"])
+        for name in CURRENT_SENSORS:
+            result[name] = 1.0
+        for name in SLOPE_SENSORS:
+            result[f"{name}__slope_5min"] = 0.1
+        return result
+
+    monkeypatch.setattr(train_image_models, "load_dinov2_feature_cache", load_cache)
+    monkeypatch.setattr(train_image_models, "attach_latest_past_sensor_values", attach)
+    args = train_image_models.build_parser().parse_args(
+        [
+            "--labels",
+            str(labels_path),
+            "--dataset",
+            str(tmp_path / "dataset"),
+            "--dinov2-feature-cache",
+            str(tmp_path / "cache"),
+            "--output",
+            str(tmp_path / "trained"),
+            "--image-features",
+            "dinov2_cache",
+            "--classifiers",
+            "logistic_regression",
+            "--input-features",
+            "image_plus_sensor_slopes",
+            "--workers",
+            "1",
+        ]
+    )
+
+    assert train_image_models.run(args) == 0
+    assert attached == 1
+    assert set(pd.read_csv(tmp_path / "trained/fold_metrics.csv")["status"]) == {"ok"}
 
 
 def test_parallel_run_writes_task_log_in_completion_order(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -122,16 +122,17 @@ def run(args: argparse.Namespace, *, command: list[str] | None = None) -> int:
                 figure_formats=tuple(args.figure_format),
                 continuous_stream=args.continuous_stream,
             )
-            plot_trigger_error_figures(
-                predictions=predictions,
-                decisions=decisions,
-                output=args.figure_output or args.output / "figures",
-                source_output=args.output / "figure_source_data",
-                image_feature=args.curve_image_feature,
-                classifier=args.curve_classifier,
-                continuous_stream=args.continuous_stream,
-                figure_formats=tuple(args.figure_format),
-            )
+            if args.continuous_stream:
+                plot_trigger_error_figures(
+                    predictions=predictions,
+                    decisions=decisions,
+                    output=args.figure_output or args.output / "figures",
+                    source_output=args.output / "figure_source_data",
+                    image_feature=args.curve_image_feature,
+                    classifier=args.curve_classifier,
+                    continuous_stream=True,
+                    figure_formats=tuple(args.figure_format),
+                )
     return 0
 
 

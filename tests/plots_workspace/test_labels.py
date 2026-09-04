@@ -130,6 +130,10 @@ def test_main_routes_explicit_figure_arguments(
     assert (
         build_image_labels.main(
             [
+                "--label-source",
+                "cost-optimum",
+                "--source-table",
+                str(tmp_path / "cost.csv"),
                 "--output",
                 str(output),
                 "--figures",

@@ -1,4 +1,4 @@
-"""Build cycle-safe RGB labels from canonical V1 cost curves."""
+"""Build image timing labels from a cost optimum or selected defrost time."""
 
 from __future__ import annotations
 
@@ -51,8 +51,8 @@ def validate_cost(cost: pd.DataFrame) -> None:
         raise ValueError("label_eligible must be True for every row")
 
 
-def validate_selected_times(decisions: pd.DataFrame) -> None:
-    """Require the shared fields used for selected-time image labels."""
+def validate_selected_times(decisions: pd.DataFrame) -> str:
+    """Return the one method represented by a consistent selected-time table."""
     required = {
         "cycle_name",
         "candidate_defrost_time",
@@ -64,8 +64,10 @@ def validate_selected_times(decisions: pd.DataFrame) -> None:
     missing = sorted(required.difference(decisions.columns))
     if missing:
         raise ValueError(f"decisions are missing required columns: {', '.join(missing)}")
-    if decisions["selection_method"].astype(str).ne("cop_heating_rate_pareto_knee").any():
-        raise ValueError("selected-time labels require cop_heating_rate_pareto_knee")
+    methods = decisions["selection_method"].dropna().astype(str).loc[lambda values: values.ne("")]
+    if methods.nunique() != 1 or len(methods) != len(decisions):
+        raise ValueError("selected-time labels require exactly one non-empty selection_method")
+    return str(methods.iloc[0])
 
 
 def threshold_suffix(threshold: float) -> str:
@@ -292,8 +294,8 @@ def build_labels(  # noqa: C901 - explicit cycle labeling and audit flow.
 def build_selected_time_labels(
     dataset_root: Path, decisions: pd.DataFrame
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Label frost-development images before or after each selected Pareto knee."""
-    validate_selected_times(decisions)
+    """Label frost-development images before or after each selected defrost time."""
+    selection_method = validate_selected_times(decisions)
     loader = DatasetLoader(dataset_root)
     catalog = loader.list_cycles()
     metadata = loader.load_image_metadata()
@@ -315,10 +317,10 @@ def build_selected_time_labels(
             )
             continue
         if len(selected) != 1 or stored.nunique() != 1:
-            raise ValueError(f"{cycle_name}: invalid COP–heating-rate Pareto selection")
+            raise ValueError(f"{cycle_name}: invalid selected defrost time")
         selected_defrost_time = pd.Timestamp(selected["candidate_defrost_time"].iloc[0])
         if selected_defrost_time != pd.Timestamp(stored.iloc[0]):
-            raise ValueError(f"{cycle_name}: invalid COP–heating-rate Pareto selection")
+            raise ValueError(f"{cycle_name}: invalid selected defrost time")
         selected_defrost_times[str(cycle_name)] = selected_defrost_time
 
     rows = metadata.loc[
@@ -334,7 +336,7 @@ def build_selected_time_labels(
         "after_reference",
     )
     rows["binary_target"] = rows["timing_state"]
-    rows["reference_method"] = "cop_heating_rate_pareto_knee"
+    rows["reference_method"] = selection_method
     rows["image_path"] = (
         "images/"
         + rows["cycle_name"].astype(str)
@@ -361,7 +363,7 @@ def build_selected_time_labels(
         for state, values in scoped.groupby("timing_state", observed=True):
             balance.append(
                 {
-                    "reference_method": "cop_heating_rate_pareto_knee",
+                    "reference_method": selection_method,
                     "camera_group": group_name,
                     "timing_state": state,
                     "image_count": len(values),
@@ -370,7 +372,7 @@ def build_selected_time_labels(
                 }
             )
     if rows.empty:
-        raise RuntimeError("no selected Pareto RGB labels")
+        raise RuntimeError("no selected-time RGB labels")
     return (
         rows.reset_index(drop=True),
         pd.DataFrame(balance),

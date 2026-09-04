@@ -19,11 +19,12 @@ from dataset_tools import DatasetLoader
 from defrost_event_models.ridge_models import (
     MODEL_FEATURES,
     OUTCOME_TARGETS,
-    OUTCOME_VALIDITY,
+    TRAINING_COHORT_RULE,
     assemble_target_model,
     fit_model_for_heldout_experiment,
     fit_model_on_all_experiments,
     mean_outcome_model,
+    select_events_complete_for_all_outcomes,
     select_valid_events_for_quantity,
 )
 from defrost_event_models.training_data import (
@@ -64,16 +65,8 @@ def _fit_ridge_outcome(
     return model_name, outcome, fitted
 
 
-def _complete_events(events: pd.DataFrame) -> pd.DataFrame:
-    valid = pd.Series(True, index=events.index)
-    for outcome, target in OUTCOME_TARGETS.items():
-        valid &= events[OUTCOME_VALIDITY[outcome]].fillna(False)
-        valid &= events[target].notna()
-    return events.loc[valid].copy()
-
-
 def _fit_models(events: pd.DataFrame, workers: int) -> dict[str, Any]:
-    events = _complete_events(events)
+    events = select_events_complete_for_all_outcomes(events)
     outcome_events = {
         name: select_valid_events_for_quantity(events, name) for name in OUTCOME_TARGETS
     }
@@ -132,12 +125,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     loader = DatasetLoader(args.dataset)
     events = build_defrost_event_training_table(loader)
-    valid_events = _complete_events(events)
+    valid_events = select_events_complete_for_all_outcomes(events)
     if valid_events.empty:
         raise ValueError("no valid observed defrost events")
     parameters: dict[str, Any] = {
         "model_format_version": "1",
         "run_name": args.run_name,
+        "training_cohort_rule": TRAINING_COHORT_RULE,
         "models": _fit_models(events, args.workers),
     }
     validation = build_validation_table(events, parameters)
@@ -152,6 +146,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "workers": args.workers,
         "command": shlex.join(["uv", "run", "python", "fit_defrost_event_models.py", *arguments]),
         "candidate_parameters_are_not_released_automatically": True,
+        "training_cohort_rule": TRAINING_COHORT_RULE,
+        "common_training_event_count": len(valid_events),
     }
     (run / "run_settings.json").write_text(
         json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

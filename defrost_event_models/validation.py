@@ -1,4 +1,4 @@
-"""Validate V2.6.8 transition models and diagnostic minima."""
+"""Build retrospective LOEO validation tables for defrost-event models."""
 
 from __future__ import annotations
 
@@ -7,20 +7,32 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from defrost_decision.selection_results import five_minute_support_runs
 from .ridge_models import (
     OUTCOME_TARGETS,
     OUTCOME_VALIDITY,
-    fit_defrost_event_ridge_model,
+    TRAINING_COHORT_RULE,
     predict_with_heldout_event_model,
+    select_events_complete_for_all_outcomes,
     select_valid_events_for_quantity,
 )
 
 _VALIDATION_COLUMNS = {
-    "event_electricity": ("defrost_event_electricity_prediction_kwh", "defrost_event_electricity_training_distance"),
-    "event_net_heat": ("defrost_event_net_heat_prediction_kwh", "defrost_event_net_heat_training_distance"),
-    "event_compressor_electricity": ("defrost_event_compressor_electricity_prediction_kwh", "defrost_event_compressor_electricity_training_distance"),
-    "event_duration": ("defrost_event_duration_prediction_minutes", "defrost_event_duration_training_distance"),
+    "event_electricity": (
+        "defrost_event_electricity_prediction_kwh",
+        "defrost_event_electricity_training_distance",
+    ),
+    "event_net_heat": (
+        "defrost_event_net_heat_prediction_kwh",
+        "defrost_event_net_heat_training_distance",
+    ),
+    "event_compressor_electricity": (
+        "defrost_event_compressor_electricity_prediction_kwh",
+        "defrost_event_compressor_electricity_training_distance",
+    ),
+    "event_duration": (
+        "defrost_event_duration_prediction_minutes",
+        "defrost_event_duration_training_distance",
+    ),
 }
 
 
@@ -76,117 +88,11 @@ def build_validation_table(events: pd.DataFrame, models: dict[str, Any]) -> pd.D
                 "event_invalid_reason": event.get("event_invalid_reason", ""),
             }
         )
-    return pd.DataFrame(rows)
-
-
-def bootstrap_minima(
-    curves: pd.DataFrame,
-    events: pd.DataFrame,
-    energy_model: dict[str, Any],
-    heat_model: dict[str, Any],
-    *,
-    replicates: int = 200,
-    seed: int = 268,
-) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    valid = events.loc[events["event_valid"].fillna(False)].copy()
-    features = tuple(str(value) for value in energy_model["feature_order"])
-    minima: dict[str, list[pd.Timestamp]] = {
-        str(name): [] for name in curves["cycle_name"].astype(str).unique()
-    }
-    for _ in range(replicates):
-        for heldout, heldout_curves in curves.groupby("experiment_id", sort=False):
-            heldout = str(heldout)
-            available = sorted(set(valid["experiment_id"].astype(str)) - {heldout})
-            if len(available) < 2 or heldout not in energy_model["folds"]:
-                continue
-            sampled = rng.choice(available, size=len(available), replace=True)
-            parts = []
-            for draw, experiment in enumerate(sampled):
-                part = valid.loc[valid["experiment_id"].astype(str).eq(str(experiment))].copy()
-                part["experiment_id"] = f"draw_{draw}"
-                parts.append(part)
-            training = pd.concat(parts, ignore_index=True)
-            energy_model = fit_defrost_event_ridge_model(
-                training,
-                features,
-                "defrost_event_electricity_observed_kwh",
-                alpha=float(energy_model["folds"][heldout]["alpha"]),
-            )
-            heat_model = fit_defrost_event_ridge_model(
-                training,
-                features,
-                "defrost_event_net_heat_observed_kwh",
-                alpha=float(heat_model["folds"][heldout]["alpha"]),
-            )
-            candidates = heldout_curves.copy()
-            energy = energy_model.predict(candidates)
-            heat = heat_model.predict(candidates)
-            e_supported = (
-                energy_model.support_distance(candidates) <= energy_model.support_threshold
-            )
-            q_supported = heat_model.support_distance(candidates) <= heat_model.support_threshold
-            numerator = candidates["pre_defrost_electricity_kwh"].to_numpy(dtype=float) + energy
-            denominator = candidates["pre_defrost_heat_kwh"].to_numpy(dtype=float) + heat
-            inverse = np.divide(
-                numerator,
-                denominator,
-                out=np.full(len(candidates), np.nan),
-                where=(numerator > 0) & (denominator > 0.01),
-            )
-            candidates["bootstrap_inverse_cop"] = inverse
-            candidates["bootstrap_base"] = (
-                candidates["pre_defrost_electricity_measurement_valid"].fillna(False).to_numpy()
-                & candidates["pre_defrost_heat_measurement_valid"].fillna(False).to_numpy()
-                & candidates["pre_defrost_feature_window_valid"].fillna(False).to_numpy()
-                & e_supported
-                & q_supported
-                & np.isfinite(inverse)
-            )
-            for cycle_name, curve in candidates.groupby("cycle_name", sort=False):
-                eligible = five_minute_support_runs(
-                    curve["candidate_defrost_time"], curve["bootstrap_base"]
-                )
-                if eligible.any():
-                    position = curve.index[
-                        eligible
-                        & curve["bootstrap_inverse_cop"].eq(
-                            curve.loc[eligible, "bootstrap_inverse_cop"].min()
-                        )
-                    ][0]
-                    minima[str(cycle_name)].append(
-                        pd.Timestamp(curve.loc[position, "candidate_defrost_time"])
-                    )
-    rows = []
-    for cycle_name, curve in curves.groupby("cycle_name", sort=False):
-        values = minima[str(cycle_name)]
-        numeric = np.asarray([value.value for value in values], dtype=np.int64)
-        basin_start = pd.to_datetime(curve["basin_5pct_start"].iloc[0], errors="coerce")
-        basin_end = pd.to_datetime(curve["basin_5pct_end"].iloc[0], errors="coerce")
-        in_basin = (
-            float(np.mean([basin_start <= value <= basin_end for value in values]))
-            if values and pd.notna(basin_start) and pd.notna(basin_end)
-            else np.nan
+    result = pd.DataFrame(rows)
+    result["training_cohort_rule"] = TRAINING_COHORT_RULE
+    result["common_training_event_count"] = len(select_events_complete_for_all_outcomes(events))
+    for outcome, target in OUTCOME_TARGETS.items():
+        result[f"available_event_count_{outcome}"] = (
+            len(select_valid_events_for_quantity(events, outcome)) if target in events else 0
         )
-        rows.append(
-            {
-                "cycle_name": cycle_name,
-                "experiment_id": curve["experiment_id"].iloc[0],
-                "repeat_count": replicates,
-                "seed": seed,
-                "valid_minimum_count": len(values),
-                "valid_minimum_fraction": len(values) / replicates if replicates else np.nan,
-                "argmin_median_time": pd.Timestamp(int(np.median(numeric)))
-                if numeric.size
-                else pd.NaT,
-                "argmin_q25_time": pd.Timestamp(int(np.quantile(numeric, 0.25)))
-                if numeric.size
-                else pd.NaT,
-                "argmin_q75_time": pd.Timestamp(int(np.quantile(numeric, 0.75)))
-                if numeric.size
-                else pd.NaT,
-                "argmin_in_original_5pct_basin_fraction": in_basin,
-                "support_rule": "refit_95pct_cross_experiment_distance_each_replicate",
-            }
-        )
-    return pd.DataFrame(rows)
+    return result

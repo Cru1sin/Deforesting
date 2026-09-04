@@ -196,3 +196,38 @@ def test_dinov2_cache_joins_back_to_the_supplied_labels(tmp_path: Path) -> None:
 
     assert result.loc[0, "binary_target_01pct"] == "before_reference"
     assert result.loc[0, "dinov2_0"] == 1.25
+
+
+def test_cached_dinov2_supports_elapsed_time_without_sensor_rows() -> None:
+    rows = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_a", "cycle_a"],
+            "camera_role": ["front", "front"],
+            "image_time": pd.to_datetime(["2026-01-01 00:10", "2026-01-01 00:20"]),
+            "stable_heating_start": pd.to_datetime(["2026-01-01 00:00"] * 2),
+            "binary_target_01pct": ["before_reference", "after_reference"],
+            "dinov2_0": [1.0, 2.0],
+        }
+    )
+
+    time_only, _, time_columns = features.prepare_cached_features(
+        rows,
+        image_feature="dinov2",
+        camera="front",
+        input_feature="elapsed_time_only",
+        label_column="binary_target_01pct",
+        max_images_per_cycle_label=48,
+    )
+    combined, _, combined_columns = features.prepare_cached_features(
+        rows,
+        image_feature="dinov2",
+        camera="front",
+        input_feature="image_plus_elapsed_time",
+        label_column="binary_target_01pct",
+        max_images_per_cycle_label=48,
+    )
+
+    assert time_columns == ["time_minutes"]
+    assert time_only["time_minutes"].tolist() == [10.0, 20.0]
+    assert combined_columns == ["dinov2_0", "time_minutes"]
+    assert combined["time_minutes"].tolist() == [10.0, 20.0]

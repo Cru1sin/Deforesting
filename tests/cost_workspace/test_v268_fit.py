@@ -142,6 +142,32 @@ def test_artifact_round_trip_and_missing_fold_fail_closed() -> None:
         predict_with_heldout_event_model(artifact, candidates, "unknown")
 
 
+def test_full_model_predicts_an_unseen_experiment() -> None:
+    from defrost_event_models.ridge_models import predict_with_event_model
+
+    parameters = {
+        "feature_order": ["x"],
+        "imputer_median": [0.0],
+        "scaler_mean": [0.0],
+        "scaler_scale": [1.0],
+        "coefficients": [2.0],
+        "intercept": 1.0,
+        "support_threshold": 3.0,
+        "training_standardized_references": [[0.0]],
+    }
+    model = {"folds": {}, "full_data_model": parameters}
+
+    result = predict_with_event_model(
+        model,
+        pd.DataFrame({"x": [2.0]}),
+        "new_experiment",
+        prediction_mode="full-model",
+    )
+
+    assert result.loc[0, "prediction"] == pytest.approx(5.0)
+    assert result.loc[0, "support_threshold"] == pytest.approx(3.0)
+
+
 def test_independent_support_is_intersection() -> None:
     from defrost_event_models.ridge_models import predict_independent_targets
 
@@ -294,16 +320,28 @@ def test_selection_composes_candidate_quantities_objectives_and_pareto(monkeypat
     monkeypatch.setattr(
         selection_command,
         "build_candidate_quantities",
-        lambda loader, cycle, source, *, candidate_step_seconds: (
-            calls.update(step=candidate_step_seconds, source=source) or base.copy()
+        lambda loader, cycle, source, *, candidate_step_seconds, prediction_mode: (
+            calls.update(
+                step=candidate_step_seconds,
+                source=source,
+                prediction_mode=prediction_mode,
+            )
+            or base.copy()
         ),
     )
 
-    def predict(model, values, experiment):
+    def predict(model, values, experiment, *, prediction_mode):
         calls.setdefault("predictions", []).append((model, values.copy(), experiment))
-        return pd.DataFrame({"prediction": [3.0, 4.0], "support_distance": [0.1, 0.7]})
+        calls["prediction_mode"] = prediction_mode
+        return pd.DataFrame(
+            {
+                "prediction": [3.0, 4.0],
+                "support_distance": [0.1, 0.7],
+                "support_threshold": [0.5, 0.5],
+            }
+        )
 
-    monkeypatch.setattr(selection_command, "predict_with_heldout_event_model", predict)
+    monkeypatch.setattr(selection_command, "predict_with_event_model", predict)
     monkeypatch.setattr(
         selection_command,
         "calculate_performance_objectives",
@@ -346,6 +384,7 @@ def test_selection_composes_candidate_quantities_objectives_and_pareto(monkeypat
     }
     assert calls["objective_options"] == {"allow_model_extrapolation": False}
     assert calls["step"] == 10
+    assert calls["prediction_mode"] == "cross-fitted"
     assert result["selection_method"].eq("cop_heating_rate_pareto_knee").all()
     assert "decision_method" not in result
     assert "label_eligible" not in result

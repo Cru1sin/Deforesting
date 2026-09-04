@@ -26,16 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--label-source",
         choices=("cost-optimum", "selected-time"),
-        default="cost-optimum",
+        required=True,
     )
     parser.add_argument(
         "--source-table",
         type=Path,
-        default=Path("output/defrost_decisions/v1_label_reference/candidate_decisions.csv"),
+        required=True,
     )
-    parser.add_argument(
-        "--output", type=Path, default=Path("output/image_labels/v1_label_reference")
-    )
+    parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--near-optimal-thresholds",
         nargs="+",

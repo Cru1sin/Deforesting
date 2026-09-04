@@ -387,7 +387,10 @@ def plot_probability_curves(
         pd.concat(source_rows, ignore_index=True).to_parquet(
             source_output / "probability_curves.parquet", index=False
         )
-    pd.DataFrame(trigger_rows).to_csv(source_output / "two_of_three_triggers.csv", index=False)
+    if continuous_stream:
+        pd.DataFrame(trigger_rows).to_csv(
+            source_output / "two_of_three_triggers.csv", index=False
+        )
 
 
 def _plot_model_comparison(

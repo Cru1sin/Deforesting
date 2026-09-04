@@ -95,6 +95,7 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
         artifact, sort_keys=True, allow_nan=False, separators=(",", ":")
     )
     assert artifact["run_name"] == "review_a"
+    assert artifact["training_cohort_rule"] == "complete_case_across_all_four_outcomes"
     model_names = {
         "experiment_balanced_mean",
         "ridge_basic_state_5",
@@ -136,6 +137,11 @@ def test_fit_writes_only_review_candidate_files(monkeypatch, tmp_path: Path) -> 
             assert all("support_threshold" in fold for fold in folds.values())
     validation = pd.read_csv(run / "model_validation.csv")
     assert len(validation) == 8 * 4 + 1
+    assert validation["common_training_event_count"].eq(6).all()
+    assert validation["available_event_count_event_electricity"].eq(8).all()
+    assert validation["available_event_count_event_net_heat"].eq(7).all()
+    assert validation["available_event_count_event_compressor_electricity"].eq(7).all()
+    assert validation["available_event_count_event_duration"].eq(8).all()
 
     assert (
         fit_command.main(

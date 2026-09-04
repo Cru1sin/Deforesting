@@ -23,12 +23,21 @@ def _canonical_cost() -> pd.DataFrame:
 
 
 def test_parser_exposes_only_the_label_run_arguments() -> None:
-    args = build_image_labels.build_parser().parse_args([])
+    args = build_image_labels.build_parser().parse_args(
+        [
+            "--label-source",
+            "cost-optimum",
+            "--source-table",
+            "cost.csv",
+            "--output",
+            "labels",
+        ]
+    )
 
     assert vars(args) == {
         "dataset": Path("dataset"),
-        "source_table": Path("output/defrost_decisions/v1_label_reference/candidate_decisions.csv"),
-        "output": Path("output/image_labels/v1_label_reference"),
+        "source_table": Path("cost.csv"),
+        "output": Path("labels"),
         "label_source": "cost-optimum",
         "near_optimal_thresholds": [0.01, 0.02, 0.05, 0.10],
         "overwrite": False,
@@ -36,6 +45,11 @@ def test_parser_exposes_only_the_label_run_arguments() -> None:
         "figure_output": None,
         "figure_format": ["png"],
     }
+
+
+def test_label_source_table_and_output_are_required_together() -> None:
+    with pytest.raises(SystemExit):
+        build_image_labels.build_parser().parse_args([])
 
 
 def test_main_gates_cost_before_calling_build(
@@ -53,7 +67,16 @@ def test_main_gates_cost_before_calling_build(
     monkeypatch.setattr(build_image_labels, "build_labels", forbidden_build)
 
     with pytest.raises(ValueError, match="label_eligible must be True for every row"):
-        build_image_labels.main(["--source-table", str(tmp_path / "cost.csv")])
+        build_image_labels.main(
+            [
+                "--label-source",
+                "cost-optimum",
+                "--source-table",
+                str(tmp_path / "cost.csv"),
+                "--output",
+                str(tmp_path / "labels"),
+            ]
+        )
     assert calls == 0
 
 
@@ -86,6 +109,8 @@ def test_main_calls_build_once_and_records_copyable_invocation(
         "chosen_dataset",
         "--source-table",
         "chosen_cost.csv",
+        "--label-source",
+        "cost-optimum",
         "--output",
         str(output),
         "--near-optimal-thresholds",
@@ -139,7 +164,16 @@ def test_main_rejects_existing_output_before_building_labels(
     monkeypatch.setattr(build_image_labels, "build_labels", forbidden_build)
 
     with pytest.raises(FileExistsError, match="pass --overwrite"):
-        build_image_labels.main(["--output", str(output)])
+        build_image_labels.main(
+            [
+                "--label-source",
+                "cost-optimum",
+                "--source-table",
+                "cost.csv",
+                "--output",
+                str(output),
+            ]
+        )
 
 
 def test_main_does_not_create_output_when_label_build_fails(
@@ -156,5 +190,14 @@ def test_main_does_not_create_output_when_label_build_fails(
     monkeypatch.setattr(build_image_labels, "build_labels", failed_build)
 
     with pytest.raises(RuntimeError, match="label build failed"):
-        build_image_labels.main(["--output", str(output)])
+        build_image_labels.main(
+            [
+                "--label-source",
+                "cost-optimum",
+                "--source-table",
+                "cost.csv",
+                "--output",
+                str(output),
+            ]
+        )
     assert not output.exists()

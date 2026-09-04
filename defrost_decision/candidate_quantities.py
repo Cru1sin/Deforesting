@@ -34,6 +34,7 @@ def build_candidate_quantities(
     candidate_step_seconds: int = 60,
     defrost_event_electricity_model: str = DEFAULT_OUTCOME_MODEL,
     defrost_event_heat_model: str = DEFAULT_OUTCOME_MODEL,
+    prediction_mode: str = "cross-fitted",
 ) -> pd.DataFrame:
     """Return neutral candidate quantities without selecting a defrost time."""
     record = loader.get_cycle_record(cycle_name)
@@ -73,6 +74,7 @@ def build_candidate_quantities(
         model_file["models"][defrost_event_heat_model]["event_net_heat"],
         features,
         str(record["experiment_id"]),
+        prediction_mode=prediction_mode,
     )
 
     result = pd.concat(
@@ -95,4 +97,10 @@ def build_candidate_quantities(
     )
     result["defrost_event_scope"] = "preparation_defrost_recovery"
     result["defrost_event_breakdown"] = "not_decomposed"
+    result["prediction_mode"] = prediction_mode
+    result["model_training_scope"] = (
+        "held_out_experiment_excluded"
+        if prediction_mode == "cross-fitted"
+        else "all_available_training_experiments"
+    )
     return result

@@ -226,8 +226,9 @@ def test_calculate_cycle_executes_declared_independent_event_components(
     )
     selected: dict[str, object] = {}
 
-    def predict(energy, heat, values, experiment_id):
+    def predict(energy, heat, values, experiment_id, *, prediction_mode):
         selected.update(energy=energy, heat=heat, experiment_id=experiment_id)
+        selected["prediction_mode"] = prediction_mode
         return pd.DataFrame(
             {
                 "defrost_event_electricity_kwh": 1.0,
@@ -263,6 +264,7 @@ def test_calculate_cycle_executes_declared_independent_event_components(
         "energy": static_energy,
         "heat": mean_heat,
         "experiment_id": "experiment",
+        "prediction_mode": "cross-fitted",
     }
     assert result["defrost_event_electricity_kwh"].eq(1.0).all()
     assert result["defrost_event_net_heat_kwh"].eq(2.0).all()

@@ -10,6 +10,7 @@ import evaluate_image_models
 import plots.image_models as model_plots
 from plots.image_models import (
     _robust_trigger_error_limit,
+    plot_probability_curves,
     plot_trigger_error_figures,
     trigger_error_table,
     two_of_three_trigger,
@@ -206,6 +207,79 @@ def test_main_reads_multiple_runs_and_writes_exactly_four_outputs(tmp_path: Path
     assert set(recorded_args) == {"results", "output", "task", "overwrite", "command"}
     assert recorded_args["task"] == "binary"
     assert recorded_args["command"] == "uv run python evaluate_image_models.py --results ..."
+
+
+def test_sampled_probability_curves_do_not_compute_control_trigger_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    _write_run(run)
+    decisions = tmp_path / "decisions.csv"
+    pd.DataFrame({"cycle_name": []}).to_csv(decisions, index=False)
+    trigger_calls = 0
+
+    monkeypatch.setattr(evaluate_image_models, "plot_model_figures", lambda **_: None)
+    monkeypatch.setattr(evaluate_image_models, "plot_probability_curves", lambda **_: None)
+
+    def trigger(**_: object) -> None:
+        nonlocal trigger_calls
+        trigger_calls += 1
+
+    monkeypatch.setattr(evaluate_image_models, "plot_trigger_error_figures", trigger)
+    args = evaluate_image_models.build_parser().parse_args(
+        [
+            "--results",
+            str(run),
+            "--output",
+            str(tmp_path / "evaluation"),
+            "--figures",
+            "--probability-curves",
+            "--decision-table",
+            str(decisions),
+        ]
+    )
+
+    assert evaluate_image_models.run(args) == 0
+    assert trigger_calls == 0
+
+
+def test_sampled_probability_source_data_omits_two_of_three_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    times = pd.date_range("2026-01-01", periods=3, freq="min")
+    predictions = pd.DataFrame(
+        {
+            "experiment_id": ["exp"] * 3,
+            "cycle_name": ["frost_cycle_000001"] * 3,
+            "camera": ["front"] * 3,
+            "input_feature": ["image_only"] * 3,
+            "image_feature": ["dinov2_cache"] * 3,
+            "classifier": ["logistic_regression"] * 3,
+            "image_time": times,
+            "decision_score": [0.2, 0.7, 0.8],
+        }
+    )
+    decisions = pd.DataFrame(
+        {
+            "cycle_name": ["frost_cycle_000001"],
+            "is_selected": [True],
+            "selected_defrost_time": [times[1]],
+        }
+    )
+    monkeypatch.setattr(model_plots, "_export", lambda figure, *_: model_plots.plt.close(figure))
+
+    plot_probability_curves(
+        predictions=predictions,
+        decisions=decisions,
+        output=tmp_path / "figures",
+        source_output=tmp_path / "source",
+        image_feature="dinov2_cache",
+        classifier="logistic_regression",
+        continuous_stream=False,
+    )
+
+    assert (tmp_path / "source/probability_curves.parquet").is_file()
+    assert not (tmp_path / "source/two_of_three_triggers.csv").exists()
 
 
 def test_nonempty_output_requires_overwrite(tmp_path: Path) -> None:

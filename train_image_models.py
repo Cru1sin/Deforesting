@@ -35,6 +35,7 @@ INPUT_FEATURES = (
     "image_plus_current_sensors",
     "image_plus_sensor_slopes",
 )
+SENSOR_INPUT_FEATURES = {"image_plus_current_sensors", "image_plus_sensor_slopes"}
 PREDICTION_COLUMNS = (
     "experiment_id",
     "cycle_name",
@@ -305,9 +306,7 @@ def run(  # noqa: C901 - this is the explicit setting/fold orchestration view.
         if args.dinov2_feature_cache is None:
             raise ValueError("dinov2_cache requires --dinov2-feature-cache")
         deep_features = load_dinov2_feature_cache(labels, args.dinov2_feature_cache, "dinov2")
-        if any(
-            setting.input_feature.startswith("image_plus_current_sensors") for setting in settings
-        ):
+        if any(setting.input_feature in SENSOR_INPUT_FEATURES for setting in settings):
             deep_features = attach_latest_past_sensor_values(deep_features, args.dataset)
     task_index = 0
     for setting in settings:

@@ -75,3 +75,39 @@ def test_selection_dry_run_checks_model_cohort_without_raw_cycles(
         )
         == 0
     )
+
+
+def test_full_model_dry_run_does_not_restrict_cycles_to_saved_folds(
+    monkeypatch, tmp_path: Path
+) -> None:
+    parameters = {"support_threshold": 1.0}
+    models = {
+        "models": {
+            "ridge_dynamic_state_8": {
+                name: {"folds": {}, "full_data_model": parameters}
+                for name in OUTCOME_TARGETS
+            }
+        }
+    }
+    received: list[set[str] | None] = []
+
+    monkeypatch.setattr(select_defrost_time, "load_defrost_event_models", lambda _: models)
+    monkeypatch.setattr(select_defrost_time, "DatasetLoader", lambda _: object())
+    monkeypatch.setattr(
+        select_defrost_time,
+        "metadata_eligible_cycles",
+        lambda _loader, _cycles, experiments: received.append(experiments) or ["cycle_new"],
+    )
+
+    assert select_defrost_time.main(
+        [
+            "--prediction-mode",
+            "full-model",
+            "--model-file",
+            str(tmp_path / "models.json"),
+            "--output-root",
+            str(tmp_path),
+            "--dry-run",
+        ]
+    ) == 0
+    assert received == [None]

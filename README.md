@@ -106,17 +106,46 @@ output/defrost_event_models/new_data_refit/
 `candidate_model_parameters.json` is review-only and never overwrites the released parameters
 automatically. Promote it only after scientific review and full-cycle parity checks.
 
+All four event outcomes currently use the same complete-case training cohort. This keeps their
+empirical support domain comparable, but discards events missing any one outcome;
+`model_validation.csv` records both each outcome's available count and the final common count.
+
 ## 4A. Select defrost times and render publication figures
+
+For leakage-free retrospective evaluation of experiments already represented by saved LOEO
+folds, use `cross-fitted`:
 
 ```bash
 uv run python select_defrost_time.py \
   --dataset dataset \
   --model-file defrost_event_models/parameters/released_ridge_models.json \
+  --prediction-mode cross-fitted \
   --run-name current \
   --workers 6 \
   --figures \
   --output-root output
 ```
+
+After refitting, point the same command at
+`output/defrost_event_models/new_data_refit/candidate_model_parameters.json` to evaluate the
+new experimental batch without training on each held-out experiment.
+
+For application to a genuinely new experiment whose ID has no saved retrospective fold, use
+the model fitted on all available training experiments:
+
+```bash
+uv run python select_defrost_time.py \
+  --dataset dataset \
+  --model-file defrost_event_models/parameters/released_ridge_models.json \
+  --prediction-mode full-model \
+  --run-name new_experiment \
+  --workers 6 \
+  --figures \
+  --output-root output
+```
+
+Both `candidate_decisions.csv` and `run_settings.json` record the prediction mode and model
+training scope; cross-fitted and full-model results must not be presented as the same estimate.
 
 ```text
 output/defrost_decisions/current/

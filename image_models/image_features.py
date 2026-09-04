@@ -93,14 +93,24 @@ def prepare_cached_features(
 ) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
     """Select one camera and input_feature from the shared cached feature table."""
     full = rows.loc[rows["camera_role"].isin(CAMERA_GROUPS[camera])].copy()
-    if input_feature != "image_only":
+    if input_feature in {"elapsed_time_only", "image_plus_elapsed_time"}:
+        image_time = pd.to_datetime(full["image_time"], errors="raise", format="mixed")
+        stable_start = pd.to_datetime(
+            full["stable_heating_start"], errors="raise", format="mixed"
+        )
+        full["time_minutes"] = (image_time - stable_start).dt.total_seconds() / 60
+    if input_feature in {"image_plus_current_sensors", "image_plus_sensor_slopes"}:
         full = full.loc[full["sensor_timestamp"].notna()].copy()
     training = limit_images_per_cycle_and_label(
         full,
         [label_column, "camera_role", "cycle_name"],
         max_images_per_cycle_label=max_images_per_cycle_label,
     )
-    columns = [column for column in full if column.startswith(f"{image_feature}_")]
+    columns = [str(column) for column in full if str(column).startswith(f"{image_feature}_")]
+    if input_feature == "elapsed_time_only":
+        columns = ["time_minutes"]
+    elif input_feature == "image_plus_elapsed_time":
+        columns.append("time_minutes")
     if input_feature in {"image_plus_current_sensors", "image_plus_sensor_slopes"}:
         columns += list(CURRENT_SENSORS)
     if input_feature == "image_plus_sensor_slopes":
