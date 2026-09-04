@@ -827,6 +827,40 @@ def test_three_class_evaluator_selects_only_label_target_shards(tmp_path) -> Non
     assert selected == [shards / "cycle_target.parquet"]
 
 
+def test_cached_rgb_features_use_the_requested_cost_labels(tmp_path) -> None:
+    path = Path("scripts/training/evaluate_rgb_feature_shards.py")
+    spec = importlib.util.spec_from_file_location("rgb_feature_relabel", path)
+    assert spec and spec.loader
+    evaluate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluate)
+    features = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_1"],
+            "camera_role": ["front"],
+            "file_name": ["frame.jpg"],
+            "relative_regret": [99.0],
+            "cost_state": ["stale"],
+            "dinov2_000": [0.5],
+        }
+    )
+    labels = tmp_path / "labels.parquet"
+    pd.DataFrame(
+        {
+            "cycle_name": ["cycle_1"],
+            "camera_role": ["front"],
+            "file_name": ["frame.jpg"],
+            "relative_regret": [0.02],
+            "binary_state_01pct": ["post_optimal"],
+        }
+    ).to_parquet(labels)
+
+    result = evaluate.relabel_cached_features(features, labels, "binary_state_01pct")
+
+    assert result.loc[0, "relative_regret"] == 0.02
+    assert result.loc[0, "cost_state"] == "post_optimal"
+    assert result.loc[0, "dinov2_000"] == 0.5
+
+
 def test_summary_scores_are_na_when_no_fold_is_evaluable() -> None:
     evaluate_path = Path("scripts/training/evaluate_rgb_feature_shards.py")
     spec = importlib.util.spec_from_file_location("rgb_feature_evaluation_scores", evaluate_path)

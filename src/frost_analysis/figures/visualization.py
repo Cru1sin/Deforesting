@@ -10,10 +10,15 @@ import matplotlib
 import numpy as np
 
 matplotlib.use("Agg")
+import matplotlib.patheffects as path_effects
 import matplotlib.pyplot as plt
 import pandas as pd
+from adjustText import adjust_text
 from matplotlib import font_manager
+from matplotlib.colors import Normalize
 from matplotlib.patches import Rectangle
+from matplotlib.text import Text
+from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 
 from frost_analysis.cost.core import water_side_heating_kw
 from frost_analysis.dataset.images import RGB_PANEL_MAX_OFFSET
@@ -409,6 +414,8 @@ def render_cycle_publication(
     )
     figure.subplots_adjust(left=0.20, right=0.98, bottom=0.06, top=0.94)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.suffix.lower() == ".png":
+        figure.savefig(output_path.with_suffix(".svg"), bbox_inches="tight", facecolor="white")
     figure.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(figure)
 
@@ -519,7 +526,19 @@ def cost_curve_optimal_time(
         return None
     curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
     curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
-    metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
+    metric = (
+        "objective_value"
+        if "objective_value" in curve
+        else "inverse_cop"
+        if "inverse_cop" in curve
+        else "renewal_cost_kw"
+    )
+    direction = (
+        str(curve["optimization_direction"].dropna().iloc[0])
+        if "optimization_direction" in curve
+        and not curve["optimization_direction"].dropna().empty
+        else "min"
+    )
     if metric not in curve:
         return None
     curve[metric] = pd.to_numeric(curve[metric], errors="coerce")
@@ -539,7 +558,456 @@ def cost_curve_optimal_time(
     values = curve.loc[eligible, metric].dropna()
     if values.empty:
         return None
-    return pd.Timestamp(curve.loc[values.idxmin(), "candidate_time"])
+    extreme = values.idxmax() if direction == "max" else values.idxmin()
+    return pd.Timestamp(curve.loc[extreme, "candidate_time"])
+
+
+def _parallel_objective_table(curves: Mapping[str, pd.DataFrame]) -> pd.DataFrame:
+    """Align C/H/O and admit physically valid extrapolation to the decision domain."""
+    aligned: pd.DataFrame | None = None
+    for metric in ("C", "H", "O"):
+        curve = curves[metric].copy()
+        curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
+        objective = pd.to_numeric(curve["objective_value"], errors="coerce")
+        native = curve.get(
+            "optimization_eligible", pd.Series(True, index=curve.index)
+        ).fillna(False).astype(bool)
+        supported = curve.get(
+            "model_supported", pd.Series(pd.NA, index=curve.index, dtype="boolean")
+        ).astype("boolean")
+        physical = curve.get(
+            "physical_valid", pd.Series(True, index=curve.index)
+        ).fillna(False).astype(bool)
+        measured = curve.get(
+            "measurement_eligible", pd.Series(True, index=curve.index)
+        ).fillna(False).astype(bool)
+        extrapolated = (
+            supported.eq(False).fillna(False)
+            & physical
+            & measured
+            & objective.notna()
+        )
+        part = pd.DataFrame(
+            {
+                "candidate_time": curve["candidate_time"],
+                metric: objective,
+                f"{metric}_eligible": native | extrapolated,
+                f"{metric}_native_eligible": native,
+                f"{metric}_model_supported": supported,
+                f"{metric}_physical_valid": physical,
+                f"{metric}_measurement_eligible": measured,
+                f"{metric}_extrapolated": extrapolated,
+            }
+        )
+        aligned = part if aligned is None else aligned.merge(
+            part, on="candidate_time", how="outer", validate="one_to_one"
+        )
+    if aligned is None:
+        return pd.DataFrame()
+    return aligned.sort_values("candidate_time", kind="stable").reset_index(drop=True)
+
+
+def _plot_parallel_objectives_panel(
+    axis: Any,
+    curves: Mapping[str, pd.DataFrame],
+    origin: pd.Timestamp,
+    stage_spans: list[tuple[str, float, float]] | None = None,
+) -> list[Any]:
+    """Plot raw C/H/O trajectories using three labelled value axes."""
+    values = _parallel_objective_table(curves)
+    values["minutes"] = (values["candidate_time"] - origin).dt.total_seconds() / 60
+    axes = [axis, axis.twinx(), axis.twinx()]
+    axes[2].spines["right"].set_position(("axes", 1.09))
+    axes[2].spines["right"].set_visible(True)
+    styles = {
+        "C": ("#484878", "-", "cycle COP"),
+        "H": ("#B64A50", "-", "Heating rate [kW]"),
+        "O": ("#2A788E", "--", "Evaporator capacity [kW]"),
+    }
+    if stage_spans:
+        _shade_cycle_stages(axis, stage_spans, [])
+    handles = []
+    for target, metric in zip(axes, ("C", "H", "O"), strict=True):
+        color, linestyle, label = styles[metric]
+        raw = pd.to_numeric(values[metric], errors="coerce")
+        eligible = values[f"{metric}_eligible"].fillna(False).astype(bool)
+        target.plot(
+            values["minutes"], raw, color=color, linestyle=linestyle, linewidth=0.8, alpha=0.25
+        )
+        line = target.plot(
+            values["minutes"],
+            raw.where(eligible),
+            color=color,
+            linestyle=linestyle,
+            linewidth=1.35,
+            label=label.split(" [", maxsplit=1)[0],
+        )[0]
+        handles.append(line)
+        target.scatter(
+            values.loc[~eligible, "minutes"],
+            raw.loc[~eligible],
+            s=9,
+            marker="x",
+            linewidths=0.5,
+            color=color,
+            alpha=0.35,
+        )
+        target.set_ylabel(label, color="black", fontsize=8, labelpad=8)
+        target.tick_params(axis="y", colors="black", labelsize=6.5)
+        target.spines["left" if metric == "C" else "right"].set_color("black")
+        display_maximum = raw.max()
+        if np.isfinite(display_maximum) and display_maximum > 0:
+            lower, upper = 0.75 * display_maximum, 1.02 * display_maximum
+            ticks = MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]).tick_values(lower, upper)
+            target.set_ylim(lower, upper)
+            target.set_yticks(ticks[(ticks >= lower) & (ticks <= upper)])
+            target.yaxis.set_major_formatter(FormatStrFormatter("%.1f"))
+    axis.legend(
+        handles=handles,
+        labels=("cycle COP", "Heating rate", "Evaporator capacity"),
+        frameon=False,
+        ncol=3,
+        fontsize=7,
+        loc="lower left",
+        bbox_to_anchor=(0, 1.01),
+    )
+    axis.grid(axis="x", alpha=0.12)
+    return axes
+
+
+def _plot_normalized_objectives_panel(
+    axis: Any,
+    curves: Mapping[str, pd.DataFrame],
+    origin: pd.Timestamp,
+    stage_spans: list[tuple[str, float, float]] | None = None,
+) -> None:
+    """Plot each objective relative to its full eligible decision-domain maximum."""
+    values = _parallel_objective_table(curves)
+    values["minutes"] = (values["candidate_time"] - origin).dt.total_seconds() / 60
+    styles = {
+        "C": ("#484878", "-", "cycle COP"),
+        "H": ("#B64A50", "-", "Heating rate"),
+        "O": ("#2A788E", "--", "Evaporator capacity"),
+    }
+    if stage_spans:
+        _shade_cycle_stages(axis, stage_spans, [])
+    for metric, (color, linestyle, label) in styles.items():
+        raw = pd.to_numeric(values[metric], errors="coerce")
+        eligible = values[f"{metric}_eligible"].fillna(False).astype(bool)
+        best = raw.where(eligible).max()
+        normalized = 100 * raw / best if np.isfinite(best) and best != 0 else raw * np.nan
+        axis.plot(
+            values["minutes"],
+            normalized.where(eligible),
+            color=color,
+            linestyle=linestyle,
+            linewidth=1.35,
+            label=label,
+        )
+    axis.axhline(100, color="#7A7A7A", linestyle=":", linewidth=0.75)
+    for loss, level in ((1, 99), (2, 98), (5, 95)):
+        axis.axhline(level, color="#9CA3AF", linestyle="--", linewidth=0.55, alpha=0.7)
+        axis.text(
+            0.995,
+            level + 0.08,
+            f"{loss}%",
+            transform=axis.get_yaxis_transform(),
+            ha="right",
+            va="bottom",
+            fontsize=5.5,
+            color="#6B7280",
+        )
+    axis.set_ylim(90, 100.8)
+    axis.set_yticks([90, 92, 94, 96, 98, 100])
+    axis.set_ylabel(
+        "Relative to best performance [%]", color="black", fontsize=8, labelpad=8
+    )
+    axis.tick_params(colors="black", labelsize=6.5)
+    axis.grid(axis="x", alpha=0.12)
+    axis.legend(
+        frameon=False,
+        ncol=3,
+        fontsize=7,
+        loc="lower left",
+        bbox_to_anchor=(0, 1.01),
+        columnspacing=1.2,
+    )
+
+
+def ch_pareto_table(
+    curves: Mapping[str, pd.DataFrame],
+    origin: pd.Timestamp,
+    *,
+    guardrail: float = 0.05,
+) -> pd.DataFrame:
+    """Return the valid-domain C-H Pareto set while keeping O reference-only."""
+    values = _parallel_objective_table(curves)
+    values["minutes"] = (values["candidate_time"] - origin).dt.total_seconds() / 60
+    c_best = values.loc[values["C_eligible"].fillna(False), "C"].max()
+    h_best = values.loc[values["H_eligible"].fillna(False), "H"].max()
+    valid = (
+        values["C_eligible"].fillna(False)
+        & values["H_eligible"].fillna(False)
+        & values[["C", "H"]].notna().all(axis=1)
+    )
+    values["within_guardrail"] = (
+        valid
+        & values["C"].ge((1 - guardrail) * c_best)
+        & values["H"].ge((1 - guardrail) * h_best)
+    )
+    values["pareto"] = False
+    feasible = values.loc[valid]
+    for index, row in feasible.iterrows():
+        others = feasible.drop(index)
+        dominated = (
+            others[["C", "H"]].ge(row[["C", "H"]]).all(axis=1)
+            & others[["C", "H"]].gt(row[["C", "H"]]).any(axis=1)
+        ).any()
+        values.loc[index, "pareto"] = not dominated
+    values["pareto_latest"] = False
+    values["pareto_knee"] = False
+    values["pareto_knee_score"] = np.nan
+    values["pareto_knee_method"] = pd.NA
+    pareto = values.loc[values["pareto"]]
+    if not pareto.empty:
+        values.loc[pareto["candidate_time"].idxmax(), "pareto_latest"] = True
+        c_span = pareto["C"].max() - pareto["C"].min()
+        h_span = pareto["H"].max() - pareto["H"].min()
+        if len(pareto) >= 3 and c_span > 0 and h_span > 0:
+            c_normalized = (pareto["C"] - pareto["C"].min()) / c_span
+            h_normalized = (pareto["H"] - pareto["H"].min()) / h_span
+            knee_score = (c_normalized + h_normalized - 1) / np.sqrt(2)
+        else:
+            knee_score = pd.Series(0.0, index=pareto.index)
+        if knee_score.max() > 1e-12:
+            method = "normalized_chord_distance"
+        else:
+            c_regret = (pareto["C"].max() - pareto["C"]) / max(
+                abs(pareto["C"].max()), 1e-12
+            )
+            h_regret = (pareto["H"].max() - pareto["H"]) / max(
+                abs(pareto["H"].max()), 1e-12
+            )
+            knee_score = -np.hypot(c_regret, h_regret)
+            method = "relative_ideal_distance_fallback"
+        knee_index = knee_score.idxmax()
+        values.loc[pareto.index, "pareto_knee_score"] = knee_score
+        values.loc[knee_index, "pareto_knee"] = True
+        values.loc[knee_index, "pareto_knee_method"] = method
+    return values
+
+
+def _plot_ch_pareto_panel(  # noqa: C901
+    axis: Any,
+    curves: Mapping[str, pd.DataFrame],
+    origin: pd.Timestamp,
+    *,
+    guardrail: float = 0.05,
+    rb_time: object | None = None,
+    selector: str = "knee",
+) -> pd.DataFrame:
+    """Plot C-H Pareto candidates and use O only as an independent colour reference."""
+    values = ch_pareto_table(curves, origin, guardrail=guardrail)
+    valid = (
+        values["C_eligible"].fillna(False)
+        & values["H_eligible"].fillna(False)
+        & values[["C", "H"]].notna().all(axis=1)
+    )
+
+    pareto = values.loc[values["pareto"]].sort_values("minutes", kind="stable")
+    time_labels: list[Text] = []
+    label_x: list[float] = []
+    label_y: list[float] = []
+    rb_timestamp = pd.to_datetime(rb_time, errors="coerce")
+    rb = values.iloc[0:0]
+    if pd.notna(rb_timestamp) and valid.any():
+        rb_index = (
+            values.loc[valid, "candidate_time"] - pd.Timestamp(rb_timestamp)
+        ).abs().idxmin()
+        rb = values.loc[[rb_index]]
+    selected_column = f"pareto_{selector}"
+    if selected_column not in values:
+        raise ValueError(f"unknown Pareto selector: {selector}")
+    selected_points = values.loc[values[selected_column]]
+    if selected_points.empty:
+        display_focus = valid
+    else:
+        selected = selected_points.iloc[0]
+        display_focus = (
+            valid
+            & values["C"].between(0.95 * selected["C"], 1.05 * selected["C"])
+            & values["H"].between(0.95 * selected["H"], 1.05 * selected["H"])
+        )
+    display_focus.loc[rb.index] = True
+    for setter, metric in ((axis.set_xlim, "C"), (axis.set_ylim, "H")):
+        focus = values.loc[
+            display_focus | values["pareto"],
+            metric,
+        ].dropna()
+        if not focus.empty:
+            lower, upper = focus.min(), focus.max()
+            reference = (
+                float(selected_points.iloc[0][metric])
+                if not selected_points.empty
+                else float(upper)
+            )
+            span = max(upper - lower, abs(reference) * 0.04, 1e-6)
+            setter(lower - 0.12 * span, upper + 0.12 * span)
+
+    local_pareto_o = pd.to_numeric(
+        values.loc[values["pareto"] & display_focus, "O"], errors="coerce"
+    ).dropna()
+    local_valid_o = pd.to_numeric(values.loc[display_focus, "O"], errors="coerce").dropna()
+    colour_source = (
+        local_pareto_o if local_pareto_o.nunique() >= 3 else local_valid_o
+    )
+    if colour_source.empty:
+        colour_source = pd.to_numeric(values.loc[valid, "O"], errors="coerce").dropna()
+    if colour_source.empty:
+        norm = Normalize(0.0, 1.0, clip=True)
+    else:
+        vmin, vmax = colour_source.min(), colour_source.max()
+        midpoint = float(colour_source.median())
+        minimum_span = max(0.02, 0.01 * abs(midpoint))
+        if vmax - vmin < minimum_span:
+            vmin, vmax = midpoint - minimum_span / 2, midpoint + minimum_span / 2
+        norm = Normalize(float(vmin), float(vmax), clip=True)
+
+    common = values.loc[valid].sort_values("candidate_time", kind="stable")
+    axis.plot(
+        common["C"],
+        common["H"],
+        color="#D1D5DB",
+        linewidth=0.55,
+        zorder=0,
+        label="_nolegend_",
+    )
+    coloured = valid & values["O"].notna()
+    colour_points = axis.scatter(
+        values.loc[coloured, "C"],
+        values.loc[coloured, "H"],
+        c=values.loc[coloured, "O"],
+        cmap="viridis",
+        norm=norm,
+        s=24,
+        alpha=0.52,
+        linewidths=0,
+        label="_nolegend_",
+    )
+    if coloured.any():
+        colourbar = axis.figure.colorbar(
+            colour_points,
+            cax=axis.inset_axes([1.02, 0, 0.018, 1], transform=axis.transAxes),
+        )
+        colourbar.set_label("Evaporator capacity [kW]", color="black", fontsize=8)
+        colourbar.ax.tick_params(colors="black", labelsize=6.5)
+    axis.scatter(
+        pareto["C"],
+        pareto["H"],
+        s=56,
+        facecolors="none",
+        edgecolors="#475467",
+        linewidths=0.55,
+        label="Pareto front",
+        zorder=3,
+    )
+    axis.scatter(
+        selected_points["C"],
+        selected_points["H"],
+        s=80,
+        marker="D",
+        facecolors="none",
+        edgecolors="#D97706",
+        linewidths=1.0,
+        label="Selected",
+        zorder=4,
+    )
+    if not rb.empty:
+        axis.scatter(
+            rb["C"],
+            rb["H"],
+            s=64,
+            marker="s",
+            facecolors="none",
+            edgecolors="#2E7D5B",
+            linewidths=1.0,
+            label="RB trigger",
+            zorder=4,
+        )
+        axis.annotate(
+            f"RB {rb['minutes'].iloc[0]:.0f}",
+            (rb["C"].iloc[0], rb["H"].iloc[0]),
+            xytext=(6, -7),
+            textcoords="offset points",
+            fontsize=5.5,
+            color="#2E7D5B",
+        )
+    if not pareto.empty:
+        axis.set_title(
+            "Local Pareto view · local O scale · "
+            f"full range {pareto['minutes'].min():.0f}–{pareto['minutes'].max():.0f} min",
+            loc="left",
+            fontsize=6.5,
+            color="#4B5563",
+            pad=3,
+        )
+        xlim, ylim = axis.get_xlim(), axis.get_ylim()
+        local_pareto = values.loc[
+            values["pareto"]
+            & values["C"].between(*xlim)
+            & values["H"].between(*ylim)
+        ].sort_values("minutes", kind="stable")
+        label_rows = local_pareto.copy()
+        label_rows["_time_label"] = label_rows["minutes"].map(lambda value: f"{value:.0f}")
+        label_rows = (
+            label_rows.sort_values([selected_column, "minutes"], ascending=[False, True])
+            .drop_duplicates("_time_label")
+            .sort_values("minutes", kind="stable")
+        )
+        for _, row in label_rows.iterrows():
+            label = axis.text(
+                row["C"],
+                row["H"],
+                row["_time_label"],
+                ha="center",
+                va="center",
+                fontsize=5.5,
+                color="#D97706" if bool(row[selected_column]) else "#667085",
+            )
+            label.set_path_effects(
+                [path_effects.withStroke(linewidth=1.2, foreground="white")]
+            )
+            time_labels.append(label)
+            label_x.append(float(row["C"]))
+            label_y.append(float(row["H"]))
+    axis.set_box_aspect(1)
+    axis.set_xlabel("cycle COP", color="black", fontsize=8)
+    axis.set_ylabel("Heating rate [kW]", color="black", fontsize=8)
+    axis.tick_params(axis="x", colors="black", labelsize=6.5)
+    axis.tick_params(axis="y", colors="black", labelsize=6.5)
+    axis.spines["bottom"].set_color("black")
+    axis.spines["left"].set_color("black")
+    axis.grid(alpha=0.15)
+    axis.legend(frameon=False, fontsize=6.5, ncol=3 if not rb.empty else 2)
+    if time_labels:
+        adjust_text(
+            time_labels,
+            x=common["C"].to_numpy(dtype=float),
+            y=common["H"].to_numpy(dtype=float),
+            target_x=label_x,
+            target_y=label_y,
+            ax=axis,
+            expand=(1.3, 1.5),
+            force_text=(0.8, 1.0),
+            force_static=(0.5, 0.8),
+            force_pull=(0.01, 0.01),
+            force_explode=(0.5, 0.8),
+            prevent_crossings=True,
+            ensure_inside_axes=True,
+            min_arrow_len=0,
+            arrowprops={"arrowstyle": "-", "linewidth": 0.35, "alpha": 0.6},
+        )
+    return values
 
 
 def render_decision_publication(
@@ -553,8 +1021,12 @@ def render_decision_publication(
     cost_label: str = "Cycle inverse COP [-]",
     full_candidate_domain: bool = False,
     display_metric: str | None = None,
+    display_label: str = "Unsupported model extension, display only",
     minimum_label: str = "Minimum",
     minimum_support_label: str | None = None,
+    parallel_curves: Mapping[str, pd.DataFrame] | None = None,
+    pareto_guardrail: float = 0.05,
+    pareto_selector: str = "knee",
 ) -> None:
     """Render two decision frames above the reusable COP, water and cost panels."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
@@ -581,12 +1053,15 @@ def render_decision_publication(
         else np.nan
     )
 
-    figure = plt.figure(figsize=(7.2, 8.25), dpi=300)
+    parallel = parallel_curves is not None
+    figure = plt.figure(figsize=(10.4, 16.8 if parallel else 8.25), dpi=300)
     grid = figure.add_gridspec(
-        4,
+        6 if parallel else 4,
         2,
-        height_ratios=[2.15, 0.92, 1.05, 1.08],
-        hspace=0.62,
+        height_ratios=[2.15, 0.92, 1.05, 1.45, 1.05, 10.0]
+        if parallel
+        else [2.15, 0.92, 1.05, 1.08],
+        hspace=0.42 if parallel else 0.62,
         wspace=0.08,
     )
     image_axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 1])]
@@ -600,6 +1075,9 @@ def render_decision_publication(
         figure.add_subplot(grid[2, :]),
         figure.add_subplot(grid[3, :]),
     ]
+    if parallel:
+        panel_axes.append(figure.add_subplot(grid[4, :]))
+        panel_axes.append(figure.add_subplot(grid[5, :]))
     _plot_cycle_panel(
         panel_axes[0],
         frame,
@@ -622,23 +1100,37 @@ def render_decision_publication(
         baseline_left,
         baseline_right,
     )
-    curve = cost_curve if cost_curve is not None else pd.DataFrame()
-    _plot_cost_panel(
-        panel_axes[2],
-        curve,
-        origin,
-        stage_spans,
-        cost_label=cost_label,
-        full_candidate_domain=full_candidate_domain,
-        display_metric=display_metric,
-        minimum_label=minimum_label,
-        minimum_support_label=minimum_support_label,
-    )
-    for axis in panel_axes:
+    if parallel_curves is not None:
+        _plot_parallel_objectives_panel(panel_axes[2], parallel_curves, origin, stage_spans)
+        _plot_normalized_objectives_panel(panel_axes[3], parallel_curves, origin, stage_spans)
+        _plot_ch_pareto_panel(
+            panel_axes[4],
+            parallel_curves,
+            origin,
+            guardrail=pareto_guardrail,
+            rb_time=decision_images.get("rb", {}).get("target_time"),
+            selector=pareto_selector,
+        )
+    else:
+        curve = cost_curve if cost_curve is not None else pd.DataFrame()
+        _plot_cost_panel(
+            panel_axes[2],
+            curve,
+            origin,
+            stage_spans,
+            cost_label=cost_label,
+            full_candidate_domain=full_candidate_domain,
+            display_metric=display_metric,
+            display_label=display_label,
+            minimum_label=minimum_label,
+            minimum_support_label=minimum_support_label,
+        )
+    for axis in panel_axes[:4] if parallel else panel_axes:
         axis.set_xlim(0.0, duration)
-    _plot_decision_markers(panel_axes, decision_images, origin, optimal_label)
+    time_axes = panel_axes[:4] if parallel else panel_axes
+    _plot_decision_markers(time_axes, decision_images, origin, optimal_label)
     labels = panel_axes[2].get_legend_handles_labels()
-    if labels[0]:
+    if labels[0] and not parallel:
         panel_axes[2].legend(
             *labels,
             frameon=False,
@@ -649,10 +1141,18 @@ def render_decision_publication(
         )
     cycle_name = str(cycle_record.get("cycle_name", cycle_record.get("cycle_id", "Cycle")))
     figure.suptitle(cycle_name, x=0.08, ha="left", fontsize=10, fontweight="bold")
-    panel_axes[-1].set_xlabel("Time from cycle start [min]", fontsize=8)
-    figure.subplots_adjust(left=0.14, right=0.98, bottom=0.06, top=0.92)
+    panel_axes[3 if parallel else 2].set_xlabel("Time from cycle start [min]", fontsize=8)
+    figure.subplots_adjust(
+        left=0.12,
+        right=0.82 if parallel else 0.98,
+        bottom=0.06,
+        top=0.92,
+    )
+    if parallel:
+        for text in figure.findobj(match=Text):
+            text.set_fontsize(1.25 * text.get_fontsize())
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    figure.savefig(output_path, dpi=300, facecolor="white", bbox_inches="tight", pad_inches=0.08)
     plt.close(figure)
 
 
@@ -717,15 +1217,15 @@ def _plot_decision_markers(
     optimal_label: str,
 ) -> None:
     markers = (
-        ("rb", "RB RGB frame", "#2E7D5B"),
-        ("optimal", f"{optimal_label} RGB frame", "#E28E2C"),
+        ("rb", "RB trigger", "#2E7D5B"),
+        ("optimal", "Selected", "#E28E2C"),
     )
     for target_type, label, color in markers:
         info = decision_images.get(target_type, {})
-        image_time = pd.to_datetime(info.get("image_time"), errors="coerce")
-        if not bool(info.get("available")) or pd.isna(image_time):
+        target_time = pd.to_datetime(info.get("target_time"), errors="coerce")
+        if pd.isna(target_time):
             continue
-        x = (pd.Timestamp(image_time) - origin).total_seconds() / 60.0
+        x = (pd.Timestamp(target_time) - origin).total_seconds() / 60.0
         for axis_index, axis in enumerate(axes):
             axis.axvline(
                 x,
@@ -746,6 +1246,7 @@ def _plot_cost_panel(  # noqa: C901
     cost_label: str = "Cycle inverse COP [-]",
     full_candidate_domain: bool = False,
     display_metric: str | None = None,
+    display_label: str = "Unsupported model extension, display only",
     minimum_label: str = "Minimum",
     minimum_support_label: str | None = None,
 ) -> None:
@@ -753,7 +1254,19 @@ def _plot_cost_panel(  # noqa: C901
     curve = cost_curve.copy()
     curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
     curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
-    metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
+    metric = (
+        "objective_value"
+        if "objective_value" in curve
+        else "inverse_cop"
+        if "inverse_cop" in curve
+        else "renewal_cost_kw"
+    )
+    direction = (
+        str(curve["optimization_direction"].dropna().iloc[0])
+        if "optimization_direction" in curve
+        and not curve["optimization_direction"].dropna().empty
+        else "min"
+    )
     curve[metric] = pd.to_numeric(curve[metric], errors="coerce")
     frost_spans = [
         (left, right) for stage, left, right in stage_spans if stage == "frost_development"
@@ -824,9 +1337,21 @@ def _plot_cost_panel(  # noqa: C901
             curve[metric],
             color="#3775BA",
             linewidth=1.25,
-            label="Cycle inverse COP" if metric == "inverse_cop" else "Empirical cost",
+            label=(
+                str(curve["objective_label"].dropna().iloc[0])
+                if metric == "objective_value"
+                and "objective_label" in curve
+                and not curve["objective_label"].dropna().empty
+                else "Cycle inverse COP"
+                if metric == "inverse_cop"
+                else "Empirical cost"
+            ),
         )
-        minimum_index = curve.loc[eligible, metric].idxmin()
+        minimum_index = (
+            curve.loc[eligible, metric].idxmax()
+            if direction == "max"
+            else curve.loc[eligible, metric].idxmin()
+        )
         minimum_x = float(curve.loc[minimum_index, "minutes"])
         axis.axvline(
             minimum_x,
@@ -836,25 +1361,44 @@ def _plot_cost_panel(  # noqa: C901
             zorder=4,
         )
         regret = (
-            pd.to_numeric(curve["relative_regret"], errors="coerce")
+            pd.to_numeric(curve["relative_optimality_gap"], errors="coerce")
+            if "relative_optimality_gap" in curve
+            else pd.to_numeric(curve["relative_regret"], errors="coerce")
             if "relative_regret" in curve
-            else curve[metric] / curve[metric].min() - 1.0
-        )
-        near = eligible & regret.le(0.01)
-        groups = near.ne(near.shift(fill_value=False)).cumsum()
-        for segment_index, (_, segment) in enumerate(
-            curve.loc[near].groupby(groups[near], sort=False), start=1
-        ):
-            axis.axvspan(
-                float(segment["minutes"].min()),
-                float(segment["minutes"].max()),
-                color="#E28E2C",
-                alpha=0.18,
-                label=f"1% near-optimal segment {segment_index}",
-                zorder=0.2,
+            else (
+                (curve.loc[minimum_index, metric] - curve[metric])
+                / abs(float(curve.loc[minimum_index, metric]))
+                if direction == "max"
+                else curve[metric] / curve.loc[minimum_index, metric] - 1.0
             )
-        if "minimum_location" in curve:
-            location = str(curve.loc[minimum_index, "minimum_location"]).replace("_", " ")
+        )
+        for threshold, alpha in ((0.05, 0.08), (0.01, 0.18)):
+            near = eligible & regret.le(threshold)
+            groups = near.ne(near.shift(fill_value=False)).cumsum()
+            for segment_index, (_, segment) in enumerate(
+                curve.loc[near].groupby(groups[near], sort=False), start=1
+            ):
+                axis.axvspan(
+                    float(segment["minutes"].min()),
+                    float(segment["minutes"].max()),
+                    color="#E28E2C",
+                    alpha=alpha,
+                    label=(
+                        f"{threshold:.0%} connected near-optimal region"
+                        if segment_index == 1
+                        else "_nolegend_"
+                    ),
+                    zorder=0.1 if threshold == 0.05 else 0.2,
+                )
+        location_column = (
+            "extreme_location"
+            if "extreme_location" in curve
+            else "minimum_location"
+            if "minimum_location" in curve
+            else None
+        )
+        if location_column is not None:
+            location = str(curve.loc[minimum_index, location_column]).replace("_", " ")
         else:
             location = (
                 "left boundary"
@@ -878,10 +1422,9 @@ def _plot_cost_panel(  # noqa: C901
             0.01,
             0.95,
             (
-                f"Minimum: {location} · "
-                f"{support_text}"
+                f"{minimum_label}: {location} · {support_text}"
                 if minimum_support_label is not None or support_state is not None
-                else f"Minimum: {location}"
+                else f"{minimum_label}: {location}"
             ),
             transform=axis.transAxes,
             ha="left",
@@ -926,7 +1469,7 @@ def _plot_cost_panel(  # noqa: C901
             marker=".",
             markersize=2.5,
             alpha=0.75,
-            label="Unsupported model extension, display only",
+            label=display_label,
         )
 
     _plot_cost_quality_markers(
@@ -965,7 +1508,7 @@ def _plot_cost_panel(  # noqa: C901
                 label="Observed defrost",
             )
     axis.set_ylabel(
-        cost_label if metric == "inverse_cop" else "Renewal cost [kW-eq.]",
+        cost_label if metric in {"inverse_cop", "objective_value"} else "Renewal cost [kW-eq.]",
         fontsize=8,
     )
     axis.grid(axis="x", alpha=0.12)

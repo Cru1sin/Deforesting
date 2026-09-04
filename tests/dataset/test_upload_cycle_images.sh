@@ -253,63 +253,22 @@ test_running_onedrive_is_paused_and_restarted() {
     assert_file_missing "$images/frost_cycle_000001"
 }
 
-test_matching_cloud_zip_is_verified_then_source_is_deleted() {
+test_existing_cloud_zip_is_skipped_before_pack() {
     new_fixture
     install_fake_zip
     install_fake_rclone
     mkdir -p "$images/frost_cycle_000002"
     printf 'original\n' > "$images/frost_cycle_000002/frame.jpg"
-    printf 'fake zip for frost_cycle_000002\n' > "$cloud/frost_cycle_000002.zip"
+    printf 'already uploaded\n' > "$cloud/frost_cycle_000002.zip"
 
     run_script > "$fixture/output.log"
 
-    assert_contains "$fixture/output.log" "[VERIFY] OneDrive cloud ZIP confirmed"
-    assert_file_missing "$images/frost_cycle_000002"
+    assert_contains "$fixture/output.log" "[SKIP] cloud ZIP already exists"
+    assert_file_exists "$images/frost_cycle_000002/frame.jpg"
     assert_file_missing "$tmp/frost_cycle_000002.zip"
     assert_file_exists "$cloud/frost_cycle_000002.zip"
-    [[ ! -f "$copy_marker" ]] || fail "matching readable cloud ZIP must not upload again"
-    grep -Fq -- "--onedrive-chunk-size 100Mi" "$log" \
-        || fail "OneDrive upload must use the tuned native chunk size"
-    grep -Fq -- "--timeout 2m" "$log" \
-        || fail "OneDrive upload must abandon and retry stalled network I/O"
-    probe_count="$(grep -Fc "rclone cat" "$log")"
-    [[ "$probe_count" == 2 ]] \
-        || fail "strict verification must probe cloud head and tail (got $probe_count probes)"
-}
-
-test_same_size_but_unreadable_cloud_zip_is_reuploaded() {
-    new_fixture
-    install_fake_zip
-    install_fake_rclone
-    mkdir -p "$images/frost_cycle_000024"
-    printf 'original\n' > "$images/frost_cycle_000024/frame.jpg"
-    printf 'fake zip for frost_cycle_000024\n' > "$cloud/frost_cycle_000024.zip"
-
-    READ_FAIL_BEFORE_COPY=1 run_script > "$fixture/output.log"
-
-    [[ "$(grep -Fc "rclone copyto" "$log")" == 2 ]] \
-        || fail "unreadable same-size ZIP must trigger one forced replacement"
-    [[ -f "$copy_marker" ]] || fail "forced replacement must upload cloud content"
-    assert_file_missing "$images/frost_cycle_000024"
-    assert_file_missing "$tmp/frost_cycle_000024.zip"
-}
-
-test_different_size_cloud_zip_is_refused() {
-    new_fixture
-    install_fake_zip
-    install_fake_rclone
-    mkdir -p "$images/frost_cycle_000003"
-    printf 'original\n' > "$images/frost_cycle_000003/frame.jpg"
-    printf 'partial\n' > "$cloud/frost_cycle_000003.zip"
-
-    if run_script > "$fixture/output.log" 2>&1; then
-        fail "different-size cloud ZIP must stop for manual review"
-    fi
-
-    ! grep -Fq "rclone copyto" "$log" || fail "different-size cloud ZIP must not be replaced"
-    assert_file_exists "$images/frost_cycle_000003/frame.jpg"
-    assert_file_exists "$tmp/frost_cycle_000003.zip"
-    [[ "$(/usr/bin/stat -f '%z' "$cloud/frost_cycle_000003.zip")" == 8 ]]
+    ! grep -Fq "ZIP_CALL" "$log" || fail "existing cloud ZIP must skip local packing"
+    ! grep -Fq "rclone copyto" "$log" || fail "existing cloud ZIP must not be replaced"
 }
 
 test_upload_failure_preserves_source_and_temp_zip() {
@@ -424,9 +383,7 @@ test_low_space_waits_then_completes_two_cycles() {
 }
 
 test_running_onedrive_is_paused_and_restarted
-test_matching_cloud_zip_is_verified_then_source_is_deleted
-test_same_size_but_unreadable_cloud_zip_is_reuploaded
-test_different_size_cloud_zip_is_refused
+test_existing_cloud_zip_is_skipped_before_pack
 test_upload_failure_preserves_source_and_temp_zip
 test_post_upload_cloud_verification_failure_preserves_source_and_temp
 test_existing_temp_zip_is_reused

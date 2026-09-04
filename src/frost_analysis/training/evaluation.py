@@ -254,14 +254,24 @@ def experiment_prediction_metrics(predictions: pd.DataFrame) -> pd.DataFrame:
                     average="macro",
                 ),
                 "accuracy": accuracy_score(values["target"], values["predicted_target"]),
-                "positive_f1": f1_score(
-                    values["target"], values["predicted_target"], pos_label=1
+                "positive_f1": (
+                    f1_score(values["target"], values["predicted_target"], pos_label=1)
+                    if len(expected_classes) == 2
+                    else float("nan")
                 ),
-                "precision": precision_score(
-                    values["target"], values["predicted_target"], pos_label=1, zero_division=0
+                "precision": (
+                    precision_score(
+                        values["target"], values["predicted_target"], pos_label=1, zero_division=0
+                    )
+                    if len(expected_classes) == 2
+                    else float("nan")
                 ),
-                "recall": recall_score(
-                    values["target"], values["predicted_target"], pos_label=1, zero_division=0
+                "recall": (
+                    recall_score(
+                        values["target"], values["predicted_target"], pos_label=1, zero_division=0
+                    )
+                    if len(expected_classes) == 2
+                    else float("nan")
                 ),
                 "auroc": _auroc(values),
                 "balanced_misclassification_regret": incorrect_regret.groupby(values["target"])
@@ -331,18 +341,35 @@ def bootstrap_mean_interval(
 
 def add_cycle_time_features(frame: pd.DataFrame, candidates: pd.DataFrame) -> pd.DataFrame:
     """Add elapsed time since stable heating began in each cycle."""
-    stable_heating_starts = (
+    boundary = next(
         (
-            pd.to_datetime(candidates["candidate_time"])
-            - pd.to_timedelta(candidates["heating_hours"], unit="h")
-        )
-        .groupby(candidates["cycle_name"])
-        .first()
+            column
+            for column in ("stable_start_fixed9", "t_heating_stable", "stable_heating_start")
+            if column in candidates
+        ),
+        None,
     )
+    starts = (
+        pd.to_datetime(candidates[boundary], errors="coerce", format="mixed")
+        if boundary
+        else pd.to_datetime(candidates["candidate_time"], format="mixed")
+        - pd.to_timedelta(candidates["heating_hours"], unit="h")
+    )
+    stable_heating_starts = starts.groupby(candidates["cycle_name"]).first()
     result = frame.copy()
     elapsed = pd.to_datetime(result["image_time"]) - result["cycle_name"].map(stable_heating_starts)
     result["time_elapsed_minutes"] = elapsed.dt.total_seconds() / 60
     return result
+
+
+def assign_boundary_targets(frame: pd.DataFrame, candidates: pd.DataFrame) -> pd.Series:
+    """Label every supported stream frame by its cycle's oracle boundary."""
+    optima = pd.to_datetime(
+        candidates.groupby("cycle_name")["t_star"].first(), errors="coerce"
+    )
+    times = pd.to_datetime(frame["image_time"], errors="coerce")
+    targets = times.ge(frame["cycle_name"].map(optima)).astype("Int64")
+    return targets.mask(frame["cycle_name"].map(optima).isna())
 
 
 def evaluate_holdout_task(  # noqa: C901
@@ -353,12 +380,14 @@ def evaluate_holdout_task(  # noqa: C901
     representation: str = "handcrafted",
     expected_classes: tuple[int, ...] | list[int],
     n_jobs: int = -1,
+    test_frame: pd.DataFrame | None = None,
 ) -> tuple[dict[str, object], pd.DataFrame]:
     """Evaluate one held-out experiment without side effects."""
     started = perf_counter()
     expected_classes = tuple(expected_classes)
     expected = set(expected_classes)
-    test = frame.loc[frame["experiment_id"].eq(experiment)].copy()
+    test_source = frame if test_frame is None else test_frame
+    test = test_source.loc[test_source["experiment_id"].eq(experiment)].copy()
     train = frame.loc[~frame["experiment_id"].eq(experiment)]
     missing = []
     if set(train["target"].unique()) != expected:

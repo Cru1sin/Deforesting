@@ -31,6 +31,7 @@ from frost_analysis.training.evaluation import (
     REPRESENTATION_PREFIXES,
     REPRESENTATIONS,
     add_cycle_time_features,
+    assign_boundary_targets,
     bootstrap_mean_interval,
     evaluate_holdout_task,
     experiment_prediction_metrics,
@@ -118,7 +119,9 @@ def audit_holdout_cohort(features: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def target_shard_paths(shards: Path, labels_path: Path) -> list[Path]:
+def target_shard_paths(
+    shards: Path, labels_path: Path, *, allow_missing: bool = False
+) -> list[Path]:
     """Select exactly the labeled cycle cohort, excluding historical shards."""
     labels = pd.read_parquet(labels_path, columns=["cycle_name", "relative_regret"])
     cycles = sorted(
@@ -126,9 +129,28 @@ def target_shard_paths(shards: Path, labels_path: Path) -> list[Path]:
     )
     paths = [shards / f"{cycle}.parquet" for cycle in cycles]
     missing = [path.stem for path in paths if not path.is_file()]
-    if missing:
+    if missing and not allow_missing:
         raise ValueError(f"missing target feature shards: {', '.join(missing)}")
-    return paths
+    return [path for path in paths if path.is_file()]
+
+
+def relabel_cached_features(
+    features: pd.DataFrame,
+    labels_path: Path,
+    state_column: str,
+) -> pd.DataFrame:
+    """Attach the requested cost labels without recomputing cached RGB features."""
+    keys = ["cycle_name", "camera_role", "file_name"]
+    labels = pd.read_parquet(
+        labels_path,
+        columns=[*keys, "relative_regret", state_column],
+    ).rename(columns={state_column: "cost_state"})
+    return features.drop(columns=["relative_regret", "cost_state"], errors="ignore").merge(
+        labels,
+        on=keys,
+        how="inner",
+        validate="one_to_one",
+    )
 
 
 def build_modality_frames(scoped: pd.DataFrame, representation: str) -> dict[str, pd.DataFrame]:
@@ -309,6 +331,10 @@ def _parse_args():  # type: ignore[no-untyped-def]
         type=Path,
         default=Path("output/label/cost_function_v1_binary/image_cost_labels.parquet"),
     )
+    parser.add_argument("--state-column", default="binary_state_01pct")
+    parser.add_argument("--relabel-from-labels", action="store_true")
+    parser.add_argument("--predict-full-stream", action="store_true")
+    parser.add_argument("--allow-missing-shards", action="store_true")
     parser.add_argument("--camera-groups", nargs="+", choices=tuple(CAMERA_GROUPS), default=["all"])
     parser.add_argument("--task", choices=("binary", "near_binary", "three"), default="binary")
     parser.add_argument("--sensor-dir", type=Path, default=Path("dataset/cycles"))
@@ -386,7 +412,9 @@ def validate_formal_run_shape(
     return combination_count * experiment_count
 
 
-def _worker(frame, heldout, metadata, expected_classes, inner_jobs):  # type: ignore[no-untyped-def]
+def _worker(  # type: ignore[no-untyped-def]
+    frame, heldout, metadata, expected_classes, inner_jobs, test_frame=None
+):
     result, predictions = evaluate_holdout_task(
         frame,
         heldout,
@@ -396,6 +424,7 @@ def _worker(frame, heldout, metadata, expected_classes, inner_jobs):  # type: ig
         else metadata["representation"],
         expected_classes=expected_classes,
         n_jobs=inner_jobs,
+        test_frame=test_frame,
     )
     return {**metadata, **result, "heldout": heldout}, predictions
 
@@ -570,8 +599,10 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
     if plan is not None and plan.empty:
         raise SystemExit("experiment manifest has no rows for the requested stage and task")
     paths = (
-        target_shard_paths(args.shards, args.labels)
-        if args.task in {"near_binary", "three"}
+        target_shard_paths(
+            args.shards, args.labels, allow_missing=args.allow_missing_shards
+        )
+        if args.relabel_from_labels or args.task in {"near_binary", "three"}
         else sorted(args.shards.glob("*.parquet"))
     )
     if not paths:
@@ -590,16 +621,32 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
     features = pd.concat(
         (pd.read_parquet(path, columns=columns) for path in paths), ignore_index=True
     )
+    if args.relabel_from_labels:
+        features = relabel_cached_features(features, args.labels, args.state_column)
     cohort_audit = audit_holdout_cohort(features)
+    candidates = (
+        pd.read_csv(args.candidates, low_memory=False)
+        if args.candidates.suffix.lower() == ".csv"
+        else pd.read_parquet(args.candidates)
+    )
+    features = add_cycle_time_features(features, candidates)
     features["target"] = (
         features["relative_regret"].le(args.regret_thresholds[0]).astype(int)
         if args.task == "near_binary"
         else map_cost_state_targets(features["cost_state"], args.task)
     )
+    prediction_features = features
+    if args.predict_full_stream and args.task == "binary":
+        prediction_features = features.loc[features["relative_regret"].notna()].copy()
+        prediction_features["target"] = assign_boundary_targets(
+            prediction_features, candidates
+        )
+        prediction_features = prediction_features.loc[
+            prediction_features["target"].notna()
+        ].copy()
+        prediction_features["target"] = prediction_features["target"].astype(int)
     features = features.loc[features["target"].notna()].copy()
     features["target"] = features["target"].astype(int)
-    candidates = pd.read_parquet(args.candidates)
-    features = add_cycle_time_features(features, candidates)
     labels = (
         pd.read_parquet(
             args.labels, columns=["cycle_name", "camera_role", "image_time", "relative_regret"]
@@ -634,6 +681,7 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
         "shards": str(args.shards),
         "candidates": str(args.candidates),
         "labels": str(args.labels),
+        "predict_full_stream": args.predict_full_stream,
         "sensor_dir": str(args.sensor_dir) if args.task == "near_binary" else None,
         "experiment_manifest": str(args.experiment_manifest) if args.experiment_manifest else None,
     }
@@ -676,6 +724,16 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
                 else camera_rows.copy()
             )
             values = build_modality_frames(scoped, representation)[modality]
+            full_values = (
+                build_modality_frames(
+                    prediction_features.loc[
+                        prediction_features["camera_role"].isin(CAMERA_GROUPS[camera])
+                    ],
+                    representation,
+                )[modality]
+                if args.predict_full_stream
+                else None
+            )
             retained = len(scoped) / len(camera_rows)
             coverage = (
                 high_confidence_coverage(label_balance, camera, threshold)
@@ -706,6 +764,7 @@ def _evaluate(args, wandb_module=None) -> None:  # type: ignore[no-untyped-def] 
                     {**metadata, "task_id": task_id},
                     (0, 1) if args.task in {"binary", "near_binary"} else (0, 1, 2),
                     1 if args.jobs > 1 else -1,
+                    full_values,
                 )
 
     started = perf_counter()

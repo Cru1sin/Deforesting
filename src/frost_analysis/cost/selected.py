@@ -762,10 +762,39 @@ def build_cost_function_table(  # noqa: C901
     points: pd.DataFrame,
     loader: DatasetLoader,
     algorithm: str,
+    *,
+    n_jobs: int = 1,
+    candidate_step_seconds: int = 60,
+    bootstrap_replicates: int = 200,
 ) -> pd.DataFrame:
     """Build the auditable candidate table for selected v1/v2 test variants."""
     if "cycle_name" in points and points["cycle_name"].duplicated().any():
         raise ValueError("points must contain one row per cycle")
+    if algorithm in {"v2.7.0", "v2.7.1", "v2.7.2", "v2.7.3"}:
+        from .evaluation import build_v27_tables
+
+        tables, artifacts = build_v27_tables(
+            points,
+            loader,
+            n_jobs=n_jobs,
+            candidate_step_seconds=candidate_step_seconds,
+            bootstrap_replicates=bootstrap_replicates,
+        )
+        result = tables[algorithm]
+        result.attrs.update(artifacts)
+        return result
+    if algorithm == "v2.6.8":
+        from .outcome import build_v268_table
+
+        result, artifacts = build_v268_table(
+            points,
+            loader,
+            n_jobs=n_jobs,
+            candidate_step_seconds=candidate_step_seconds,
+            bootstrap_replicates=bootstrap_replicates,
+        )
+        result.attrs.update(artifacts)
+        return result
     if algorithm == "v2.6.7":
         from .ticket import build_v267_table
 

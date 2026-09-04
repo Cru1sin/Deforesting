@@ -17,6 +17,7 @@ from frost_analysis.labels.cost import high_confidence_coverage, map_cost_state_
 from frost_analysis.training.evaluation import (
     MODEL_NAMES,
     add_cycle_time_features,
+    assign_boundary_targets,
     bootstrap_mean_interval,
     evaluate_holdout_task,
     experiment_prediction_metrics,
@@ -79,6 +80,60 @@ def test_task_result_marks_missing_fold_class_invalid() -> None:
     assert result["status"] == "invalid"
     assert "test classes" in result["message"]
     assert predictions["predicted_target"].isna().all()
+
+
+def test_holdout_can_train_on_confident_rows_and_predict_the_full_stream() -> None:
+    confident = pd.DataFrame(
+        {
+            "experiment_id": ["a", "a", "b", "b"],
+            "cycle_name": ["a", "a", "b", "b"],
+            "target": [0, 1, 0, 1],
+            "feature_000": [0.0, 1.0, 0.1, 1.1],
+        }
+    )
+    full = pd.concat(
+        [
+            confident,
+            pd.DataFrame(
+                {
+                    "experiment_id": ["a"],
+                    "cycle_name": ["a"],
+                    "target": [1],
+                    "feature_000": [0.6],
+                },
+                index=[10],
+            ),
+        ]
+    )
+
+    result, predictions = evaluate_holdout_task(
+        confident,
+        "a",
+        model_name="logistic",
+        expected_classes=(0, 1),
+        test_frame=full,
+    )
+
+    assert result["status"] == "ok"
+    assert len(predictions) == 3
+
+
+def test_full_stream_targets_use_oracle_time_inside_the_ambiguity_basin() -> None:
+    start = pd.Timestamp("2026-01-01")
+    images = pd.DataFrame(
+        {
+            "cycle_name": ["cycle", "cycle"],
+            "image_time": [start, start + pd.Timedelta(minutes=2)],
+        }
+    )
+    candidates = pd.DataFrame(
+        {
+            "cycle_name": ["cycle"],
+            "t_star": [start + pd.Timedelta(minutes=1)],
+        }
+    )
+
+    assert assign_boundary_targets(images, candidates).tolist() == [0, 1]
 
 
 def test_convergence_warning_is_counted_and_fails_the_task(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -436,6 +491,23 @@ def test_add_cycle_time_features_uses_stable_heating_start() -> None:
 
     assert math.isclose(enriched["time_elapsed_minutes"].iloc[0], 15)
     assert not {"candidate_start", "candidate_end", "time_candidate_progress"} & set(enriched)
+
+
+def test_add_cycle_time_features_accepts_fixed9_boundary() -> None:
+    rows = pd.DataFrame(
+        {"cycle_name": ["cycle"], "image_time": [pd.Timestamp("2026-01-01 00:15:00")]}
+    )
+    candidates = pd.DataFrame(
+        {
+            "cycle_name": ["cycle"],
+            "candidate_time": [pd.Timestamp("2026-01-01 00:20:00")],
+            "stable_start_fixed9": [pd.Timestamp("2026-01-01 00:09:00")],
+        }
+    )
+
+    enriched = add_cycle_time_features(rows, candidates)
+
+    assert enriched["time_elapsed_minutes"].iloc[0] == 6
 
 
 def test_experiment_metrics_balance_classes_and_regret() -> None:

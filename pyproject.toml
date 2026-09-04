@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Cycle Dataset construction and evidence analysis for heat-pump frost data"
 requires-python = ">=3.11"
 dependencies = [
+    "adjusttext>=1.3,<2",
     "matplotlib>=3.9,<4",
     "numpy>=2,<3",
     "pandas>=2.1,<3",

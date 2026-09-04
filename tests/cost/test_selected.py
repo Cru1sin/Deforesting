@@ -131,6 +131,28 @@ def test_selected_models_are_embedded() -> None:
     assert build_cost_function_table.__module__ == "frost_analysis.cost.selected"
 
 
+def test_v27_dispatch_selects_requested_table_and_keeps_shared_artifacts(monkeypatch) -> None:
+    from frost_analysis.cost import evaluation
+
+    expected = pd.DataFrame({"algorithm": ["v2.7.1"], "cycle_name": ["cycle_a"]})
+    artifacts = {
+        "validation": pd.DataFrame({"event": [1]}),
+        "identifiability": pd.DataFrame({"audit": [1]}),
+        "bootstrap": pd.DataFrame({"repeat_count": [200]}),
+    }
+    monkeypatch.setattr(
+        evaluation,
+        "build_v27_tables",
+        lambda points, loader: ({"v2.7.1": expected}, artifacts),
+    )
+
+    result = build_cost_function_table(pd.DataFrame(), pd.DataFrame(), object(), "v2.7.1")
+
+    pd.testing.assert_frame_equal(result, expected)
+    assert result.attrs["validation"].equals(artifacts["validation"])
+    assert result.attrs["identifiability"].equals(artifacts["identifiability"])
+
+
 def test_v1_uses_unit_heat_without_loading_cycle_data(tables) -> None:
     base, points = tables
     result = build_cost_function_table(base, points, FailingLoader(), "v1")

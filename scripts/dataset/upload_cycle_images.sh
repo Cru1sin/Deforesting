@@ -259,6 +259,12 @@ for i in "${!cycles[@]}"; do
     echo
     echo "[$n/$total] $cycle_name"
 
+    existing_remote_bytes="$(remote_size_bytes "$remote_file")"
+    if [[ "$existing_remote_bytes" =~ ^[0-9]+$ ]]; then
+        echo "[SKIP] cloud ZIP already exists: $zip_name ($existing_remote_bytes bytes)"
+        continue
+    fi
+
     if [[ ! -f "$archive" ]]; then
         estimated_kib="$(du -sk "$cycle_dir" | awk '{print $1}')"
         wait_for_space "$estimated_kib" "$cycle_name"

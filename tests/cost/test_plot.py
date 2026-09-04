@@ -119,6 +119,818 @@ def test_read_tables_admits_cycles_by_any_usable_candidate_and_keeps_full_curve(
     assert table["is_censored"].tolist() == [False, True]
 
 
+def test_read_tables_keeps_v268_cycles_without_a_diagnostic_minimum(tmp_path: Path) -> None:
+    module = _module()
+    path = tmp_path / "v2.6.8.csv"
+    pd.DataFrame(
+        {
+            "cycle_name": ["supported", "supported", "no_minimum", "no_minimum"],
+            "algorithm": ["v2.6.8"] * 4,
+            "optimization_eligible": [True, True, False, False],
+            "valid": [True, True, False, False],
+        }
+    ).to_csv(path, index=False)
+
+    table = module._read_tables({"V2.6.8": path})["v2.6.8"]
+
+    assert table["cycle_name"].tolist() == [
+        "supported",
+        "supported",
+        "no_minimum",
+        "no_minimum",
+    ]
+
+
+def test_v27_metric_reader_preserves_multiple_native_metrics_from_one_csv(
+    tmp_path: Path,
+) -> None:
+    module = _module()
+    path = tmp_path / "cost_function_v2.7.0.csv"
+    pd.DataFrame(
+        {
+            "cycle_name": ["cycle_003"] * 4,
+            "experiment_id": ["exp_20260101"] * 4,
+            "candidate_time": pd.date_range("2026-01-01 00:10", periods=2, freq="min").tolist() * 2,
+            "algorithm": ["v2.7.0"] * 4,
+            "metric_id": ["eta_e_cyc"] * 2 + ["cop_e"] * 2,
+            "optimization_direction": ["max"] * 4,
+            "objective_value": [0.8, 0.9, 1.8, 2.0],
+            "optimization_eligible": True,
+            "valid": True,
+        }
+    ).to_csv(path, index=False)
+
+    metrics = module._read_v27_metrics({"V2.7.0": path})
+
+    assert set(metrics) == {"eta_e_cyc", "cop_e"}
+    assert metrics["eta_e_cyc"]["objective_value"].tolist() == [0.8, 0.9]
+    assert metrics["cop_e"]["optimization_direction"].eq("max").all()
+
+
+def test_v27_validation_figure_shows_all_loeo_targets_and_derived_dynamic_loss() -> None:
+    module = _module()
+    rows = []
+    for experiment_index, experiment in enumerate(("exp_20260101", "exp_20260102")):
+        for cycle_index in range(2):
+            observed_e = 0.30 + 0.02 * experiment_index + 0.01 * cycle_index
+            observed_q = 0.20 + 0.03 * experiment_index + 0.01 * cycle_index
+            observed_j = 0.40 + 0.02 * experiment_index + 0.01 * cycle_index
+            for model_index, model_name in enumerate(
+                ("mean_baseline", "static_5", "physical_static_6", "dynamic_8")
+            ):
+                rows.append(
+                    {
+                        "cycle_name": f"cycle_{experiment_index * 2 + cycle_index + 1:03d}",
+                        "experiment_id": experiment,
+                        "event_valid": True,
+                        "model_name": model_name,
+                        "E_T_observed_kwh": observed_e,
+                        "E_T_prediction_kwh": observed_e + 0.005 * model_index,
+                        "Q_T_observed_kwh": observed_q,
+                        "Q_T_prediction_kwh": observed_q - 0.004 * model_index,
+                        "J_w_observed": observed_j,
+                        "J_w_prediction": observed_j + 0.003 * model_index,
+                        "L_T_dynamic_observed_kwh": 1.0 + 0.05 * cycle_index,
+                        "L_T_dynamic_prediction_kwh": 1.0
+                        + 0.05 * cycle_index
+                        + 0.01 * model_index,
+                    }
+                )
+
+    figure = module._validation_figure(pd.DataFrame(rows))
+    legend_labels = [
+        label.get_text()
+        for axis in figure.axes
+        if axis.get_legend() is not None
+        for label in axis.get_legend().texts
+    ]
+    labels = " ".join(
+        [
+            figure._suptitle.get_text() if figure._suptitle is not None else "",
+            *(axis.get_title() for axis in figure.axes),
+            *(text.get_text() for axis in figure.axes for text in axis.texts),
+            *legend_labels,
+        ]
+    ).lower()
+
+    assert all(model.replace("_", "-") in labels for model in ("static_5", "dynamic_8"))
+    assert "mean" in labels and "physical-static-6" in labels
+    assert "e_t" in labels and "q_t" in labels and "j_w" in labels
+    assert "calibration" in labels
+    assert "cross-fitted healthy-reference-derived target" in labels
+    assert "dynamic event heat loss observed" not in labels
+    plt.close(figure)
+
+
+def test_v27_notation_figure_separates_definitions_from_estimators() -> None:
+    module = _module()
+
+    figure = module._metric_formula_boundary_figure()
+    labels = " ".join(
+        [
+            figure._suptitle.get_text(),
+            *(text.get_text() for axis in figure.axes for text in axis.texts),
+        ]
+    )
+
+    assert all(
+        term in labels
+        for term in (
+            "$COP_{cyc}=Q/E$",
+            "$\\eta_H=Q/Q_0$",
+            "$\\eta_{out}=Q_{out}/Q_{out,0}$",
+        )
+    )
+    assert "only future recovery is excluded; leading recovery: included" in labels
+    assert "Current V2.7 fields are estimators or sensitivity analyses" in labels
+    plt.close(figure)
+
+
+def test_v27_csv_only_summary_does_not_rebuild_models(tmp_path: Path, monkeypatch) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    sources = {}
+    metric_specs = {
+        "v2.7.0": ("eta_e_cyc", "max", [0.8, 0.9]),
+        "v2.7.1": ("epsilon_hl", "min", [0.2, 0.1]),
+        "v2.7.2": ("cop_cyc_k", "max", [1.8, 2.0]),
+        "v2.7.3": ("epsilon_hl_2a", "min", [0.3, 0.2]),
+    }
+    for algorithm, (metric_id, direction, objective) in metric_specs.items():
+        path = tmp_path / f"cost_function_{algorithm}.csv"
+        pd.DataFrame(
+            {
+                "cycle_name": ["cycle_003"] * 2,
+                "experiment_id": ["exp_20260101"] * 2,
+                "candidate_time": [
+                    start + pd.Timedelta(minutes=10),
+                    start + pd.Timedelta(minutes=11),
+                ],
+                "cycle_start": [start] * 2,
+                "algorithm": [algorithm] * 2,
+                "metric_id": [metric_id] * 2,
+                "optimization_direction": [direction] * 2,
+                "objective_value": objective,
+                "relative_optimality_gap": [0.1, 0.0],
+                "optimization_eligible": True,
+                "supported": True,
+                "physical_valid": True,
+                "identifiable": True,
+                "t_star": [start + pd.Timedelta(minutes=11)] * 2,
+                "t_RB": [start + pd.Timedelta(minutes=12)] * 2,
+                "rb_status": ["triggered"] * 2,
+                "basin_1pct_width_minutes": [1.0] * 2,
+                "basin_5pct_width_minutes": [2.0] * 2,
+                "bootstrap_in_original_5pct_basin_fraction": [0.8] * 2,
+            }
+        ).to_csv(path, index=False)
+        sources[algorithm] = path
+
+    saved: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "_save_svg_png",
+        lambda figure, path: (saved.append(path.name), plt.close(figure)),
+    )
+
+    metrics = module._read_v27_metrics(sources)
+    module._write_v27_summaries(
+        metrics, {}, sources, tmp_path / "figures", diagnostics=False
+    )
+
+    assert "comparison_v2.7_RB.png" in saved
+    assert "comparison_v1_v2.5_v2.6.7_v2.6.8_v2.7_RB.png" not in saved
+
+    saved.clear()
+    module._write_v27_summaries(
+        metrics, {}, sources, tmp_path / "figures", diagnostics=True
+    )
+    assert {
+        "01_评价指标迁移与文献定位.png",
+        "02_完整性极值位置区分度与稳定性.png",
+        "03_支持域与可识别覆盖.png",
+        "04_方向感知成本形状比较.png",
+        "05_新增事件目标LOEO.png",
+        "06_全历史成本函数经验链.png",
+    } <= set(saved)
+
+
+def test_v27_csv_only_history_uses_v27_cycle_origin_when_old_csv_lacks_cycle_start(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    v27_path = tmp_path / "cost_function_v2.7.0.csv"
+    pd.DataFrame(
+        {
+            "cycle_name": ["cycle_003"] * 2,
+            "experiment_id": ["exp_20260101"] * 2,
+            "candidate_time": pd.date_range(
+                start + pd.Timedelta(minutes=10), periods=2, freq="min"
+            ),
+            "cycle_start": [start] * 2,
+            "algorithm": ["v2.7.0"] * 2,
+            "metric_id": ["eta_e_cyc"] * 2,
+            "optimization_direction": ["max"] * 2,
+            "objective_value": [0.8, 0.9],
+            "optimization_eligible": True,
+            "valid": True,
+            "t_star": [start + pd.Timedelta(minutes=11)] * 2,
+            "t_RB": [start + pd.Timedelta(minutes=12)] * 2,
+            "rb_status": ["triggered"] * 2,
+        }
+    ).to_csv(v27_path, index=False)
+    sources = {"V2.7.0": v27_path}
+    for algorithm in ("v1", "v2.5", "v2.6.7", "v2.6.8"):
+        path = tmp_path / f"cost_function_{algorithm}.csv"
+        _table(algorithm).loc[lambda table: table["cycle_name"].eq("cycle_003")].to_csv(
+            path, index=False
+        )
+        sources[algorithm] = path
+
+    saved: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "_save_svg_png",
+        lambda figure, path: (saved.append(path.name), plt.close(figure)),
+    )
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(_cycle_name: str) -> dict[str, object]:
+            return {"boundaries": {"start_time": start}}
+
+    module.generate_cost_function_figures(
+        sources, Loader(), tmp_path / "figures", comparison_only=True
+    )
+
+    assert "comparison_v1_v2.5_v2.6.7_v2.6.8_v2.7_RB.png" in saved
+
+
+def test_v27_shape_comparison_skips_cycles_without_finite_gap() -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    rows = []
+    for cycle_id in range(1, 5):
+        for minute in (10, 11):
+            rows.append(
+                {
+                    "cycle_name": f"cycle_{cycle_id:03d}",
+                    "cycle_start": start,
+                    "candidate_time": start + pd.Timedelta(minutes=minute),
+                    "relative_optimality_gap": (
+                        np.nan if cycle_id == 1 else 0.01 * abs(minute - 11)
+                    ),
+                }
+            )
+    table = pd.DataFrame(rows)
+
+    figure = module._normalized_gap_figure({"eta_e_cyc": table})
+
+    assert [axis.get_title(loc="left") for axis in figure.axes] == [
+        "cycle_002",
+        "cycle_003",
+        "cycle_004",
+    ]
+    plt.close(figure)
+
+
+def test_v27_boundary_sensitivity_labels_map_all_protocols_without_aliasing() -> None:
+    module = _module()
+    metrics = {
+        metric_id: _table("v2.7.1").assign(
+            cycle_start=pd.Timestamp("2025-12-31 23:55:00"), metric_id=metric_id
+        )
+        for metric_id in ("epsilon_hl", "epsilon_hl_t0_proxy", "cop_cyc_k")
+    }
+    historical = {
+        "v2.6.8": _table("v2.6.8").assign(cycle_start=pd.Timestamp("2025-12-31 23:55:00"))
+    }
+
+    figure = module._baseline_boundary_sensitivity_figure(metrics, historical)
+    labels = [
+        label.get_text()
+        for axis in figure.axes
+        if axis.get_legend() is not None
+        for label in axis.get_legend().texts
+    ]
+    labels.extend(text.get_text() for axis in figure.axes for text in axis.texts)
+    labels.extend(text.get_text() for text in figure.texts)
+    rendered = "\n".join(labels).lower()
+
+    assert "fixed-9 stable-to-stable" in rendered
+    assert "leading recovery + heating + prep/d" in rendered
+    assert "only future recovery excluded" in rendered
+    assert "ts-dependent 9/13 min" in rendered
+    assert "not plotted" in rendered or "not available" in rendered
+    plt.close(figure)
+
+
+def test_v27_formula_figure_states_all_directions_and_recovery_boundaries() -> None:
+    module = _module()
+
+    figure = module._metric_formula_boundary_figure()
+    rendered = "\n".join(text.get_text() for text in figure.texts)
+    rendered += "\n" + "\n".join(
+        text.get_text() for axis in figure.axes for text in axis.texts
+    )
+
+    for metric_id in (
+        "eta_e_cyc",
+        "cop_e",
+        "epsilon_hl",
+        "epsilon_hl_t0_proxy",
+        "cop_cyc_k",
+        "epsilon_hl_2a",
+    ):
+        assert metric_id in rendered
+    assert rendered.count("MAXIMIZE") == 3
+    assert rendered.count("MINIMIZE") == 3
+    assert "only future recovery is excluded" in rendered
+    assert "leading recovery: included" in rendered
+    plt.close(figure)
+
+
+def test_v27_shape_comparison_draws_one_and_five_percent_guides() -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    table = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_001"] * 2,
+            "cycle_start": [start] * 2,
+            "candidate_time": pd.date_range(
+                start + pd.Timedelta(minutes=10), periods=2, freq="min"
+            ),
+            "relative_optimality_gap": [0.01, 0.0],
+        }
+    )
+
+    figure = module._normalized_gap_figure({"eta_e_cyc": table})
+    guide_levels = {
+        float(np.asarray(line.get_ydata())[0])
+        for line in figure.axes[0].lines
+        if np.asarray(line.get_ydata()).size > 1
+        and np.all(np.asarray(line.get_ydata()) == np.asarray(line.get_ydata())[0])
+    }
+
+    assert {1.0, 5.0} <= guide_levels
+    plt.close(figure)
+
+
+def test_v27_cost_curve_accepts_mixed_fractional_timestamp_formats() -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    metric = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_001"] * 2,
+            "cycle_start": [start] * 2,
+            "candidate_time": [
+                "2026-01-01 00:10:00.000000000",
+                "2026-01-01 00:11:00",
+            ],
+            "objective_value": [0.8, 0.9],
+            "relative_optimality_gap": [0.1, 0.0],
+            "optimization_eligible": [True, True],
+            "optimization_direction": ["max", "max"],
+            "t_star": ["2026-01-01 00:11:00"] * 2,
+        }
+    )
+
+    figure = module._cost_curve_figure({"eta_e_cyc": metric}, "cycle_001")
+
+    assert len(figure.axes[0].lines) >= 1
+    plt.close(figure)
+
+
+
+def test_v27_comparison_marks_cycle_without_valid_metric_curve() -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    table = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_001"],
+            "experiment_id": ["exp_20260101"],
+            "cycle_start": [start],
+            "candidate_time": [start + pd.Timedelta(minutes=10)],
+            "objective_value": [1.0],
+            "optimization_eligible": [False],
+            "optimization_direction": ["max"],
+            "t_star": [pd.NaT],
+            "t_RB": [pd.NaT],
+            "rb_status": ["not_triggered"],
+        }
+    )
+
+    figure = module._comparison_figure({"eta_e_cyc": table}, ("eta_e_cyc",))
+
+    labels = {collection.get_label() for collection in figure.axes[0].collections}
+    assert any("no diagnostic minimum" in label for label in labels)
+    plt.close(figure)
+
+
+
+
+def test_v27_publications_keep_no_valid_metric_slots(monkeypatch, tmp_path: Path) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    metrics = {
+        metric_id: pd.DataFrame(
+            {
+                "cycle_name": ["cycle_001"],
+                "experiment_id": ["exp_20260101"],
+                "cycle_start": [start],
+                "candidate_time": [start + pd.Timedelta(minutes=10)],
+                "objective_value": [1.0],
+                "optimization_eligible": [metric_id == "cop_e"],
+                "optimization_direction": ["min" if metric_id == "epsilon_hl" else "max"],
+                "objective_label": [metric_id],
+                "objective_unit": ["-"],
+                "t_star": [start + pd.Timedelta(minutes=11) if metric_id == "cop_e" else pd.NaT],
+            }
+        )
+        for metric_id in ("epsilon_hl", "cop_e")
+    }
+    captured: list[tuple[Path, pd.DataFrame, dict[str, object]]] = []
+    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
+    monkeypatch.setattr(
+        module,
+        "render_decision_publication",
+        lambda _frame, _record, curve, _images, path, **kwargs: captured.append(
+            (path, curve, kwargs)
+        ),
+    )
+
+    class Loader:
+        load_cycle = load_image_metadata = load_cycle_images = staticmethod(
+            lambda _cycle_name: pd.DataFrame()
+        )
+
+    module._render_cycle_sets(
+        metrics,
+        Loader(),
+        {"cycle_001": {"cycle_name": "cycle_001"}},
+        tmp_path,
+    )
+
+    by_metric = {
+        path.parent.name.rsplit("/", 1)[-1]: (curve, kwargs)
+        for path, curve, kwargs in captured
+    }
+    assert set(by_metric) == {"epsilon_hl", "cop_e"}
+    assert by_metric["epsilon_hl"][1]["minimum_label"] == "Minimum"
+    assert by_metric["cop_e"][1]["minimum_label"] == "Maximum"
+    assert by_metric["epsilon_hl"][0]["display_only_objective"].notna().all()
+
+
+def test_parallel_policy_cycle_reuses_publication_renderer_with_c_h_o(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    times = pd.date_range(start, periods=4, freq="min")
+    metrics = {
+        metric_id: pd.DataFrame(
+            {
+                "cycle_name": "cycle_001",
+                "candidate_time": times,
+                "objective_value": values,
+                "optimization_eligible": True,
+            }
+        )
+        for metric_id, values in {
+            "cop_cyc_evt": [3.0, 2.99, 2.97, 2.7],
+            "h_abs_rate": [8.0, 8.1, 8.2, 8.3],
+            "o_abs_rate": [5.0, 4.8, 4.6, 4.4],
+        }.items()
+    }
+    captured = []
+    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
+    monkeypatch.setattr(
+        module,
+        "render_decision_publication",
+        lambda *_args, **kwargs: captured.append(kwargs),
+    )
+
+    class Loader:
+        load_cycle = staticmethod(lambda _cycle: pd.DataFrame({"timestamp": times}))
+        load_image_metadata = load_cycle_images = staticmethod(lambda _cycle: pd.DataFrame())
+
+    module._render_parallel_policy_cycles(
+        metrics,
+        Loader(),
+        {
+            "cycle_001": {
+                "cycle_name": "cycle_001",
+                "boundaries": {"stable_heating_start": times[1]},
+            }
+        },
+        tmp_path,
+    )
+
+    assert set(captured[0]["parallel_curves"]) == {"C", "H", "O"}
+    assert all(
+        curve["candidate_time"].tolist() == times[1:].tolist()
+        for curve in captured[0]["parallel_curves"].values()
+    )
+    assert captured[0]["pareto_guardrail"] == 0.05
+    assert captured[0]["pareto_selector"] == "knee"
+    candidates = pd.read_csv(tmp_path / "pareto_knee_candidates.csv")
+    assert candidates["pareto_knee"].sum() == 1
+    assert candidates.loc[candidates["pareto_knee"], "candidate_time"].tolist() == [
+        str(times[2])
+    ]
+
+
+def test_parallel_policy_cycle_uses_full_pareto_when_five_percent_intersection_is_empty(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    times = pd.date_range("2026-01-01", periods=2, freq="min")
+    metrics = {
+        metric_id: pd.DataFrame(
+            {
+                "cycle_name": "cycle_001",
+                "candidate_time": times,
+                "objective_value": values,
+                "optimization_eligible": True,
+            }
+        )
+        for metric_id, values in {
+            "cop_cyc_evt": [10.0, 1.0],
+            "h_abs_rate": [1.0, 10.0],
+            "o_abs_rate": [5.0, 4.0],
+        }.items()
+    }
+    captured = []
+    monkeypatch.setattr(module, "_decision_images", lambda *_args: {})
+    monkeypatch.setattr(
+        module,
+        "render_decision_publication",
+        lambda *_args, **_kwargs: captured.append(True),
+    )
+
+    class Loader:
+        load_cycle = staticmethod(lambda _cycle: pd.DataFrame({"timestamp": times}))
+        load_image_metadata = load_cycle_images = staticmethod(lambda _cycle: pd.DataFrame())
+
+    result = module._render_parallel_policy_cycle(
+        "cycle_001",
+        metrics,
+        Loader(),
+        {"cycle_name": "cycle_001"},
+        tmp_path,
+    )
+
+    assert captured == [True]
+    assert result["pareto_latest"].sum() == 1
+    assert result.loc[result["pareto_latest"], "candidate_time"].tolist() == [times[1]]
+    assert result["pareto_knee"].sum() == 1
+    assert result.loc[result["pareto_knee"], "candidate_time"].tolist() == [times[0]]
+
+
+def test_historical_and_v27_share_one_cycle_publication_registration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    module = _module()
+    v1_path = tmp_path / "cost_function_v1.csv"
+    v27_path = tmp_path / "cost_function_v2.7.0.csv"
+    v1 = _table("v1")
+    v1.to_csv(v1_path, index=False)
+    v1.assign(
+        algorithm="v2.7.0",
+        metric_id="eta_e_cyc",
+        objective_value=v1["inverse_cop"],
+        optimization_direction="max",
+        relative_optimality_gap=v1["relative_regret"],
+        supported=True,
+        physical_valid=True,
+        identifiable=True,
+    ).to_csv(v27_path, index=False)
+
+    captured: list[set[str]] = []
+    monkeypatch.setattr(module, "_write_v27_summaries", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(module, "_render_cost_curve_comparisons", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "_render_cycle_sets",
+        lambda tables, *_args, **_kwargs: captured.append(set(tables)),
+    )
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(_cycle_name: str) -> dict[str, object]:
+            return {"boundaries": {"start_time": pd.Timestamp("2025-12-31 23:55")}}
+
+    module.generate_cost_function_figures(
+        {"v1": v1_path, "v2.7.0": v27_path}, Loader(), tmp_path / "figures"
+    )
+
+    assert captured == [{"v1", "eta_e_cyc"}]
+
+
+def test_cost_curve_panel_shows_distinct_one_and_five_percent_basin_guides() -> None:
+    module = _module()
+    table = _table("v2.6.5").assign(cycle_start=pd.Timestamp("2025-12-31 23:55:00"))
+
+    figure = module._cost_curve_figure({"v2.6.5": table}, "cycle_003")
+
+    axis = figure.axes[1]
+    guides = {
+        float(np.asarray(line.get_ydata())[0]): line.get_linestyle()
+        for line in axis.lines
+        if np.asarray(line.get_ydata()).size > 1
+        and np.all(np.asarray(line.get_ydata()) == np.asarray(line.get_ydata())[0])
+    }
+    assert {1.0, 5.0} <= set(guides)
+    assert guides[1.0] != guides[5.0]
+    assert axis.get_ylim()[1] > 5.0
+    plt.close(figure)
+
+
+def test_v27_front_image_matching_uses_optimal_target_not_rule_row(monkeypatch) -> None:
+    module = _module()
+    monkeypatch.setattr(
+        module,
+        "match_decision_rgb_images",
+        lambda *_args, **_kwargs: pd.DataFrame(
+            {
+                "target_type": ["rb", "optimal"],
+                "available": [False, True],
+                "status": ["rb_right_censored", "matched"],
+            }
+        ),
+    )
+    curve = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_001"],
+            "t_star": [pd.Timestamp("2026-01-01 00:10")],
+            "optimization_eligible": [True],
+            "optimization_direction": ["max"],
+        }
+    )
+
+    matched = module._match_optimal_front_images(
+        {"eta_e_cyc": curve},
+        "cycle_001",
+        pd.DataFrame(),
+        pd.DataFrame(),
+    )
+
+    assert matched["eta_e_cyc"]["available"] is True
+    assert matched["eta_e_cyc"]["status"] == "matched"
+
+
+def test_v27_rgb_page_passes_cycle_stable_start_to_decision_image(monkeypatch) -> None:
+    module = _module()
+    stable = pd.Timestamp("2026-01-01 00:09:00")
+    captured: list[pd.Timestamp] = []
+    monkeypatch.setattr(
+        module,
+        "_plot_decision_image",
+        lambda _axis, _info, _label, _origin, stable_arg: captured.append(stable_arg),
+    )
+
+    for figure in module._optimal_rgb_figures(
+            {
+                "eta_e_cyc": {
+                    "target_time": pd.Timestamp("2026-01-01 00:10"),
+                    "available": True,
+                    "image_time": pd.Timestamp("2026-01-01 00:12:00"),
+                    "offset_seconds": 0.0,
+                }
+            },
+            ("eta_e_cyc",),
+            "cycle_001",
+            pd.Timestamp("2026-01-01"),
+            stable,
+        ):
+        plt.close(figure)
+
+    assert captured == [stable]
+
+
+def test_v268_cost_figure_draws_supported_and_outside_domain_segments() -> None:
+    module = _module()
+    start = pd.Timestamp("2026-01-01")
+    table = pd.DataFrame(
+        {
+            "cycle_name": ["cycle_003"] * 8,
+            "algorithm": ["v2.6.8"] * 8,
+            "experiment_id": ["exp_20260101"] * 8,
+            "cycle_start": [start] * 8,
+            "candidate_time": pd.date_range(start + pd.Timedelta(minutes=1), periods=8, freq="min"),
+            "t_star": [start + pd.Timedelta(minutes=5)] * 8,
+            "t_RB": [start + pd.Timedelta(minutes=7)] * 8,
+            "rb_status": ["triggered"] * 8,
+            "J_model": np.linspace(0.5, 0.3, 8),
+            "inverse_cop": np.linspace(0.5, 0.3, 8),
+            "relative_regret": [np.nan, 0.5, 0.3, 0.1, 0.0, 0.1, 0.2, np.nan],
+            "optimization_eligible": [False, True, True, True, True, True, True, False],
+            "supported": [False, True, True, True, True, True, True, False],
+            "model_supported": [False, True, True, True, True, True, True, False],
+            "cycle_status": ["identified_curve"] * 8,
+        }
+    )
+
+    figure = module._cost_curve_figure({"v2.6.8": table}, "cycle_003")
+    labels = figure.axes[0].get_legend_handles_labels()[1]
+
+    assert "V2.6.8" in labels
+    assert "V2.6.8 outside applicability domain" in labels
+    plt.close(figure)
+
+
+def test_v268_standard_comparisons_and_curve_family_have_requested_names(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    sources = {}
+    for algorithm in ("v1", "v2.5", "v2.6.7", "v2.6.8"):
+        path = tmp_path / f"{algorithm}.csv"
+        _table(algorithm).assign(cycle_status="identified_curve").to_csv(path, index=False)
+        sources[algorithm] = path
+
+    class Loader:
+        @staticmethod
+        def get_cycle_record(cycle_name: str) -> dict[str, object]:
+            return {"boundaries": {"start_time": "2026-01-01"}}
+
+    saved: list[str] = []
+    family: list[str] = []
+    monkeypatch.setattr(
+        module,
+        "_save_png",
+        lambda figure, path: (saved.append(path.name), plt.close(figure)),
+    )
+    monkeypatch.setattr(module, "_render_cycle_sets", lambda *args, **kwargs: None)
+    module.generate_cost_function_figures(sources, Loader(), tmp_path / "figures")
+
+    assert "comparison_v2.6.8_RB.png" in saved
+    assert "comparison_v1_v2.5_v2.6.7_v2.6.8_RB.png" in saved
+
+    monkeypatch.setattr(
+        module,
+        "_render_cost_curve_comparisons",
+        lambda tables, loader, output, **kwargs: family.append(output.name),
+    )
+    module.generate_cost_function_figures(
+        sources,
+        Loader(),
+        tmp_path / "figures",
+        curves_only=True,
+    )
+    assert family == ["cost_function_v1_v2.5_v2.6.7_v2.6.8_cycle"]
+
+
+def test_v268_publication_cycle_displays_all_noneligible_model_values(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    table = _table("v2.6.8").loc[lambda values: values["cycle_name"].eq("cycle_003")].copy()
+    table["J_model"] = table["inverse_cop"]
+    table["supported"] = [True, True]
+    table["model_supported"] = table["supported"]
+    table["optimization_eligible"] = [True, False]
+    table["cycle_status"] = "identified_curve"
+
+    class Loader:
+        @staticmethod
+        def load_cycle(cycle_name: str) -> pd.DataFrame:
+            return pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=2, freq="min")})
+
+        @staticmethod
+        def load_image_metadata(cycle_name: str) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        @staticmethod
+        def load_cycle_images(cycle_name: str) -> pd.DataFrame:
+            return pd.DataFrame()
+
+    seen = {}
+
+    def render(frame, record, curve, images, output, **kwargs) -> None:
+        seen.update(curve=curve, output=output, kwargs=kwargs)
+
+    monkeypatch.setattr(module, "render_decision_publication", render)
+    monkeypatch.setattr(module, "_decision_images", lambda *args: {})
+    module._render_cycle_sets(
+        {"v2.6.8": table},
+        Loader(),
+        {"cycle_003": {"cycle_name": "cycle_003"}},
+        tmp_path,
+    )
+
+    assert seen["output"].parent.name == "cost_function_v2.6.8_cycle"
+    assert seen["kwargs"]["display_metric"] == module.V268_DISPLAY_METRIC
+    assert seen["kwargs"]["display_label"] == "Non-eligible V2.6.8 model curve, display only"
+    assert (
+        seen["curve"]
+        .loc[seen["curve"]["optimization_eligible"].eq(False), module.V268_DISPLAY_METRIC]
+        .notna()
+        .all()
+    )
+
+
 def test_water_reference_curve_uses_its_own_selected_time() -> None:
     module = _module()
     table = _table("v1")
@@ -367,9 +1179,7 @@ def test_v2_variants_render_publication_cycles(tmp_path: Path, monkeypatch) -> N
     assert set(rendered) == expected
 
 
-def test_v261_uses_dotted_comparison_and_cycle_directory(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_v261_uses_dotted_comparison_and_cycle_directory(tmp_path: Path, monkeypatch) -> None:
     module = _module()
     path = tmp_path / "v2.6.1.csv"
     _table("v2.6.1").to_csv(path, index=False)
@@ -550,9 +1360,7 @@ def test_five_method_v267_family_uses_one_front_image_plate() -> None:
     images = {algorithm: {"available": False, "status": "missing"} for algorithm in algorithms}
 
     pages = list(
-        module._optimal_rgb_figures(
-            images, algorithms, "cycle_003", pd.Timestamp("2026-01-01")
-        )
+        module._optimal_rgb_figures(images, algorithms, "cycle_003", pd.Timestamp("2026-01-01"))
     )
 
     assert len(pages) == 1
@@ -573,9 +1381,9 @@ def test_five_method_v267_family_uses_one_front_image_plate() -> None:
             pd.Timestamp("2026-01-01"),
         )
     )
-    assert "model support limited · no eligible diagnostic minimum" in v267_page.axes[
-        0
-    ].get_title(loc="left")
+    assert "model support limited · no eligible diagnostic minimum" in v267_page.axes[0].get_title(
+        loc="left"
+    )
     plt.close(v267_page)
 
 
@@ -597,9 +1405,7 @@ def test_v266_rgb_support_and_page_title_follow_cycle_status(monkeypatch) -> Non
         {"v2.6.6": table}, "cycle_003", pd.DataFrame(), pd.DataFrame()
     )
     page = next(
-        module._optimal_rgb_figures(
-            matched, ("v2.6.6",), "cycle_003", pd.Timestamp("2026-01-01")
-        )
+        module._optimal_rgb_figures(matched, ("v2.6.6",), "cycle_003", pd.Timestamp("2026-01-01"))
     )
 
     assert matched["v2.6.6"]["target_supported"] is False
@@ -632,9 +1438,7 @@ def test_v266_overview_encodes_each_nonidentified_status() -> None:
                 t_star_model_supported=True,
             )
         )
-    figure = module._comparison_figure(
-        {"v2.6.6": pd.concat(rows, ignore_index=True)}, ("v2.6.6",)
-    )
+    figure = module._comparison_figure({"v2.6.6": pd.concat(rows, ignore_index=True)}, ("v2.6.6",))
 
     labels = {collection.get_label() for collection in figure.axes[0].collections}
     assert {
@@ -731,14 +1535,18 @@ def test_v267_nonidentified_publication_preserves_support_and_labels_cycle_limit
     records = {cycle: {} for cycle in table["cycle_name"].unique()}
     module._render_cycle_sets({"v2.6.7": table}, Loader(), records, tmp_path)
 
-    assert seen == [
-        (
-            [True, True],
-            module.V267_DISPLAY_METRIC,
-            "Diagnostic/raw minimum",
-            "measurement limited",
-        )
-    ] * 2
+    assert (
+        seen
+        == [
+            (
+                [True, True],
+                module.V267_DISPLAY_METRIC,
+                "Diagnostic/raw minimum",
+                "measurement limited",
+            )
+        ]
+        * 2
+    )
 
 
 def test_all_cost_curves_use_distinct_colors_and_line_styles() -> None:
@@ -765,15 +1573,11 @@ def test_all_cost_curves_use_distinct_colors_and_line_styles() -> None:
 
 def test_cost_curve_selected_marker_uses_true_regret() -> None:
     module = _module()
-    table = _table("v2.6.5").assign(
-        cycle_start=pd.Timestamp("2025-12-31 23:55:00")
-    )
+    table = _table("v2.6.5").assign(cycle_start=pd.Timestamp("2025-12-31 23:55:00"))
     selected = table["cycle_name"].eq("cycle_003") & table["candidate_time"].eq(
         pd.Timestamp("2026-01-01 00:16:00")
     )
-    table.loc[table["cycle_name"].eq("cycle_003"), "t_star"] = pd.Timestamp(
-        "2026-01-01 00:16:00"
-    )
+    table.loc[table["cycle_name"].eq("cycle_003"), "t_star"] = pd.Timestamp("2026-01-01 00:16:00")
     table.loc[selected, "relative_regret"] = 0.009208
 
     figure = module._cost_curve_figure({"v2.6.5": table}, "cycle_003")
@@ -858,6 +1662,76 @@ def test_cost_curve_rgb_fetches_only_missing_optimal_front_members(
     ]
 
 
+def test_v268_publication_cycle_can_fetch_its_missing_front_image(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = _module()
+    table = _table("v2.6.8").loc[lambda values: values["cycle_name"].eq("cycle_003")].copy()
+    table["J_model"] = table["inverse_cop"]
+    table["supported"] = True
+    table["model_supported"] = True
+    table["cycle_status"] = "identified_curve"
+    image_path = tmp_path / "front.jpg"
+    plt.imsave(image_path, np.ones((4, 4, 3)))
+
+    class Loader:
+        dataset_root = tmp_path / "dataset"
+
+        @staticmethod
+        def load_cycle(cycle_name: str) -> pd.DataFrame:
+            return pd.DataFrame({"timestamp": pd.date_range("2026-01-01", periods=2, freq="min")})
+
+        @staticmethod
+        def load_image_metadata(cycle_name: str) -> pd.DataFrame:
+            return pd.DataFrame(
+                {
+                    "camera_role": ["front"],
+                    "file_name": ["front_10.jpg"],
+                    "image_time": [pd.Timestamp("2026-01-01 00:10:00")],
+                }
+            )
+
+        @staticmethod
+        def load_cycle_images(cycle_name: str) -> pd.DataFrame:
+            return pd.DataFrame(columns=["camera_role", "file_name", "path"])
+
+    requested = []
+
+    @contextmanager
+    def materialize(_dataset, cycle_name, names, **options):
+        requested.append((cycle_name, tuple(names), options))
+        yield tmp_path / "range"
+
+    def scan(_dataset, cycle_name, metadata, *, cycle_dir):
+        return pd.DataFrame(
+            {"camera_role": ["front"], "file_name": ["front_10.jpg"], "path": [image_path]}
+        )
+
+    available = []
+    monkeypatch.setattr(module, "materialize_cycle_image_members", materialize)
+    monkeypatch.setattr(module, "scan_cycle_images", scan)
+    monkeypatch.setattr(
+        module,
+        "render_decision_publication",
+        lambda frame, record, curve, images, output, **kwargs: available.append(
+            images["optimal"]["available"]
+        ),
+    )
+    module._render_cycle_sets(
+        {"v2.6.8": table},
+        Loader(),
+        {"cycle_003": {"cycle_name": "cycle_003"}},
+        tmp_path,
+        fetch_cloud=True,
+        minimum_free_gib=5,
+    )
+
+    assert requested == [
+        ("cycle_003", ("front_10.jpg",), {"fetch_cloud": True, "minimum_free_gib": 5})
+    ]
+    assert available == [True]
+
+
 def test_v267_is_registered_and_keeps_cycles_without_an_eligible_candidate(
     tmp_path: Path,
 ) -> None:
@@ -879,7 +1753,7 @@ def test_v267_is_registered_and_keeps_cycles_without_an_eligible_candidate(
 
     loaded = module._read_tables({"V2.6.7": path})["v2.6.7"]
 
-    assert module.V26_PATCHES[-1] == "v2.6.7"
+    assert "v2.6.7" in module.V26_PATCHES
     assert set(loaded["cycle_name"]) == {"cycle_003", "cycle_005"}
 
 
@@ -896,18 +1770,22 @@ def test_v267_overview_rejects_unrecognized_status() -> None:
 
 def test_v267_cost_curve_draws_unsupported_extension_without_selecting_it() -> None:
     module = _module()
-    table = _table("v2.6.7").loc[lambda values: values["cycle_name"].eq("cycle_003")].assign(
-        cycle_start=pd.Timestamp("2025-12-31 23:55:00"),
-        cycle_status="model_support_limited",
-        measurement_eligible=True,
-        model_supported=False,
-        optimization_eligible=False,
-        valid=False,
-        t_star=pd.NaT,
-        heating_electricity_kwh=[0.2, 0.4],
-        unit_heating_kwh=[0.4, 0.8],
-        E_T_hat_kwh=[0.1, 0.1],
-        Q_T_hat_kwh=[0.2, 0.2],
+    table = (
+        _table("v2.6.7")
+        .loc[lambda values: values["cycle_name"].eq("cycle_003")]
+        .assign(
+            cycle_start=pd.Timestamp("2025-12-31 23:55:00"),
+            cycle_status="model_support_limited",
+            measurement_eligible=True,
+            model_supported=False,
+            optimization_eligible=False,
+            valid=False,
+            t_star=pd.NaT,
+            heating_electricity_kwh=[0.2, 0.4],
+            unit_heating_kwh=[0.4, 0.8],
+            E_T_hat_kwh=[0.1, 0.1],
+            Q_T_hat_kwh=[0.2, 0.2],
+        )
     )
 
     figure = module._cost_curve_figure({"v2.6.7": table}, "cycle_003")
