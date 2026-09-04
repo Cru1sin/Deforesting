@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import main_evaluate
-from plots.model import two_of_three_trigger
+from plots.model import trigger_error_table, two_of_three_trigger
 
 SETTING = {
     "representation": "handcrafted",
@@ -70,6 +70,32 @@ def test_two_of_three_trigger_fires_on_the_second_adjacent_positive() -> None:
 
     assert trigger == times[1]
     assert rolling.tolist() == [False, True, True]
+
+
+def test_trigger_error_table_keeps_the_sign_for_both_control_rules() -> None:
+    times = pd.date_range("2026-01-01", periods=3, freq="min")
+    predictions = pd.DataFrame(
+        {
+            "cycle_name": ["frost_cycle_000001"] * 3,
+            "camera": ["front"] * 3,
+            "modality": ["rgb"] * 3,
+            "image_time": times,
+            "decision_score": [0.6, 0.2, 0.7],
+        }
+    )
+    policy = pd.DataFrame(
+        {
+            "cycle_name": ["frost_cycle_000001"],
+            "selected": [True],
+            "selected_time": [times[2]],
+        }
+    )
+
+    result = trigger_error_table(predictions, policy)
+
+    errors = result.set_index("strategy")["trigger_error_minutes"]
+    assert errors["first_positive"] == pytest.approx(-2.0)
+    assert errors["two_of_three"] == pytest.approx(0.0)
 
 
 def test_main_reads_multiple_runs_and_writes_exactly_four_outputs(tmp_path: Path) -> None:

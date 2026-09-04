@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 
 from model.evaluate import evaluate_run
-from plots.model import plot_model_figures, plot_probability_curves
+from plots.model import plot_model_figures, plot_probability_curves, plot_trigger_error_figures
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -109,9 +109,10 @@ def run(args: argparse.Namespace, *, command: list[str] | None = None) -> int:
                 [pd.read_parquet(path / "predictions.parquet") for path in args.results],
                 ignore_index=True,
             )
+            policy = pd.read_csv(args.policy_cost, low_memory=False)
             plot_probability_curves(
                 predictions=predictions,
-                policy=pd.read_csv(args.policy_cost, low_memory=False),
+                policy=policy,
                 output=args.figure_output or args.output / "figures",
                 source_output=args.output / "figure_source_data",
                 representation=args.curve_representation,
@@ -119,6 +120,16 @@ def run(args: argparse.Namespace, *, command: list[str] | None = None) -> int:
                 window_minutes=args.curve_window_minutes,
                 figure_formats=tuple(args.figure_format),
                 continuous_stream=args.continuous_stream,
+            )
+            plot_trigger_error_figures(
+                predictions=predictions,
+                policy=policy,
+                output=args.figure_output or args.output / "figures",
+                source_output=args.output / "figure_source_data",
+                representation=args.curve_representation,
+                head=args.curve_head,
+                continuous_stream=args.continuous_stream,
+                figure_formats=tuple(args.figure_format),
             )
     return 0
 
