@@ -99,10 +99,10 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
         merge_original_columns,
         merge_registries,
     )
-    from .validate_dataset import validate_dataset
+    from .cycle_metadata import read_catalog
     from .dataset_paths import read_json, write_csv, write_json, write_parquet
     from .local_images import collect_cycle_images, copy_image, image_metadata_frame
-    from .cycle_metadata import read_catalog
+    from .validate_dataset import validate_dataset
 
     input_path = Path(input_dir).resolve()
     project_root = _resolve_project_root()
@@ -347,9 +347,9 @@ def remove_dataset(dataset_dir: Path, date: str) -> Path:  # noqa: C901
     """Remove one experiment without renumbering or rewriting other cycles."""
     import shutil
 
-    from .validate_dataset import validate_dataset
-    from .dataset_paths import write_json, write_parquet
     from .cycle_metadata import image_root, read_catalog, read_manifest, write_catalog
+    from .dataset_paths import write_json, write_parquet
+    from .validate_dataset import validate_dataset
 
     root = Path(dataset_dir).resolve()
     manifest = read_manifest(root)
@@ -440,12 +440,12 @@ def update_cycle_columns(
 
 def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
     """Rebuild Processed cycles from the published Original sensor rows."""
+    from .builder.build_cycle_tables import process
     from .builder.channel_mapping import load_channels
     from .builder.dataset_settings import load_config
-    from .builder.build_cycle_tables import process
     from .builder.schema import build_processed_frame, merge_registries, registry_from_frame
-    from .edit_cycle_metadata import apply_baseline
     from .dataset_paths import read_json, write_csv, write_json, write_parquet
+    from .edit_cycle_metadata import apply_baseline
 
     if seconds <= 0:
         raise ValueError("aggregate seconds must be positive")
@@ -694,8 +694,9 @@ def _materialize_cycle(
     )
 
     from .builder.schema import build_processed_frame, export_original_frame
-    from .edit_cycle_metadata import apply_baseline, apply_recovery
+    from .cycle_metadata import build_cycle_record
     from .dataset_paths import write_csv, write_parquet
+    from .edit_cycle_metadata import apply_baseline, apply_recovery
     from .local_images import (
         _cycle_image_summary,
         _sensor_coverage_intervals,
@@ -703,7 +704,6 @@ def _materialize_cycle(
         rgb_stage_metrics,
         scan_cycle_images,
     )
-    from .cycle_metadata import build_cycle_record
 
     original_source = build.original if build.original is not None else build.prepared
     original = export_original_frame(
@@ -805,9 +805,9 @@ def _materialize_builds(  # noqa: C901
 ) -> None:
     from .builder.raw import discover_inputs
     from .builder.schema import build_registry, merge_original_columns
+    from .cycle_metadata import experiment_record
     from .dataset_paths import write_json, write_parquet
     from .local_images import collect_cycle_images, copy_image, image_metadata_frame
-    from .cycle_metadata import experiment_record
 
     if not builds:
         raise ValueError("Dataset requires at least one date")
@@ -965,9 +965,9 @@ def _append_build(  # noqa: C901
         merge_original_columns,
         merge_registries,
     )
+    from .cycle_metadata import experiment_record, read_catalog, read_manifest
     from .dataset_paths import read_json, write_csv, write_json, write_parquet
     from .local_images import collect_cycle_images, copy_image, image_metadata_frame
-    from .cycle_metadata import experiment_record, read_catalog, read_manifest
 
     manifest = read_manifest(dataset_dir)
     catalog = read_catalog(dataset_dir)
@@ -1100,13 +1100,13 @@ def render_publication_asset(
     """Render one Dataset publication, optionally with an analysis cost curve."""
     from plots.publication import render_cycle_publication
 
+    from .cycle_metadata import read_catalog
     from .dataset_paths import read_json
     from .local_images import (
         _sensor_coverage_intervals,
         image_coverage_intervals,
         rgb_overall_intervals,
     )
-    from .cycle_metadata import read_catalog
 
     cycle_name = str(record["cycle_name"])
     assets = record.get("assets")
@@ -1287,8 +1287,9 @@ def edit_dataset(  # noqa: C901
 
     from plots.publication import render_cycle_publication
 
-    from .edit_cycle_metadata import apply_baseline, apply_defrost_preparation, apply_recovery
+    from .cycle_metadata import read_catalog, write_catalog
     from .dataset_paths import read_json, write_csv, write_json, write_parquet
+    from .edit_cycle_metadata import apply_baseline, apply_defrost_preparation, apply_recovery
     from .local_images import (
         _sensor_coverage_intervals,
         image_coverage_intervals,
@@ -1296,7 +1297,6 @@ def edit_dataset(  # noqa: C901
         rgb_stage_metrics,
         scan_cycle_images,
     )
-    from .cycle_metadata import read_catalog, write_catalog
 
     catalog = read_catalog(dataset_dir)
     registry = read_json(dataset_dir / "channel_registry.json")
@@ -1400,10 +1400,10 @@ def edit_dataset(  # noqa: C901
 
 def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
     """Refresh only the Dataset layer named by the user's physical edit."""
-    from .validate_dataset import validate_dataset
+    from .cycle_metadata import image_root, read_catalog, read_manifest, write_catalog
     from .dataset_paths import read_json, write_json, write_parquet
     from .local_images import _image_timestamp, collect_cycle_images, image_metadata_frame
-    from .cycle_metadata import image_root, read_catalog, read_manifest, write_catalog
+    from .validate_dataset import validate_dataset
 
     if mode not in {"roles", "images", "figures", "all"}:
         raise ValueError(f"invalid refresh mode: {mode}")
@@ -1570,8 +1570,8 @@ def render_dataset(
     fetch_cloud_images: bool = False,
 ) -> Path:
     """Render selected final assets without reading any source directory."""
-    from .dataset_paths import read_json
     from .cycle_metadata import read_catalog
+    from .dataset_paths import read_json
 
     catalog = read_catalog(dataset_dir)
     if not any(

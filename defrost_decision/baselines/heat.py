@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from defrost_decision.candidate_times import cycle_boundaries
+
 from .electricity import (
     MINIMUM_COVERAGE,
     _historical_pressure,
@@ -199,8 +200,12 @@ def transition_heat_v2_5(
         events["defrost_start"] - events["defrost_preparation_start"]
     ).total_seconds() / 60
     duration = _rule_duration(frame, record)
-    candidate_defrost_times = [pd.Timestamp(value) for value in boundaries["candidate_defrost_time"]]
-    state_rows = [_candidate_states(frame, value, state_protocol) for value in candidate_defrost_times]
+    candidate_defrost_times = [
+        pd.Timestamp(value) for value in boundaries["candidate_defrost_time"]
+    ]
+    state_rows = [
+        _candidate_states(frame, value, state_protocol) for value in candidate_defrost_times
+    ]
     strict_rows = (
         state_rows
         if state_protocol == "strict_causal"

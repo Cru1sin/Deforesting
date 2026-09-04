@@ -30,9 +30,7 @@ def process(
     )
     _validate_cycle_summary_input(prepared, initial_summary)
     scientific_source, fallback_source = _partition_process_inputs(prepared, initial_summary)
-    scientific_source = scientific_source.loc[
-        scientific_source["cycle_stage"].ne("partial")
-    ].copy()
+    scientific_source = scientific_source.loc[scientific_source["cycle_stage"].ne("partial")].copy()
     eligible_channels = _eligible_continuous_channels(prepared, channels)
     masked = _mask_duplicate_values(scientific_source, channels)
     interval_seconds = config.process.resample_interval_seconds
@@ -120,8 +118,7 @@ def _mask_duplicate_values(
     quality_columns = [
         column
         for column in result.columns
-        if str(column).endswith(_SOURCE_QUALITY_SUFFIXES)
-        or str(column).endswith("__imputed")
+        if str(column).endswith(_SOURCE_QUALITY_SUFFIXES) or str(column).endswith("__imputed")
     ]
     return result.drop(columns=quality_columns, errors="ignore")
 
@@ -167,9 +164,7 @@ def _resample(
         grid = _cycle_grid(summary, frequency, observed_end=observed_end)
         buckets = ordered["timestamp"].dt.floor(frequency)
         processed_cycles.add((experiment_id, cycle_id))
-        intervals = _cycle_stage_intervals(
-            summary, observed_end=observed_end, frequency=frequency
-        )
+        intervals = _cycle_stage_intervals(summary, observed_end=observed_end, frequency=frequency)
         image_records = {role: _image_records(ordered, role) for role in roles}
         cycle_key = (experiment_id, cycle_id)
         for timestamp in grid:
@@ -192,16 +187,12 @@ def _resample(
             eligible_channel_buckets[cycle_key] = (
                 eligible_channel_buckets.get(cycle_key, 0) + eligible_count
             )
-            low_coverage_buckets[cycle_key] = (
-                low_coverage_buckets.get(cycle_key, 0) + low_count
-            )
+            low_coverage_buckets[cycle_key] = low_coverage_buckets.get(cycle_key, 0) + low_count
             for name, settings in channels.items():
                 if str(settings.get("kind")) == "derived":
                     continue
                 row[name] = (
-                    np.nan
-                    if name in low_names
-                    else _aggregate_channel(bucket, name, settings)
+                    np.nan if name in low_names else _aggregate_channel(bucket, name, settings)
                 )
             for role in roles:
                 _add_bucket_image(row, image_records[role], role, timestamp, interval_seconds)
@@ -215,9 +206,7 @@ def _resample(
             eligible_channel_buckets,
             processed_cycles,
         )
-    result = pd.DataFrame(rows).sort_values(
-        ["experiment_id", "timestamp"], kind="stable"
-    )
+    result = pd.DataFrame(rows).sort_values(["experiment_id", "timestamp"], kind="stable")
     return (
         result.reset_index(drop=True),
         excluded_transition_buckets,
@@ -236,9 +225,9 @@ def _resample_fallback(
     if frame.empty:
         return pd.DataFrame(columns=_processed_columns(channels, list(roles)))
     source = frame.copy()
-    cycle_origins = source.groupby(
-        ["experiment_id", "cycle_id"], sort=False, dropna=False
-    )["timestamp"].transform("min")
+    cycle_origins = source.groupby(["experiment_id", "cycle_id"], sort=False, dropna=False)[
+        "timestamp"
+    ].transform("min")
     elapsed_seconds = (source["timestamp"] - cycle_origins).dt.total_seconds()
     source["_process_bucket"] = cycle_origins + pd.to_timedelta(
         (elapsed_seconds // interval_seconds) * interval_seconds,
@@ -264,9 +253,11 @@ def _resample_fallback(
                 interval_seconds,
             )
         rows.append(row)
-    result = pd.DataFrame(rows).sort_values(
-        ["experiment_id", "timestamp"], kind="stable"
-    ).reset_index(drop=True)
+    result = (
+        pd.DataFrame(rows)
+        .sort_values(["experiment_id", "timestamp"], kind="stable")
+        .reset_index(drop=True)
+    )
     raw_system_quantities = _calculate_unfilled_system_quantities(result, channels)
     for column in raw_system_quantities:
         name = str(column)
@@ -333,9 +324,7 @@ def _as_timestamp(value: Any) -> pd.Timestamp | None:
     return pd.Timestamp(value)
 
 
-def _aggregate_channel(
-    bucket: pd.DataFrame, name: str, settings: Mapping[str, Any]
-) -> object:
+def _aggregate_channel(bucket: pd.DataFrame, name: str, settings: Mapping[str, Any]) -> object:
     if name not in bucket:
         return np.nan
     values = bucket[name].dropna()
@@ -376,9 +365,7 @@ def _add_bucket_image(
     path_column, time_column, offset_column = image_columns(role)
     bucket_end = timestamp + pd.Timedelta(seconds=interval_seconds)
     candidates = [
-        (path, image_time)
-        for path, image_time in records
-        if timestamp <= image_time < bucket_end
+        (path, image_time) for path, image_time in records if timestamp <= image_time < bucket_end
     ]
     if not candidates:
         row[path_column] = pd.NA
@@ -417,17 +404,13 @@ def _processed_columns(
         "cycle_status_reason",
         "timestamp",
     ]
-    columns.extend(
-        name for name, settings in channels.items() if settings.get("kind") != "derived"
-    )
+    columns.extend(name for name, settings in channels.items() if settings.get("kind") != "derived")
     for role in image_roles:
         columns.extend(image_columns(role))
     return columns
 
 
-def recompute_cycle_coordinates(
-    frame: pd.DataFrame, cycle_summary: pd.DataFrame
-) -> pd.DataFrame:
+def recompute_cycle_coordinates(frame: pd.DataFrame, cycle_summary: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     result["cycle_elapsed_seconds"] = np.nan
     result["cycle_progress"] = np.nan
@@ -486,14 +469,15 @@ def _fill_missing(
                 filled = _fill_continuous(
                     values, timestamps, config.process.continuous_max_gap_seconds
                 )
-            elif str(settings.get("kind")) == "step" and missing_method in {"forward_fill", "ffill"}:
+            elif str(settings.get("kind")) == "step" and missing_method in {
+                "forward_fill",
+                "ffill",
+            }:
                 filled = _fill_step(values, timestamps, config.process.control_max_gap_seconds)
             else:
                 filled = values
             result.loc[indices, name] = filled.to_numpy()
-            result.loc[indices, imputed_column] = (
-                values.isna() & filled.notna()
-            ).to_numpy()
+            result.loc[indices, imputed_column] = (values.isna() & filled.notna()).to_numpy()
     return result
 
 
@@ -522,8 +506,8 @@ def _fill_continuous(
                 right_value = float(result.iloc[right])
                 for index in range(position, end + 1):
                     fraction = (
-                        (timestamps.iloc[index] - timestamps.iloc[left]).total_seconds() / gap
-                    )
+                        timestamps.iloc[index] - timestamps.iloc[left]
+                    ).total_seconds() / gap
                     result.iloc[index] = left_value + fraction * (right_value - left_value)
         position = end + 1
     return result
@@ -632,8 +616,7 @@ def _calculate_unfilled_system_quantities(
     settings = {
         name: value
         for name, value in channels.items()
-        if name in {"cop", "evaporator_capacity"}
-        and str(value.get("kind")) == "derived"
+        if name in {"cop", "evaporator_capacity"} and str(value.get("kind")) == "derived"
     }
     return calculate_derived_features(frame, settings).loc[:, list(settings)]
 
@@ -652,9 +635,7 @@ def _cycle_grid(
     if start is None or end is None:
         return pd.DatetimeIndex([])
     last = (
-        end.floor(frequency)
-        if open_cycle
-        else (end - pd.Timedelta(nanoseconds=1)).floor(frequency)
+        end.floor(frequency) if open_cycle else (end - pd.Timedelta(nanoseconds=1)).floor(frequency)
     )
     return pd.date_range(start.floor(frequency), last, freq=frequency)
 

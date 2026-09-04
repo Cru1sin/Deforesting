@@ -10,6 +10,7 @@ import pandas as pd
 
 from defrost_event_models.ridge_models import load_defrost_event_models
 from defrost_event_models.training_data import timestamp
+
 from ..candidate_quantities import build_candidate_quantities
 from ..selection_results import add_selected_time_fields, cycle_ratio, five_minute_support_runs
 
@@ -53,9 +54,7 @@ def calculate_cycle(
     curve["defrost_event_electricity_evaluable"] = curve[
         "defrost_event_electricity_prediction_available"
     ]
-    curve["defrost_event_net_heat_evaluable"] = curve[
-        "defrost_event_net_heat_prediction_available"
-    ]
+    curve["defrost_event_net_heat_evaluable"] = curve["defrost_event_net_heat_prediction_available"]
     curve = cycle_ratio(curve)
     curve["physical_valid"] = curve["total_energy_kwh"].gt(0) & curve["total_heat_kwh"].gt(
         Q_MIN_KWH
@@ -91,7 +90,9 @@ def validate_recipe(recipe: Mapping[str, object]) -> dict[str, object]:
 
 
 def finalize_curve(curve: pd.DataFrame) -> pd.DataFrame:
-    result = curve.sort_values("candidate_defrost_time", kind="stable").reset_index(drop=True).copy()
+    result = (
+        curve.sort_values("candidate_defrost_time", kind="stable").reset_index(drop=True).copy()
+    )
     inverse = pd.to_numeric(result["inverse_cop"], errors="coerce").replace(
         [np.inf, -np.inf], np.nan
     )
@@ -105,13 +106,11 @@ def finalize_curve(curve: pd.DataFrame) -> pd.DataFrame:
         & result["physical_valid"].fillna(False)
         & inverse.notna()
     )
-    result["model_supported"] = result[
-        "defrost_event_electricity_in_training_domain"
-    ].fillna(False) & result["defrost_event_net_heat_in_training_domain"].fillna(False)
+    result["model_supported"] = result["defrost_event_electricity_in_training_domain"].fillna(
+        False
+    ) & result["defrost_event_net_heat_in_training_domain"].fillna(False)
     result["support_rule"] = "require_empirical_support"
-    result["continuous_support"] = five_minute_support_runs(
-        result["candidate_defrost_time"], base
-    )
+    result["continuous_support"] = five_minute_support_runs(result["candidate_defrost_time"], base)
     result["optimization_eligible"] = base & result["continuous_support"]
     result["diagnostic_minimum"] = pd.NaT
     for percent in (1, 5):
@@ -136,7 +135,9 @@ def finalize_curve(curve: pd.DataFrame) -> pd.DataFrame:
             result[f"basin_{percent}pct_width_minutes"] = (end - start).total_seconds() / 60
     result["relative_regret"] = np.nan
     if eligible.any():
-        result.loc[eligible, "relative_regret"] = inverse.loc[eligible] / inverse.loc[eligible].min() - 1
+        result.loc[eligible, "relative_regret"] = (
+            inverse.loc[eligible] / inverse.loc[eligible].min() - 1
+        )
     result["near_optimal_1pct"] = eligible & result["relative_regret"].le(0.01)
     result["near_optimal_5pct"] = eligible & result["relative_regret"].le(0.05)
     for phase in ("preparation", "defrost", "recovery"):

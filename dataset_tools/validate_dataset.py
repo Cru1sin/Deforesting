@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from .load_dataset import DatasetLoader
 from .cycle_metadata import image_root
+from .load_dataset import DatasetLoader
 
 
 def validate_dataset(dataset_dir: Path) -> None:

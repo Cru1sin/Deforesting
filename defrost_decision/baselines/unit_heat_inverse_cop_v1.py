@@ -15,6 +15,7 @@ import pandas as pd
 
 from defrost_decision.candidate_times import build_candidate_boundaries
 from defrost_decision.selection_results import build_historical_cost_curve
+
 from .electricity import heating_energy, transition_energy
 from .heat import heating_heat, transition_heat_v2_5, zero_transition_heat
 

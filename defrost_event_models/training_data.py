@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from defrost_decision.candidate_times import catalog_exclusion_reason, clean_anchor_exclusion_reason
+
 from .ridge_models import DYNAMIC_STATE_8
 
 QUALITY_COVERAGE = 0.95
@@ -298,7 +299,9 @@ def measure_defrost_event_quantities(
         if compressor_valid
         else np.nan
     )
-    result["defrost_event_duration_observed_minutes"] = (recovery_end - preparation_start).total_seconds() / 60
+    result["defrost_event_duration_observed_minutes"] = (
+        recovery_end - preparation_start
+    ).total_seconds() / 60
     result["event_duration_minutes"] = result["defrost_event_duration_observed_minutes"]
     result["phase_partition_valid"] = bool(partition)
     result["phase_interval_convention"] = PHASE_INTERVAL_CONVENTION

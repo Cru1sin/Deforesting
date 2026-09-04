@@ -9,8 +9,8 @@ from typing import Any
 
 import pandas as pd
 
-from .local_images import scan_cycle_images
 from .cycle_metadata import read_catalog, read_manifest
+from .local_images import scan_cycle_images
 
 
 class DatasetLoader:

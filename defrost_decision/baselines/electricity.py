@@ -89,9 +89,7 @@ def integrate_energy_curve_kwh(
         last_observed_time = pd.Timestamp(observed["time"].iloc[-1])
         observed_time = observed["time"].astype("int64").to_numpy(dtype=float)
         observed_power = observed["power"].to_numpy(dtype=float)
-        left_slope = (observed_power[1] - observed_power[0]) / (
-            observed_time[1] - observed_time[0]
-        )
+        left_slope = (observed_power[1] - observed_power[0]) / (observed_time[1] - observed_time[0])
         right_slope = (observed_power[-1] - observed_power[-2]) / (
             observed_time[-1] - observed_time[-2]
         )
@@ -114,9 +112,7 @@ def integrate_energy_curve_kwh(
     short = dt.gt(0) & dt.le(maximum_gap_seconds)
     bridged = bridge_internal_gaps & dt.gt(maximum_gap_seconds)
     valid = short | bridged
-    increments = (
-        (observed["power"] + observed["power"].shift()) / 2 * dt / 3600
-    ).where(valid, 0.0)
+    increments = ((observed["power"] + observed["power"].shift()) / 2 * dt / 3600).where(valid, 0.0)
     energy = increments.cumsum().to_numpy()
     covered_seconds = dt.where(valid, 0.0).cumsum().to_numpy()
     observed_index = pd.DatetimeIndex(observed["time"])
@@ -169,9 +165,8 @@ def integrate_energy_curve_kwh(
         covered += partial_seconds
         bridged_candidates = inside.copy()
         for gap_index in np.flatnonzero(bridged_segments):
-            bridged_candidates |= (
-                (candidate_ns > observed_ns[gap_index - 1])
-                & (candidate_ns < observed_ns[gap_index])
+            bridged_candidates |= (candidate_ns > observed_ns[gap_index - 1]) & (
+                candidate_ns < observed_ns[gap_index]
             )
         spans = np.where(
             candidates >= raw_time[0],
@@ -403,7 +398,8 @@ def transition_energy(
     coefficients = [float(value) for value in model["coefficients"]]
     lower, upper = (float(value) for value in model["support"])
     strict_features = [
-        _strict_pressure(frame, pd.Timestamp(value)) for value in boundaries["candidate_defrost_time"]
+        _strict_pressure(frame, pd.Timestamp(value))
+        for value in boundaries["candidate_defrost_time"]
     ]
     strict_pe = pd.Series([value for value, _ in strict_features])
     complete_seconds = pd.Series([count for _, count in strict_features])

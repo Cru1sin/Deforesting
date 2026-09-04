@@ -21,13 +21,19 @@ def select_cop_heating_rate_pareto_knee(
     minimum_time: object = None,
 ) -> pd.DataFrame:
     """Select a two-objective Pareto knee without allowing O to move it."""
-    result = objectives.sort_values("candidate_defrost_time", kind="stable").reset_index(drop=True).copy()
+    result = (
+        objectives.sort_values("candidate_defrost_time", kind="stable")
+        .reset_index(drop=True)
+        .copy()
+    )
     after_minimum = pd.Series(True, index=result.index)
     if minimum_time is not None:
-        after_minimum = pd.to_datetime(result["candidate_defrost_time"]).ge(pd.Timestamp(minimum_time))
+        after_minimum = pd.to_datetime(result["candidate_defrost_time"]).ge(
+            pd.Timestamp(minimum_time)
+        )
     for name in ("cycle_cop", "cycle_heating_rate_kw", "cycle_evaporator_capacity_kw"):
-        candidate = after_minimum & result[f"{name}_eligible"].fillna(False) & np.isfinite(
-            result[name]
+        candidate = (
+            after_minimum & result[f"{name}_eligible"].fillna(False) & np.isfinite(result[name])
         )
         eligible = candidate & five_minute_support_runs(result["candidate_defrost_time"], candidate)
         result[f"{name}_eligible"] = eligible
@@ -90,9 +96,7 @@ def select_cop_heating_rate_pareto_knee(
     )
     if len(front_positions) >= 3 and c_span > 0 and h_span > 0:
         chord = (
-            (front_c - front_c.min()) / c_span
-            + (front_h - front_h.min()) / h_span
-            - 1
+            (front_c - front_c.min()) / c_span + (front_h - front_h.min()) / h_span - 1
         ) / np.sqrt(2)
         if float(chord.max()) > 1e-12:
             scores = chord

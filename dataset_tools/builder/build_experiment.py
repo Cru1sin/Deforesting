@@ -23,10 +23,10 @@ class ExperimentBuild:
 
 def build_experiment(input_dir: Path, config: Any) -> ExperimentBuild:
     """Run the existing Prepare -> Process path for one experiment."""
+    from .build_cycle_tables import process
     from .channel_mapping import load_channels
     from .prepare_measurements import prepare, prepare_original
     from .validate_prepared_measurements import validate_prepared, validate_processed
-    from .build_cycle_tables import process
 
     channels = load_channels()
     print("[add] prepare sensors", flush=True)

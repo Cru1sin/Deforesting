@@ -11,7 +11,9 @@ import pandas as pd
 def cycle_ratio(curve: pd.DataFrame) -> pd.DataFrame:
     """Return EH + ET, QH + QT, and their finite nonzero-denominator ratio."""
     result = curve.copy()
-    result["total_energy_kwh"] = result["pre_defrost_electricity_kwh"] + result["defrost_event_electricity_kwh"]
+    result["total_energy_kwh"] = (
+        result["pre_defrost_electricity_kwh"] + result["defrost_event_electricity_kwh"]
+    )
     result["total_heat_kwh"] = result["pre_defrost_heat_kwh"] + result["defrost_event_net_heat_kwh"]
     valid = (
         np.isfinite(result["total_energy_kwh"])
@@ -72,11 +74,15 @@ def add_selected_time_fields(
         if chosen.empty:
             continue
         index = chosen[0]
-        result.loc[positions, "selected_defrost_time"] = pd.Timestamp(result.loc[index, "candidate_defrost_time"])
+        result.loc[positions, "selected_defrost_time"] = pd.Timestamp(
+            result.loc[index, "candidate_defrost_time"]
+        )
         result.loc[positions, "selection_status"] = "selected"
         result.loc[positions, "selection_reason"] = selected_reason
         result.loc[index, "selection_score"] = score.loc[index]
-        result.loc[positions, "selected_point_in_training_domain"] = bool(model_supported.loc[index])
+        result.loc[positions, "selected_point_in_training_domain"] = bool(
+            model_supported.loc[index]
+        )
     return result
 
 
@@ -124,11 +130,7 @@ def build_historical_cost_curve(  # noqa: C901
     qt_evaluable = curve["defrost_event_net_heat_evaluable"].fillna(False)
     qt_physical = curve["QT_physical_valid"].fillna(False)
     curve["supported"] = (
-        curve["heating_valid"].fillna(False)
-        & et_evaluable
-        & qt_evaluable
-        & qt_physical
-        & positive
+        curve["heating_valid"].fillna(False) & et_evaluable & qt_evaluable & qt_physical & positive
     )
     curve["optimization_eligible"] = curve["supported"]
     curve["support_rule"] = "allow_historical_extrapolation"
@@ -155,8 +157,10 @@ def build_historical_cost_curve(  # noqa: C901
         selected_reason="historical_eligible_minimum",
         abstain_reason="no_eligible_candidate",
         score=curve["inverse_cop"],
-        model_supported=curve.get("defrost_event_electricity_in_training_domain", pd.Series(False, index=curve.index)).fillna(
-            False
-        )
-        & curve.get("defrost_event_net_heat_in_training_domain", pd.Series(False, index=curve.index)).fillna(False),
+        model_supported=curve.get(
+            "defrost_event_electricity_in_training_domain", pd.Series(False, index=curve.index)
+        ).fillna(False)
+        & curve.get(
+            "defrost_event_net_heat_in_training_domain", pd.Series(False, index=curve.index)
+        ).fillna(False),
     )
