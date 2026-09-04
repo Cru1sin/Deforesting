@@ -14,6 +14,7 @@
 !build_image_labels.py
 !train_image_models.py
 !evaluate_image_models.py
+!download_shared_dataset.py
 !dataset_tools/
 !dataset_tools/**
 !defrost_event_models/
