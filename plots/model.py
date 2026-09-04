@@ -72,6 +72,11 @@ def _ordered(values: pd.Series, preferred: list[str]) -> list[str]:
     )
 
 
+def _robust_trigger_error_limit(errors: pd.Series) -> float:
+    """Keep isolated extremes from flattening the central trigger-error evidence."""
+    return max(5.0, float(errors.dropna().abs().quantile(0.995)) * 1.10)
+
+
 def two_of_three_trigger(
     times: pd.Series | pd.DatetimeIndex,
     probabilities: pd.Series,
@@ -157,8 +162,7 @@ def plot_trigger_error_figures(
     source_output.mkdir(parents=True, exist_ok=True)
     errors.to_csv(source_output / "trigger_error_by_cycle.csv", index=False)
     cameras = [camera for camera in _CAMERA_ORDER[:6] if camera in set(errors["camera"])]
-    finite = errors["trigger_error_minutes"].dropna().abs()
-    limit = max(5.0, float(finite.max()) * 1.05)
+    limit = _robust_trigger_error_limit(errors["trigger_error_minutes"])
     names = {
         "two_of_three": "Two positives within three frames",
         "first_positive": "First positive frame",
@@ -179,15 +183,34 @@ def plot_trigger_error_figures(
             _shade_experiment_dates(axis, cycles["experiment_id"].astype(str).tolist())
             for modality, rows in camera_rows.groupby("modality", sort=False):
                 rows = rows.sort_values("cycle_id")
+                x_values = (
+                    rows["cycle_name"].map(positions).to_numpy(dtype=float)
+                    + offsets[str(modality)]
+                )
+                actual = rows["trigger_error_minutes"].to_numpy(dtype=float)
+                shown = np.clip(actual, -0.96 * limit, 0.96 * limit)
                 axis.scatter(
-                    rows["cycle_name"].map(positions) + offsets[str(modality)],
-                    rows["trigger_error_minutes"],
+                    x_values,
+                    shown,
                     color=_MODALITY_COLORS[str(modality)],
                     marker=_MODALITY_MARKERS[str(modality)],
                     s=18,
                     label=str(modality).replace("_", " + "),
                     zorder=3,
                 )
+                for index in np.flatnonzero(np.abs(actual) > limit):
+                    direction = "↑" if actual[index] > 0 else "↓"
+                    axis.annotate(
+                        f"{direction} {actual[index]:+.0f}",
+                        (x_values[index], shown[index]),
+                        xytext=(0, -2 if actual[index] > 0 else 2),
+                        textcoords="offset points",
+                        ha="center",
+                        va="top" if actual[index] > 0 else "bottom",
+                        fontsize=5.5,
+                        color=_MODALITY_COLORS[str(modality)],
+                        clip_on=False,
+                    )
             axis.axhline(0, color="#333333", lw=0.8)
             axis.set_ylim(-limit, limit)
             axis.grid(axis="y", color="#DDDDDD", lw=0.45)
@@ -219,7 +242,7 @@ def plot_trigger_error_figures(
                 0.5,
                 0.008,
                 "Positive = later than Pareto knee; negative = earlier. "
-                "Missing points never triggered.",
+                "Boundary labels denote off-scale values; missing points never triggered.",
                 ha="center",
                 fontsize=5.8,
             )

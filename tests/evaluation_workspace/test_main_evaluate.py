@@ -9,6 +9,7 @@ import pytest
 import main_evaluate
 import plots.model as model_plots
 from plots.model import (
+    _robust_trigger_error_limit,
     plot_trigger_error_figures,
     trigger_error_table,
     two_of_three_trigger,
@@ -20,6 +21,12 @@ SETTING = {
     "camera": "front",
     "modality": "rgb",
 }
+
+
+def test_trigger_error_axis_ignores_one_extreme_outlier() -> None:
+    errors = pd.Series([*range(1, 61)] * 20 + [122.0])
+
+    assert _robust_trigger_error_limit(errors) < 70
 
 
 def _write_run(path: Path, held_out: str = "a") -> None:
