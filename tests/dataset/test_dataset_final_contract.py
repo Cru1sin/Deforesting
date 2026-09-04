@@ -10,12 +10,12 @@ from typing import cast
 import pandas as pd
 import pytest
 
-from dataloader.builder.config import Config, ProcessSettings
-from dataloader.operations import assign_final_cycle_names_by_time
+from dataset_tools.builder.dataset_settings import Config, ProcessSettings
+from dataset_tools.dataset_maintenance import assign_final_cycle_names_by_time
 
 
 def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(
@@ -28,7 +28,7 @@ def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_collect_cycle_images_uses_cycle_window_without_sensor_match(
     tmp_path: Path,
 ) -> None:
-    from dataloader.images import collect_cycle_images
+    from dataset_tools.local_images import collect_cycle_images
 
     camera = tmp_path / "front_center"
     camera.mkdir()
@@ -72,7 +72,7 @@ def test_collect_cycle_images_uses_cycle_window_without_sensor_match(
 
 
 def test_image_metadata_has_no_sensor_alignment_fields() -> None:
-    from dataloader.images import image_metadata_frame
+    from dataset_tools.local_images import image_metadata_frame
 
     metadata = image_metadata_frame(
         [
@@ -100,7 +100,7 @@ def test_image_metadata_has_no_sensor_alignment_fields() -> None:
 def test_materialize_cycle_images_prefers_and_preserves_local_images(
     tmp_path: Path,
 ) -> None:
-    from dataloader.cloud_images import materialize_cycle_images
+    from dataset_tools.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     local = tmp_path / "dataset" / "images" / cycle_name
@@ -122,7 +122,7 @@ def test_materialize_cycle_images_prefers_and_preserves_local_images(
 def test_materialize_cycle_images_treats_missing_cloud_zip_as_no_images(
     tmp_path: Path,
 ) -> None:
-    from dataloader.cloud_images import materialize_cycle_images
+    from dataset_tools.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     cloud = tmp_path / "cloud"
@@ -139,7 +139,7 @@ def test_materialize_cycle_images_copies_extracts_and_preserves_local_copy(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader.cloud_images import materialize_cycle_images
+    from dataset_tools.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -167,7 +167,7 @@ def test_materialize_cycle_images_cleans_only_fresh_download_after_success(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     cycle_name = "frost_cycle_000021"
     dataset = tmp_path / "dataset"
@@ -196,7 +196,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     cycle_name = "frost_cycle_000022"
     dataset = tmp_path / "dataset"
@@ -225,7 +225,7 @@ def test_materialize_cycle_images_keeps_fresh_download_after_failure(
 def test_materialize_cycle_images_never_cleans_preexisting_local_directory(
     tmp_path: Path,
 ) -> None:
-    from dataloader.cloud_images import materialize_cycle_images
+    from dataset_tools.cloud_images import materialize_cycle_images
 
     cycle_name = "frost_cycle_000023"
     local = tmp_path / "dataset" / "images" / cycle_name
@@ -248,7 +248,7 @@ def test_materialize_cycle_images_stops_before_crossing_free_space_floor(
     from collections import namedtuple
     from zipfile import ZipFile
 
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -277,7 +277,7 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     cycle_name = "frost_cycle_000020"
     dataset = tmp_path / "dataset"
@@ -294,9 +294,7 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
     )
 
     with (
-        pytest.raises(
-            OSError, match=r"extracting frost_cycle_000020\.zip.*5 GiB safety floor"
-        ),
+        pytest.raises(OSError, match=r"extracting frost_cycle_000020\.zip.*5 GiB safety floor"),
         cloud_images.materialize_cycle_images(
             dataset,
             cycle_name,
@@ -313,7 +311,7 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     cycle_name = "frost_cycle_000020"
     monkeypatch.setattr(cloud_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
@@ -332,9 +330,7 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
     monkeypatch.setenv("NO_PROXY", "inherited.example")
     monkeypatch.setenv("no_proxy", "inherited.example")
 
-    def fake_run(
-        command: list[str], **options: object
-    ) -> subprocess.CompletedProcess[str]:
+    def fake_run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
         env = cast(dict[str, str], options["env"])
         calls.append((command, env))
         if command[1] == "lsf":
@@ -388,7 +384,7 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
 def test_materialize_cycle_images_treats_missing_default_remote_as_no_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     calls: list[list[str]] = []
 
@@ -397,6 +393,7 @@ def test_materialize_cycle_images_treats_missing_default_remote_as_no_images(
         return subprocess.CompletedProcess(command, 1, stdout="")
 
     monkeypatch.setattr(cloud_images.subprocess, "run", fake_run)
+    monkeypatch.setattr(cloud_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
 
     with cloud_images.materialize_cycle_images(
         tmp_path / "dataset", "frost_cycle_000099", fetch_cloud=True
@@ -411,7 +408,7 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
 ) -> None:
     from zipfile import ZIP_DEFLATED, ZipFile
 
-    from dataloader import cloud_images
+    from dataset_tools import cloud_images
 
     cycle_name = "frost_cycle_000006"
     archive_path = tmp_path / f"{cycle_name}.zip"
@@ -469,7 +466,7 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
 
 
 def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
-    from dataloader.files import write_json
+    from dataset_tools.dataset_paths import write_json
 
     cycle_name = "frost_cycle_000001"
     assets = {
@@ -561,10 +558,10 @@ def test_materialize_cycle_builds_one_catalog_record(
 ) -> None:
     from types import SimpleNamespace
 
-    import dataloader.operations as dataset_module
-    from dataloader import metadata as dataset_metadata
-    from dataloader.builder.build import ExperimentBuild
-    from dataloader.operations import add_dataset
+    import dataset_tools.cycle_metadata as dataset_metadata
+    import dataset_tools.dataset_maintenance as dataset_module
+    from dataset_tools.builder.build_experiment import ExperimentBuild
+    from dataset_tools.dataset_maintenance import add_dataset
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -692,8 +689,8 @@ def test_materialize_cycle_builds_one_catalog_record(
 def test_load_config_for_input_gets_date_from_xls_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.builder.config as config_module
-    from dataloader.operations import _load_config_for_input
+    import dataset_tools.builder.dataset_settings as config_module
+    from dataset_tools.dataset_maintenance import _load_config_for_input
 
     original = Config(
         project_root=tmp_path,
@@ -738,7 +735,7 @@ def test_load_config_for_input_gets_date_from_xls_names(
 
 
 def test_load_config_for_input_rejects_multiple_xls_dates(tmp_path: Path) -> None:
-    from dataloader.operations import _load_config_for_input
+    from dataset_tools.dataset_maintenance import _load_config_for_input
 
     (tmp_path / "2026-07-24参数1.xls").touch()
     (tmp_path / "2026-07-25参数2.xls").touch()
@@ -752,9 +749,11 @@ def test_build_experiment_prints_processing_stages(
 ) -> None:
     from types import SimpleNamespace
 
-    from dataloader.builder import channels, prepare, process
-    from dataloader.builder import prepared as validation
-    from dataloader.builder.build import build_experiment
+    from dataset_tools.builder import build_cycle_tables as process
+    from dataset_tools.builder import channel_mapping as channels
+    from dataset_tools.builder import prepare_measurements as prepare
+    from dataset_tools.builder import validate_prepared_measurements as validation
+    from dataset_tools.builder.build_experiment import build_experiment
 
     frame = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
     summary = pd.DataFrame({"cycle_id": ["cycle_001", "cycle_002"]})
@@ -778,8 +777,8 @@ def test_build_experiment_prints_processing_stages(
 
 
 def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
-    from dataloader.files import write_json
-    from dataloader.metadata import read_catalog, read_manifest, write_catalog
+    from dataset_tools.cycle_metadata import read_catalog, read_manifest, write_catalog
+    from dataset_tools.dataset_paths import write_json
 
     write_json(
         {
@@ -815,8 +814,8 @@ def test_metadata_readers_allow_extra_review_fields(tmp_path: Path) -> None:
 def test_review_cycle_does_not_scan_images_or_update_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader import images as dataset_images
-    from dataloader.operations import review_cycle
+    import dataset_tools.local_images as dataset_images
+    from dataset_tools.dataset_maintenance import review_cycle
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -852,29 +851,29 @@ def test_review_cycle_does_not_scan_images_or_update_manifest(
 
 
 def test_review_cycle_rejects_nonbinary_status(tmp_path: Path) -> None:
-    from dataloader.operations import review_cycle
+    from dataset_tools.dataset_maintenance import review_cycle
 
     with pytest.raises(ValueError, match="invalid Dataset status"):
         review_cycle(tmp_path, "frost_cycle_000001", status="incomplete")
 
 
-def test_validate_dataset_rejects_nonbinary_status(tmp_path: Path) -> None:
-    from dataloader.check import validate_dataset
+@pytest.mark.parametrize("status", ["partial", "reference"])
+def test_validate_dataset_accepts_pipeline_statuses_and_rejects_unknown(
+    status: str,
+) -> None:
+    from dataset_tools.validate_dataset import _validate_statuses
 
-    _write_renderable_dataset(tmp_path)
-    catalog = json.loads((tmp_path / "cycle_catalog.json").read_text())
-    catalog["cycles"][0]["status"] = "incomplete"
-    (tmp_path / "cycle_catalog.json").write_text(json.dumps(catalog))
+    _validate_statuses(pd.DataFrame({"status": [status]}))
 
-    with pytest.raises(ValueError, match="status must be valid or invalid"):
-        validate_dataset(tmp_path)
+    with pytest.raises(ValueError, match="Dataset status is not recognized"):
+        _validate_statuses(pd.DataFrame({"status": ["incomplete"]}))
 
 
 def test_render_only_draws_without_writing_catalog_or_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader import files as dataset_io
-    from dataloader.operations import render_dataset
+    import dataset_tools.dataset_paths as dataset_io
+    from dataset_tools.dataset_maintenance import render_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -897,9 +896,7 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     monkeypatch.setattr(
         visualization,
         "render_rgb_panel",
-        lambda _record, _frame, _images, _intervals, _roles, _path: panel_calls.append(
-            cycle_name
-        ),
+        lambda _record, _frame, _images, _intervals, _roles, _path: panel_calls.append(cycle_name),
     )
 
     render_dataset(tmp_path, cycle_name, publication=True, panel=True)
@@ -916,8 +913,8 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
 ) -> None:
     from zipfile import ZipFile
 
-    from dataloader import cloud_images
-    from dataloader.operations import render_dataset
+    from dataset_tools import cloud_images
+    from dataset_tools.dataset_maintenance import render_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -942,17 +939,14 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
     with ZipFile(archive, "w") as bundle:
         bundle.writestr(f"{cycle_name}/front_center/{file_name}", b"rgb")
 
-    def fake_rclone(
-        command: list[str], **_options: object
-    ) -> subprocess.CompletedProcess[str]:
+    def fake_rclone(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
         if command[1] == "lsf":
-            return subprocess.CompletedProcess(
-                command, 0, stdout=f"{archive.stat().st_size}\n"
-            )
+            return subprocess.CompletedProcess(command, 0, stdout=f"{archive.stat().st_size}\n")
         shutil.copyfile(archive, Path(command[3]))
         return subprocess.CompletedProcess(command, 0)
 
     monkeypatch.setattr(cloud_images.subprocess, "run", fake_rclone)
+    monkeypatch.setattr(cloud_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
     _allow_image_download(monkeypatch)
     seen: list[list[Path]] = []
     monkeypatch.setattr(
@@ -981,7 +975,7 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
 
 
 def test_cycle_assets_has_publication_and_panel_without_coverage() -> None:
-    from dataloader.metadata import cycle_assets
+    from dataset_tools.cycle_metadata import cycle_assets
 
     assets = cycle_assets("frost_cycle_000001")
 
@@ -992,9 +986,9 @@ def test_cycle_assets_has_publication_and_panel_without_coverage() -> None:
 def test_validate_scientific_schema_ignores_catalog_counts(
     tmp_path: Path,
 ) -> None:
-    from dataloader.check import validate_dataset
-    from dataloader.files import write_json
-    from dataloader.operations import make_cycle_uid
+    from dataset_tools.dataset_maintenance import make_cycle_uid
+    from dataset_tools.dataset_paths import write_json
+    from dataset_tools.validate_dataset import validate_dataset
 
     cycle_name = "frost_cycle_000001"
     cycle_uid = make_cycle_uid("exp", "cycle_001")
@@ -1126,29 +1120,29 @@ def test_final_cycle_names_skip_summary_only_cycles() -> None:
 
 
 def test_cli_default_dataset_path_is_local(monkeypatch: object) -> None:
-    import main_data
+    from dataset_tools import manage_dataset
 
     calls: list[tuple[str, Path]] = []
     monkeypatch.setattr(
-        main_data,
+        manage_dataset,
         "edit_dataset",
         lambda path, **kwargs: calls.append(("edit", path)) or path,
     )
 
-    assert main_data.main(["edit", "--baseline-seconds", "60"]) == 0
+    assert manage_dataset.main(["edit", "--baseline-seconds", "60"]) == 0
     assert calls == [("edit", Path("dataset"))]
 
 
 def test_cli_edit_can_skip_rgb_panel_rendering(monkeypatch: object, tmp_path: Path) -> None:
-    import main_data
+    from dataset_tools import manage_dataset
 
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        main_data, "edit_dataset", lambda _path, **kwargs: calls.append(kwargs) or tmp_path
+        manage_dataset, "edit_dataset", lambda _path, **kwargs: calls.append(kwargs) or tmp_path
     )
 
     assert (
-        main_data.main(
+        manage_dataset.main(
             [
                 "edit",
                 "--dataset",
@@ -1164,7 +1158,7 @@ def test_cli_edit_can_skip_rgb_panel_rendering(monkeypatch: object, tmp_path: Pa
 
 
 def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -> None:
-    from dataloader.edit import apply_recovery
+    from dataset_tools.edit_cycle_metadata import apply_recovery
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=12, freq="10s")
     stages = [
@@ -1233,8 +1227,8 @@ def test_recovery_transform_recomputes_stage_coordinates_features_and_images() -
 
 
 def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
-    from dataloader.builder.baseline import apply_fixed_baseline
-    from dataloader.builder.cycles import resolve_stable_heating_start
+    from dataset_tools.builder.baseline import apply_fixed_baseline
+    from dataset_tools.builder.detect_cycles import resolve_stable_heating_start
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=6, freq="10s")
     frame = pd.DataFrame(
@@ -1288,7 +1282,7 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
 
 
 def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence() -> None:
-    from dataloader.builder.cycles import _partial_stage_context
+    from dataset_tools.builder.detect_cycles import _partial_stage_context
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=5, freq="10s")
     segment = pd.DataFrame(
@@ -1310,7 +1304,7 @@ def test_partial_stage_context_keeps_known_defrost_without_temperature_evidence(
 
 
 def test_sensor_coverage_keeps_required_channels_in_the_mask() -> None:
-    from dataloader.images import _sensor_coverage_intervals
+    from dataset_tools.local_images import _sensor_coverage_intervals
 
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=4, freq="10s")
     frame = pd.DataFrame(
@@ -1340,9 +1334,9 @@ def test_sensor_coverage_keeps_required_channels_in_the_mask() -> None:
 def test_refresh_dataset_does_not_modify_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.check as validation
-    from dataloader.files import write_json
-    from dataloader.operations import refresh_dataset
+    import dataset_tools.validate_dataset as validation
+    from dataset_tools.dataset_maintenance import refresh_dataset
+    from dataset_tools.dataset_paths import write_json
     from plots import publication as visualization
 
     (tmp_path / "cycles").mkdir()
@@ -1377,7 +1371,7 @@ def test_refresh_dataset_does_not_modify_manifest(
     write_json(
         {
             "cycles": [
-                    {
+                {
                     "cycle_name": "frost_cycle_000001",
                     "experiment_id": "exp",
                     "assets": {
@@ -1426,11 +1420,11 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 ) -> None:
     from types import SimpleNamespace
 
-    import dataloader.operations as dataset_module
-    from dataloader.builder.build import ExperimentBuild
-    from dataloader.check import validate_dataset
-    from dataloader.loader import DatasetLoader
-    from dataloader.operations import add_dataset
+    import dataset_tools.dataset_maintenance as dataset_module
+    from dataset_tools.builder.build_experiment import ExperimentBuild
+    from dataset_tools.dataset_maintenance import add_dataset
+    from dataset_tools.load_dataset import DatasetLoader
+    from dataset_tools.validate_dataset import validate_dataset
 
     def make_build(input_dir: Path) -> ExperimentBuild:
         date = {
@@ -1545,8 +1539,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
     assert all("source_fingerprint" not in item for item in manifest["experiments"])
 
-    from dataloader import images as dataset_images
-    from dataloader.operations import edit_dataset, refresh_dataset
+    import dataset_tools.local_images as dataset_images
+    from dataset_tools.dataset_maintenance import edit_dataset, refresh_dataset
 
     read_parquet = dataset_module.pd.read_parquet
     scan_cycle_images = dataset_images.scan_cycle_images
@@ -1594,7 +1588,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 
 
 def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
-    import dataloader.files as dataset_io
+    import dataset_tools.dataset_paths as dataset_io
 
     assert hasattr(dataset_io, "write_json")
     assert hasattr(dataset_io, "write_csv")
@@ -1604,8 +1598,8 @@ def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
 
 
 def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture[str]) -> None:
-    import dataloader.operations as dataset_module
-    from main_data import main
+    import dataset_tools.dataset_maintenance as dataset_module
+    from validate_dataset import main
 
     with pytest.raises(SystemExit):
         main(["--help"])
@@ -1617,8 +1611,8 @@ def test_dataset_rebuild_is_not_a_public_operation(capsys: pytest.CaptureFixture
 def test_dataset_replace_is_a_public_one_input_operation(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import dataloader.operations as dataset_module
-    from main_data import main
+    import dataset_tools.dataset_maintenance as dataset_module
+    from dataset_tools.manage_dataset import main
 
     with pytest.raises(SystemExit):
         main(["replace", "--help"])
@@ -1633,8 +1627,8 @@ def test_dataset_remove_deletes_only_selected_experiment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import dataloader.check as validation
-    from dataloader.operations import remove_dataset
+    import dataset_tools.validate_dataset as validation
+    from dataset_tools.dataset_maintenance import remove_dataset
 
     first_name, _ = _write_renderable_dataset(tmp_path)
     second_name = "frost_cycle_000002"
@@ -1653,8 +1647,7 @@ def test_dataset_remove_deletes_only_selected_experiment(
         }
     )
     second["assets"] = {
-        key: value.replace(first_name, second_name)
-        for key, value in second["assets"].items()
+        key: value.replace(first_name, second_name) for key, value in second["assets"].items()
     }
     first_catalog["cycles"].append(second)
     (tmp_path / "cycle_catalog.json").write_text(json.dumps(first_catalog))
@@ -1709,8 +1702,8 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import dataloader.check as validation
-    from dataloader.operations import refresh_dataset
+    import dataset_tools.validate_dataset as validation
+    from dataset_tools.dataset_maintenance import refresh_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -1764,8 +1757,8 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
 def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.check as validation
-    from dataloader.operations import refresh_dataset
+    import dataset_tools.validate_dataset as validation
+    from dataset_tools.dataset_maintenance import refresh_dataset
     from plots import publication as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
@@ -1794,8 +1787,8 @@ def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
 def test_refresh_images_refuses_file_outside_its_cycle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.check as validation
-    from dataloader.operations import refresh_dataset
+    import dataset_tools.validate_dataset as validation
+    from dataset_tools.dataset_maintenance import refresh_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "front"
@@ -1813,8 +1806,8 @@ def test_refresh_images_refuses_file_outside_its_cycle(
 def test_refresh_figures_does_not_rewrite_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.check as validation
-    from dataloader.operations import refresh_dataset
+    import dataset_tools.validate_dataset as validation
+    from dataset_tools.dataset_maintenance import refresh_dataset
     from plots import publication as visualization
 
     _write_renderable_dataset(tmp_path)
@@ -1825,9 +1818,7 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
         "render_cycle_publication",
         lambda *_a, **_k: calls.append("publication"),
     )
-    monkeypatch.setattr(
-        visualization, "render_rgb_panel", lambda *_a, **_k: calls.append("panel")
-    )
+    monkeypatch.setattr(visualization, "render_rgb_panel", lambda *_a, **_k: calls.append("panel"))
     monkeypatch.setattr(validation, "validate_dataset", lambda _path: None)
 
     refresh_dataset(tmp_path, "figures")
@@ -1837,7 +1828,7 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
 
 
 def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Path) -> None:
-    from dataloader.loader import DatasetLoader
+    from dataset_tools.load_dataset import DatasetLoader
 
     dataset_dir = tmp_path / "dataset"
     cycle_name, _ = _write_renderable_dataset(dataset_dir)
@@ -1872,8 +1863,8 @@ def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Pat
 def test_baseline_edit_does_not_require_original_or_image_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataloader.files import write_json
-    from dataloader.operations import edit_dataset
+    from dataset_tools.dataset_maintenance import edit_dataset
+    from dataset_tools.dataset_paths import write_json
 
     cycle_name = "frost_cycle_000001"
     cycles_dir = tmp_path / "cycles"
@@ -1933,8 +1924,8 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
 def test_loader_uses_camera_directory_as_role(
     tmp_path: Path,
 ) -> None:
-    from dataloader.files import write_json
-    from dataloader.loader import DatasetLoader
+    from dataset_tools.dataset_paths import write_json
+    from dataset_tools.load_dataset import DatasetLoader
 
     cycle_name = "frost_cycle_000001"
     camera_dir = tmp_path / "images" / cycle_name / "front"
@@ -2020,7 +2011,7 @@ def test_loader_uses_camera_directory_as_role(
 
 
 def test_rgb_stage_metrics_require_all_expected_roles() -> None:
-    from dataloader.images import rgb_stage_metrics
+    from dataset_tools.local_images import rgb_stage_metrics
 
     times = pd.date_range("2026-07-14 10:00:00", periods=5, freq="10s")
     frame = pd.DataFrame(
@@ -2043,12 +2034,10 @@ def test_rgb_stage_metrics_require_all_expected_roles() -> None:
 
 
 def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
-    from dataloader.images import rgb_stage_metrics
+    from dataset_tools.local_images import rgb_stage_metrics
 
     times = pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s")
-    frame = pd.DataFrame(
-        {"timestamp": times, "cycle_stage": ["defrost", "defrost"]}
-    )
+    frame = pd.DataFrame({"timestamp": times, "cycle_stage": ["defrost", "defrost"]})
     metrics = rgb_stage_metrics(
         frame,
         {"front": {"available": [(times[0], times[-1] + pd.Timedelta(seconds=10))]}},
@@ -2060,7 +2049,7 @@ def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
 
 
 def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path) -> None:
-    from dataloader.operations import update_cycle_columns
+    from dataset_tools.dataset_maintenance import update_cycle_columns
 
     cycle_name = "frost_cycle_000001"
     cycles = tmp_path / "cycles"
@@ -2091,9 +2080,7 @@ def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path
             "evaporator_capacity": [9.0, 10.0],
         }
     )
-    pd.testing.assert_frame_equal(
-        pd.read_parquet(cycles / f"{cycle_name}.parquet"), expected
-    )
+    pd.testing.assert_frame_equal(pd.read_parquet(cycles / f"{cycle_name}.parquet"), expected)
     pd.testing.assert_frame_equal(
         pd.read_csv(cycles / f"{cycle_name}.csv", parse_dates=["timestamp"]), expected
     )
@@ -2102,9 +2089,9 @@ def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path
 def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.operations as dataset_module
-    from dataloader.files import write_json
-    from dataloader.operations import add_dataset
+    import dataset_tools.dataset_maintenance as dataset_module
+    from dataset_tools.dataset_maintenance import add_dataset
+    from dataset_tools.dataset_paths import write_json
 
     input_dir = tmp_path / "0714"
     input_dir.mkdir()
@@ -2139,20 +2126,17 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
         lambda *_args: pytest.fail("same experiment must not rerun Prepare/Process"),
     )
 
-    assert (
-        add_dataset(input_dir, dataset_dir)
-        == dataset_dir.resolve()
-    )
+    assert add_dataset(input_dir, dataset_dir) == dataset_dir.resolve()
 
 
 def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import dataloader.builder.channels as channels_module
-    import dataloader.builder.config as config_module
-    import dataloader.operations as dataset_module
-    from dataloader.files import write_json
-    from dataloader.operations import aggregate_original
+    import dataset_tools.builder.channel_mapping as channels_module
+    import dataset_tools.builder.dataset_settings as config_module
+    import dataset_tools.dataset_maintenance as dataset_module
+    from dataset_tools.dataset_maintenance import aggregate_original
+    from dataset_tools.dataset_paths import write_json
 
     dataset = tmp_path / "dataset"
     (dataset / "cycles").mkdir(parents=True)
@@ -2244,18 +2228,18 @@ def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
 def test_cli_aggregates_original_at_requested_interval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import main_data
+    from dataset_tools import manage_dataset
 
     calls: list[tuple[Path, int]] = []
     monkeypatch.setattr(
-        main_data,
+        manage_dataset,
         "aggregate_original",
         lambda dataset, *, seconds: calls.append((dataset, seconds)) or dataset,
         raising=False,
     )
 
     assert (
-        main_data.main(
+        manage_dataset.main(
             [
                 "aggregate-original",
                 "--dataset",
@@ -2269,20 +2253,18 @@ def test_cli_aggregates_original_at_requested_interval(
     assert calls == [(tmp_path, 30)]
 
 
-def test_cli_add_needs_no_date_argument(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import main_data
+def test_cli_add_needs_no_date_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from dataset_tools import manage_dataset
 
     calls: list[tuple[Path, Path]] = []
     monkeypatch.setattr(
-        main_data,
+        manage_dataset,
         "add_dataset",
         lambda input_dir, dataset: calls.append((input_dir, dataset)) or input_dir,
     )
 
     assert (
-        main_data.main(
+        manage_dataset.main(
             [
                 "add",
                 str(tmp_path),
@@ -2296,20 +2278,19 @@ def test_cli_add_needs_no_date_argument(
 def test_cli_render_cloud_fetch_is_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import main_data
+    from dataset_tools import manage_dataset
 
     calls: list[bool] = []
     monkeypatch.setattr(
-        main_data,
+        manage_dataset,
         "render_dataset",
-        lambda _dataset, _cycle, **options: calls.append(
-            bool(options["fetch_cloud_images"])
-        )
-        or tmp_path,
+        lambda _dataset, _cycle, **options: (
+            calls.append(bool(options["fetch_cloud_images"])) or tmp_path
+        ),
     )
 
-    main_data.main(["render", "frost_cycle_000020", "--panel"])
-    main_data.main(
+    manage_dataset.main(["render", "frost_cycle_000020", "--panel"])
+    manage_dataset.main(
         [
             "render",
             "frost_cycle_000020",

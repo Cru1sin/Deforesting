@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dataloader.builder.config import BaselineSettings, Config, ProcessSettings
-from dataloader.builder.process import process
+from dataset_tools.builder.build_cycle_tables import process
+from dataset_tools.builder.dataset_settings import BaselineSettings, Config, ProcessSettings
 
 
 def _config(
@@ -281,16 +281,12 @@ def test_process_rejects_legacy_partial_status(tmp_path: Path) -> None:
 
 
 def test_fallback_cycles_anchor_buckets_to_each_cycle_start(tmp_path: Path) -> None:
-    first_timestamps = pd.to_datetime(
-        ["2026-07-15 00:00:11", "2026-07-15 00:00:15"]
-    )
+    first_timestamps = pd.to_datetime(["2026-07-15 00:00:11", "2026-07-15 00:00:15"])
     first = _frame(first_timestamps, temperature=[1.0, 2.0], stage="partial")
     first["cycle_id"] = "partial_001"
     first["cycle_status"] = "valid"
 
-    second_timestamps = pd.to_datetime(
-        ["2026-07-15 00:00:16", "2026-07-15 00:00:19"]
-    )
+    second_timestamps = pd.to_datetime(["2026-07-15 00:00:16", "2026-07-15 00:00:19"])
     second = _frame(second_timestamps, temperature=[3.0, 4.0], stage="partial")
     second["cycle_id"] = "partial_002"
     second["cycle_status"] = "valid"
@@ -377,9 +373,12 @@ def test_stage_boundary_buckets_are_excluded_only_when_boundary_is_inside_bucket
 
     assert not processed.duplicated(["experiment_id", "timestamp"]).any()
     assert not processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:00")).any()
-    assert processed.loc[
-        processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:10")), "cycle_stage"
-    ].iloc[0] == "frost_development"
+    assert (
+        processed.loc[
+            processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:10")), "cycle_stage"
+        ].iloc[0]
+        == "frost_development"
+    )
 
     edge_frame = _frame(
         pd.date_range("2026-07-15", periods=3, freq="10s"), temperature=[1.0, 2.0, 3.0]
@@ -468,9 +467,7 @@ def test_gap_threshold_below_grid_interval_does_not_impute(tmp_path: Path) -> No
     frame = _frame(timestamps, temperature=[1.0, 3.0])
     summary = _summary(defrost="2026-07-15 00:05:00")
 
-    processed, _ = process(
-        frame, summary, _config(tmp_path, continuous_gap=5.0), _channels()
-    )
+    processed, _ = process(frame, summary, _config(tmp_path, continuous_gap=5.0), _channels())
 
     middle = processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:10"))
     assert processed.loc[middle, "temperature"].isna().all()
@@ -555,9 +552,7 @@ def test_continuous_coverage_counts_before_fill_and_excludes_unavailable_channel
 def test_complete_cycle_grid_uses_summary_boundaries_for_unobserved_edges(
     tmp_path: Path,
 ) -> None:
-    timestamps = pd.to_datetime(
-        ["2026-07-15 00:00:05", "2026-07-15 00:00:45"]
-    )
+    timestamps = pd.to_datetime(["2026-07-15 00:00:05", "2026-07-15 00:00:45"])
     frame = _frame(timestamps, temperature=[1.0, 2.0])
     frame["temperature__missing"] = False
     frame.loc[0, "cycle_stage"] = "recovery"

@@ -1,6 +1,6 @@
 import numpy as np
 
-from dataloader.builder.knee import find_global_knee
+from dataset_tools.builder.find_recovery_temperature_knee import find_global_knee
 
 
 def test_find_global_knee_prefers_larger_later_transition() -> None:

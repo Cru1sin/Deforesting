@@ -5,18 +5,17 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from labels import build
+from image_labels import timing as build
 
 
 def _canonical_cost(**columns: object) -> pd.DataFrame:
     values: dict[str, object] = {
         "cycle_name": ["cycle_a", "cycle_a"],
-        "candidate_time": pd.to_datetime(["2026-01-01 00:00", "2026-01-01 00:10"]),
+        "candidate_defrost_time": pd.to_datetime(["2026-01-01 00:00", "2026-01-01 00:10"]),
         "relative_regret": [0.2, 0.0],
         "optimization_eligible": [True, True],
         "is_censored": [False, False],
         "label_eligible": [True, True],
-        "variant": [None, None],
     }
     values.update(columns)
     return pd.DataFrame(values)
@@ -85,12 +84,11 @@ def test_build_rejects_an_all_unsupported_cycle_with_images(
     cost = pd.DataFrame(
         {
             "cycle_name": ["unsupported"] * 3,
-            "candidate_time": pd.date_range("2026-01-01", periods=3, freq="10min"),
+            "candidate_defrost_time": pd.date_range("2026-01-01", periods=3, freq="10min"),
             "relative_regret": [0.2, 0.0, 0.1],
             "optimization_eligible": [False, True, False],
             "is_censored": [False] * 3,
             "label_eligible": [True] * 3,
-            "variant": [None] * 3,
         }
     )
 
@@ -151,32 +149,31 @@ def test_build_returns_labels_balance_and_cycle_audit(
             _canonical_cost(),
             _canonical_cost(
                 cycle_name=["censored", "censored"],
-                candidate_time=pd.to_datetime(["2026-01-03 00:00", "2026-01-03 00:10"]),
+                candidate_defrost_time=pd.to_datetime(["2026-01-03 00:00", "2026-01-03 00:10"]),
                 is_censored=[True, False],
             ),
             _canonical_cost(
                 cycle_name=["no_images", "no_images"],
-                candidate_time=pd.to_datetime(["2026-01-04 00:00", "2026-01-04 00:10"]),
+                candidate_defrost_time=pd.to_datetime(["2026-01-04 00:00", "2026-01-04 00:10"]),
             ),
         ],
         ignore_index=True,
     )
-    labels, balance, audit_table = build.build_labels(
-        tmp_path / "dataset", cost, (0.01, 0.10)
-    )
+    labels, balance, audit_table = build.build_labels(tmp_path / "dataset", cost, (0.01, 0.10))
 
     assert labels["cycle_name"].tolist() == ["cycle_a", "cycle_a"]
     assert "split" not in labels
     assert set(labels) >= {
-        "cost_state_01pct",
-        "three_class_state_01pct",
-        "binary_state_01pct",
-        "cost_state_10pct",
-        "three_class_state_10pct",
-        "binary_state_10pct",
+        "timing_state_01pct",
+        "three_class_target_01pct",
+        "binary_target_01pct",
+        "timing_state_10pct",
+        "three_class_target_10pct",
+        "binary_target_10pct",
     }
-    assert labels["cost_state_01pct"].tolist() == ["pre_optimal", "near_optimal"]
-    assert pd.isna(labels.loc[1, "binary_state_01pct"])
+    assert labels["timing_state_01pct"].tolist() == ["before_reference", "near_reference"]
+    assert pd.isna(labels.loc[1, "binary_target_01pct"])
+    assert labels["reference_method"].eq("v1_cost_optimum").all()
 
     audit = audit_table.set_index("cycle_name")
     assert audit.loc["cycle_a", "reason"] == "labeled"
@@ -190,7 +187,7 @@ def test_build_returns_labels_balance_and_cycle_audit(
     assert set(balance["camera_group"]) >= {"top", "top_pair", "all"}
 
 
-def test_policy_labels_use_only_selected_cycles_and_the_selected_time(
+def test_policy_labels_use_only_selected_cycles_and_the_selected_defrost_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     catalog = pd.DataFrame(
@@ -198,15 +195,9 @@ def test_policy_labels_use_only_selected_cycles_and_the_selected_time(
             "cycle_name": ["selected", "abstained"],
             "experiment_id": ["e1", "e2"],
             "status": ["valid", "valid"],
-            "stable_heating_start": pd.to_datetime(
-                ["2026-01-01 00:00", "2026-01-02 00:00"]
-            ),
-            "defrost_start": pd.to_datetime(
-                ["2026-01-01 00:30", "2026-01-02 00:30"]
-            ),
-            "defrost_end": pd.to_datetime(
-                ["2026-01-01 00:35", "2026-01-02 00:35"]
-            ),
+            "stable_heating_start": pd.to_datetime(["2026-01-01 00:00", "2026-01-02 00:00"]),
+            "defrost_start": pd.to_datetime(["2026-01-01 00:30", "2026-01-02 00:30"]),
+            "defrost_end": pd.to_datetime(["2026-01-01 00:35", "2026-01-02 00:35"]),
         }
     )
     metadata = pd.DataFrame(
@@ -235,23 +226,23 @@ def test_policy_labels_use_only_selected_cycles_and_the_selected_time(
     policy = pd.DataFrame(
         {
             "cycle_name": ["selected", "selected", "abstained"],
-            "candidate_time": pd.to_datetime(
+            "candidate_defrost_time": pd.to_datetime(
                 ["2026-01-01 00:05", "2026-01-01 00:10", "2026-01-02 00:05"]
             ),
-            "selected": [False, True, False],
-            "selected_time": pd.to_datetime(
-                ["2026-01-01 00:10", "2026-01-01 00:10", None]
-            ),
-            "selection_policy": ["ch_pareto_knee"] * 3,
+            "is_selected": [False, True, False],
+            "selected_defrost_time": pd.to_datetime(["2026-01-01 00:10", "2026-01-01 00:10", None]),
+            "selection_method": ["cop_heating_rate_pareto_knee"] * 3,
             "selection_status": ["selected", "selected", "abstain"],
         }
     )
 
-    labels, balance, audit = build.build_policy_labels(tmp_path / "dataset", policy)
+    labels, balance, audit = build.build_selected_time_labels(tmp_path / "dataset", policy)
 
-    assert labels["policy_state"].tolist() == ["pre_optimal", "post_optimal"]
-    assert labels["selected_time"].nunique() == 1
+    assert labels["timing_state"].tolist() == ["before_reference", "after_reference"]
+    assert labels["binary_target"].tolist() == ["before_reference", "after_reference"]
+    assert labels["reference_time"].nunique() == 1
+    assert labels["reference_method"].eq("cop_heating_rate_pareto_knee").all()
     assert set(balance["camera_group"]) >= {"front", "all"}
     reasons = audit.set_index("cycle_name")["reason"]
     assert reasons["selected"] == "labeled"
-    assert reasons["abstained"] == "policy_abstained"
+    assert reasons["abstained"] == "selection_abstained"

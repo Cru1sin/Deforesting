@@ -6,21 +6,20 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import pytest
 
-import main_labels
-from plots import labels as label_plots
+import build_image_labels
+from plots import image_labels as label_plots
 
 
 def _cost() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "cycle_name": ["cycle"] * 5,
-            "candidate_time": pd.date_range("2026-01-01", periods=5, freq="10min"),
+            "candidate_defrost_time": pd.date_range("2026-01-01", periods=5, freq="10min"),
             "inverse_cop": [0.6, 0.5, 0.7, 0.51, 0.8],
             "relative_regret": [0.01, 0.0, 0.2, 0.005, 0.0],
             "optimization_eligible": [True, True, False, True, False],
             "is_censored": [False] * 5,
             "label_eligible": [True] * 5,
-            "variant": [None] * 5,
         }
     )
 
@@ -30,7 +29,7 @@ def _balance() -> pd.DataFrame:
         {
             "regret_threshold": [0.01] * 3 + [0.02] * 3,
             "camera_group": ["all"] * 6,
-            "cost_state": ["pre_optimal", "near_optimal", "post_optimal"] * 2,
+            "timing_state": ["before_reference", "near_reference", "after_reference"] * 2,
             "image_count": [30, 40, 30, 20, 60, 20],
         }
     )
@@ -118,16 +117,18 @@ def test_main_routes_explicit_figure_arguments(
     output = tmp_path / "labels"
     calls: list[dict[str, object]] = []
 
-    monkeypatch.setattr(main_labels.pd, "read_csv", lambda _path: cost)
+    monkeypatch.setattr(build_image_labels.pd, "read_csv", lambda _path, **_kwargs: cost)
     monkeypatch.setattr(
-        main_labels,
+        build_image_labels,
         "build_labels",
         lambda _dataset, _cost, _thresholds: (labels, balance, pd.DataFrame()),
     )
-    monkeypatch.setattr(main_labels, "plot_label_figures", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(
+        build_image_labels, "plot_label_figures", lambda **kwargs: calls.append(kwargs)
+    )
 
     assert (
-        main_labels.main(
+        build_image_labels.main(
             [
                 "--output",
                 str(output),

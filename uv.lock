@@ -437,7 +437,7 @@ wheels = [
 ]
 
 [[package]]
-name = "frost-analysis"
+name = "heat-pump-defrost"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -1,28 +1,26 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-import main_cost
-from cost.cost_function_v1 import calculate_cycle as calculate_v1
-from cost.cost_function_v2_5 import calculate_cycle as calculate_v25
-from cost.energy_models import load_parameters
-from dataloader import DatasetLoader
+from dataset_tools import DatasetLoader
+from defrost_decision.baselines.electricity import load_parameters
+from defrost_decision.baselines.unit_heat_inverse_cop_v1 import calculate_cycle as calculate_v1
+from defrost_decision.baselines.water_heat_inverse_cop_v25 import calculate_cycle as calculate_v25
+from defrost_decision.candidate_times import clean_anchor_cycles, metadata_eligible_cycles
 
-ORIGINAL_ROOT = Path("/Users/cruisin/Documents/DeforestingSensor")
+DATASET = Path(os.environ.get("DEFROST_DATASET", "dataset"))
+HISTORICAL_COSTS = Path(os.environ.get("DEFROST_HISTORICAL_COSTS", "output/成本函数"))
 CYCLE = "frost_cycle_000070"
 
 
 def _formal_cycles(loader: DatasetLoader) -> list[str]:
-    metadata_cycles = main_cost._cycle_names(  # noqa: SLF001
-        loader, None, set(load_parameters()["pe_quadratic"])
-    )
-    selected, _ = main_cost._clean_anchor_cycles(  # noqa: SLF001
-        loader, metadata_cycles, explicit=False
-    )
+    metadata_cycles = metadata_eligible_cycles(loader, None, set(load_parameters()["pe_quadratic"]))
+    selected, _ = clean_anchor_cycles(loader, metadata_cycles, explicit=False)
     return selected
 
 
@@ -42,16 +40,12 @@ def _assert_numeric_parity(
 
 
 def test_real_dataset_frozen_science_cohort_is_69() -> None:
-    dataset = ORIGINAL_ROOT / "dataset"
+    dataset = DATASET
     if not dataset.exists():
         pytest.skip("read-only original Dataset integration assets are unavailable")
     loader = DatasetLoader(dataset)
-    metadata_cycles = main_cost._cycle_names(  # noqa: SLF001
-        loader, None, set(load_parameters()["pe_quadratic"])
-    )
-    selected, excluded = main_cost._clean_anchor_cycles(  # noqa: SLF001
-        loader, metadata_cycles, explicit=False
-    )
+    metadata_cycles = metadata_eligible_cycles(loader, None, set(load_parameters()["pe_quadratic"]))
+    selected, excluded = clean_anchor_cycles(loader, metadata_cycles, explicit=False)
 
     assert len(metadata_cycles) == 70
     assert len(selected) == 69
@@ -69,8 +63,8 @@ def test_real_dataset_frozen_science_cohort_is_69() -> None:
 def test_dataset_native_curve_matches_historical_selected_output(
     name: str, calculate: object, heat_column: str, optimum: pd.Timestamp
 ) -> None:
-    dataset = ORIGINAL_ROOT / "dataset"
-    historical_path = ORIGINAL_ROOT / "output/成本函数" / f"cost_function_{name}.csv"
+    dataset = DATASET
+    historical_path = HISTORICAL_COSTS / f"cost_function_{name}.csv"
     if not dataset.exists() or not historical_path.exists():
         pytest.skip("read-only original Dataset integration assets are unavailable")
     result = calculate(DatasetLoader(dataset), CYCLE)  # type: ignore[operator]
@@ -79,12 +73,12 @@ def test_dataset_native_curve_matches_historical_selected_output(
 
     assert len(result) == len(historical) == 107
     assert np.array_equal(
-        pd.to_datetime(result["candidate_time"], format="mixed").to_numpy(),
+        pd.to_datetime(result["candidate_defrost_time"], format="mixed").to_numpy(),
         pd.to_datetime(historical["candidate_time"], format="mixed").to_numpy(),
     )
     comparisons = {
-        "heating_energy_kwh": "heating_electricity_kwh",
-        "heating_heat_kwh": heat_column,
+        "pre_defrost_electricity_kwh": "heating_electricity_kwh",
+        "pre_defrost_heat_kwh": heat_column,
         "defrost_energy_kwh": "defrost_electricity_kwh",
         "recovery_energy_kwh": "recovery_electricity_kwh",
         "inverse_cop": "inverse_cop",
@@ -98,10 +92,10 @@ def test_dataset_native_curve_matches_historical_selected_output(
         )
     for current, old in comparisons.items():
         assert np.allclose(result[current], historical[old], rtol=0, atol=5e-13)
-    assert "strict_heating_energy_kwh" in result
-    assert "strict_heating_heat_kwh" in result
+    assert "strict_pre_defrost_electricity_kwh" in result
+    assert "strict_pre_defrost_heat_kwh" in result
     assert "strict_ET_supported" in result
-    assert result.loc[result["is_optimum"], "candidate_time"].tolist() == [optimum]
+    assert result.loc[result["is_optimum"], "candidate_defrost_time"].tolist() == [optimum]
     assert pd.Timestamp(historical["t_star"].iloc[0]) == optimum
 
 
@@ -115,8 +109,8 @@ def test_dataset_native_curve_matches_historical_selected_output(
 def test_all_dataset_native_curves_match_formal_cost_outputs(
     name: str, calculate: object, heat_column: str
 ) -> None:
-    dataset = ORIGINAL_ROOT / "dataset"
-    historical_path = ORIGINAL_ROOT / "output/成本函数" / f"cost_function_{name}.csv"
+    dataset = DATASET
+    historical_path = HISTORICAL_COSTS / f"cost_function_{name}.csv"
     if not dataset.exists() or not historical_path.exists():
         pytest.skip("read-only original Dataset integration assets are unavailable")
     loader = DatasetLoader(dataset)
@@ -127,17 +121,17 @@ def test_all_dataset_native_curves_match_formal_cost_outputs(
     historical = pd.read_csv(historical_path).sort_values(
         ["cycle_name", "candidate_time"], kind="stable"
     )
-    current = current.sort_values(["cycle_name", "candidate_time"], kind="stable")
+    current = current.sort_values(["cycle_name", "candidate_defrost_time"], kind="stable")
 
     assert len(current) == len(historical) == 7418
     assert current["cycle_name"].tolist() == historical["cycle_name"].tolist()
     assert np.array_equal(
-        pd.to_datetime(current["candidate_time"], format="mixed").to_numpy(),
+        pd.to_datetime(current["candidate_defrost_time"], format="mixed").to_numpy(),
         pd.to_datetime(historical["candidate_time"], format="mixed").to_numpy(),
     )
     numeric = {
-        "heating_energy_kwh": "heating_electricity_kwh",
-        "heating_heat_kwh": heat_column,
+        "pre_defrost_electricity_kwh": "heating_electricity_kwh",
+        "pre_defrost_heat_kwh": heat_column,
         "defrost_energy_kwh": "defrost_electricity_kwh",
         "recovery_energy_kwh": "recovery_electricity_kwh",
         "inverse_cop": "inverse_cop",
@@ -157,9 +151,9 @@ def test_all_dataset_native_curves_match_formal_cost_outputs(
         if name == "v2.5"
         else pd.Series(0.0, index=historical.index)
     )
-    assert np.allclose(current["transition_energy_kwh"], expected_et, rtol=0, atol=5e-13)
+    assert np.allclose(current["defrost_event_electricity_kwh"], expected_et, rtol=0, atol=5e-13)
     assert np.allclose(
-        current["transition_heat_kwh"],
+        current["defrost_event_net_heat_kwh"],
         expected_qt,
         rtol=0,
         atol=5e-13,
@@ -171,14 +165,15 @@ def test_all_dataset_native_curves_match_formal_cost_outputs(
     )
     assert current["heating_heat_supported"].tolist() == historical["integration_eligible"].tolist()
     assert (
-        current["ET_evaluable"].tolist() == historical["evaporating_pressure_mpa"].notna().tolist()
+        current["defrost_event_electricity_evaluable"].tolist()
+        == historical["evaporating_pressure_mpa"].notna().tolist()
     )
     expected_qt_support = (
         historical["qprep_eligible"].fillna(False) & historical["qd_eligible"].fillna(False)
         if name == "v2.5"
         else pd.Series(True, index=historical.index)
     )
-    assert current["QT_evaluable"].tolist() == expected_qt_support.tolist()
+    assert current["defrost_event_net_heat_evaluable"].tolist() == expected_qt_support.tolist()
     assert "ET_supported" not in current
     assert "QT_supported" not in current
     expected_optima = pd.to_datetime(historical["candidate_time"], format="mixed").eq(

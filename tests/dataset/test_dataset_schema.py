@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from dataloader.builder.schema import (
+from dataset_tools.builder.schema import (
     build_processed_frame,
     drop_image_columns,
     merge_registries,

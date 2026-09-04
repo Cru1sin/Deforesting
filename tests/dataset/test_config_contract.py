@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from dataloader.builder.channels import load_channels
-from dataloader.builder.config import CycleSettings, load_config
+from dataset_tools.builder.channel_mapping import load_channels
+from dataset_tools.builder.dataset_settings import CycleSettings, load_config
 
 
 def test_python_defaults_match_the_frozen_raw_dataset_contract(tmp_path: Path) -> None:
@@ -35,15 +35,11 @@ def test_python_channel_table_preserves_active_sensor_contract() -> None:
     channels = load_channels()
 
     assert len(channels) == 36
-    assert channels["compressor_frequency_setpoint"]["source_names"] == [
-        "p1__设定频率<1_00>"
-    ]
+    assert channels["compressor_frequency_setpoint"]["source_names"] == ["p1__设定频率<1_00>"]
     assert channels["plate_heat_exchanger_outlet_temperature"]["source_names"] == [
         "p1__T2(18.1)'2_20"
     ]
-    assert channels["evaporator_inlet_temperature"]["source_names"] == [
-        "p1__TL(28.1)'2_31'"
-    ]
+    assert channels["evaporator_inlet_temperature"]["source_names"] == ["p1__TL(28.1)'2_31'"]
     assert channels["plate_heat_exchanger_inlet_temperature"]["source_names"] == [
         "p1__T2b(20.1)'2_20"
     ]
@@ -68,18 +64,14 @@ def test_load_channels_returns_an_independent_table() -> None:
 
 def test_sensor_coverage_and_analysis_candidates_remain_explicit() -> None:
     channels = load_channels()
-    required = {
-        name for name, settings in channels.items() if settings.get("coverage_required")
-    }
+    required = {name for name, settings in channels.items() if settings.get("coverage_required")}
     assert required == {
         name
         for name, settings in channels.items()
         if settings.get("role") == "sensor" and settings.get("kind") != "derived"
     } - {"fin_temperature"}
     assert channels["fin_temperature"]["coverage_required"] is False
-    assert {
-        name for name, settings in channels.items() if settings["analysis_candidate"]
-    } == {
+    assert {name for name, settings in channels.items() if settings["analysis_candidate"]} == {
         "evaporating_pressure",
         "evaporating_temperature",
         "coil_temperature",

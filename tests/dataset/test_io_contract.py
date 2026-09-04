@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from dataloader.builder.config import Config
-from dataloader.builder.raw import discover_inputs
+from dataset_tools.builder.dataset_settings import Config
+from dataset_tools.builder.raw import discover_inputs
 
 
 def test_discover_inputs_reads_root_sensors_and_one_level_images(tmp_path: Path) -> None:

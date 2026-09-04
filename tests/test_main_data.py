@@ -9,19 +9,19 @@ from pathlib import Path
 import pandas as pd
 
 
-def test_main_data_help_lists_dataset_actions(tmp_path: Path) -> None:
+def test_validate_dataset_help_exposes_only_read_only_validation(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
     result = subprocess.run(
-        ["uv", "run", "python", "main_data.py", "--help"],
+        ["uv", "run", "python", "validate_dataset.py", "--help"],
         check=True,
         capture_output=True,
         env=environment,
         text=True,
     )
 
-    for action in (
-        "validate",
+    assert "--dataset" in result.stdout
+    for maintenance_action in (
         "add",
         "replace",
         "aggregate-original",
@@ -31,15 +31,14 @@ def test_main_data_help_lists_dataset_actions(tmp_path: Path) -> None:
         "edit",
         "render",
     ):
-        assert action in result.stdout
+        assert maintenance_action not in result.stdout
 
 
-def test_main_data_defaults_to_validate_local_dataset() -> None:
-    from main_data import build_parser
+def test_validate_dataset_defaults_to_validate_local_dataset() -> None:
+    from validate_dataset import build_parser
 
     arguments = build_parser().parse_args([])
 
-    assert arguments.action == "validate"
     assert arguments.dataset == Path("dataset")
 
 
@@ -55,7 +54,7 @@ def test_quality_tools_target_new_workspace_entries() -> None:
 def test_validate_dispatches_to_read_only_domain_functions(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    import main_data
+    import validate_dataset
 
     validated: list[Path] = []
 
@@ -69,26 +68,26 @@ def test_validate_dispatches_to_read_only_domain_functions(
         def load_image_metadata(self) -> pd.DataFrame:
             return pd.DataFrame(index=range(3))
 
-    monkeypatch.setattr(main_data, "validate_dataset", validated.append)
-    monkeypatch.setattr(main_data, "DatasetLoader", Loader)
+    monkeypatch.setattr(validate_dataset, "validate_dataset", validated.append)
+    monkeypatch.setattr(validate_dataset, "DatasetLoader", Loader)
 
-    assert main_data.main(["validate", "--dataset", str(tmp_path)]) == 0
+    assert validate_dataset.main(["--dataset", str(tmp_path)]) == 0
     assert validated == [tmp_path]
     assert capsys.readouterr().out == "dataset valid: 2 cycles, 3 images\n"
 
 
-def test_edit_dispatches_recovery_and_rgb_options(tmp_path: Path, monkeypatch) -> None:
-    import main_data
+def test_advanced_dataset_maintenance_keeps_edit_options(tmp_path: Path, monkeypatch) -> None:
+    from dataset_tools import manage_dataset
 
     calls: list[tuple[Path, dict[str, object]]] = []
     monkeypatch.setattr(
-        main_data,
+        manage_dataset,
         "edit_dataset",
         lambda dataset, **options: calls.append((dataset, options)) or dataset,
     )
 
     assert (
-        main_data.main(
+        manage_dataset.main(
             [
                 "edit",
                 "--dataset",
@@ -114,17 +113,17 @@ def test_edit_dispatches_recovery_and_rgb_options(tmp_path: Path, monkeypatch) -
     ]
 
 
-def test_render_dispatches_default_publication_and_panel(tmp_path: Path, monkeypatch) -> None:
-    import main_data
+def test_advanced_dataset_maintenance_keeps_render_options(tmp_path: Path, monkeypatch) -> None:
+    from dataset_tools import manage_dataset
 
     calls: list[tuple[Path, str, dict[str, object]]] = []
     monkeypatch.setattr(
-        main_data,
+        manage_dataset,
         "render_dataset",
         lambda dataset, cycle, **options: calls.append((dataset, cycle, options)) or dataset,
     )
 
-    assert main_data.main(["render", "cycle_001", "--dataset", str(tmp_path)]) == 0
+    assert manage_dataset.main(["render", "cycle_001", "--dataset", str(tmp_path)]) == 0
     assert calls == [
         (
             tmp_path,
@@ -161,7 +160,8 @@ def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) ->
             "uv",
             "run",
             "python",
-            "main_data.py",
+            "-m",
+            "dataset_tools.manage_dataset",
             "edit",
             "--dataset",
             str(missing),
@@ -172,7 +172,8 @@ def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) ->
             "uv",
             "run",
             "python",
-            "main_data.py",
+            "-m",
+            "dataset_tools.manage_dataset",
             "render",
             "cycle_001",
             "--dataset",
@@ -189,7 +190,7 @@ def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) ->
 
 
 def test_dataset_loader_reads_catalog_from_absolute_path_without_writing(tmp_path: Path) -> None:
-    from dataloader.loader import DatasetLoader
+    from dataset_tools.load_dataset import DatasetLoader
 
     dataset = tmp_path / "external-dataset"
     (dataset / "cycles").mkdir(parents=True)
@@ -207,9 +208,7 @@ def test_dataset_loader_reads_catalog_from_absolute_path_without_writing(tmp_pat
     (dataset / "cycle_catalog.json").write_text(
         json.dumps({"cycles": [], "catalog_note": "absolute-path"}), encoding="utf-8"
     )
-    (dataset / "channel_registry.json").write_text(
-        json.dumps({"columns": []}), encoding="utf-8"
-    )
+    (dataset / "channel_registry.json").write_text(json.dumps({"columns": []}), encoding="utf-8")
     pd.DataFrame(columns=["cycle_name", "camera_role", "file_name"]).to_parquet(
         dataset / "image_metadata.parquet", index=False
     )

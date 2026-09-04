@@ -7,11 +7,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import main_cost
-from cost import cost_function_v2_6_8
-from cost.fit_v2_6_8 import OUTCOME_VALIDITY
-from cost.v2_6_8_data import candidate_cohort
-from dataloader import DatasetLoader
+import fit_defrost_event_models
+from dataset_tools import DatasetLoader
+from defrost_decision.baselines import ridge_inverse_cop_v268 as cost_function_v2_6_8
+from defrost_event_models.ridge_models import OUTCOME_VALIDITY
+from defrost_event_models.training_data import candidate_cohort
 
 
 @pytest.mark.slow
@@ -22,13 +22,9 @@ def test_current_dataset_freezes_v268_review_counts_and_outcomes(tmp_path: Path)
     dataset = Path(dataset_value)
 
     assert (
-        main_cost.main(
+        fit_defrost_event_models.main(
             [
-                "--action",
-                "fit",
-                "--cost",
-                "v2.6.8",
-                "--variant",
+                "--run-name",
                 "dataset_acceptance",
                 "--dataset",
                 str(dataset),
@@ -39,20 +35,19 @@ def test_current_dataset_freezes_v268_review_counts_and_outcomes(tmp_path: Path)
         == 0
     )
 
-    run = tmp_path / "cost" / "fit" / "dataset_acceptance"
-    events = pd.read_csv(run / "events.csv")
-    validation = pd.read_csv(run / "validation.csv")
-    bootstrap = pd.read_csv(run / "bootstrap.csv")
+    run = tmp_path / "defrost_event_models" / "dataset_acceptance"
+    events = pd.read_csv(run / "defrost_events.csv")
+    validation = pd.read_csv(run / "model_validation.csv")
     assert (len(events), int(events["event_valid"].sum())) == (83, 72)
     assert int((~events["event_valid"]).sum()) == 11
-    assert {
-        name: int(events[column].sum())
-        for name, column in OUTCOME_VALIDITY.items()
-    } == {"energy": 77, "heat": 72, "compressor_energy": 73, "duration": 77}
+    assert {name: int(events[column].sum()) for name, column in OUTCOME_VALIDITY.items()} == {
+        "event_electricity": 77,
+        "event_net_heat": 72,
+        "event_compressor_electricity": 73,
+        "event_duration": 77,
+    }
     assert len(validation) == 314
-    assert len(bootstrap) == 69
-    assert bootstrap["repeat_count"].eq(200).all()
-    assert bootstrap["seed"].eq(268).all()
+    assert not (run / "bootstrap_minima.csv").exists()
 
     loader = DatasetLoader(dataset)
     experiments = set(events.loc[events["event_valid"], "experiment_id"].astype(str))
@@ -62,7 +57,7 @@ def test_current_dataset_freezes_v268_review_counts_and_outcomes(tmp_path: Path)
     }
     assert (len(cohort), len(cohort_experiments), candidate_rows) == (69, 15, 8461)
 
-    artifact = json.loads((run / "params_candidate.json").read_text(encoding="utf-8"))
+    artifact = json.loads((run / "candidate_model_parameters.json").read_text(encoding="utf-8"))
     curves = pd.concat(
         [
             cost_function_v2_6_8.calculate_cycle(

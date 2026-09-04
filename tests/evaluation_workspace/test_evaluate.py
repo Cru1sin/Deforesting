@@ -7,13 +7,13 @@ import sys
 import pandas as pd
 import pytest
 
-from model.evaluate import classification_metrics, evaluate_run
+from image_models.evaluation import classification_metrics, evaluate_run
 
 SETTING = {
-    "representation": "handcrafted",
-    "head": "logistic",
+    "image_feature": "color_gradient",
+    "classifier": "logistic_regression",
     "camera": "front",
-    "modality": "rgb",
+    "input_feature": "image_only",
 }
 
 
@@ -91,10 +91,10 @@ def test_invalid_fold_is_retained_with_nan_metrics() -> None:
             columns=[
                 "experiment_id",
                 "held_out_experiment",
-                "representation",
-                "head",
+                "image_feature",
+                "classifier",
                 "camera",
-                "modality",
+                "input_feature",
                 "target",
                 "prediction",
             ]
@@ -151,9 +151,7 @@ def test_prediction_group_must_map_to_one_metrics_row() -> None:
 
 
 def test_duplicate_metrics_fold_keys_are_rejected_without_predictions() -> None:
-    metrics = pd.concat(
-        [_metrics(held_out="a"), _metrics(held_out="a")], ignore_index=True
-    )
+    metrics = pd.concat([_metrics(held_out="a"), _metrics(held_out="a")], ignore_index=True)
 
     with pytest.raises(ValueError, match="duplicate metrics fold key"):
         evaluate_run(metrics, pd.DataFrame(), task="binary")
@@ -197,6 +195,6 @@ def import_without_torch(name, *args, **kwargs):
         raise AssertionError('evaluation imported torch')
     return real_import(name, *args, **kwargs)
 builtins.__import__ = import_without_torch
-import model.evaluate
+import image_models.evaluation
 """
     subprocess.run([sys.executable, "-c", code], check=True)

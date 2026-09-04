@@ -3,10 +3,10 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from cost.cost_function_v1 import DEFAULT_RECIPE as V1_RECIPE
-from cost.cost_function_v1 import calculate_cycle as calculate_v1
-from cost.cost_function_v2_5 import DEFAULT_RECIPE as V25_RECIPE
-from cost.cost_function_v2_5 import calculate_cycle as calculate_v25
+from defrost_decision.baselines.unit_heat_inverse_cop_v1 import DEFAULT_RECIPE as V1_RECIPE
+from defrost_decision.baselines.unit_heat_inverse_cop_v1 import calculate_cycle as calculate_v1
+from defrost_decision.baselines.water_heat_inverse_cop_v25 import DEFAULT_RECIPE as V25_RECIPE
+from defrost_decision.baselines.water_heat_inverse_cop_v25 import calculate_cycle as calculate_v25
 
 
 class FakeDataset:
@@ -54,7 +54,7 @@ def test_default_recipes_are_canonical_and_explicit() -> None:
     assert V1_RECIPE == {
         "base_cost": "v1",
         "version": "v1",
-        "variant": None,
+        "run_name": None,
         "label_eligible": True,
         "heat_basis": "unit",
         "event_scope": "stable_heating_start_to_actual_preparation",
@@ -67,7 +67,7 @@ def test_default_recipes_are_canonical_and_explicit() -> None:
         "state_window": "[tau-60s,tau)",
         "transition_scope": "preparation_defrost_recovery",
         "transition_window": "candidate_state_at_tau",
-        "transition_provenance": "candidate_time_state_plus_fixed_recovery",
+        "transition_provenance": "candidate_defrost_time_state_plus_fixed_recovery",
         "decision_rule": "supported_argmin_inverse_cop",
         "heating_energy_model": "measured_total_power",
         "heating_heat_model": "measured_unit_heat",
@@ -100,12 +100,13 @@ def test_v1_single_cycle_uses_stable_unit_heat_fixed_recovery_and_zero_qt() -> N
     result = calculate_v1(FakeDataset(), "cycle_a")
     first = result.iloc[0]
 
-    assert first["candidate_elapsed_minutes"] == 10.0
-    assert first["heating_energy_kwh"] == pytest.approx(1.0)
-    assert first["heating_heat_kwh"] == pytest.approx(2.0)
+    assert not result["is_censored"].any()
+    assert first["minutes_since_heating_start"] == 10.0
+    assert first["pre_defrost_electricity_kwh"] == pytest.approx(1.0)
+    assert first["pre_defrost_heat_kwh"] == pytest.approx(2.0)
     assert first["preparation_energy_kwh"] == 0.0
     assert first["recovery_energy_kwh"] == 0.279901897467
-    assert first["transition_heat_kwh"] == 0.0
+    assert first["defrost_event_net_heat_kwh"] == 0.0
     assert first["base_cost"] == "v1"
     assert first["label_eligible"]
     assert first["heating_energy_rule"] == (
@@ -130,14 +131,14 @@ def test_v25_single_cycle_uses_cycle_start_water_heat_and_signed_qd() -> None:
     result = calculate_v25(FakeDataset(), "cycle_a")
     first = result.iloc[0]
 
-    assert first["candidate_elapsed_minutes"] == 12.0
-    assert first["heating_energy_kwh"] == pytest.approx(1.2)
-    assert first["heating_heat_kwh"] == pytest.approx(1.161)
+    assert first["minutes_since_heating_start"] == 12.0
+    assert first["pre_defrost_electricity_kwh"] == pytest.approx(1.2)
+    assert first["pre_defrost_heat_kwh"] == pytest.approx(1.161)
     assert first["preparation_energy_kwh"] == 0.0
     assert first["recovery_energy_kwh"] == 0.0
     assert first["recovery_heat_kwh"] == 0.0
     assert first["defrost_heat_kwh"] <= 0.0
-    assert first["transition_heat_kwh"] == (
+    assert first["defrost_event_net_heat_kwh"] == (
         first["preparation_heat_kwh"] + first["defrost_heat_kwh"]
     )
     assert first["base_cost"] == "v2.5"
@@ -154,7 +155,7 @@ def test_v25_single_cycle_uses_cycle_start_water_heat_and_signed_qd() -> None:
 
 def test_strict_mixed_variant_is_causal_and_label_ineligible() -> None:
     recipe = dict(V1_RECIPE)
-    recipe.update(variant="strict_state", state_protocol="strict_causal")
+    recipe.update(run_name="strict_state", state_protocol="strict_causal")
     result = calculate_v1(FakeDataset(), "cycle_a", recipe)
 
     assert not result["label_eligible"].any()
@@ -170,7 +171,7 @@ def test_strict_integration_variant_threads_through_v1_pipeline() -> None:
     )
     dataset.frame = dataset.frame.loc[~gap]
     recipe = dict(V1_RECIPE)
-    recipe.update(variant="strict_integration", integration_protocol="strict_causal")
+    recipe.update(run_name="strict_integration", integration_protocol="strict_causal")
 
     result = calculate_v1(dataset, "cycle_a", recipe)
 
@@ -180,20 +181,24 @@ def test_strict_integration_variant_threads_through_v1_pipeline() -> None:
         .eq("strict_causal_gap_aware_5s_from_stable_heating_start")
         .all()
     )
-    assert result["heating_energy_kwh"].equals(result["strict_heating_energy_kwh"])
-    assert result["heating_heat_kwh"].equals(result["strict_heating_heat_kwh"])
+    assert result["pre_defrost_electricity_kwh"].equals(
+        result["strict_pre_defrost_electricity_kwh"]
+    )
+    assert result["pre_defrost_heat_kwh"].equals(result["strict_pre_defrost_heat_kwh"])
 
 
 def test_v25_strict_state_variant_threads_through_transition_heat() -> None:
     recipe = dict(V25_RECIPE)
-    recipe.update(variant="strict_state", state_protocol="strict_causal")
+    recipe.update(run_name="strict_state", state_protocol="strict_causal")
 
     result = calculate_v25(FakeDataset(), "cycle_a", recipe)
 
     assert not result["label_eligible"].any()
     assert result["transition_energy_rule"].eq("strict_causal_[tau-60s,tau)").all()
     assert result["transition_heat_rule"].eq("strict_causal_[tau-60s,tau)").all()
-    assert result["transition_energy_kwh"].equals(result["strict_transition_energy_kwh"])
-    assert result["transition_heat_kwh"].equals(result["strict_transition_heat_kwh"])
-    assert result["QT_evaluable"].equals(result["strict_QT_supported"])
+    assert result["defrost_event_electricity_kwh"].equals(
+        result["strict_defrost_event_electricity_kwh"]
+    )
+    assert result["defrost_event_net_heat_kwh"].equals(result["strict_defrost_event_net_heat_kwh"])
+    assert result["defrost_event_net_heat_evaluable"].equals(result["strict_QT_supported"])
     assert "QT_supported" not in result

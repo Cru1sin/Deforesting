@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from plots import model as model_plots
+from plots import image_models as model_plots
 
 
 def _summary() -> pd.DataFrame:
@@ -20,16 +20,22 @@ def _summary() -> pd.DataFrame:
                 "root-a/current",
                 "root-b/current",
             ],
-            "representation": [
-                "handcrafted",
+            "image_feature": [
+                "color_gradient",
                 "embedding",
-                "handcrafted",
-                "handcrafted",
-                "handcrafted",
+                "color_gradient",
+                "color_gradient",
+                "color_gradient",
             ],
-            "head": ["logistic", "mlp", "logistic", "logistic", "logistic"],
+            "classifier": [
+                "logistic_regression",
+                "mlp",
+                "logistic_regression",
+                "logistic_regression",
+                "logistic_regression",
+            ],
             "camera": ["front", "front", "novel_camera", "front", "front"],
-            "modality": ["rgb", "rgb", "rgb", "time", "rgb"],
+            "input_feature": ["image_only", "image_only", "image_only", "time_only", "image_only"],
             "balanced_accuracy_mean": [0.80, 0.90, 0.85, 0.82, 0.81],
             "balanced_accuracy_std": [0.02, 0.03, 0.04, 0.01, 0.025],
             "macro_f1_mean": [0.79, 0.89, 0.84, 0.81, 0.80],
@@ -60,17 +66,17 @@ def test_figure_5_adapts_current_settings_as_mean_plus_or_minus_sd(
 
     assert len(calls) == 8
     assert {label for _, _, label in calls} == {
-        "embedding + mlp + rgb",
-        "handcrafted + logistic + rgb + run=root-a/current",
-        "handcrafted + logistic + rgb + run=root-b/current",
-        "handcrafted + logistic + time",
+        "embedding + mlp + image only",
+        "color gradient + logistic regression + image only + run=root-a/current",
+        "color gradient + logistic regression + image only + run=root-b/current",
+        "color gradient + logistic regression + time only",
     }
     source = pd.read_csv(tmp_path / "source" / "figure_5_model_comparison.csv")
     assert set(source["model_setting"]) == {
-        "embedding + mlp + rgb",
-        "handcrafted + logistic + rgb + run=root-a/current",
-        "handcrafted + logistic + rgb + run=root-b/current",
-        "handcrafted + logistic + time",
+        "embedding + mlp + image only",
+        "color gradient + logistic regression + image only + run=root-a/current",
+        "color gradient + logistic regression + image only + run=root-b/current",
+        "color gradient + logistic regression + time only",
     }
     assert set(source["camera"].astype(str)) == {"front", "novel_camera"}
 

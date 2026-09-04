@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -11,8 +12,8 @@ pytest.importorskip("torchvision")
 from torch import nn  # noqa: E402
 from torchvision import transforms  # noqa: E402
 
-import main_train  # noqa: E402
-from model import resnet  # noqa: E402
+import train_image_models  # noqa: E402
+from image_models import resnet50 as resnet  # noqa: E402
 
 
 def test_resnet50_classifier_weights_none_forward() -> None:
@@ -113,15 +114,21 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
             "image_time": pd.date_range("2026-01-01", periods=4, freq="min"),
             "stable_heating_start": [pd.Timestamp("2025-12-31 23:50:00")] * 4,
             "relative_regret": [0.2] * 4,
-            "cost_state_01pct": [
-                "pre_optimal",
-                "post_optimal",
-                "pre_optimal",
-                "post_optimal",
+            "timing_state_01pct": [
+                "before_reference",
+                "after_reference",
+                "before_reference",
+                "after_reference",
+            ],
+            "binary_target_01pct": [
+                "before_reference",
+                "after_reference",
+                "before_reference",
+                "after_reference",
             ],
         }
     )
-    labels_path = tmp_path / "labels.parquet"
+    labels_path = tmp_path / "image_labels.parquet"
     labels.to_parquet(labels_path, index=False)
     calls: list[tuple[str, Path | None]] = []
 
@@ -132,18 +139,18 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
         calls.append((heldout, kwargs["save_path"]))
         test = rows.loc[rows["experiment_id"].eq(heldout)].copy()
         test["held_out_experiment"] = heldout
-        test["representation"] = "resnet50_finetune"
-        test["head"] = "paper_mlp"
-        test["modality"] = "rgb"
+        test["image_feature"] = "resnet50_end_to_end"
+        test["classifier"] = "resnet_mlp"
+        test["input_feature"] = "image_only"
         test["prediction"] = test["target"]
         test["decision_score"] = 1.0
         return {
             "metrics": {
                 "held_out_experiment": heldout,
-                "representation": "resnet50_finetune",
-                "head": "paper_mlp",
+                "image_feature": "resnet50_end_to_end",
+                "classifier": "resnet_mlp",
                 "camera": "front",
-                "modality": "rgb",
+                "input_feature": "image_only",
                 "train_images": 2,
                 "test_images": 2,
                 "status": "ok",
@@ -158,7 +165,7 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
 
     monkeypatch.setattr(resnet, "train_resnet_fold", fake_fold)
     output = tmp_path / "run"
-    args = main_train.build_parser().parse_args(
+    args = train_image_models.build_parser().parse_args(
         [
             "--dataset",
             str(tmp_path / "dataset"),
@@ -166,11 +173,11 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
             str(labels_path),
             "--output",
             str(output),
-            "--representations",
-            "resnet50_finetune",
-            "--heads",
-            "paper_mlp",
-            "--jobs",
+            "--image-features",
+            "resnet50_end_to_end",
+            "--classifiers",
+            "resnet_mlp",
+            "--workers",
             "1",
             "--epochs",
             "1",
@@ -180,11 +187,11 @@ def test_main_dispatches_every_resnet_fold_with_lazy_training_import(
         ]
     )
 
-    assert main_train.run(args) == 0
+    assert train_image_models.run(args) == 0
 
     assert [heldout for heldout, _ in calls] == ["a", "b"]
     assert all(path is not None and path.suffix == ".pt" for _, path in calls)
-    assert len(pd.read_csv(output / "metrics.csv")) == 2
+    assert len(pd.read_csv(output / "fold_metrics.csv")) == 2
     assert len(pd.read_parquet(output / "predictions.parquet")) == 4
 
 
@@ -296,7 +303,7 @@ def test_three_class_checkpoint_reloads_matching_classifier(
 
 @pytest.mark.slow
 def test_existing_best_head_checkpoint_loads_read_only_and_forwards() -> None:
-    root = Path("/Users/cruisin/Documents/DeforestingSensor/output/test/model")
+    root = Path(os.environ.get("DEFROST_CHECKPOINT_ROOT", "output/test/model"))
     checkpoints = sorted(root.rglob("best_head.pt")) if root.is_dir() else []
     if not checkpoints:
         pytest.skip("no historical best_head.pt exists")

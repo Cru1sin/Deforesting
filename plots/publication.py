@@ -15,9 +15,13 @@ import pandas as pd
 from matplotlib import font_manager
 from matplotlib.patches import Rectangle
 
-from cost.energy_models import water_side_heating_kw
-from dataloader.images import RGB_PANEL_MAX_OFFSET
-from plots.pareto import plot_ch_pareto, plot_normalized, plot_objectives
+from dataset_tools.local_images import RGB_PANEL_MAX_OFFSET
+from defrost_decision.baselines.electricity import water_side_heating_kw
+from plots.pareto_selection import (
+    plot_cop_heating_rate_pareto,
+    plot_normalized,
+    plot_objectives,
+)
 
 _PANELS = (
     (("compressor_frequency", "compressor_frequency_setpoint"), "Compressor frequency [Hz]"),
@@ -516,10 +520,12 @@ def cost_curve_optimal_time(
 ) -> pd.Timestamp | None:
     """Return the same eligible minimum used by ``_plot_cost_panel``."""
     curve = cost_curve.copy()
-    if "candidate_time" not in curve:
+    if "candidate_defrost_time" not in curve:
         return None
-    curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
-    curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
+    curve["candidate_defrost_time"] = pd.to_datetime(
+        curve["candidate_defrost_time"], errors="coerce"
+    )
+    curve["minutes"] = (curve["candidate_defrost_time"] - origin).dt.total_seconds() / 60.0
     metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
     if metric not in curve:
         return None
@@ -540,7 +546,7 @@ def cost_curve_optimal_time(
     values = curve.loc[eligible, metric].dropna()
     if values.empty:
         return None
-    return pd.Timestamp(curve.loc[values.idxmin(), "candidate_time"])
+    return pd.Timestamp(curve.loc[values.idxmin(), "candidate_defrost_time"])
 
 
 def render_decision_publication(
@@ -558,7 +564,7 @@ def render_decision_publication(
     minimum_support_label: str | None = None,
     parallel_curve: pd.DataFrame | None = None,
 ) -> None:
-    """Render two decision frames above the shared historical or policy panels."""
+    """Render two decision frames above the shared historical or selection panels."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     frame = frame.dropna(subset=["timestamp"])
@@ -606,9 +612,7 @@ def render_decision_publication(
         figure.add_subplot(grid[3, :]),
     ]
     if parallel:
-        panel_axes.extend(
-            [figure.add_subplot(grid[4, :]), figure.add_subplot(grid[5, :])]
-        )
+        panel_axes.extend([figure.add_subplot(grid[4, :]), figure.add_subplot(grid[5, :])])
     _plot_cycle_panel(
         panel_axes[0],
         frame,
@@ -634,7 +638,7 @@ def render_decision_publication(
     if parallel_curve is not None:
         plot_objectives(panel_axes[2], parallel_curve, origin, stage_spans, _shade_cycle_stages)
         plot_normalized(panel_axes[3], parallel_curve, origin, stage_spans, _shade_cycle_stages)
-        plot_ch_pareto(
+        plot_cop_heating_rate_pareto(
             panel_axes[4],
             parallel_curve,
             origin,
@@ -789,8 +793,10 @@ def _plot_cost_panel(  # noqa: C901
 ) -> None:
     """Plot empirical cost only where the cycle is in frost development."""
     curve = cost_curve.copy()
-    curve["candidate_time"] = pd.to_datetime(curve["candidate_time"], errors="coerce")
-    curve["minutes"] = (curve["candidate_time"] - origin).dt.total_seconds() / 60.0
+    curve["candidate_defrost_time"] = pd.to_datetime(
+        curve["candidate_defrost_time"], errors="coerce"
+    )
+    curve["minutes"] = (curve["candidate_defrost_time"] - origin).dt.total_seconds() / 60.0
     metric = "inverse_cop" if "inverse_cop" in curve else "renewal_cost_kw"
     curve[metric] = pd.to_numeric(curve[metric], errors="coerce")
     frost_spans = [
@@ -916,8 +922,7 @@ def _plot_cost_panel(  # noqa: C901
             0.01,
             0.95,
             (
-                f"Minimum: {location} · "
-                f"{support_text}"
+                f"Minimum: {location} · {support_text}"
                 if minimum_support_label is not None or support_state is not None
                 else f"Minimum: {location}"
             ),
@@ -931,7 +936,9 @@ def _plot_cost_panel(  # noqa: C901
             curve.get("t_star", pd.Series(dtype=object)).iloc[:1], errors="coerce"
         )
         if not decision_time.empty and pd.notna(decision_time.iloc[0]):
-            decision_index = (curve["candidate_time"] - decision_time.iloc[0]).abs().idxmin()
+            decision_index = (
+                (curve["candidate_defrost_time"] - decision_time.iloc[0]).abs().idxmin()
+            )
             if decision_index != minimum_index:
                 axis.axvline(
                     float(curve.loc[decision_index, "minutes"]),
@@ -980,8 +987,8 @@ def _plot_cost_panel(  # noqa: C901
     _plot_rb_trigger(axis, curve, origin, metric, eligible)
 
     preparation = (
-        pd.to_datetime(curve["actual_preparation_time"], errors="coerce").dropna()
-        if "actual_preparation_time" in curve
+        pd.to_datetime(curve["observed_defrost_preparation_start"], errors="coerce").dropna()
+        if "observed_defrost_preparation_start" in curve
         else pd.Series(dtype="datetime64[ns]")
     )
     if not preparation.empty:
@@ -1109,8 +1116,8 @@ def _plot_rb_trigger(
     )
     valid_cost = eligible & curve[metric].notna()
     if valid_cost.any():
-        nearest = (curve.loc[valid_cost, "candidate_time"] - rb_time).abs().idxmin()
-        if abs(curve.loc[nearest, "candidate_time"] - rb_time) > pd.Timedelta(minutes=0.51):
+        nearest = (curve.loc[valid_cost, "candidate_defrost_time"] - rb_time).abs().idxmin()
+        if abs(curve.loc[nearest, "candidate_defrost_time"] - rb_time) > pd.Timedelta(minutes=0.51):
             return
         axis.scatter(
             curve.loc[nearest, "minutes"],

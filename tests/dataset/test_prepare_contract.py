@@ -8,9 +8,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from dataloader.builder.channels import load_channels
-from dataloader.builder.config import Config, CycleSettings, ProcessSettings, load_config
-from dataloader.builder.cycles import (
+from dataset_tools.builder.channel_mapping import load_channels
+from dataset_tools.builder.dataset_settings import (
+    Config,
+    CycleSettings,
+    ProcessSettings,
+    load_config,
+)
+from dataset_tools.builder.detect_cycles import (
     _build_cycles,
     _debounce_state,
     _defrost_runs,
@@ -19,16 +24,16 @@ from dataloader.builder.cycles import (
     find_stable_heating_start,
     label_cycles,
 )
-from dataloader.builder.matching import match_images
-from dataloader.builder.prepare import (
+from dataset_tools.builder.match_camera_images import match_images
+from dataset_tools.builder.prepare_measurements import (
     _expected_row_count,
     _maximum_gap,
     _observed_fraction,
     prepare,
 )
-from dataloader.builder.sensors import read_edf_environment
+from dataset_tools.builder.sensors import read_edf_environment
 
-prepare_module = import_module("dataloader.builder.prepare")
+prepare_module = import_module("dataset_tools.builder.prepare_measurements")
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -128,9 +133,7 @@ def test_read_edf_environment_chooses_nearest_pair_without_reuse(tmp_path: Path)
         pd.Timedelta(seconds=1),
     )
 
-    assert result["timestamp"].tolist() == [
-        pd.Timestamp("2026-07-20 09:00:00.950000")
-    ]
+    assert result["timestamp"].tolist() == [pd.Timestamp("2026-07-20 09:00:00.950000")]
     assert result["environment_temperature"].tolist() == [23.0]
     assert result["environment_relative_humidity"].tolist() == [104.0]
 
@@ -216,25 +219,28 @@ def test_prepare_attaches_edf_channels_without_replacing_t4(tmp_path: Path) -> N
     prepared, _ = prepare(config, channels)
     without_edf, _ = prepare(replace(config, sensor_globs=("*.xls",)), channels)
 
-    assert prepared["timestamp"].tolist() == pd.to_datetime(
-        [
-            "2026-07-15 09:00:00",
-            "2026-07-15 09:00:01",
-            "2026-07-15 09:00:02",
-        ]
-    ).tolist()
-    main_rows = prepared.loc[prepared["timestamp"].isin(pd.to_datetime(
-        ["2026-07-15 09:00:00", "2026-07-15 09:00:01", "2026-07-15 09:00:02"]
-    ))]
+    assert (
+        prepared["timestamp"].tolist()
+        == pd.to_datetime(
+            [
+                "2026-07-15 09:00:00",
+                "2026-07-15 09:00:01",
+                "2026-07-15 09:00:02",
+            ]
+        ).tolist()
+    )
+    main_rows = prepared.loc[
+        prepared["timestamp"].isin(
+            pd.to_datetime(["2026-07-15 09:00:00", "2026-07-15 09:00:01", "2026-07-15 09:00:02"])
+        )
+    ]
     assert main_rows["ambient_temperature"].tolist() == [10.0, 11.0, 12.0]
     environment = prepared.loc[prepared["environment_temperature"].notna()]
     assert environment["environment_temperature"].tolist() == [21.0, 25.0]
     assert environment["environment_relative_humidity"].tolist() == [102.0, 103.0]
     assert environment["environment_relative_humidity__invalid"].eq(False).all()
     old_columns = [
-        column
-        for column in without_edf.columns
-        if not column.startswith("environment_")
+        column for column in without_edf.columns if not column.startswith("environment_")
     ]
     pd.testing.assert_frame_equal(
         prepared[old_columns].reset_index(drop=True),
@@ -403,7 +409,7 @@ def test_label_cycles_does_not_invent_defrost_preparation_without_frequency_drop
 
 
 def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
-    from dataloader.builder.cycles import find_defrost_preparation_start
+    from dataset_tools.builder.detect_cycles import find_defrost_preparation_start
 
     defrost_start = pd.Timestamp("2026-07-15 00:01:00")
     frame = pd.DataFrame(
@@ -416,20 +422,23 @@ def test_defrost_preparation_ignores_frequency_drop_across_sensor_gap() -> None:
         }
     )
 
-    assert find_defrost_preparation_start(
-        frame,
-        defrost_start - pd.Timedelta(minutes=10),
-        defrost_start,
-        {
-            "maximum_state_gap_seconds": 5,
-            "defrost_preparation_setpoint_drop_hz": 10,
-            "defrost_preparation_lookback_seconds": 120,
-        },
-    ) is None
+    assert (
+        find_defrost_preparation_start(
+            frame,
+            defrost_start - pd.Timedelta(minutes=10),
+            defrost_start,
+            {
+                "maximum_state_gap_seconds": 5,
+                "defrost_preparation_setpoint_drop_hz": 10,
+                "defrost_preparation_lookback_seconds": 120,
+            },
+        )
+        is None
+    )
 
 
 def test_defrost_preparation_uses_frequency_channels_own_sampling_interval() -> None:
-    from dataloader.builder.cycles import find_defrost_preparation_start
+    from dataset_tools.builder.detect_cycles import find_defrost_preparation_start
 
     defrost_start = pd.Timestamp("2026-07-15 00:01:00")
     timestamps = pd.date_range(defrost_start - pd.Timedelta(seconds=50), periods=5, freq="10s")
@@ -440,23 +449,22 @@ def test_defrost_preparation_uses_frequency_channels_own_sampling_interval() -> 
         }
     )
 
-    assert find_defrost_preparation_start(
-        frame,
-        defrost_start - pd.Timedelta(minutes=10),
-        defrost_start,
-        {
-            "maximum_state_gap_seconds": 5,
-            "defrost_preparation_setpoint_drop_hz": 10,
-            "defrost_preparation_lookback_seconds": 120,
-        },
-    ) == timestamps[3]
+    assert (
+        find_defrost_preparation_start(
+            frame,
+            defrost_start - pd.Timedelta(minutes=10),
+            defrost_start,
+            {
+                "maximum_state_gap_seconds": 5,
+                "defrost_preparation_setpoint_drop_hz": 10,
+                "defrost_preparation_lookback_seconds": 120,
+            },
+        )
+        == timestamps[3]
+    )
 
 
-
-
-def _cycle_frame_with_mode(
-    states: list[object], modes: list[object] | None = None
-) -> pd.DataFrame:
+def _cycle_frame_with_mode(states: list[object], modes: list[object] | None = None) -> pd.DataFrame:
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-07-15", periods=len(states), freq="s"),
@@ -594,9 +602,7 @@ def test_single_defrost_event_preserves_known_defrost_stage() -> None:
 
 
 def test_leading_partial_keeps_observed_defrost_end_at_next_cycle_start() -> None:
-    frame = _cycle_frame_with_mode(
-        [False, True, True, False, False, False, True, True, False]
-    )
+    frame = _cycle_frame_with_mode([False, True, True, False, False, False, True, True, False])
 
     _, summary = label_cycles(
         frame,
@@ -701,9 +707,7 @@ def test_long_defrost_state_gap_is_not_filled_but_open_segment_remains_valid() -
             "2026-07-15 00:00:11",
         ]
     )
-    frame = pd.DataFrame(
-        {"timestamp": timestamps, "defrost_active": [True, None, None, False]}
-    )
+    frame = pd.DataFrame({"timestamp": timestamps, "defrost_active": [True, None, None, False]})
 
     labeled, summary = label_cycles(
         frame,
@@ -886,9 +890,7 @@ def test_data_starting_on_does_not_create_a_phantom_cycle() -> None:
 
 
 def test_data_ending_on_keeps_only_a_valid_open_cycle_with_data() -> None:
-    frame = _cycle_frame_with_mode(
-        [False, False, True, True, False, False, False, True, True]
-    )
+    frame = _cycle_frame_with_mode([False, False, True, True, False, False, False, True, True])
 
     labeled, summary = label_cycles(
         frame,
@@ -1078,16 +1080,11 @@ def test_prepare_duplicate_only_masks_affected_channel(tmp_path: Path) -> None:
     raw = tmp_path / "data" / "0715"
     raw.mkdir(parents=True)
     (raw / "sample参数1.xls").write_text(
-        "时间\tT4\n"
-        "2026-07-15 00:00:00\t10\n"
-        "2026-07-15 00:00:00\t11\n"
-        "2026-07-15 00:00:01\t12\n",
+        "时间\tT4\n2026-07-15 00:00:00\t10\n2026-07-15 00:00:00\t11\n2026-07-15 00:00:01\t12\n",
         encoding="utf-8",
     )
     (raw / "events参数1.xls").write_text(
-        "时间\tDefrost\n"
-        "2026-07-15 00:00:00\tON\n"
-        "2026-07-15 00:00:01\tOFF\n",
+        "时间\tDefrost\n2026-07-15 00:00:00\tON\n2026-07-15 00:00:01\tOFF\n",
         encoding="utf-8",
     )
     config = _config(tmp_path, raw)
@@ -1146,9 +1143,7 @@ def test_match_images_does_not_reuse_one_image() -> None:
 
 
 def test_match_images_assigns_image_to_closest_sensor_timestamp() -> None:
-    timestamps = pd.to_datetime(
-        ["2026-07-15 00:00:00", "2026-07-15 00:00:01"]
-    )
+    timestamps = pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:00:01"])
     image_files = [Path("front_center/20260715000000900.jpg")]
 
     matched = match_images(
@@ -1158,9 +1153,7 @@ def test_match_images_assigns_image_to_closest_sensor_timestamp() -> None:
     )
 
     assert pd.isna(matched.loc[0, "image_front_center_path"])
-    assert matched.loc[1, "image_front_center_path"].endswith(
-        "20260715000000900.jpg"
-    )
+    assert matched.loc[1, "image_front_center_path"].endswith("20260715000000900.jpg")
     assert matched.loc[1, "image_front_center_offset_seconds"] == pytest.approx(-0.1)
 
 
@@ -1189,9 +1182,7 @@ def test_environment_alignment_uses_each_observation_once_and_main_timestamp() -
             "environment_relative_humidity": [50.0],
         }
     )
-    main_timestamps = pd.Series(
-        pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:00:01"])
-    )
+    main_timestamps = pd.Series(pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:00:01"]))
 
     aligned = prepare_module._align_environment_to_main_timestamps(
         environment,
@@ -1448,7 +1439,7 @@ def test_observed_fraction_uses_source_discovery_denominator() -> None:
 
 
 def test_sensor_sample_may_end_midway_through_gb18030_character(tmp_path: Path) -> None:
-    from dataloader.builder.prepare import _read_sensor_table
+    from dataset_tools.builder.prepare_measurements import _read_sensor_table
 
     path = tmp_path / "sample参数1.xls"
     prefix = "时间\t值\n2026-07-14 10:00:00\t".encode("gb18030")
@@ -1471,9 +1462,7 @@ def test_prepare_original_preserves_all_raw_points_and_duplicate_rows(tmp_path: 
         encoding="utf-8",
     )
     (raw / "sample参数2.xls").write_text(
-        "时间\tother_point\n"
-        "2026-07-15 00:00:00\tx\n"
-        "2026-07-15 00:00:01\ty\n",
+        "时间\tother_point\n2026-07-15 00:00:00\tx\n2026-07-15 00:00:01\ty\n",
         encoding="utf-8",
     )
     _write_edf(
@@ -1489,9 +1478,7 @@ def test_prepare_original_preserves_all_raw_points_and_duplicate_rows(tmp_path: 
         {
             "experiment_id": ["exp_test", "exp_test"],
             "experiment_date": ["2026-07-15", "2026-07-15"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-15 00:00:00", "2026-07-15 00:00:01"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:00:01"]),
             "cycle_id": ["cycle_001", "cycle_001"],
             "cycle_stage": ["frost_development", "frost_development"],
             "cycle_status": ["valid", "valid"],
