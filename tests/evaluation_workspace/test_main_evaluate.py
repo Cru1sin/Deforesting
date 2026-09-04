@@ -7,7 +7,12 @@ import pandas as pd
 import pytest
 
 import main_evaluate
-from plots.model import trigger_error_table, two_of_three_trigger
+import plots.model as model_plots
+from plots.model import (
+    plot_trigger_error_figures,
+    trigger_error_table,
+    two_of_three_trigger,
+)
 
 SETTING = {
     "representation": "handcrafted",
@@ -76,6 +81,7 @@ def test_trigger_error_table_keeps_the_sign_for_both_control_rules() -> None:
     times = pd.date_range("2026-01-01", periods=3, freq="min")
     predictions = pd.DataFrame(
         {
+            "experiment_id": ["exp_20260101"] * 3,
             "cycle_name": ["frost_cycle_000001"] * 3,
             "camera": ["front"] * 3,
             "modality": ["rgb"] * 3,
@@ -96,6 +102,62 @@ def test_trigger_error_table_keeps_the_sign_for_both_control_rules() -> None:
     errors = result.set_index("strategy")["trigger_error_minutes"]
     assert errors["first_positive"] == pytest.approx(-2.0)
     assert errors["two_of_three"] == pytest.approx(0.0)
+    assert set(result["experiment_id"]) == {"exp_20260101"}
+
+
+def test_trigger_error_figures_are_one_scatter_plot_per_camera_and_strategy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cameras = ["top", "top_close", "left", "left_close", "front", "extreme"]
+    modalities = ["rgb", "rgb_sensor", "rgb_sensor_slope"]
+    prediction_rows = []
+    policy_rows = []
+    for cycle_id, experiment_id in ((1, "exp_20260101"), (2, "exp_20260101"), (3, "exp_20260102")):
+        cycle_name = f"frost_cycle_{cycle_id:06d}"
+        times = pd.date_range(f"2026-01-0{cycle_id} 00:00", periods=3, freq="min")
+        policy_rows.append(
+            {"cycle_name": cycle_name, "selected": True, "selected_time": times[1]}
+        )
+        for camera in cameras:
+            for modality in modalities:
+                for image_time, score in zip(times, (0.2, 0.8, 0.9), strict=True):
+                    prediction_rows.append(
+                        {
+                            "experiment_id": experiment_id,
+                            "cycle_name": cycle_name,
+                            "camera": camera,
+                            "modality": modality,
+                            "representation": "dinov2",
+                            "head": "logistic",
+                            "image_time": image_time,
+                            "decision_score": score,
+                        }
+                    )
+
+    exports: list[Path] = []
+
+    def record_export(figure, stem, formats=("png",)) -> None:
+        exports.append(stem)
+        axis = figure.axes[0]
+        assert len(figure.axes) == 1
+        assert axis.collections
+        assert len(axis.patches) == 2
+        assert all(len(line.get_xdata()) <= 2 for line in axis.lines)
+        model_plots.plt.close(figure)
+
+    monkeypatch.setattr(model_plots, "_export", record_export)
+    plot_trigger_error_figures(
+        predictions=pd.DataFrame(prediction_rows),
+        policy=pd.DataFrame(policy_rows),
+        output=tmp_path / "figures",
+        source_output=tmp_path / "source",
+        representation="dinov2",
+        head="logistic",
+    )
+
+    assert len(exports) == 12
+    assert {path.parent.name for path in exports} == {"two_of_three", "first_positive"}
+    assert {path.name for path in exports} == set(cameras)
 
 
 def test_main_reads_multiple_runs_and_writes_exactly_four_outputs(tmp_path: Path) -> None:

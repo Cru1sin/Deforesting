@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 
+from plots.cost import _shade_experiment_dates
+
 __all__ = [
     "plot_model_figures",
     "plot_probability_curves",
@@ -97,8 +99,10 @@ def trigger_error_table(
     selected = selected.drop_duplicates("cycle_name").set_index("cycle_name")["selected_time"]
     selected = pd.to_datetime(selected, errors="coerce", format="mixed")
     rows: list[dict[str, object]] = []
-    for keys, group in predictions.groupby(["cycle_name", "camera", "modality"], sort=True):
-        cycle_name, camera, modality = keys
+    for keys, group in predictions.groupby(
+        ["experiment_id", "cycle_name", "camera", "modality"], sort=True
+    ):
+        experiment_id, cycle_name, camera, modality = keys
         if cycle_name not in selected:
             continue
         group = group.sort_values("image_time", kind="stable")
@@ -113,6 +117,7 @@ def trigger_error_table(
         ):
             rows.append(
                 {
+                    "experiment_id": experiment_id,
                     "cycle_name": cycle_name,
                     "cycle_id": int(str(cycle_name).rsplit("_", 1)[-1]),
                     "camera": camera,
@@ -158,57 +163,68 @@ def plot_trigger_error_figures(
         "two_of_three": "Two positives within three frames",
         "first_positive": "First positive frame",
     }
+    offsets = {"rgb": -0.16, "rgb_sensor": 0.0, "rgb_sensor_slope": 0.16}
     for strategy, strategy_name in names.items():
-        figure, axes = plt.subplots(2, 3, figsize=(7.2, 4.6), sharex=True, sharey=True)
         subset = errors.loc[errors["strategy"].eq(strategy)]
-        for axis, camera in zip(axes.flat, cameras, strict=False):
+        for camera in cameras:
             camera_rows = subset.loc[subset["camera"].eq(camera)]
+            cycles = (
+                camera_rows[["cycle_name", "cycle_id", "experiment_id"]]
+                .drop_duplicates("cycle_name")
+                .sort_values("cycle_id")
+                .reset_index(drop=True)
+            )
+            positions = pd.Series(cycles.index, index=cycles["cycle_name"])
+            figure, axis = plt.subplots(figsize=(max(7.2, 0.15 * len(cycles)), 3.4))
+            _shade_experiment_dates(axis, cycles["experiment_id"].astype(str).tolist())
             for modality, rows in camera_rows.groupby("modality", sort=False):
                 rows = rows.sort_values("cycle_id")
-                axis.plot(
-                    rows["cycle_id"],
+                axis.scatter(
+                    rows["cycle_name"].map(positions) + offsets[str(modality)],
                     rows["trigger_error_minutes"],
                     color=_MODALITY_COLORS[str(modality)],
                     marker=_MODALITY_MARKERS[str(modality)],
-                    ms=2.2,
-                    lw=0.65,
+                    s=18,
                     label=str(modality).replace("_", " + "),
+                    zorder=3,
                 )
             axis.axhline(0, color="#333333", lw=0.8)
-            axis.set_title(camera.replace("_", " "))
             axis.set_ylim(-limit, limit)
             axis.grid(axis="y", color="#DDDDDD", lw=0.45)
-        for axis in axes.flat[len(cameras) :]:
-            axis.set_visible(False)
-        for axis in axes[1]:
-            axis.set_xlabel("Cycle ID")
-        axes[0, 0].set_ylabel("Trigger − Pareto knee (min)")
-        axes[1, 0].set_ylabel("Trigger − Pareto knee (min)")
-        handles = [
-            Line2D(
-                [0],
-                [0],
-                color=color,
-                marker=_MODALITY_MARKERS[name],
-                ms=3,
-                lw=0.8,
-                label=name.replace("_", " + "),
+            axis.set(
+                xlabel="Cycle ID",
+                ylabel="Trigger − Pareto knee (min)",
+                xticks=np.arange(len(cycles)),
+                xticklabels=cycles["cycle_id"],
             )
-            for name, color in _MODALITY_COLORS.items()
-        ]
-        figure.legend(handles=handles, loc="upper center", ncol=3, fontsize=6)
-        prefix = "Continuous stream" if continuous_stream else "Sampled-frame diagnostic"
-        figure.suptitle(f"{prefix}: {strategy_name} trigger error by cycle", fontsize=8)
-        figure.text(
-            0.5,
-            0.008,
-            "Positive = later than Pareto knee; negative = earlier. "
-            "Missing points never triggered.",
-            ha="center",
-            fontsize=5.8,
-        )
-        figure.tight_layout(rect=(0, 0.045, 1, 0.92))
-        _export(figure, output / f"trigger_error_{strategy}", figure_formats)
+            axis.tick_params(axis="x", labelrotation=90, labelsize=6)
+            handles = [
+                Line2D(
+                    [0],
+                    [0],
+                    color=color,
+                    marker=_MODALITY_MARKERS[name],
+                    ms=4,
+                    linestyle="none",
+                    label=name.replace("_", " + "),
+                )
+                for name, color in _MODALITY_COLORS.items()
+            ]
+            axis.legend(handles=handles, loc="upper right", ncol=3, fontsize=6)
+            prefix = "Continuous stream" if continuous_stream else "Sampled-frame diagnostic"
+            figure.suptitle(
+                f"{prefix}: {camera.replace('_', ' ')} — {strategy_name}", fontsize=8
+            )
+            figure.text(
+                0.5,
+                0.008,
+                "Positive = later than Pareto knee; negative = earlier. "
+                "Missing points never triggered.",
+                ha="center",
+                fontsize=5.8,
+            )
+            figure.tight_layout(rect=(0, 0.06, 1, 0.93))
+            _export(figure, output / "trigger_error" / strategy / camera, figure_formats)
 
 
 def plot_probability_curves(
