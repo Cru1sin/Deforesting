@@ -57,11 +57,15 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--skip-rgb-panels", action="store_true")
 
     render = actions.add_parser("render", help="render cycle figures")
-    render.add_argument("cycle")
+    render.add_argument("cycle", nargs="?")
     render.add_argument("--dataset", type=Path, default=Path("dataset"))
     render.add_argument("--publication", action="store_true")
     render.add_argument("--panel", action="store_true")
     render.add_argument("--fetch-cloud-images", action="store_true")
+    render.add_argument("--cleanup-downloaded-images", action="store_true")
+    render.add_argument(
+        "--n-jobs", type=int, default=10, help="maximum concurrent OneDrive requests"
+    )
     return parser
 
 
@@ -107,6 +111,8 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
                 publication=args.publication or not args.panel,
                 panel=args.panel or not args.publication,
                 fetch_cloud_images=args.fetch_cloud_images,
+                cleanup_downloaded_images=args.cleanup_downloaded_images,
+                n_jobs=args.n_jobs,
             )
         )
     return 0

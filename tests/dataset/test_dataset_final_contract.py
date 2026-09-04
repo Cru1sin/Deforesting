@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import struct
 import subprocess
+import threading
+import time
 from collections import namedtuple
 from pathlib import Path
 from typing import cast
@@ -306,6 +310,62 @@ def test_materialize_cycle_images_uses_custom_free_space_floor_for_both_checks(
         pass
 
 
+def test_cloud_images_reuses_publication_remote_by_default() -> None:
+    from dataset_tools import cloud_images
+
+    assert cloud_images.DEFAULT_CLOUD_IMAGES_REMOTE == os.environ.get(
+        "HEAT_PUMP_DEFROST_IMAGE_REMOTE",
+        "onedrive_hkust:HKUST/Project/Defrost/dataset/images",
+    )
+
+
+def test_zip_member_index_reads_zip64_directory(tmp_path: Path) -> None:
+    from zipfile import ZipFile
+
+    from dataset_tools.cloud_images import _zip_member_index
+
+    archive = tmp_path / "cycle.zip"
+    with ZipFile(archive, "w") as bundle:
+        bundle.writestr("frost_cycle_000001/front/frame.jpg", b"rgb")
+    payload = archive.read_bytes()
+    eocd = payload.rfind(b"PK\x05\x06")
+    fields = struct.unpack_from("<4s4H2LH", payload, eocd)
+    entries, central_size, central_offset = fields[4], fields[5], fields[6]
+    central = bytearray(payload[central_offset:eocd])
+    filename_size, extra_size = struct.unpack_from("<2H", central, 28)
+    local_offset = struct.unpack_from("<L", central, 42)[0]
+    zip64_extra = struct.pack("<HHQ", 0x0001, 8, local_offset)
+    struct.pack_into("<H", central, 30, extra_size + len(zip64_extra))
+    struct.pack_into("<L", central, 42, 0xFFFFFFFF)
+    extra_end = 46 + filename_size + extra_size
+    central[extra_end:extra_end] = zip64_extra
+    central_size = len(central)
+    eocd = central_offset + central_size
+    zip64 = struct.pack(
+        "<4sQ2H2L4Q",
+        b"PK\x06\x06",
+        44,
+        45,
+        45,
+        0,
+        0,
+        entries,
+        entries,
+        central_size,
+        central_offset,
+    )
+    locator = struct.pack("<4sLQL", b"PK\x06\x07", 0, eocd, 1)
+    sentinel_eocd = struct.pack(
+        "<4s4H2LH", b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0
+    )
+    archive.write_bytes(payload[:central_offset] + central + zip64 + locator + sentinel_eocd)
+
+    member = _zip_member_index(archive, archive.stat().st_size)[
+        "frost_cycle_000001/front/frame.jpg"
+    ]
+    assert member[0] == local_offset
+
+
 def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -463,6 +523,90 @@ def test_materialize_cycle_image_members_reads_only_requested_remote_members(
     ]
     assert not any(command[1] == "copyto" for command in calls)
     assert all("--count" in command for command in calls if command[1] == "cat")
+
+
+def test_materialize_cycle_image_members_accepts_camera_member_paths(tmp_path: Path) -> None:
+    from zipfile import ZipFile
+
+    from dataset_tools.cloud_images import materialize_cycle_image_members
+
+    cycle_name = "frost_cycle_000006"
+    cloud = tmp_path / "OneDrive"
+    cloud.mkdir()
+    with ZipFile(cloud / f"{cycle_name}.zip", "w") as bundle:
+        bundle.writestr(f"{cycle_name}/left_center/left.jpg", b"left-image")
+
+    with materialize_cycle_image_members(
+        tmp_path / "dataset",
+        cycle_name,
+        ["left_center/left.jpg"],
+        fetch_cloud=True,
+        cloud_root=cloud,
+        cleanup_downloaded=True,
+        minimum_free_gib=0,
+    ) as available:
+        assert (available / "left_center" / "left.jpg").read_bytes() == b"left-image"
+    assert not (available / "left_center" / "left.jpg").exists()
+
+
+def test_materialize_image_members_uses_one_global_pool_and_yields_ready_cycles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from zipfile import ZipFile
+
+    from dataset_tools import cloud_images
+
+    cloud = tmp_path / "OneDrive"
+    cloud.mkdir()
+    cycles = ("frost_cycle_000006", "frost_cycle_000007")
+    for cycle, payloads in zip(cycles, ((b"a",), (b"bb", b"ccc")), strict=True):
+        with ZipFile(cloud / f"{cycle}.zip", "w") as bundle:
+            for index, payload in enumerate(payloads):
+                bundle.writestr(f"{cycle}/front/{index}.jpg", payload)
+
+    existing = tmp_path / "dataset" / "images" / cycles[1] / "front" / "0.jpg"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"existing")
+    real_read = cloud_images._read_zip_member
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def observed_read(*args, **kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02 * args[1][2])
+        try:
+            return real_read(*args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(cloud_images, "_read_zip_member", observed_read)
+    requests = {
+        cycles[0]: ["front/0.jpg"],
+        cycles[1]: ["front/0.jpg", "front/1.jpg"],
+    }
+
+    with cloud_images.materialize_image_members(
+        tmp_path / "dataset",
+        requests,
+        cloud_root=cloud,
+        cleanup_downloaded=True,
+        minimum_free_gib=0,
+        n_jobs=2,
+    ) as completed:
+        assert list(completed) == list(cycles)
+        assert peak == 2
+        assert existing.read_bytes() == b"existing"
+        assert (tmp_path / "dataset" / "images" / cycles[0] / "front" / "0.jpg").is_file()
+        assert (tmp_path / "dataset" / "images" / cycles[1] / "front" / "1.jpg").is_file()
+
+    assert existing.read_bytes() == b"existing"
+    assert not (tmp_path / "dataset" / "images" / cycles[0] / "front" / "0.jpg").exists()
+    assert not (tmp_path / "dataset" / "images" / cycles[1] / "front" / "1.jpg").exists()
 
 
 def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
@@ -908,6 +1052,47 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     assert (tmp_path / "dataset_manifest.json").read_bytes() == manifest_before
 
 
+def test_rgb_panel_coverage_uses_full_metadata_not_materialized_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataset_tools.dataset_maintenance import _render_rgb_panel
+    from dataset_tools.dataset_paths import read_json
+    from plots import publication
+
+    cycle_name, _ = _write_renderable_dataset(tmp_path)
+    frame = pd.read_parquet(tmp_path / "cycles" / f"{cycle_name}.parquet")
+    metadata = pd.DataFrame(
+        {
+            "cycle_name": [cycle_name, cycle_name],
+            "camera_role": ["front", "front"],
+            "file_name": ["start.jpg", "end.jpg"],
+            "frame_index": [0, 1],
+            "image_time": frame["timestamp"],
+            "cycle_stage": frame["cycle_stage"],
+        }
+    )
+    record = read_json(tmp_path / "cycle_catalog.json")["cycles"][0]
+    registry = read_json(tmp_path / "channel_registry.json")
+    seen: list[dict[str, dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]]]] = []
+    monkeypatch.setattr(
+        publication,
+        "render_rgb_panel",
+        lambda _record, _frame, _images, intervals, _roles, _path: seen.append(intervals),
+    )
+
+    _render_rgb_panel(
+        tmp_path,
+        record,
+        metadata,
+        registry,
+        ("front",),
+        frame=frame,
+        images=pd.DataFrame(columns=["camera_role", "image_time", "path"]),
+    )
+
+    assert seen[0]["front"]["available"]
+
+
 def test_render_can_explicitly_fetch_cloud_cycle_images(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -938,12 +1123,17 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
     archive = cloud / f"{cycle_name}.zip"
     with ZipFile(archive, "w") as bundle:
         bundle.writestr(f"{cycle_name}/front_center/{file_name}", b"rgb")
+    archive_bytes = archive.read_bytes()
 
-    def fake_rclone(command: list[str], **_options: object) -> subprocess.CompletedProcess[str]:
+    def fake_rclone(command: list[str], **_options: object) -> subprocess.CompletedProcess:
         if command[1] == "lsf":
             return subprocess.CompletedProcess(command, 0, stdout=f"{archive.stat().st_size}\n")
-        shutil.copyfile(archive, Path(command[3]))
-        return subprocess.CompletedProcess(command, 0)
+        assert command[1] == "cat"
+        offset = int(command[command.index("--offset") + 1])
+        count = int(command[command.index("--count") + 1])
+        return subprocess.CompletedProcess(
+            command, 0, stdout=archive_bytes[offset : offset + count]
+        )
 
     monkeypatch.setattr(cloud_images.subprocess, "run", fake_rclone)
     monkeypatch.setattr(cloud_images, "DEFAULT_CLOUD_IMAGES_REMOTE", "remote:images")
@@ -972,6 +1162,149 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
     assert seen[1] == [tmp_path / "images" / cycle_name / "front_center" / file_name]
     assert (tmp_path / "images" / cycle_name / "front_center" / file_name).is_file()
     assert archive.is_file()
+
+
+def test_render_fetches_only_missing_rgb_panel_members(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from dataset_tools import cloud_images
+    from dataset_tools.dataset_maintenance import render_dataset
+    from plots import publication
+
+    cycle_name, _ = _write_renderable_dataset(tmp_path)
+    shutil.rmtree(tmp_path / "images" / cycle_name)
+    metadata = pd.DataFrame(
+        [
+            {
+                "cycle_name": cycle_name,
+                "camera_role": role,
+                "file_name": f"{role}.jpg",
+                "frame_index": 1,
+                "image_time": pd.Timestamp("2026-07-14 10:00:00"),
+                "cycle_stage": "recovery",
+            }
+            for role in ("front_center", "left_center")
+        ]
+    )
+    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    requested: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    whole_cycle_downloads: list[str] = []
+
+    @contextmanager
+    def selected(_dataset: Path, _cycle: str, members, **_options):
+        requested.append((tuple(members), _options))
+        yield tmp_path / "images" / cycle_name
+
+    @contextmanager
+    def whole(_dataset: Path, cycle: str, **_options):
+        whole_cycle_downloads.append(cycle)
+        yield tmp_path / "images" / cycle_name
+
+    monkeypatch.setattr(cloud_images, "materialize_cycle_image_members", selected)
+    monkeypatch.setattr(cloud_images, "materialize_cycle_images", whole)
+    monkeypatch.setattr(publication, "render_rgb_panel", lambda *_args, **_kwargs: None)
+
+    render_dataset(
+        tmp_path,
+        cycle_name,
+        publication=False,
+        panel=True,
+        fetch_cloud_images=True,
+        cleanup_downloaded_images=True,
+    )
+
+    assert whole_cycle_downloads == []
+    assert requested == [
+        (
+            ("front_center/front_center.jpg", "left_center/left_center.jpg"),
+            {"fetch_cloud": True, "cleanup_downloaded": True},
+        )
+    ]
+
+
+def test_render_without_cycle_renders_all_catalog_panels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataset_tools.dataset_maintenance import render_dataset
+    from plots import publication
+
+    cycle_name, _ = _write_renderable_dataset(tmp_path)
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        publication,
+        "render_rgb_panel",
+        lambda record, *_args, **_kwargs: rendered.append(str(record["cycle_name"])),
+    )
+
+    render_dataset(tmp_path, None, publication=False, panel=True)
+
+    assert rendered == [cycle_name]
+
+
+def test_cloud_render_flattens_all_cycles_into_one_image_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from dataset_tools import cloud_images
+    from dataset_tools.dataset_maintenance import render_dataset
+    from dataset_tools.dataset_paths import read_json, write_json
+    from plots import publication
+
+    first, _ = _write_renderable_dataset(tmp_path)
+    second = "frost_cycle_000002"
+    catalog = read_json(tmp_path / "cycle_catalog.json")
+    second_record = dict(catalog["cycles"][0])
+    second_record["cycle_name"] = second
+    catalog["cycles"].append(second_record)
+    write_json(catalog, tmp_path / "cycle_catalog.json")
+    metadata = pd.read_parquet(tmp_path / "image_metadata.parquet")
+    metadata = pd.concat(
+        [metadata, metadata.assign(cycle_name=second)], ignore_index=True
+    )
+    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    queued: list[tuple[dict[str, list[str]], dict[str, object]]] = []
+    rendered: list[str] = []
+
+    @contextmanager
+    def materialize(_dataset, requests, **options):
+        queued.append((requests, options))
+        yield iter((second, first))
+
+    monkeypatch.setattr(cloud_images, "materialize_image_members", materialize)
+    monkeypatch.setattr(
+        publication,
+        "render_rgb_panel",
+        lambda record, *_args, **_kwargs: rendered.append(str(record["cycle_name"])),
+    )
+
+    render_dataset(
+        tmp_path,
+        None,
+        publication=False,
+        panel=True,
+        fetch_cloud_images=True,
+        cleanup_downloaded_images=True,
+        n_jobs=4,
+    )
+
+    assert len(queued) == 1
+    assert list(queued[0][0]) == [first, second]
+    assert queued[0][1] == {"cleanup_downloaded": True, "n_jobs": 4}
+    assert rendered == [second, first]
+
+
+def test_render_cycle_job_reports_start(tmp_path: Path, monkeypatch, capsys) -> None:
+    from dataset_tools import dataset_maintenance
+
+    monkeypatch.setattr(dataset_maintenance, "render_dataset", lambda *_args, **_kwargs: tmp_path)
+
+    assert dataset_maintenance._render_cycle_job(
+        tmp_path, "frost_cycle_000001", False, True, True, False
+    ) == "frost_cycle_000001"
+    assert capsys.readouterr().out == "[render:start] frost_cycle_000001\n"
 
 
 def test_cycle_assets_has_publication_and_panel_without_coverage() -> None:

@@ -1158,7 +1158,8 @@ def _render_rgb_panel(
     if intervals is None:
         from .local_images import image_coverage_intervals
 
-        intervals = image_coverage_intervals(frame, images, registry)
+        expected = metadata.loc[metadata["cycle_name"].astype(str).eq(cycle_name)]
+        intervals = image_coverage_intervals(frame, expected, registry)
     render_rgb_panel(
         record,
         frame,
@@ -1563,17 +1564,82 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
 
 def render_dataset(
     dataset_dir: Path,
-    cycle_name: str,
+    cycle_name: str | None,
     *,
     publication: bool = True,
     panel: bool = True,
     fetch_cloud_images: bool = False,
+    cleanup_downloaded_images: bool = False,
+    n_jobs: int = 1,
 ) -> Path:
-    """Render selected final assets without reading any source directory."""
+    """Render one cycle, or every Catalog cycle when no name is given."""
     from .cycle_metadata import read_catalog
     from .dataset_paths import read_json
 
     catalog = read_catalog(dataset_dir)
+    if cycle_name is None:
+        records = [record for record in catalog["cycles"] if isinstance(record, Mapping)]
+        if n_jobs < 1:
+            raise ValueError("n_jobs must be positive")
+        if fetch_cloud_images and panel:
+            from .cloud_images import materialize_image_members
+            from .local_images import scan_cycle_images
+
+            registry = read_json(dataset_dir / "channel_registry.json")
+            if not isinstance(registry, dict):
+                raise ValueError("channel_registry.json must contain an object")
+            metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+            contexts = {
+                str(record["cycle_name"]): _rgb_panel_inputs(
+                    dataset_dir, record, catalog, metadata
+                )
+                for record in records
+            }
+            requests = {cycle: context[3] for cycle, context in contexts.items()}
+            by_name = {str(record["cycle_name"]): record for record in records}
+            print(f"[render] {len(records)} cycles with {n_jobs} workers", flush=True)
+            if publication:
+                for record in records:
+                    render_publication_asset(dataset_dir, record)
+            with materialize_image_members(
+                dataset_dir,
+                requests,
+                cleanup_downloaded=cleanup_downloaded_images,
+                n_jobs=n_jobs,
+            ) as completed_cycles:
+                for completed, name in enumerate(completed_cycles, start=1):
+                    roles, frame, _, _ = contexts[name]
+                    images = scan_cycle_images(dataset_dir, name, metadata)
+                    _render_rgb_panel(
+                        dataset_dir,
+                        by_name[name],
+                        metadata,
+                        registry,
+                        roles,
+                        frame=frame,
+                        images=images,
+                    )
+                    print(f"[render:done] {completed}/{len(records)} {name}", flush=True)
+            return dataset_dir
+        from joblib import parallel_config
+        from sklearn.utils.parallel import Parallel, delayed
+
+        print(f"[render] {len(records)} cycles with {n_jobs} workers", flush=True)
+        with parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1):
+            results = Parallel(return_as="generator_unordered")(
+                delayed(_render_cycle_job)(
+                    dataset_dir,
+                    str(record["cycle_name"]),
+                    publication,
+                    panel,
+                    fetch_cloud_images,
+                    cleanup_downloaded_images,
+                )
+                for record in records
+            )
+            for completed, name in enumerate(results, start=1):
+                print(f"[render:done] {completed}/{len(records)} {name}", flush=True)
+        return dataset_dir
     if not any(
         isinstance(record, Mapping) and str(record.get("cycle_name")) == cycle_name
         for record in catalog["cycles"]
@@ -1594,23 +1660,95 @@ def render_dataset(
             raise ValueError("channel_registry.json must contain an object")
         metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
         roles = _experiment_camera_roles(catalog, metadata, str(record["experiment_id"]))
+        images = scan_cycle_images(dataset_dir, cycle_name, metadata)
         if fetch_cloud_images:
-            from .cloud_images import materialize_cycle_images
+            from .cloud_images import materialize_cycle_image_members
 
-            with materialize_cycle_images(
-                dataset_dir, cycle_name, fetch_cloud=True
+            roles, frame, images, missing = _rgb_panel_inputs(
+                dataset_dir, record, catalog, metadata
+            )
+
+            with materialize_cycle_image_members(
+                dataset_dir,
+                cycle_name,
+                missing,
+                fetch_cloud=True,
+                cleanup_downloaded=cleanup_downloaded_images,
             ) as cycle_dir:
                 images = scan_cycle_images(
                     dataset_dir, cycle_name, metadata, cycle_dir=cycle_dir
                 )
-        else:
-            images = scan_cycle_images(
-                dataset_dir, cycle_name, metadata
-            )
         _render_rgb_panel(
-            dataset_dir, record, metadata, registry, roles, images=images
+            dataset_dir,
+            record,
+            metadata,
+            registry,
+            roles,
+            frame=frame if fetch_cloud_images else None,
+            images=images,
         )
     return dataset_dir
+
+
+def _rgb_panel_inputs(
+    dataset_dir: Path,
+    record: Mapping[str, Any],
+    catalog: Mapping[str, Any],
+    metadata: pd.DataFrame,
+) -> tuple[tuple[str, ...], pd.DataFrame, pd.DataFrame, list[str]]:
+    from plots.publication import build_rgb_panel_targets, select_rgb_panel_cells
+
+    from .local_images import scan_cycle_images
+
+    cycle_name = str(record["cycle_name"])
+    roles = _experiment_camera_roles(catalog, metadata, str(record["experiment_id"]))
+    assets = record.get("assets")
+    if not isinstance(assets, Mapping):
+        raise ValueError(f"cycle assets are missing: {cycle_name}")
+    frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+    expected = metadata.loc[metadata["cycle_name"].astype(str).eq(cycle_name)].copy()
+    expected["path"] = [
+        Path(str(role)) / str(name)
+        for role, name in zip(expected["camera_role"], expected["file_name"], strict=True)
+    ]
+    images = scan_cycle_images(dataset_dir, cycle_name, metadata)
+    cells = select_rgb_panel_cells(
+        expected,
+        build_rgb_panel_targets(record, frame),
+        list(roles),
+    )
+    local = set(
+        zip(images["camera_role"].astype(str), images["file_name"].astype(str), strict=True)
+    )
+    missing = sorted(
+        {
+            path.as_posix()
+            for role, paths in cells.items()
+            for path in paths
+            if path is not None and (role, path.name) not in local
+        }
+    )
+    return roles, frame, images, missing
+
+
+def _render_cycle_job(
+    dataset_dir: Path,
+    cycle_name: str,
+    publication: bool,
+    panel: bool,
+    fetch_cloud_images: bool,
+    cleanup_downloaded_images: bool,
+) -> str:
+    print(f"[render:start] {cycle_name}", flush=True)
+    render_dataset(
+        dataset_dir,
+        cycle_name,
+        publication=publication,
+        panel=panel,
+        fetch_cloud_images=fetch_cloud_images,
+        cleanup_downloaded_images=cleanup_downloaded_images,
+    )
+    return cycle_name
 
 
 def _experiment_camera_roles(

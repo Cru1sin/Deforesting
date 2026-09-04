@@ -128,8 +128,67 @@ def test_advanced_dataset_maintenance_keeps_render_options(tmp_path: Path, monke
         (
             tmp_path,
             "cycle_001",
-            {"publication": True, "panel": True, "fetch_cloud_images": False},
+            {
+                "publication": True,
+                "panel": True,
+                "fetch_cloud_images": False,
+                "cleanup_downloaded_images": False,
+                "n_jobs": 10,
+            },
         )
+    ]
+
+
+def test_render_without_cycle_targets_all_default_dataset_panels(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[tuple[Path, str | None, dict[str, object]]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "render_dataset",
+        lambda dataset, cycle, **options: calls.append((dataset, cycle, options)) or dataset,
+    )
+
+    assert manage_dataset.main(["render", "--panel", "--fetch-cloud-images"]) == 0
+    assert calls == [
+        (
+            Path("dataset"),
+            None,
+            {
+                "publication": False,
+                "panel": True,
+                "fetch_cloud_images": True,
+                "cleanup_downloaded_images": False,
+                "n_jobs": 10,
+            },
+        )
+    ]
+
+
+def test_render_cleanup_is_explicit(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "render_dataset",
+        lambda _dataset, _cycle, **options: calls.append(options) or Path("dataset"),
+    )
+
+    assert (
+        manage_dataset.main(
+            ["render", "--panel", "--fetch-cloud-images", "--cleanup-downloaded-images"]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "publication": False,
+            "panel": True,
+            "fetch_cloud_images": True,
+            "cleanup_downloaded_images": True,
+            "n_jobs": 10,
+        }
     ]
 
 
