@@ -24,6 +24,7 @@
 !image_labels/
 !image_labels/**
 !image_models/
+!train_pareto_boundary.py
 !image_models/**
 !plots/
 !plots/**

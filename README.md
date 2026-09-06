@@ -257,6 +257,58 @@ cache. Provide it explicitly with `--dinov2-feature-cache`. Sensor options are
 `image_plus_current_sensors` and `image_plus_sensor_slopes`; they are joined causally to the
 image latent features before classification.
 
+## Pareto boundary learning: reusable experiment entry
+
+This workflow learns the frozen Pareto-knee boundary from native front-camera frames.
+Run from the repository root with `dataset/` prepared. Build the teacher-independent
+RGB cache once; subsequent runs extract only missing image keys:
+
+```bash
+uv run python -m image_models.dinov2_features --dataset dataset \
+  --output output/image_models/_cache/dinov2_vits14_r256_c224_front_v1 --n-jobs 6
+```
+
+To repair selected cycles, repeat this command with `--cycles frost_cycle_000006`.
+Compatible existing vectors can be imported with `--source-cache PATH`.
+Use `--device mps` on Apple Silicon or `--device cuda` on a CUDA GPU.
+Changing the teacher, method, seed or training run does not invalidate RGB vectors.
+
+Prepare measured cumulative quantities and causal sensor statistics independently of G:
+
+```bash
+uv run python train_pareto_boundary.py --action prepare --dataset dataset --n-jobs 6
+```
+
+Review `output/image_models/_cache/pareto_boundary_v1/cycle_coverage.csv` and RGB coverage
+before fitting the fold-specific G models and teachers:
+
+```bash
+uv run python train_pareto_boundary.py --action fit --n-jobs 6
+```
+
+Review teacher coverage and experiment exclusions before training the first method:
+
+```bash
+uv run python train_pareto_boundary.py --action train --method baseline --seed 0 \
+  --output output/test/pareto_boundary/baseline_seed0 --n-jobs 6
+```
+
+Review each stage and each method before proceeding; do not automate the complete
+comparison as one unattended loop. Reuse the same prepared data for `economic`
+(economic input only), `relation` (Pareto relation supervision only), and `combined`
+(both); `baseline` enables neither. `nonvisual` is the matched economic-only control
+with the visual branch zeroed. Each method/seed uses its own `--output` directory.
+
+Replay triggers at the first native frame with `logit >= 0`. Observation gaps remain
+missing, with no interpolated frames; plots break lines across gaps longer than 45 s.
+This is offline imitation and retrospective replay, not validation of actual online control.
+
+After adding raw data, use a new `--data output/image_models/_cache/SNAPSHOT_NAME`
+consistently for prepare, fit and train. Keep snapshots under the same cache parent to
+reuse unchanged per-cycle `pareto_measured_stat6_v1` tables, and retain the RGB cache
+(the training default points to its `cycles/` directory). Preserve previous snapshots
+and run directories; choose new paths rather than overwriting historical results.
+
 ## Weights & Biases
 
 W&B remains optional and is controlled only at the public training entry:

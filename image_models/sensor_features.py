@@ -5,24 +5,114 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 CURRENT_SENSORS = (
-    "ambient_temperature", "environment_relative_humidity", "water_in_temperature",
-    "water_out_temperature", "water_temperature_setpoint", "water_flow",
-    "evaporating_pressure", "coil_temperature", "suction_temperature", "superheat",
-    "condensing_pressure", "condensing_temperature", "discharge_temperature",
-    "plate_heat_exchanger_inlet_temperature", "plate_heat_exchanger_outlet_temperature",
-    "compressor_frequency", "compressor_frequency_setpoint", "compressor_current",
-    "compressor_power", "fan_speed", "fan_current", "exv_opening", "heating_capacity",
-    "power_total", "cop", "evaporator_capacity", "pressure_ratio", "water_delta_temperature",
+    "ambient_temperature",
+    "environment_relative_humidity",
+    "water_in_temperature",
+    "water_out_temperature",
+    "water_temperature_setpoint",
+    "water_flow",
+    "evaporating_pressure",
+    "coil_temperature",
+    "suction_temperature",
+    "superheat",
+    "condensing_pressure",
+    "condensing_temperature",
+    "discharge_temperature",
+    "plate_heat_exchanger_inlet_temperature",
+    "plate_heat_exchanger_outlet_temperature",
+    "compressor_frequency",
+    "compressor_frequency_setpoint",
+    "compressor_current",
+    "compressor_power",
+    "fan_speed",
+    "fan_current",
+    "exv_opening",
+    "heating_capacity",
+    "power_total",
+    "cop",
+    "evaporator_capacity",
+    "pressure_ratio",
+    "water_delta_temperature",
 )
 SLOPE_SENSORS = (
-    "evaporating_pressure", "coil_temperature", "fan_current", "compressor_frequency",
-    "exv_opening", "compressor_power", "power_total", "heating_capacity", "cop",
-    "evaporator_capacity", "water_out_temperature", "water_delta_temperature",
-    "suction_temperature", "superheat", "discharge_temperature", "pressure_ratio",
+    "evaporating_pressure",
+    "coil_temperature",
+    "fan_current",
+    "compressor_frequency",
+    "exv_opening",
+    "compressor_power",
+    "power_total",
+    "heating_capacity",
+    "cop",
+    "evaporator_capacity",
+    "water_out_temperature",
+    "water_delta_temperature",
+    "suction_temperature",
+    "superheat",
+    "discharge_temperature",
+    "pressure_ratio",
 )
+
+
+def build_past_only_sensor_statistics(
+    frame: pd.DataFrame,
+    *,
+    current_sensors: tuple[str, ...] = CURRENT_SENSORS,
+    bucket_seconds: int = 10,
+) -> pd.DataFrame:
+    """Six statistics on available bucket endpoints in the last five minutes.
+
+    Sample std and unbiased Fisher skew/kurtosis follow pandas conventions;
+    slope is least squares per minute, entropy is natural-log histogram entropy.
+    """
+    values = frame.copy()
+    values["sensor_timestamp"] = pd.to_datetime(values["timestamp"], format="mixed") + pd.Timedelta(
+        seconds=bucket_seconds
+    )
+    outputs = []
+    for _, cycle in values.groupby("cycle_name", sort=False):
+        cycle = cycle.sort_values("sensor_timestamp").set_index("sensor_timestamp")
+        result = {"cycle_name": cycle["cycle_name"]}
+        for name in current_sensors:
+            x = pd.to_numeric(cycle[name], errors="coerce")
+            if f"{name}__imputed" in cycle:
+                x = x.where(cycle[f"{name}__imputed"].eq(False))
+            rolling = x.rolling("5min", closed="both", min_periods=1)
+            for statistic in ("mean", "std", "skew", "kurt"):
+                result[f"stat_{name}_{statistic}"] = getattr(rolling, statistic)()
+
+            def slope(window):
+                valid = window.dropna()
+                if len(valid) < 2:
+                    return np.nan
+                minutes = (valid.index.asi8 - valid.index.asi8[0]) / 60e9
+                centered = minutes - minutes.mean()
+                denominator = np.square(centered).sum()
+                return (
+                    np.dot(centered, valid.to_numpy() - valid.mean()) / denominator
+                    if denominator
+                    else np.nan
+                )
+
+            def entropy(window):
+                valid = window[np.isfinite(window)]
+                if len(valid) < 2:
+                    return np.nan
+                span = valid.max() - valid.min()
+                if span == 0:
+                    return 0.0
+                counts = np.histogram((valid - valid.min()) / span, bins=10, range=(0.0, 1.0))[0]
+                probabilities = counts[counts > 0] / len(valid)
+                return -np.dot(probabilities, np.log(probabilities))
+
+            result[f"stat_{name}_slope"] = rolling.apply(slope, raw=False)
+            result[f"stat_{name}_entropy"] = rolling.apply(entropy, raw=True)
+        outputs.append(pd.DataFrame(result, index=cycle.index).reset_index())
+    return pd.concat(outputs, ignore_index=True)
 
 
 def build_past_only_sensor_features(
@@ -52,22 +142,16 @@ def build_past_only_sensor_features(
             }
         )
         paired = pd.merge_asof(
-            cycle.assign(
-                slope_target_time=cycle["sensor_timestamp"] - pd.Timedelta(minutes=5)
-            ),
+            cycle.assign(slope_target_time=cycle["sensor_timestamp"] - pd.Timedelta(minutes=5)),
             past,
             left_on="slope_target_time",
             right_on="past_timestamp",
             direction="backward",
             tolerance=pd.Timedelta(seconds=15),
         )
-        elapsed = (
-            paired["sensor_timestamp"] - paired["past_timestamp"]
-        ).dt.total_seconds() / 60
+        elapsed = (paired["sensor_timestamp"] - paired["past_timestamp"]).dt.total_seconds() / 60
         for name in slope_sensors:
-            paired[f"{name}__slope_5min"] = (
-                paired[name] - paired[f"past_{name}"]
-            ) / elapsed
+            paired[f"{name}__slope_5min"] = (paired[name] - paired[f"past_{name}"]) / elapsed
         groups.append(
             paired.drop(
                 columns=[
@@ -80,9 +164,7 @@ def build_past_only_sensor_features(
     return pd.concat(groups, ignore_index=True) if groups else values
 
 
-def attach_latest_past_sensor_values(
-    rows: pd.DataFrame, dataset_root: Path
-) -> pd.DataFrame:
+def attach_latest_past_sensor_values(rows: pd.DataFrame, dataset_root: Path) -> pd.DataFrame:
     """Attach the latest same-cycle sensor row to every image."""
     required = tuple(dict.fromkeys((*CURRENT_SENSORS, *SLOPE_SENSORS)))
     registry = json.loads((dataset_root / "channel_registry.json").read_text())

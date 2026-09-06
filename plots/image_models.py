@@ -76,9 +76,9 @@ def _ordered(values: pd.Series, preferred: list[str]) -> list[str]:
     )
 
 
-def _robust_trigger_error_limit(errors: pd.Series) -> float:
+def _robust_trigger_error_limit(errors: pd.Series, quantile: float = 0.995) -> float:
     """Keep isolated extremes from flattening the central trigger-error evidence."""
-    return max(5.0, float(errors.dropna().abs().quantile(0.995)) * 1.10)
+    return max(5.0, float(errors.dropna().abs().quantile(quantile)) * 1.10)
 
 
 def two_of_three_trigger(
@@ -156,29 +156,37 @@ def plot_trigger_error_figures(
     classifier: str,
     continuous_stream: bool = False,
     figure_formats: tuple[str, ...] = ("png",),
+    method_styles: dict[str, tuple[str, str]] | None = None,
+    policies: tuple[str, ...] = ("two_of_three", "first_positive"),
+    threshold: float = 0.5,
+    flat_output: bool = False,
+    error_quantile: float = 0.995,
 ) -> None:
     """Plot signed trigger-minus-Pareto timing errors for two control rules."""
+    colors = ({name: style[0] for name, style in method_styles.items()}
+              if method_styles else _MODALITY_COLORS)
+    markers = ({name: style[1] for name, style in method_styles.items()}
+               if method_styles else _MODALITY_MARKERS)
     values = predictions.loc[
         predictions["image_feature"].eq(image_feature)
         & predictions["classifier"].eq(classifier)
-        & predictions["input_feature"].isin(_MODALITY_COLORS)
+        & predictions["input_feature"].isin(colors)
     ].copy()
-    errors = trigger_error_table(values, decisions)
+    errors = trigger_error_table(values, decisions, threshold=threshold)
+    errors = errors.loc[errors["strategy"].isin(policies)]
     errors["continuous_stream"] = continuous_stream
     source_output.mkdir(parents=True, exist_ok=True)
     errors.to_csv(source_output / "trigger_error_by_cycle.csv", index=False)
     cameras = [camera for camera in _CAMERA_ORDER[:6] if camera in set(errors["camera"])]
-    limit = _robust_trigger_error_limit(errors["trigger_error_minutes"])
+    limit = _robust_trigger_error_limit(errors["trigger_error_minutes"], quantile=error_quantile)
     names = {
         "two_of_three": "Two positives within three frames",
         "first_positive": "First positive frame",
     }
-    offsets = {
-        "image_only": -0.16,
-        "image_plus_current_sensors": 0.0,
-        "image_plus_sensor_slopes": 0.16,
-    }
+    offsets = dict(zip(colors, np.linspace(-0.16, 0.16, len(colors)), strict=True))
     for strategy, strategy_name in names.items():
+        if strategy not in policies:
+            continue
         subset = errors.loc[errors["strategy"].eq(strategy)]
         for camera in cameras:
             camera_rows = subset.loc[subset["camera"].eq(camera)]
@@ -202,8 +210,8 @@ def plot_trigger_error_figures(
                 axis.scatter(
                     x_values,
                     shown,
-                    color=_MODALITY_COLORS[str(input_feature)],
-                    marker=_MODALITY_MARKERS[str(input_feature)],
+                    color=colors[str(input_feature)],
+                    marker=markers[str(input_feature)],
                     s=18,
                     label=str(input_feature).replace("_", " + "),
                     zorder=3,
@@ -211,14 +219,14 @@ def plot_trigger_error_figures(
                 for index in np.flatnonzero(np.abs(actual) > limit):
                     direction = "↑" if actual[index] > 0 else "↓"
                     axis.annotate(
-                        f"{direction} {actual[index]:+.0f}",
+                        direction,
                         (x_values[index], shown[index]),
                         xytext=(0, -2 if actual[index] > 0 else 2),
                         textcoords="offset points",
                         ha="center",
                         va="top" if actual[index] > 0 else "bottom",
-                        fontsize=5.5,
-                        color=_MODALITY_COLORS[str(input_feature)],
+                        fontsize=7,
+                        color=colors[str(input_feature)],
                         clip_on=False,
                     )
             axis.axhline(0, color="#333333", lw=0.8)
@@ -236,26 +244,32 @@ def plot_trigger_error_figures(
                     [0],
                     [0],
                     color=color,
-                    marker=_MODALITY_MARKERS[name],
+                    marker=markers[name],
                     ms=4,
                     linestyle="none",
                     label=name.replace("_", " + "),
                 )
-                for name, color in _MODALITY_COLORS.items()
+                for name, color in colors.items()
             ]
-            axis.legend(handles=handles, loc="upper right", ncol=3, fontsize=6)
-            prefix = "Continuous stream" if continuous_stream else "Sampled-frame diagnostic"
+            axis.legend(handles=handles, loc="lower center", bbox_to_anchor=(.5, 1.13),
+                        ncol=min(5, len(handles)), fontsize=6)
+            prefix = ("Observed native-stream replay" if continuous_stream
+                      else "Sampled-frame diagnostic")
             figure.suptitle(f"{prefix}: {camera.replace('_', ' ')} — {strategy_name}", fontsize=8)
             figure.text(
                 0.5,
                 0.008,
                 "Positive = later than Pareto knee; negative = earlier. "
-                "Boundary labels denote off-scale values; missing points never triggered.",
+                "Arrows: off-scale; exact values remain in CSV. Gaps lack a trigger or reference.",
                 ha="center",
                 fontsize=5.8,
             )
             figure.tight_layout(rect=(0, 0.06, 1, 0.93))
-            _export(figure, output / "trigger_error" / strategy / camera, figure_formats)
+            stem = (
+                output / f"trigger_error_{strategy}_{camera}" if flat_output
+                else output / "trigger_error" / strategy / camera
+            )
+            _export(figure, stem, figure_formats)
 
 
 def plot_probability_curves(

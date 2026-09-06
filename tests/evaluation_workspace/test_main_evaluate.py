@@ -30,6 +30,14 @@ def test_trigger_error_axis_ignores_one_extreme_outlier() -> None:
     assert _robust_trigger_error_limit(errors) < 70
 
 
+def test_trigger_error_quantile_changes_display_not_source() -> None:
+    errors = pd.Series([0.0] * 95 + [60.0] * 5)
+    original = errors.copy()
+    assert _robust_trigger_error_limit(errors, quantile=0.90) == 5.0
+    assert _robust_trigger_error_limit(errors) == 66.0
+    pd.testing.assert_series_equal(errors, original)
+
+
 def _write_run(path: Path, held_out: str = "a") -> None:
     path.mkdir()
     pd.DataFrame(

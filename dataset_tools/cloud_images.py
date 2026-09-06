@@ -223,6 +223,7 @@ def _read_zip_member(
     archive_size: int,
     remote: str | None = None,
     transferred: list[int] | None = None,
+    payload: bytes | memoryview | None = None,
 ) -> bytes:
     (
         local_offset,
@@ -232,7 +233,7 @@ def _read_zip_member(
         filename_size,
         extra_size,
     ) = member
-    payload = _read_zip_range(
+    payload = payload if payload is not None else _read_zip_range(
         archive,
         local_offset,
         min(
@@ -265,7 +266,7 @@ def _read_zip_member(
     data_offset = 30 + filename_size + extra_size
     payload = payload[data_offset : data_offset + compressed_size]
     if method == 0:
-        data = payload
+        data = bytes(payload)
     elif method == 8:
         data = zlib.decompress(payload, -15)
     else:
