@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from .dataset_paths import write_json
@@ -161,6 +162,10 @@ def build_cycle_record(
         "pipeline_status_reason": pipeline_reason,
         "status": pipeline_status,
         "status_reason": pipeline_reason,
+        "pareto_knee_status": "invalid",
+        "rgb_knee_coverage_status": "invalid",
+        "pareto_extrapolated_knee_status": "invalid",
+        "rgb_extrapolated_knee_coverage_status": "invalid",
         "boundaries": boundaries,
         "data": {
             "processed_row_count": int(len(processed)),
@@ -195,3 +200,81 @@ def _iso(value: Any) -> str | None:
         return None
     timestamp = pd.to_datetime(cleaned, errors="coerce")
     return None if pd.isna(timestamp) else pd.Timestamp(timestamp).isoformat()
+
+
+def complete_peak_screen(rows, epsilon=.01, minimum_seconds=60, maximum_gap_seconds=30):
+    """Offline curve eligibility, independent of RGB and every model's predictions."""
+    records = []
+    for name, curve in rows.groupby("cycle_name", sort=True):
+        curve = curve.sort_values("candidate_defrost_time")
+        time = curve.candidate_defrost_time
+        supported = curve.cycle_cop_eligible & np.isfinite(curve.cycle_cop)
+        peak = curve.loc[supported, "cycle_cop"].max()
+        record = dict(cycle_name=name, experiment_id=curve.experiment_id.iloc[0],
+                      selected=False, reason="no_supported_reference", reference_time=pd.NaT,
+                      before_seconds=0., after_seconds=0.)
+        if pd.notna(peak) and peak > 0:
+            boundary = time.loc[supported & curve.cycle_cop.eq(peak)].min()
+            below = supported & curve.cycle_cop.le((1 - epsilon) * peak)
+            for side, mask in (("before", time.lt(boundary)), ("after", time.gt(boundary))):
+                valid = below & mask
+                # Unsupported samples and time gaps break evidence; never bridge them.
+                segment = ((~valid) | time.diff().dt.total_seconds().gt(maximum_gap_seconds)).cumsum()
+                spans = time.loc[valid].groupby(segment.loc[valid]).agg(["min", "max"])
+                record[side + "_seconds"] = float((spans["max"] - spans["min"]).dt.total_seconds().max()) if len(spans) else 0.
+            missing = [side for side in ("before", "after") if record[side + "_seconds"] < minimum_seconds]
+            record.update(reference_time=boundary, selected=not missing,
+                          reason="complete_peak" if not missing else "insufficient_" + "_and_".join(missing))
+        records.append(record)
+    return pd.DataFrame(records)
+
+
+def update_effective_cop_quality(dataset_dir, rows, *, cycle_names=None, source=None):
+    """Publish COP shape quality after calculation, retaining prior human/pipeline status."""
+    catalog = read_catalog(dataset_dir)
+    quality = complete_peak_screen(rows).set_index("cycle_name")
+    scope = set(cycle_names) if cycle_names is not None else set(quality.index)
+    for record in catalog["cycles"]:
+        name = record["cycle_name"]
+        if name not in scope:
+            continue
+        previous = record.setdefault("pre_cop_status", {
+            "status": record["status"], "status_reason": record.get("status_reason")})
+        row = quality.loc[name] if name in quality.index else None
+        complete = bool(row.selected) if row is not None else False
+        reason = str(row.reason) if row is not None else "no_supported_reference"
+        record["cop_peak_quality"] = dict(
+            complete=complete, reason=reason, epsilon=.01, minimum_seconds=60,
+            maximum_gap_seconds=30, source=str(source) if source is not None else None,
+            before_seconds=float(row.before_seconds) if row is not None else 0.,
+            after_seconds=float(row.after_seconds) if row is not None else 0.)
+        if record.get("review_status", previous["status"]) not in {"invalid", "reference"}:
+            record["status"] = "valid" if complete else "invalid"
+            record["status_reason"] = "complete_effective_cop_peak" if complete else "effective_cop_" + reason
+    write_catalog(dataset_dir, catalog)
+    return quality.reset_index()
+
+
+def update_rgb_validity(dataset_dir, rows, *, source=None):
+    """Image presence is Dataset quality; model-specific view coverage is separate."""
+    catalog = read_catalog(dataset_dir)
+    metadata = Path(dataset_dir) / "image_metadata.parquet"
+    counts = (pd.read_parquet(metadata).groupby("cycle_name").size()
+              if metadata.exists() else pd.Series(dtype=int))
+    available = rows.groupby("cycle_name").rgb_available.any()
+    evidence = {}
+    for record in catalog["cycles"]:
+        name = record["cycle_name"]
+        present = bool(counts.get(name, 0) > 0 or available.get(name, False))
+        evidence[name] = dict(rgb_valid=present,
+            rgb_valid_reason="images_present" if present else "no_image_records")
+        record.pop("rgb_positive_slots", None)
+    results = []
+    for record in catalog["cycles"]:
+        quality = evidence.get(record["cycle_name"], dict(
+            rgb_valid=False, rgb_valid_reason="not_assessed"))
+        record.update(quality)
+        record["rgb_valid_source"] = str(source) if source is not None else None
+        results.append(dict(cycle_name=record["cycle_name"], status=record["status"], **quality))
+    write_catalog(dataset_dir, catalog)
+    return pd.DataFrame(results)

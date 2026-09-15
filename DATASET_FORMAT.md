@@ -59,10 +59,18 @@ schema 一致。
 
 `cycle_catalog.json` 保存每个 cycle 的身份、构建状态、当前人工状态、边界、数据摘要、
 图片摘要和固定资产路径。`pipeline_status` 是上游事实；
-`status` 是当前唯一 Dataset 使用状态，只能通过 `review-cycle` 修改。下游分析只按
-`status` 过滤。完整科研循环使用 `valid` / `invalid`；`partial` 标记不完整上下文片段，
+`status` 是 Dataset 的人工使用状态，只能通过 `review-cycle` 修改。完整科研循环使用
+`valid` / `invalid`；`partial` 标记不完整上下文片段，
 `reference` 标记仅作参照而不进入正式循环。`review-cycle` 只把记录改为 `valid` 或
-`invalid`，当前决策和训练流程只读取 `valid`。
+`invalid`。Pareto-boundary CV 另有两个与 `status` 平行的状态：
+`pareto_knee_status` 表示该循环是否存在由留出该实验的 teacher 得到的有效 Pareto knee，
+`rgb_knee_coverage_status` 表示原生 front RGB 时间范围是否前后覆盖该 knee。只有这两个字段
+与 `status` 同时为 `valid` 的循环才进入 Pareto CV 训练和比较统计；缺失字段按 `invalid`
+处理。该限制不移除全循环审计图，也不改变 teacher 的选择定义。
+
+允许历史测量重建和 outcome-model 外推的新定义使用独立字段
+`pareto_extrapolated_knee_status` 与 `rgb_extrapolated_knee_coverage_status`，避免覆盖或
+静默重命名上述严格定义；该版本的 CV 只读取 `status` 和这两个 extrapolated 状态。
 
 `images_root` 可以是相对 Dataset 的 `images`，也可以在图片整体移动后直接改成
 OneDrive `images` 文件夹的绝对路径。目录内部仍固定为

@@ -63,6 +63,7 @@ def build_past_only_sensor_statistics(
     *,
     current_sensors: tuple[str, ...] = CURRENT_SENSORS,
     bucket_seconds: int = 10,
+    include_current: bool = False,
 ) -> pd.DataFrame:
     """Six statistics on available bucket endpoints in the last five minutes.
 
@@ -82,8 +83,24 @@ def build_past_only_sensor_statistics(
             if f"{name}__imputed" in cycle:
                 x = x.where(cycle[f"{name}__imputed"].eq(False))
             rolling = x.rolling("5min", closed="both", min_periods=1)
+            if include_current:
+                result[f"stat_{name}_current"] = x.ffill().where(
+                    (pd.Series(cycle.index, index=cycle.index)
+                     - pd.Series(cycle.index.where(x.notna()), index=cycle.index).ffill())
+                    .dt.total_seconds().le(300)
+                )
             for statistic in ("mean", "std", "skew", "kurt"):
-                result[f"stat_{name}_{statistic}"] = getattr(rolling, statistic)()
+                column = f"stat_{name}_{statistic}"
+                # pandas rolling skew/kurt center on the entire series internally.
+                # Window-local moments keep past results independent of future values.
+                if statistic in {"skew", "kurt"}:
+                    result[column] = rolling.apply(
+                        lambda window, kind=statistic: getattr(pd.Series(window), kind)(),
+                        raw=True,
+                    )
+                else:
+                    result[column] = getattr(rolling, statistic)()
+                result[f"{column}_missing"] = result[column].isna()
 
             def slope(window):
                 valid = window.dropna()
@@ -109,8 +126,18 @@ def build_past_only_sensor_statistics(
                 probabilities = counts[counts > 0] / len(valid)
                 return -np.dot(probabilities, np.log(probabilities))
 
-            result[f"stat_{name}_slope"] = rolling.apply(slope, raw=False)
-            result[f"stat_{name}_entropy"] = rolling.apply(entropy, raw=True)
+            for statistic, series in (
+                ("slope", rolling.apply(slope, raw=False)),
+                ("entropy", rolling.apply(entropy, raw=True)),
+            ):
+                column = f"stat_{name}_{statistic}"
+                result[column] = series
+                result[f"{column}_missing"] = series.isna()
+            result[f"stat_{name}_valid_count"] = rolling.count()
+            last_valid = pd.Series(cycle.index.where(x.notna()), index=cycle.index).ffill()
+            result[f"stat_{name}_age_seconds"] = (
+                pd.Series(cycle.index, index=cycle.index) - last_valid
+            ).dt.total_seconds()
         outputs.append(pd.DataFrame(result, index=cycle.index).reset_index())
     return pd.concat(outputs, ignore_index=True)
 

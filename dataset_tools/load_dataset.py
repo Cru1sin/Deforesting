@@ -17,6 +17,7 @@ class DatasetLoader:
     """Load Dataset schema 3 without consulting Raw data or configuration files."""
 
     def __init__(self, dataset_root: Path) -> None:
+        self.recovery_settings = None
         self.dataset_root = Path(dataset_root).resolve()
         if not self.dataset_root.is_dir():
             raise FileNotFoundError(f"dataset directory does not exist: {dataset_root}")
@@ -30,6 +31,49 @@ class DatasetLoader:
         for name in ("cycles", "cycles_original"):
             if not (self.dataset_root / name).is_dir():
                 raise FileNotFoundError(f"Dataset is missing {name}/")
+
+    def configure_recovery(self, settings):
+        """Apply one offline boundary definition in memory; never rewrite raw data."""
+        from .builder.detect_cycles import heating_episode_bounds, recovery_control_trace, find_defrost_preparation_start
+
+        self.recovery_settings = dict(settings)
+        rows = []
+        for record in self._catalog["cycles"]:
+            frame = self.load_cycle_original(str(record["cycle_name"]))
+            bounds = heating_episode_bounds(self, str(record["cycle_name"]), frame)
+            frame["timestamp"] = pd.to_datetime(frame.timestamp)
+            if not bounds.get("defrost_preparation_start"):
+                bounds["defrost_preparation_start"] = find_defrost_preparation_start(
+                    frame, pd.to_datetime(bounds.get("stable_heating_start")),
+                    pd.to_datetime(bounds.get("defrost_start")), settings)
+            start = pd.to_datetime(bounds.get("heating_start"))
+            end = pd.to_datetime(
+                bounds.get("defrost_preparation_start") or bounds.get("defrost_start")
+            )
+            frame = frame.loc[frame.timestamp.ge(start)] if pd.notna(start) else frame.iloc[:0]
+            if pd.notna(end):
+                frame = frame.loc[frame.timestamp.lt(end)]
+            trace = recovery_control_trace(frame, settings)
+            confirmed = trace.loc[trace.normal_heating, "timestamp"]
+            boundary = confirmed.iloc[0] if len(confirmed) else None
+            bounds["stable_heating_start"] = boundary
+            record["boundaries"] = bounds
+            record["recovery_status"] = (
+                trace.recovery_status.iloc[-1] if len(trace) else "no_heating_observations"
+            )
+            rows.append(
+                {
+                    "cycle_name": record["cycle_name"],
+                    "experiment_id": record["experiment_id"],
+                    "heating_start": bounds["heating_start"],
+                    "recorded_heating_start": bounds["recorded_heating_start"],
+                    "heating_origin": bounds["heating_origin"],
+                    "excluded_prestart_seconds": bounds["excluded_prestart_seconds"],
+                    "stable_heating_start": boundary,
+                    "recovery_status": record["recovery_status"],
+                }
+            )
+        return pd.DataFrame(rows)
 
     @property
     def manifest(self) -> dict[str, object]:
@@ -62,6 +106,14 @@ class DatasetLoader:
                 row["image_count"] = image.get("image_count", 0)
             row["status"] = str(record.get("status", "invalid"))
             row["status_reason"] = record.get("status_reason")
+            row["pareto_knee_status"] = str(record.get("pareto_knee_status", "invalid"))
+            row["rgb_knee_coverage_status"] = str(record.get("rgb_knee_coverage_status", "invalid"))
+            row["pareto_extrapolated_knee_status"] = str(
+                record.get("pareto_extrapolated_knee_status", "invalid")
+            )
+            row["rgb_extrapolated_knee_coverage_status"] = str(
+                record.get("rgb_extrapolated_knee_coverage_status", "invalid")
+            )
             rows.append(row)
         result = pd.DataFrame(rows)
         if result.empty:
@@ -71,9 +123,11 @@ class DatasetLoader:
         if experiment_ids is not None:
             result = result.loc[result["experiment_id"].isin(experiment_ids)]
         if "start_time" in result:
-            result = result.assign(
-                _start=pd.to_datetime(result["start_time"], errors="coerce")
-            ).sort_values(["_start", "cycle_name"], kind="stable").drop(columns="_start")
+            result = (
+                result.assign(_start=pd.to_datetime(result["start_time"], errors="coerce"))
+                .sort_values(["_start", "cycle_name"], kind="stable")
+                .drop(columns="_start")
+            )
         return result.reset_index(drop=True)
 
     def get_cycle_record(self, cycle_name: str) -> dict[str, object]:
@@ -82,9 +136,7 @@ class DatasetLoader:
                 return dict(record)
         raise KeyError(f"unknown cycle: {cycle_name}")
 
-    def load_cycle(
-        self, cycle_name: str, *, columns: list[str] | None = None
-    ) -> pd.DataFrame:
+    def load_cycle(self, cycle_name: str, *, columns: list[str] | None = None) -> pd.DataFrame:
         record = self.get_cycle_record(cycle_name)
         assets = record.get("assets")
         if not isinstance(assets, Mapping):
@@ -92,7 +144,22 @@ class DatasetLoader:
         path = self.dataset_root / str(assets["parquet"])
         if not path.is_file():
             raise FileNotFoundError(f"cycle parquet does not exist: {path}")
-        return pd.read_parquet(path, columns=columns)
+        frame = pd.read_parquet(path, columns=columns)
+        if (
+            self.recovery_settings is not None
+            and "timestamp" in frame
+            and record["boundaries"].get("heating_origin") in {"cold_start", "not_started"}
+        ):
+            frame = frame.loc[
+                pd.to_datetime(frame.timestamp).ge(
+                    pd.to_datetime(record["boundaries"]["heating_start"])
+                )
+            ].copy()
+        if self.recovery_settings is not None and {"cycle_stage", "timestamp"} <= set(frame):
+            from .builder.detect_cycles import recovery_stages
+
+            frame["cycle_stage"] = recovery_stages(frame, record["boundaries"])
+        return frame
 
     def load_cycle_original(
         self, cycle_name: str, *, columns: list[str] | None = None
@@ -130,12 +197,10 @@ class DatasetLoader:
         experiment_ids: set[str] | None = None,
         columns: list[str] | None = None,
     ) -> Iterator[tuple[dict[str, object], pd.DataFrame]]:
-        for cycle_name in self.list_cycles(
-            statuses=statuses, experiment_ids=experiment_ids
-        )["cycle_name"].astype(str):
-            yield self.get_cycle_record(cycle_name), self.load_cycle(
-                cycle_name, columns=columns
-            )
+        for cycle_name in self.list_cycles(statuses=statuses, experiment_ids=experiment_ids)[
+            "cycle_name"
+        ].astype(str):
+            yield self.get_cycle_record(cycle_name), self.load_cycle(cycle_name, columns=columns)
 
     def publication_path(self, cycle_name: str) -> Path:
         record = self.get_cycle_record(cycle_name)

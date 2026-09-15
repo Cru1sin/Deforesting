@@ -34,22 +34,6 @@ def _cloud_file(name: str) -> str:
     return f"{DEFAULT_CLOUD_IMAGES_REMOTE}/{name}"
 
 
-def _direct_rclone_env() -> dict[str, str]:
-    env = os.environ.copy()
-    for name in (
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "all_proxy",
-        "RCLONE_HTTP_PROXY",
-    ):
-        env.pop(name, None)
-    env["NO_PROXY"] = env["no_proxy"] = "*"
-    return env
-
-
 def _require_free_space(
     path: Path, required: int, action: str, minimum_free_gib: float
 ) -> None:
@@ -84,12 +68,9 @@ def _read_zip_range(
                 str(offset),
                 "--count",
                 str(count),
-                "--http-proxy",
-                "",
             ],
             check=True,
             capture_output=True,
-            env=_direct_rclone_env(),
         )
         data = result.stdout
         if isinstance(data, str):
@@ -311,18 +292,20 @@ def _plan_image_members(
                 "--files-only",
                 "--format",
                 "s",
-                "--http-proxy",
-                "",
             ],
             check=False,
             capture_output=True,
             text=True,
-            env=_direct_rclone_env(),
         )
         raw_size = result.stdout.strip()
-        if result.returncode != 0 or not raw_size.isdigit():
-            print(f"[images] no local directory or cloud ZIP: {cycle_name}", flush=True)
+        if result.returncode in (3, 4) or (result.returncode == 0 and not raw_size):
+            print(f"[images] cloud ZIP missing: {cycle_name}", flush=True)
             return [], [0], time.monotonic()
+        if result.returncode != 0 or not raw_size.isdigit():
+            raise RuntimeError(
+                f"{cycle_name}: cannot inspect cloud ZIP {remote}: "
+                f"{result.stderr.strip() or repr(raw_size)}"
+            )
         archive_size = int(raw_size)
         archive: Path | str = archive_name
     else:
@@ -520,13 +503,10 @@ def materialize_cycle_images(  # noqa: C901
                 "--files-only",
                 "--format",
                 "s",
-                "--http-proxy",
-                "",
             ],
             check=False,
             capture_output=True,
             text=True,
-            env=_direct_rclone_env(),
         )
         remote_size = remote.stdout.strip()
         if remote.returncode != 0 or not remote_size.isdigit():
@@ -574,11 +554,8 @@ def materialize_cycle_images(  # noqa: C901
                     "10",
                     "--retries-sleep",
                     "10s",
-                    "--http-proxy",
-                    "",
                 ],
                 check=True,
-                env=_direct_rclone_env(),
             )
         else:
             shutil.copyfile(archive, local_archive)

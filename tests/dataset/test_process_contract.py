@@ -186,8 +186,7 @@ def test_process_excludes_partial_and_recomputes_coordinates(tmp_path: Path) -> 
 
     assert not processed["cycle_stage"].eq("partial").any()
     assert processed["cycle_progress"].dropna().tolist() == [index / 6 for index in range(6)]
-    assert final_summary.loc[0, "baseline_status"] == "unavailable"
-    assert final_summary.loc[0, "baseline_failure_reason"] == "insufficient_observed_coverage"
+    assert "baseline_status" not in final_summary
 
 
 def test_process_aggregates_environment_channels_and_keeps_rh_over_100(tmp_path: Path) -> None:
@@ -619,8 +618,7 @@ def test_valid_open_cycle_without_boundaries_uses_observed_ten_second_fallback(
     assert processed["cop"].notna().all()
     assert processed["cop"].tolist() == [5.0, 5.0]
     assert processed["cop__imputed"].eq(False).all()
-    assert processed["temperature__baseline"].isna().all()
-    assert processed["temperature__baseline_residual"].isna().all()
+    assert not any("__baseline" in name for name in processed)
     imputed_columns = [column for column in processed if column.endswith("__imputed")]
     assert imputed_columns
     assert not processed[imputed_columns].any(axis=None)
@@ -635,7 +633,7 @@ def test_valid_open_cycle_without_boundaries_uses_observed_ten_second_fallback(
     assert final_summary.loc[0, "processed_row_count"] == 2
 
 
-def test_fallback_cycle_computes_baseline_when_window_is_available(tmp_path: Path) -> None:
+def test_fallback_cycle_does_not_compute_baseline(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=37, freq="10s")
     frame = _frame(timestamps, temperature=list(np.linspace(10, 8, len(timestamps))))
     frame["cycle_status"] = "valid"
@@ -644,9 +642,8 @@ def test_fallback_cycle_computes_baseline_when_window_is_available(tmp_path: Pat
 
     processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
 
-    assert final_summary.loc[0, "baseline_status"] == "available"
-    assert processed["temperature__baseline"].notna().all()
-    assert processed["temperature__baseline_residual"].notna().all()
+    assert "baseline_status" not in final_summary
+    assert not any("__baseline" in name for name in processed)
 
 
 def test_valid_cycle_without_boundaries_uses_observed_fallback(tmp_path: Path) -> None:
@@ -719,19 +716,23 @@ def test_machine_status_does_not_change_complete_cycle_processing(tmp_path: Path
         "cycle_progress",
         "temperature",
         "cop",
-        "temperature__baseline",
-        "temperature__baseline_residual",
     ]
     pd.testing.assert_frame_equal(
         invalid_processed[scientific_columns],
         valid_processed[scientific_columns],
     )
     assert invalid_result.loc[0, "cycle_status"] == "invalid"
-    assert invalid_result.loc[0, "baseline_status"] == "available"
-    assert valid_result.loc[0, "baseline_status"] == "available"
+    assert "baseline_status" not in invalid_result
+    assert "baseline_status" not in valid_result
+    assert not any("__baseline" in name for name in valid_processed)
+    from dataset_tools.builder.validate_prepared_measurements import validate_processed
+
+    validate_processed(valid_processed, valid_result)
 
 
 def test_baseline_uses_one_common_non_imputed_anchor_window(tmp_path: Path) -> None:
+    from dataset_tools.builder.baseline import add_baseline_residuals
+
     timestamps = pd.date_range("2026-07-15", periods=37, freq="10s")
     frame = _frame(timestamps, temperature=list(np.linspace(10, 8, len(timestamps))))
     frame.loc[2, "anchor"] = np.nan
@@ -742,6 +743,9 @@ def test_baseline_uses_one_common_non_imputed_anchor_window(tmp_path: Path) -> N
     summary = _summary(defrost="2026-07-15 00:06:00")
 
     processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
+    processed, final_summary = add_baseline_residuals(
+        processed, final_summary, _channels(), _config(tmp_path).process.baseline
+    )
 
     assert final_summary.loc[0, "baseline_status"] == "available"
     assert final_summary.loc[0, "baseline_reference_type"] == "cycle_local_early_stable_proxy"
@@ -753,6 +757,8 @@ def test_baseline_uses_one_common_non_imputed_anchor_window(tmp_path: Path) -> N
 
 
 def test_baseline_does_not_shift_past_fixed_recovery_window(tmp_path: Path) -> None:
+    from dataset_tools.builder.baseline import add_baseline_residuals
+
     timestamps = pd.date_range("2026-07-15", periods=37, freq="10s")
     frame = _frame(timestamps, temperature=list(np.linspace(10, 8, len(timestamps))))
     frame.loc[:1, "anchor"] = np.nan
@@ -762,7 +768,10 @@ def test_baseline_does_not_shift_past_fixed_recovery_window(tmp_path: Path) -> N
     frame["power_total__imputed"] = False
     summary = _summary(defrost="2026-07-15 00:06:00")
 
-    _, final_summary = process(frame, summary, _config(tmp_path), _channels())
+    processed, final_summary = process(frame, summary, _config(tmp_path), _channels())
+    _, final_summary = add_baseline_residuals(
+        processed, final_summary, _channels(), _config(tmp_path).process.baseline
+    )
 
     assert final_summary.loc[0, "baseline_status"] == "unavailable"
     assert final_summary.loc[0, "baseline_failure_reason"] == "insufficient_observed_coverage"

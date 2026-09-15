@@ -237,7 +237,11 @@ def test_validation_replays_only_targets_present_in_each_model(monkeypatch) -> N
         validate_v2_6_8,
         "predict_with_heldout_event_model",
         lambda artifact, *_: pd.DataFrame(
-            {"prediction": [values[artifact["name"]]], "support_distance": [0.25]}
+            {
+                "prediction": [values[artifact["name"]]],
+                "support_distance": [0.25],
+                "support_threshold": [1.0],
+            }
         ),
     )
 
@@ -278,7 +282,9 @@ def test_validation_keeps_an_event_valid_for_only_one_outcome(monkeypatch) -> No
     monkeypatch.setattr(
         validate_v2_6_8,
         "predict_with_heldout_event_model",
-        lambda *_: pd.DataFrame({"prediction": [1.1], "support_distance": [0.2]}),
+        lambda *_: pd.DataFrame(
+            {"prediction": [1.1], "support_distance": [0.2], "support_threshold": [1.0]}
+        ),
     )
 
     result = validate_v2_6_8.build_validation_table(events, models)
@@ -289,102 +295,46 @@ def test_validation_keeps_an_event_valid_for_only_one_outcome(monkeypatch) -> No
     assert not result.loc[0, "heat_event_valid"]
 
 
-def test_selection_composes_candidate_quantities_objectives_and_pareto(monkeypatch) -> None:
-    import select_defrost_time as selection_command
+def test_selection_uses_only_supported_cop_and_earliest_tie(monkeypatch):
+    import select_defrost_time as command
 
-    base = pd.DataFrame(
-        {
-            "candidate_defrost_time": pd.date_range("2026-01-01", periods=2, freq="10s"),
-            "feature": [1.0, 2.0],
-        }
-    )
-    models = {
-        "models": {
-            "ridge_dynamic_state_8": {
-                "event_electricity": {},
-                "event_net_heat": {},
-                "event_compressor_electricity": {"folds": {"exp": {"support_threshold": 0.5}}},
-                "event_duration": {"folds": {"exp": {"support_threshold": 0.5}}},
-            }
-        }
-    }
+    start = pd.Timestamp("2026-01-01")
 
     class Loader:
-        def get_cycle_record(self, _: str) -> dict[str, object]:
+        def get_cycle_record(self, _):
             return {
                 "experiment_id": "exp",
-                "boundaries": {"stable_heating_start": "2026-01-01 00:00:10"},
+                "status": "valid",
+                "boundaries": {
+                    "heating_start": start,
+                    "stable_heating_start": start,
+                    "defrost_preparation_start": start + pd.Timedelta(minutes=6),
+                },
             }
 
-    calls: dict[str, object] = {}
+        def load_cycle_original(self, _):
+            return pd.DataFrame({"timestamp": [start]})
+
     monkeypatch.setattr(
-        selection_command,
-        "build_candidate_quantities",
-        lambda loader, cycle, source, *, candidate_step_seconds, prediction_mode: (
-            calls.update(
-                step=candidate_step_seconds,
-                source=source,
-                prediction_mode=prediction_mode,
-            )
-            or base.copy()
-        ),
+        command.rule_based,
+        "calculate_cycle",
+        lambda *_: {"t_RB": start + pd.Timedelta(minutes=6), "rb_status": "triggered"},
     )
 
-    def predict(model, values, experiment, *, prediction_mode):
-        calls.setdefault("predictions", []).append((model, values.copy(), experiment))
-        calls["prediction_mode"] = prediction_mode
+    def candidates(frame, times, *args, **kwargs):
         return pd.DataFrame(
             {
-                "prediction": [3.0, 4.0],
-                "support_distance": [0.1, 0.7],
-                "support_threshold": [0.5, 0.5],
+                "candidate_defrost_time": times,
+                "cycle_cop": 3.0,
+                "cycle_cop_eligible": True,
+                "cycle_heating_rate_kw": range(len(times)),
             }
         )
 
-    monkeypatch.setattr(selection_command, "predict_with_event_model", predict)
-    monkeypatch.setattr(
-        selection_command,
-        "calculate_performance_objectives",
-        lambda values, **kwargs: (
-            calls.update(objectives=values.copy(), objective_options=kwargs)
-            or values.assign(cycle_cop=1.0, cycle_heating_rate_kw=2.0)
-        ),
+    monkeypatch.setattr(command, "effective_candidate_cop", candidates)
+    result = command.calculate_cycle(Loader(), "cycle", {})
+    assert result.is_selected.sum() == 1
+    assert result.loc[result.is_selected, "candidate_defrost_time"].iloc[0] == start + pd.Timedelta(
+        minutes=5
     )
-    monkeypatch.setattr(selection_command, "add_single_objective_optima", lambda values: values)
-    monkeypatch.setattr(
-        selection_command,
-        "select_cop_heating_rate_pareto_knee",
-        lambda values, **kwargs: (
-            calls.update(selection_options=kwargs)
-            or values.assign(
-                selected_defrost_time=pd.NaT,
-                selection_method="cop_heating_rate_pareto_knee",
-            )
-        ),
-    )
-
-    result = selection_command.calculate_cycle(
-        Loader(),
-        "cycle",
-        models,
-        candidate_step_seconds=10,
-        allow_extrapolation=False,
-    )
-
-    objectives = calls["objectives"]
-    assert objectives["defrost_event_compressor_electricity_kwh"].tolist() == [3.0, 4.0]
-    assert objectives["defrost_event_duration_minutes"].tolist() == [3.0, 4.0]
-    assert objectives["defrost_event_compressor_electricity_in_training_domain"].tolist() == [
-        True,
-        False,
-    ]
-    assert objectives["defrost_event_duration_in_training_domain"].tolist() == [True, False]
-    assert calls["selection_options"] == {
-        "minimum_time": "2026-01-01 00:00:10",
-    }
-    assert calls["objective_options"] == {"allow_model_extrapolation": False}
-    assert calls["step"] == 10
-    assert calls["prediction_mode"] == "cross-fitted"
-    assert result["selection_method"].eq("cop_heating_rate_pareto_knee").all()
-    assert "decision_method" not in result
-    assert "label_eligible" not in result
+    assert result.algorithm.eq("effective_cop").all()

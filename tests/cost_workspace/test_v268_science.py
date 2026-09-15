@@ -42,6 +42,76 @@ def test_half_open_integral_excludes_right_boundary_and_does_not_bridge_gap() ->
     assert not audit["valid"]
 
 
+def test_candidate_measurement_reconstruction_is_explicit_and_traceable() -> None:
+    from defrost_decision.candidate_quantities import build_measured_candidate_quantities
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 1201).drop(index=range(700, 820))
+
+    class Loader:
+        def get_cycle_record(self, _: str) -> dict[str, object]:
+            return {
+                "experiment_id": "experiment",
+                "boundaries": {
+                    "heating_start": start,
+                    "defrost_preparation_start": start + pd.Timedelta(minutes=20),
+                },
+            }
+
+        def load_cycle_original(self, _: str, *, columns: list[str]) -> pd.DataFrame:
+            return frame[columns]
+
+    strict = build_measured_candidate_quantities(Loader(), "cycle")
+    reconstructed = build_measured_candidate_quantities(
+        Loader(), "cycle", allow_measurement_reconstruction=True
+    )
+
+    assert not strict.pre_defrost_electricity_measurement_valid.iloc[-1]
+    assert reconstructed.pre_defrost_electricity_measurement_valid.iloc[-1]
+    assert reconstructed.pre_defrost_electricity_uses_measurement_reconstruction.iloc[-1]
+    assert reconstructed.pre_defrost_heat_uses_measurement_reconstruction.iloc[-1]
+    assert reconstructed.pre_defrost_compressor_uses_measurement_reconstruction.iloc[-1]
+
+
+def test_candidate_before_accounting_start_retains_missing_causal_integrals() -> None:
+    from defrost_decision.candidate_quantities import build_measured_candidate_quantities
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 61)
+
+    class Loader:
+        def get_cycle_record(self, _: str) -> dict[str, object]:
+            return {
+                "experiment_id": "experiment",
+                "boundaries": {
+                    "heating_start": start,
+                    "defrost_preparation_start": start + pd.Timedelta(seconds=9),
+                },
+            }
+
+        def load_cycle_original(self, _: str, *, columns: list[str]) -> pd.DataFrame:
+            return frame[columns]
+
+    candidates = pd.DataFrame({
+        "cycle_name": ["cycle"], "experiment_id": ["experiment"],
+        "candidate_defrost_time": [start + pd.Timedelta(seconds=9)],
+        "minutes_since_heating_start": [.15],
+        "heating_accounting_start": [start + pd.Timedelta(minutes=9)],
+        "heating_accounting_start_rule": ["fixed_post_defrost_9min"],
+        "heating_start": [start],
+        "observed_defrost_preparation_start": [start + pd.Timedelta(seconds=9)],
+    })
+
+    result = build_measured_candidate_quantities(
+        Loader(), "cycle", candidates, allow_measurement_reconstruction=True
+    ).iloc[0]
+
+    assert pd.isna(result.online_pre_defrost_electricity_kwh)
+    assert not result.online_pre_defrost_electricity_measurement_valid
+    assert pd.isna(result.pre_defrost_heat_kwh)
+    assert not result.pre_defrost_heat_measurement_valid
+
+
 def test_features_are_strictly_pre_action_and_require_counts() -> None:
     from defrost_event_models.training_data import extract_pre_defrost_features
 

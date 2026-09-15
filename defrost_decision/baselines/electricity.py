@@ -61,6 +61,7 @@ def integrate_energy_curve_kwh(
     maximum_gap_seconds: float = 5.0,
     bridge_internal_gaps: bool = False,
     extrapolate_endpoints: bool = False,
+    causal_candidates: bool = False,
 ) -> pd.DataFrame:
     """Return gap-aware cumulative energy and coverage at many candidate times."""
     raw = pd.DataFrame(
@@ -157,16 +158,22 @@ def integrate_energy_curve_kwh(
             where=segment_seconds > 0,
         )
         partial_power = left_power + (right_power - left_power) * fraction
-        cumulative += np.where(
-            inside,
-            (left_power + partial_power) / 2 * partial_seconds / 3600,
-            0.0,
+        if not causal_candidates:
+            cumulative += np.where(
+                inside,
+                (left_power + partial_power) / 2 * partial_seconds / 3600,
+                0.0,
+            )
+            covered += partial_seconds
+        bridged_candidates = (
+            inside.copy() if not causal_candidates else np.zeros(len(candidates), bool)
         )
-        covered += partial_seconds
-        bridged_candidates = inside.copy()
         for gap_index in np.flatnonzero(bridged_segments):
-            bridged_candidates |= (candidate_ns > observed_ns[gap_index - 1]) & (
-                candidate_ns < observed_ns[gap_index]
+            bridged_candidates |= (
+                candidate_ns >= observed_ns[gap_index]
+                if causal_candidates
+                else (candidate_ns > observed_ns[gap_index - 1])
+                & (candidate_ns < observed_ns[gap_index])
             )
         spans = np.where(
             candidates >= raw_time[0],
@@ -257,6 +264,8 @@ def integrate_heating_curve(
     start: pd.Timestamp,
     integration_protocol: str = "historical_reconstruction",
     historical_start: pd.Timestamp | None = None,
+    *,
+    causal_candidates: bool = False,
 ) -> pd.DataFrame:
     """Return the selected heating integral plus the causal strict diagnostic.
 
@@ -276,8 +285,9 @@ def integrate_heating_curve(
             pd.to_numeric(power_kw.loc[source], errors="coerce"),
             candidates,
             bridge_internal_gaps=True,
-            extrapolate_endpoints=True,
-        )[["energy_kwh", "coverage"]]
+            extrapolate_endpoints=not causal_candidates,
+            causal_candidates=causal_candidates,
+        )[["energy_kwh", "coverage", "bridged_internal_gap"]]
         if base_start != start:
             prefix = parsed.between(min(start, base_start), max(start, base_start))
             adjustment, coverage = integrate_energy_kwh(

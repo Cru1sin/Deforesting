@@ -384,8 +384,10 @@ def test_optimal_rgb_figures_paginate_four_methods_per_page() -> None:
         )
     )
 
-    assert len(pages) == 3
-    assert [sum(axis.get_visible() for axis in figure.axes) for figure in pages] == [4, 4, 4]
+    assert len(pages) == (len(algorithms) + 3) // 4
+    assert [sum(axis.get_visible() for axis in figure.axes) for figure in pages] == [
+        min(4, len(algorithms) - start) for start in range(0, len(algorithms), 4)
+    ]
     for figure in pages:
         plt.close(figure)
 
@@ -1249,3 +1251,335 @@ def test_pareto_panel_labels_front_times() -> None:
 
     assert {text.get_text() for text in axis.texts} >= {"10", "20"}
     plt.close(figure)
+
+
+def test_pareto_panel_uses_full_valid_candidate_domain() -> None:
+    from plots.pareto_selection import plot_cop_heating_rate_pareto
+
+    start = pd.Timestamp("2026-01-01")
+    values = pd.DataFrame(
+        {
+            "candidate_defrost_time": [
+                start + pd.Timedelta(minutes=10),
+                start + pd.Timedelta(minutes=20),
+                start + pd.Timedelta(minutes=30),
+            ],
+            "cycle_cop": [2.0, 2.1, 6.0],
+            "cycle_heating_rate_kw": [4.1, 4.0, 12.0],
+            "cycle_evaporator_capacity_kw": [2.5, 2.4, 8.0],
+            "cycle_cop_eligible": True,
+            "cycle_heating_rate_kw_eligible": True,
+            "is_cop_heating_rate_pareto_point": [True, True, False],
+            "is_selected_pareto_point": [False, True, False],
+        }
+    )
+    figure, axis = plt.subplots()
+
+    plot_cop_heating_rate_pareto(axis, values, start)
+
+    assert axis.get_xlim()[0] <= 2.0 and axis.get_xlim()[1] >= 6.0
+    assert axis.get_ylim()[0] <= 4.0 and axis.get_ylim()[1] >= 12.0
+    assert axis.get_title(loc="left").startswith("Full Pareto domain")
+    plt.close(figure)
+
+
+def test_pareto_panel_can_add_selected_centered_local_view() -> None:
+    from plots.pareto_selection import plot_cop_heating_rate_pareto
+
+    start = pd.Timestamp("2026-01-01")
+    values = pd.DataFrame(
+        {
+            "candidate_defrost_time": [
+                start + pd.Timedelta(minutes=value) for value in (0, 10, 20, 30, 40)
+            ],
+            "cycle_cop": [0.0, 1.0, 2.0, 3.0, 100.0],
+            "cycle_heating_rate_kw": [0.0, 2.0, 4.0, 6.0, 200.0],
+            "cycle_evaporator_capacity_kw": [0.0, 1.0, 2.0, 3.0, 100.0],
+            "cycle_cop_eligible": True,
+            "cycle_heating_rate_kw_eligible": True,
+            "is_cop_heating_rate_pareto_point": [False, False, True, False, False],
+            "is_selected_pareto_point": [False, False, True, False, False],
+        }
+    )
+    full_figure, full_axis = plt.subplots()
+    local_figure, local_axis = plt.subplots()
+
+    plot_cop_heating_rate_pareto(full_axis, values, start)
+    plot_cop_heating_rate_pareto(
+        local_axis, values, start, local=True, local_window_minutes=10
+    )
+
+    assert local_axis.get_xlim() == pytest.approx((.96, 3.04))
+    assert local_axis.get_ylim() == pytest.approx((1.92, 6.08))
+    assert local_axis.get_title(loc="left").startswith("Knee time window (±10 min)")
+    assert max(len(collection.get_offsets()) for collection in local_axis.collections) == 3
+    assert len(local_axis.lines[0].get_xdata()) == 5
+    assert {"0", "40"} <= {text.get_text() for text in full_axis.texts}
+    labels = local_axis.get_legend_handles_labels()[1]
+    assert "Optimal defrost point" in labels
+    assert "Pareto front" not in labels
+
+    knee_figure, knee_axis = plt.subplots()
+    plot_cop_heating_rate_pareto(
+        knee_axis, values, start, selection_label="Selected Pareto knee"
+    )
+    assert "Selected Pareto knee" in knee_axis.get_legend_handles_labels()[1]
+
+    values["is_selected_pareto_point"] = False
+    no_selected_figure, no_selected_axis = plt.subplots()
+    plot_cop_heating_rate_pareto(
+        no_selected_axis, values, start, local=True, local_window_minutes=10
+    )
+    assert no_selected_axis.get_title(loc="left") == "Optimal-point detail unavailable"
+    assert not no_selected_axis.collections
+    assert any(
+        "Local time view unavailable" in text.get_text()
+        for text in no_selected_axis.texts
+    )
+    centered_figure, centered_axis = plt.subplots()
+    plot_cop_heating_rate_pareto(
+        centered_axis, values, start, local=True, local_window_minutes=10,
+        local_center_time=start + pd.Timedelta(minutes=10),
+    )
+    assert centered_axis.get_xlim() == pytest.approx((-.04, 2.04))
+    assert centered_axis.get_title(loc="left").startswith("Knee time window (±10 min)")
+    plt.close(full_figure)
+    plt.close(local_figure)
+    plt.close(no_selected_figure)
+    plt.close(centered_figure)
+
+
+def test_offscreen_pareto_markers_can_use_separate_navigation_lanes() -> None:
+    from plots.pareto_selection import clip_point_to_axes
+
+    figure, axis = plt.subplots()
+    axis.set(xlim=(0, 1), ylim=(0, 1))
+
+    first = clip_point_to_axes(axis, -1, -1, pad_fraction=.025)
+    second = clip_point_to_axes(axis, -1, -1, pad_fraction=.075)
+
+    assert first[:2] == pytest.approx((.025, .025))
+    assert second[:2] == pytest.approx((.075, .075))
+    assert first[2] == second[2] == r"$\swarrow$"
+    plt.close(figure)
+
+
+def test_effective_publication_merges_cop_axes_and_interpolates_display(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+
+    from plots.publication import render_decision_publication
+
+    start = pd.Timestamp("2026-01-01")
+    times = pd.date_range(start, periods=5, freq="min")
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "cycle_stage": "frost_development",
+            "cop": [2.0, np.nan, 2.2, 2.3, 2.4],
+            "water_in_temperature": 20.0,
+            "water_out_temperature": 25.0,
+            "water_temperature_setpoint": 30.0,
+        }
+    )
+    curve = pd.DataFrame(
+        {
+            "candidate_defrost_time": times,
+            "algorithm": "effective_cop",
+            "preparation_heat": "include",
+            "cycle_status": "identified_curve",
+            "cycle_cop": [2.0, np.nan, 2.2, 2.1, 2.4],
+            "cycle_cop_eligible": [True, True, True, True, False],
+            "t_star": times[2],
+            "t_RB": times[3],
+        }
+    )
+    captured = []
+    monkeypatch.setattr(Figure, "savefig", lambda figure, *_a, **_k: captured.append(figure))
+    render_decision_publication(
+        frame,
+        {},
+        curve,
+        {"rb": {"target_time": times[3]}, "optimal": {"target_time": times[2]}},
+        tmp_path / "effective.png",
+        parallel_curve=curve,
+    )
+    figure = captured[0]
+    assert len(figure.axes) == 6  # Two front images, three panels, one right axis.
+    image, _, cop, water, absolute, relative = figure.axes
+    assert image.get_position().height > 1.5 * cop.get_position().height
+    assert cop.lines[0].get_ydata()[1] == pytest.approx(2.1)
+    assert water.get_ylabel() == "Water temperature [degC]"
+    assert absolute.get_ylabel() == "Effective cycle COP [-]"
+    assert absolute.lines[0].get_linestyle() == "--"
+    assert absolute.lines[0].get_alpha() is None
+    assert absolute.lines[1].get_ydata()[1] == pytest.approx(2.1)
+    assert np.isnan(absolute.lines[1].get_ydata()[-1])
+    assert relative.lines[1].get_ydata()[2] == pytest.approx(100)
+    assert relative.get_ylim() == (90, 100.8)
+    assert relative.spines["right"].get_visible()
+    assert relative.spines["right"].get_edgecolor() == (0, 0, 0, 1)
+    assert {text.get_text() for text in relative.texts} >= {"1%", "2%", "5%"}
+    legend = {text.get_text() for text in absolute.get_legend().get_texts()}
+    assert legend >= {
+        "RB defrost trigger",
+        "COP-optimal defrost trigger",
+        "Outside candidate support",
+        "Normalized cycle COP",
+    }
+    assert pd.isna(curve.cycle_cop.iloc[1])  # Display interpolation does not change decisions.
+
+
+def test_chen_cycle_figure_reuses_effective_cop_panel_and_keeps_missing_probabilities():
+    from plots.publication import _effective_cop_probability_figure
+
+    origin = pd.Timestamp("2026-01-01 00:00:00")
+    times = pd.date_range(origin, periods=6, freq="30s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "cycle_stage": [
+                "recovery",
+                "recovery",
+                "frost_development",
+                "frost_development",
+                "frost_development",
+                "defrost_preparation",
+            ],
+        }
+    )
+    curve = pd.DataFrame(
+        {
+            "candidate_defrost_time": times,
+            "cycle_cop": [0.0, 1.0, 2.0, 2.2, 2.1, 2.0],
+            "cycle_cop_eligible": [False, False, True, True, True, False],
+            "t_star": times[3],
+            "t_RB": times[4],
+            "cycle_status": "identified_curve",
+            "cycle_cop_basin_1pct_start": times[3],
+            "cycle_cop_basin_1pct_end": times[3],
+            "cycle_cop_basin_2pct_start": times[3],
+            "cycle_cop_basin_2pct_end": times[4],
+            "cycle_cop_basin_5pct_start": times[2],
+            "cycle_cop_basin_5pct_end": times[4],
+        }
+    )
+    trace = pd.DataFrame(
+        {
+            "candidate_defrost_time": times,
+            "score": [0.1, np.nan, 0.6, 0.8, 0.7, 0.9],
+            "threshold": 0.5,
+        }
+    )
+    metric = pd.Series({"trigger_time": times[3], "status": "scored"})
+
+    figure = _effective_cop_probability_figure(
+        frame, curve, trace, metric, "frost_cycle_000001"
+    )
+
+    effective_axis = next(
+        axis for axis in figure.axes if axis.get_ylabel() == "Effective cycle COP [-]"
+    )
+    probability_axis = next(
+        axis for axis in figure.axes if axis.get_ylabel() == "Trigger probability"
+    )
+    assert effective_axis.get_shared_x_axes().joined(effective_axis, probability_axis)
+    assert effective_axis.patches and probability_axis.patches
+    labels = {
+        line.get_label()
+        for axis in (effective_axis, probability_axis)
+        for line in axis.lines
+    }
+    assert {
+        "COP optimum",
+        "RB trigger",
+        "2/3 confirmed trigger",
+        "Positive threshold (0.5)",
+    } <= labels
+    probability = next(
+        line for line in probability_axis.lines if line.get_label() == "Positive-class probability"
+    )
+    assert np.isnan(probability.get_ydata()[1])
+    assert "(a)" in {text.get_text() for text in effective_axis.texts}
+    assert "(b)" in {text.get_text() for text in probability_axis.texts}
+
+
+def test_publish_effective_decision_preserves_history_and_manual_status(tmp_path):
+    from dataset_tools.dataset_maintenance import publish_effective_decision_assets
+
+    dataset = tmp_path / "dataset"
+    (dataset / "cycles").mkdir(parents=True)
+    name = "frost_cycle_000001"
+    old = dataset / "cycles" / f"{name}_pareto_decision.png"
+    old.write_bytes(b"historical figure")
+    record = {
+        "cycle_name": name,
+        "status": "valid",
+        "assets": {"pareto_decision": f"cycles/{old.name}"},
+        "pareto_decision": {"status": "old"},
+    }
+    (dataset / "cycle_catalog.json").write_text(json.dumps({"cycles": [record]}))
+    run = tmp_path / "run"
+    run.mkdir()
+    pd.DataFrame(
+        [{"cycle_name": name, "cycle_status": "identified_curve", "preparation_heat": "zero"}]
+    ).to_csv(run / "cycle_comparison.csv", index=False)
+    figures = tmp_path / "figures"
+    source = figures / "cost_function_effective_cop_cycle" / "cycle_001_publication.png"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"effective figure")
+    publish_effective_decision_assets(dataset, run, figures)
+    current = json.loads((dataset / "cycle_catalog.json").read_text())["cycles"][0]
+    assert current["status"] == "valid"
+    assert "pareto_decision" not in current["assets"]
+    assert current["effective_cop"]["preparation_heat"] == "zero"
+    published = dataset / current["assets"]["effective_cop"]
+    assert published.read_bytes() == b"effective figure"
+    assert (figures / "previous_dataset_decisions" / old.name).read_bytes() == b"historical figure"
+    assert not old.exists()
+
+    table = pd.read_csv(run / "cycle_comparison.csv")
+    table["preparation_heat"] = "include"
+    table.to_csv(run / "cycle_comparison.csv", index=False)
+    with pytest.raises(ValueError, match="zero preparation heat"):
+        publish_effective_decision_assets(dataset, run, figures)
+    assert published.name == f"{name}_effective_cop.png"
+    assert published.read_bytes() == b"effective figure"
+
+
+def test_timing_comparison_gain_uses_only_supported_paired_cycles():
+    from plots.defrost_decision import _comparison_figure
+
+    start = pd.Timestamp("2026-01-01")
+    rows = []
+    for name, eligible in [("cycle_001", True), ("cycle_002", False)]:
+        for minute, cop in [(10, 2.0), (20, 2.2)]:
+            rows.append(
+                dict(
+                    cycle_name=name,
+                    experiment_id="e",
+                    cycle_start=start,
+                    stable_heating_start=start,
+                    observation_end=start + pd.Timedelta(minutes=30),
+                    candidate_defrost_time=start + pd.Timedelta(minutes=minute),
+                    t_star=start + pd.Timedelta(minutes=20),
+                    t_RB=start + pd.Timedelta(minutes=10),
+                    rb_status="triggered",
+                    cycle_status="identified_curve",
+                    preparation_heat="zero",
+                    cycle_cop=cop,
+                    cycle_cop_eligible=eligible or minute == 20,
+                    is_selected=minute == 20,
+                    cycle_cop_basin_1pct_start=pd.NaT,
+                    cycle_cop_basin_1pct_end=pd.NaT,
+                    cycle_cop_basin_5pct_start=pd.NaT,
+                    cycle_cop_basin_5pct_end=pd.NaT,
+                )
+            )
+    fig = _comparison_figure(
+        {"effective_cop": pd.DataFrame(rows)}, ("effective_cop",), horizontal=True
+    )
+    assert "+10.00%" in fig._suptitle.get_text()
+    assert "paired cycles: 1/2" in fig._suptitle.get_text()
+    assert "model estimates" in fig._suptitle.get_text()
+    assert fig.axes[0].get_xlim()[1] >= 30
+    plt.close(fig)

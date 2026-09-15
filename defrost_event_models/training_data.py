@@ -58,10 +58,17 @@ def catalog(loader: Any, *, valid_only: bool = False) -> pd.DataFrame:
     )
 
 
-def load_frame(loader: Any, cycle_name: str, cache: dict[str, pd.DataFrame]) -> pd.DataFrame:
+def load_frame(
+    loader: Any, cycle_name: str, cache: dict[str, pd.DataFrame], *, extra_columns=()
+) -> pd.DataFrame:
     if cycle_name in cache:
         return cache[cycle_name]
-    frame = loader.load_cycle_original(cycle_name, columns=list(RAW_COLUMNS)).copy()
+    columns = list(RAW_COLUMNS) + list(extra_columns)
+    frame = (
+        loader.load_cycle_original(cycle_name, columns=None if extra_columns else columns)
+        .reindex(columns=columns)
+        .copy()
+    )
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     for column in frame.columns.drop("timestamp"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -91,9 +98,20 @@ def water_heat(frame: pd.DataFrame) -> pd.Series:
 
 
 def window_audit(
-    frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, column: str
+    frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, column: str,
+    *, minimum_outlet_temperature: float | None = None,
 ) -> dict[str, object]:
     """Integrate adjacent raw samples in a strict half-open declared window."""
+    if start == end:
+        return {
+            "energy": 0.0,
+            "coverage": 1.0,
+            "maximum_gap_seconds": 0.0,
+            "integral_sampling_convention": INTEGRAL_SAMPLING_CONVENTION,
+            "start_fresh": True,
+            "end_fresh": True,
+            "valid": True,
+        }
     values = sorted_time_slice(frame, start, end, end_inclusive=False).copy()
     values = values.sort_values("timestamp", kind="stable").drop_duplicates("timestamp")
     signal = (
@@ -101,10 +119,30 @@ def window_audit(
         if column == "water_heat"
         else pd.to_numeric(values[column], errors="coerce")
     )
-    observed = pd.DataFrame({"timestamp": values["timestamp"], "value": signal}).dropna()
+    observed = pd.DataFrame({"timestamp": values["timestamp"], "value": signal})
+    if minimum_outlet_temperature is not None:
+        observed["temperature"] = pd.to_numeric(
+            values.get("water_out_temperature", pd.Series(np.nan, index=values.index)),
+            errors="coerce",
+        )
+    observed = observed.dropna()
+    if minimum_outlet_temperature is not None and not np.isfinite(minimum_outlet_temperature):
+        observed = observed.iloc[:0]
     dt = observed["timestamp"].diff().dt.total_seconds()
     short = dt.gt(0) & dt.le(MAXIMUM_GAP_SECONDS)
     increments = ((observed["value"] + observed["value"].shift()) / 2 * dt / 3600).where(short, 0.0)
+    if minimum_outlet_temperature is not None:
+        # Integrate only the above-threshold fraction of each linear segment.
+        left = observed.temperature.shift()
+        right = observed.temperature
+        crossing = ((minimum_outlet_temperature - left) / (right - left)).clip(0, 1)
+        lower = crossing.where(left.lt(minimum_outlet_temperature), 0.0)
+        upper = crossing.where(right.lt(minimum_outlet_temperature), 1.0)
+        upper = upper.where(~(left.lt(minimum_outlet_temperature)
+                                & right.lt(minimum_outlet_temperature)), lower)
+        p0 = observed.value.shift()
+        increments = ((p0 * (upper - lower) + (observed.value - p0)
+                       * (upper ** 2 - lower ** 2) / 2) * dt / 3600).where(short, 0.0)
     short_steps = dt.loc[short]
     cadence = float(short_steps.median()) if not short_steps.empty else np.nan
     last_row = observed.iloc[-1] if not observed.empty else None
@@ -116,7 +154,9 @@ def window_audit(
     hold = min(trailing, cadence) if np.isfinite(cadence) and cadence > 0 else 0.0
     energy = float(increments.sum())
     if last_row is not None:
-        energy += float(last_row["value"]) * hold / 3600
+        retained = (minimum_outlet_temperature is None
+                    or last_row["temperature"] >= minimum_outlet_temperature)
+        energy += float(last_row["value"]) * hold / 3600 if retained else 0.0
     duration = max((end - start).total_seconds(), 0.0)
     covered = float(dt.where(short, 0.0).sum() + hold)
     gaps = dt.dropna()
@@ -154,9 +194,14 @@ def window_audit(
 
 
 def candidate_integral_table(
-    frame: pd.DataFrame, start: pd.Timestamp, candidates: Sequence[pd.Timestamp], column: str
+    frame: pd.DataFrame, start: pd.Timestamp, candidates: Sequence[pd.Timestamp], column: str,
+    *, minimum_outlet_temperature: float | None = None,
 ) -> pd.DataFrame:
-    return pd.DataFrame([window_audit(frame, start, end, column) for end in candidates])
+    return pd.DataFrame([
+        window_audit(frame, start, end, column,
+                     minimum_outlet_temperature=minimum_outlet_temperature)
+        for end in candidates
+    ])
 
 
 def extract_pre_defrost_features(
@@ -266,8 +311,11 @@ def measure_defrost_event_quantities(
     defrost_start: pd.Timestamp,
     defrost_end: pd.Timestamp,
     recovery_end: pd.Timestamp,
+    preparation_heat: str | None = None,
 ) -> dict[str, object]:
-    """Observe preparation, defrost, and fixed recovery targets without clipping Q."""
+    """Integrate all event electricity and the explicitly chosen heat definition."""
+    if preparation_heat not in {None, "include", "zero"}:
+        raise ValueError("preparation heat must be include or zero")
     windows = {
         "prep": (current, preparation_start, defrost_start),
         "D": (current, defrost_start, defrost_end),
@@ -280,11 +328,27 @@ def measure_defrost_event_quantities(
             ("Q", "water_heat"),
             ("E_comp", "compressor_power"),
         ):
-            audit = window_audit(frame, start, end, column)
+            if quantity == "Q" and preparation_heat is not None:
+                column = "heating_capacity"
+            if (
+                quantity == "Q"
+                and preparation_heat is not None
+                and (phase != "prep" or preparation_heat == "zero")
+            ):
+                audit = dict(
+                    energy=0.0,
+                    coverage=1.0,
+                    maximum_gap_seconds=0.0,
+                    start_fresh=True,
+                    end_fresh=True,
+                    valid=True,
+                )
+            else:
+                audit = window_audit(frame, start, end, column)
             result[f"{quantity}_{phase}_kwh"] = audit["energy"]
             for field in ("coverage", "maximum_gap_seconds", "start_fresh", "end_fresh", "valid"):
                 result[f"{quantity}_{phase}_{field}"] = audit[field]
-    partition = preparation_start < defrost_start < defrost_end < recovery_end
+    partition = preparation_start <= defrost_start < defrost_end < recovery_end
     result["defrost_event_electricity_observed_kwh"] = float(
         np.sum([float(result[f"E_{phase}_kwh"]) for phase in windows])  # type: ignore[arg-type]
     )
@@ -314,8 +378,10 @@ def measure_defrost_event_quantities(
     return result
 
 
-def build_defrost_event_training_table(loader: Any) -> pd.DataFrame:  # noqa: C901
-    """Retain every real defrost record, including incomplete exclusions."""
+def build_defrost_event_training_table(
+    loader: Any, *, preparation_heat: str | None = None
+) -> pd.DataFrame:  # noqa: C901
+    """Extract valid-cycle events; retain full chronology for their recovery endpoints."""
     values = catalog(loader)
     next_rows: dict[str, pd.Series] = {}
     for _, experiment in values.groupby("experiment_id", sort=False):
@@ -325,11 +391,9 @@ def build_defrost_event_training_table(loader: Any) -> pd.DataFrame:  # noqa: C9
     cache: dict[str, pd.DataFrame] = {}
     rows: list[dict[str, object]] = []
     real = values.loc[
-        values["defrost_preparation_start"].notna()
-        | (
-            values["status"].eq("valid")
-            & values["defrost_start"].notna()
-            & values["defrost_end"].notna()
+        values["status"].eq("valid") & (
+            values["defrost_preparation_start"].notna()
+            | (values["defrost_start"].notna() & values["defrost_end"].notna())
         )
     ]
     boundary_names = ("heating_start", "defrost_preparation_start", "defrost_start", "defrost_end")
@@ -353,6 +417,10 @@ def build_defrost_event_training_table(loader: Any) -> pd.DataFrame:  # noqa: C9
             next_start = timestamp(following.get("heating_start"))
             if next_start is None or abs((next_start - recorded_end).total_seconds()) > 60:
                 reasons.append("following_cycle_not_adjacent")
+        if preparation_heat is not None and (
+            following is None or timestamp(following.get("stable_heating_start")) is None
+        ):
+            reasons.append("following_recovery_not_identified")
         if reasons:
             row.update(
                 event_valid=False,
@@ -369,15 +437,22 @@ def build_defrost_event_training_table(loader: Any) -> pd.DataFrame:  # noqa: C9
         assert isinstance(heating, pd.Timestamp) and isinstance(preparation, pd.Timestamp)
         assert isinstance(defrost, pd.Timestamp) and isinstance(defrost_end, pd.Timestamp)
         assert following is not None
-        current = load_frame(loader, name, cache)
-        recovery = load_frame(loader, str(following["cycle_name"]), cache)
+        extra = ("heating_capacity",) if preparation_heat is not None else ()
+        current = load_frame(loader, name, cache, extra_columns=extra)
+        recovery = load_frame(loader, str(following["cycle_name"]), cache, extra_columns=extra)
+        recovery_end = (
+            timestamp(following["stable_heating_start"])
+            if preparation_heat is not None
+            else defrost_end + pd.Timedelta(minutes=9)
+        )
         observed = measure_defrost_event_quantities(
             current,
             recovery,
             preparation_start=preparation,
             defrost_start=defrost,
             defrost_end=defrost_end,
-            recovery_end=defrost_end + pd.Timedelta(minutes=9),
+            recovery_end=recovery_end,
+            **({"preparation_heat": preparation_heat} if preparation_heat is not None else {}),
         )
         features = cast(
             dict[str, object],
@@ -400,8 +475,12 @@ def build_defrost_event_training_table(loader: Any) -> pd.DataFrame:  # noqa: C9
                         audit_reasons.append(f"{prefix}_end_boundary")
         row.update(
             next_cycle_name=str(following["cycle_name"]),
-            recovery_end_fixed9=defrost_end + pd.Timedelta(minutes=9),
-            recovery_duration_minutes=9.0,
+            **(
+                {"recovery_end": recovery_end}
+                if preparation_heat is not None
+                else {"recovery_end_fixed9": recovery_end}
+            ),
+            recovery_duration_minutes=(recovery_end - defrost_end).total_seconds() / 60,
             **features,
             **observed,
         )
@@ -409,6 +488,56 @@ def build_defrost_event_training_table(loader: Any) -> pd.DataFrame:  # noqa: C9
         row["event_invalid_reason"] = ";".join(audit_reasons)
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def observed_cycle_cop_comparison(loader, events):
+    """Compare both heat definitions at the same observed closed-cycle endpoint."""
+    from defrost_decision.performance_objectives import calculate_cycle_cop
+
+    rows = []
+    for _, event in events.iterrows():
+        bounds = loader.get_cycle_record(event.cycle_name)["boundaries"]
+        start = timestamp(bounds.get("stable_heating_start"))
+        end = timestamp(event.get("defrost_preparation_start"))
+        row = {
+            "cycle_name": event.cycle_name,
+            "experiment_id": event.experiment_id,
+            "candidate_defrost_time": end,
+            # Observed comparison needs no model features.
+            "pre_defrost_feature_window_valid": True,
+        }
+        valid_boundary = start is not None and end is not None and start < end
+        frame = loader.load_cycle_original(event.cycle_name) if valid_boundary else None
+        if frame is not None:
+            frame["timestamp"] = pd.to_datetime(frame.timestamp)
+        for quantity, column in (("heat", "heating_capacity"), ("electricity", "power_total")):
+            audit = (
+                window_audit(frame, start, end, column)
+                if valid_boundary
+                else {"energy": np.nan, "valid": False}
+            )
+            row[f"pre_defrost_{quantity}_kwh"] = audit["energy"]
+            row[f"pre_defrost_{quantity}_measurement_valid"] = audit["valid"]
+        for quantity, validity in (("electricity", "energy"), ("net_heat", "heat")):
+            row[f"defrost_event_{quantity}_kwh"] = event.get(
+                f"defrost_event_{quantity}_observed_kwh", np.nan
+            )
+            row[f"defrost_event_{quantity}_prediction_available"] = bool(
+                event.get(f"{validity}_event_valid", False)
+            )
+            row[f"defrost_event_{quantity}_in_training_domain"] = True
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    for mode in ("include", "zero"):
+        inputs = table.copy()
+        if mode == "zero":
+            inputs["defrost_event_net_heat_kwh"] = 0.0
+            inputs["defrost_event_net_heat_prediction_available"] = True
+        result = calculate_cycle_cop(inputs, effective=True)
+        table[f"COP_eff_{mode}"] = result.cycle_cop.where(result.cycle_cop_eligible)
+    table["COP_difference"] = table.COP_eff_include - table.COP_eff_zero
+    table["COP_relative_difference_pct"] = 100 * table.COP_difference / table.COP_eff_zero
+    return table
 
 
 def candidate_cohort(loader: Any, parameter_experiments: set[str]) -> tuple[list[str], int]:

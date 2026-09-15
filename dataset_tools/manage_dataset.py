@@ -60,12 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("cycle", nargs="?")
     render.add_argument("--dataset", type=Path, default=Path("dataset"))
     render.add_argument("--publication", action="store_true")
+    render.add_argument("--recovery-boundaries", type=Path)
     render.add_argument("--panel", action="store_true")
     render.add_argument("--fetch-cloud-images", action="store_true")
     render.add_argument("--cleanup-downloaded-images", action="store_true")
-    render.add_argument(
-        "--n-jobs", type=int, default=10, help="maximum concurrent OneDrive requests"
-    )
+    render.add_argument("--n-jobs", type=int, default=6, help="maximum concurrent workers")
     return parser
 
 
@@ -113,6 +112,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
                 fetch_cloud_images=args.fetch_cloud_images,
                 cleanup_downloaded_images=args.cleanup_downloaded_images,
                 n_jobs=args.n_jobs,
+                recovery_boundaries=args.recovery_boundaries,
             )
         )
     return 0

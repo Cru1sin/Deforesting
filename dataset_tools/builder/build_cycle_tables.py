@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .baseline import add_baseline_residuals
 from .dataset_settings import Config
 from .features import calculate_derived_features
 from .match_camera_images import image_columns, image_roles
@@ -72,18 +71,15 @@ def process(
     derived = derived.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
-    baselined, baseline_summary = add_baseline_residuals(
-        derived, initial_summary, channels, config.process.baseline
-    )
     final_summary = _update_summary(
-        baseline_summary,
-        baselined,
+        initial_summary,
+        derived,
         excluded_transition_buckets,
         low_coverage_buckets,
         eligible_channel_buckets,
         processed_cycles,
     )
-    return baselined, final_summary
+    return derived, final_summary
 
 
 def _partition_process_inputs(

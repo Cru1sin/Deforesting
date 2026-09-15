@@ -161,6 +161,7 @@ def plot_trigger_error_figures(
     threshold: float = 0.5,
     flat_output: bool = False,
     error_quantile: float = 0.995,
+    saved_errors: pd.DataFrame | None = None,
 ) -> None:
     """Plot signed trigger-minus-Pareto timing errors for two control rules."""
     colors = ({name: style[0] for name, style in method_styles.items()}
@@ -172,7 +173,8 @@ def plot_trigger_error_figures(
         & predictions["classifier"].eq(classifier)
         & predictions["input_feature"].isin(colors)
     ].copy()
-    errors = trigger_error_table(values, decisions, threshold=threshold)
+    errors = (trigger_error_table(values, decisions, threshold=threshold)
+              if saved_errors is None else saved_errors.copy())
     errors = errors.loc[errors["strategy"].isin(policies)]
     errors["continuous_stream"] = continuous_stream
     source_output.mkdir(parents=True, exist_ok=True)

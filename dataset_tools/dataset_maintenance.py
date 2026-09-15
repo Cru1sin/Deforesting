@@ -267,11 +267,14 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
                 == record.get("boundaries", {}).get(name)
                 for name in ("heating_start", "defrost_start", "defrost_end")
             )
-            if same_boundaries and reviewed is not None and (
-                reviewed.get("status"), reviewed.get("status_reason")
-            ) != (
-                reviewed.get("pipeline_status"),
-                reviewed.get("pipeline_status_reason"),
+            if (
+                same_boundaries
+                and reviewed is not None
+                and (reviewed.get("status"), reviewed.get("status_reason"))
+                != (
+                    reviewed.get("pipeline_status"),
+                    reviewed.get("pipeline_status_reason"),
+                )
             ):
                 record["status"] = reviewed.get("status")
                 record["status_reason"] = reviewed.get("status_reason")
@@ -445,7 +448,6 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
     from .builder.dataset_settings import load_config
     from .builder.schema import build_processed_frame, merge_registries, registry_from_frame
     from .dataset_paths import read_json, write_csv, write_json, write_parquet
-    from .edit_cycle_metadata import apply_baseline
 
     if seconds <= 0:
         raise ValueError("aggregate seconds must be positive")
@@ -502,13 +504,6 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
             cycle_name=str(record["cycle_name"]),
             cycle_uid=str(record["cycle_uid"]),
         )
-        if bool(registry.get("baseline_managed", False)):
-            canonical = apply_baseline(
-                canonical,
-                dict(record),
-                dict(output_registry),
-                seconds=int(registry["baseline_seconds"]),
-            )
         write_csv(canonical, target / f"{record['cycle_name']}.csv")
         write_parquet(canonical, target / f"{record['cycle_name']}.parquet")
 
@@ -696,7 +691,7 @@ def _materialize_cycle(
     from .builder.schema import build_processed_frame, export_original_frame
     from .cycle_metadata import build_cycle_record
     from .dataset_paths import write_csv, write_parquet
-    from .edit_cycle_metadata import apply_baseline, apply_recovery
+    from .edit_cycle_metadata import apply_recovery
     from .local_images import (
         _cycle_image_summary,
         _sensor_coverage_intervals,
@@ -748,16 +743,6 @@ def _materialize_cycle(
                 dict(registry),
                 mode=mode,
                 seconds=int(raw_seconds) if raw_seconds is not None else None,
-            )
-    if bool(registry.get("baseline_managed", False)):
-        baseline_seconds = registry.get("baseline_seconds")
-        if baseline_seconds is not None:
-            baseline_registry = dict(registry)
-            canonical = apply_baseline(
-                canonical,
-                record,
-                baseline_registry,
-                seconds=int(baseline_seconds),
             )
     write_parquet(canonical, dataset_dir / assets["parquet"])
     write_csv(canonical, dataset_dir / assets["csv"])
@@ -1096,6 +1081,7 @@ def render_publication_asset(
     *,
     cost_curve: pd.DataFrame | None = None,
     output_path: Path | None = None,
+    recovery_boundaries: Path | None = None,
 ) -> None:
     """Render one Dataset publication, optionally with an analysis cost curve."""
     from plots.publication import render_cycle_publication
@@ -1113,6 +1099,27 @@ def render_publication_asset(
     if not isinstance(assets, Mapping):
         raise ValueError(f"cycle assets are missing: {cycle_name}")
     frame = pd.read_parquet(dataset_dir / str(assets["parquet"]))
+    if recovery_boundaries is not None:
+        from .builder.detect_cycles import recovery_stages
+
+        boundaries = pd.read_csv(recovery_boundaries)
+        selected = boundaries.loc[
+            boundaries.cycle_name.eq(cycle_name) & boundaries.recovery_rule.eq("frequency-setpoint")
+        ]
+        if len(selected) != 1:
+            raise ValueError(f"expected one recovery boundary for {cycle_name}")
+        row = selected.iloc[0]
+        boundary = pd.to_datetime(row.stable_heating_start)
+        record = {
+            **record,
+            "recovery_status": row.recovery_status,
+            "boundaries": {
+                **record["boundaries"],
+                "stable_heating_start": boundary,
+                **{key: row[key] for key in ("heating_start", "heating_origin") if key in row},
+            },
+        }
+        frame["cycle_stage"] = recovery_stages(frame, record["boundaries"])
     registry = read_json(dataset_dir / "channel_registry.json")
     if not isinstance(registry, dict):
         raise ValueError("channel_registry.json must contain an object")
@@ -1255,6 +1262,7 @@ def review_cycle(
     for record in catalog["cycles"]:
         if isinstance(record, dict) and record.get("cycle_name") == cycle_name:
             record["status"] = status
+            record["review_status"] = status
             record["status_reason"] = reason
             if rgb_frost is not None:
                 record["rgb_frost_status"] = rgb_frost
@@ -1458,9 +1466,9 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
         metadata = metadata.sort_values(
             ["cycle_name", "camera_role", "image_time", "file_name"], kind="stable"
         ).reset_index(drop=True)
-        metadata["frame_index"] = metadata.groupby(
-            ["cycle_name", "camera_role"], sort=False
-        ).cumcount() + 1
+        metadata["frame_index"] = (
+            metadata.groupby(["cycle_name", "camera_role"], sort=False).cumcount() + 1
+        )
         print("[refresh] updating image metadata")
         write_parquet(metadata, root / "image_metadata.parquet")
 
@@ -1570,7 +1578,8 @@ def render_dataset(
     panel: bool = True,
     fetch_cloud_images: bool = False,
     cleanup_downloaded_images: bool = False,
-    n_jobs: int = 1,
+    n_jobs: int = 6,
+    recovery_boundaries: Path | None = None,
 ) -> Path:
     """Render one cycle, or every Catalog cycle when no name is given."""
     from .cycle_metadata import read_catalog
@@ -1600,7 +1609,9 @@ def render_dataset(
             print(f"[render] {len(records)} cycles with {n_jobs} workers", flush=True)
             if publication:
                 for record in records:
-                    render_publication_asset(dataset_dir, record)
+                    render_publication_asset(
+                        dataset_dir, record, recovery_boundaries=recovery_boundaries
+                    )
             with materialize_image_members(
                 dataset_dir,
                 requests,
@@ -1634,6 +1645,7 @@ def render_dataset(
                     panel,
                     fetch_cloud_images,
                     cleanup_downloaded_images,
+                    recovery_boundaries,
                 )
                 for record in records
             )
@@ -1651,7 +1663,7 @@ def render_dataset(
         if isinstance(record, Mapping) and str(record.get("cycle_name")) == cycle_name
     )
     if publication:
-        render_publication_asset(dataset_dir, record)
+        render_publication_asset(dataset_dir, record, recovery_boundaries=recovery_boundaries)
     if panel:
         from .local_images import scan_cycle_images
 
@@ -1738,6 +1750,7 @@ def _render_cycle_job(
     panel: bool,
     fetch_cloud_images: bool,
     cleanup_downloaded_images: bool,
+    recovery_boundaries: Path | None = None,
 ) -> str:
     print(f"[render:start] {cycle_name}", flush=True)
     render_dataset(
@@ -1747,6 +1760,7 @@ def _render_cycle_job(
         panel=panel,
         fetch_cloud_images=fetch_cloud_images,
         cleanup_downloaded_images=cleanup_downloaded_images,
+        recovery_boundaries=recovery_boundaries,
     )
     return cycle_name
 
@@ -1761,3 +1775,57 @@ def _experiment_camera_roles(
     }
     scoped = image_metadata.loc[image_metadata["cycle_name"].astype(str).isin(cycle_names)]
     return tuple(sorted(scoped["camera_role"].dropna().astype(str).unique()))
+
+
+def publish_effective_decision_assets(dataset_dir: Path, run: Path, figures: Path) -> None:
+    """Publish the selected zero-preparation COP definition and archive prior figures."""
+    from shutil import copy2
+
+    from .cycle_metadata import read_catalog, write_catalog
+
+    catalog = read_catalog(dataset_dir)
+    summary = pd.read_csv(run / "cycle_comparison.csv").set_index("cycle_name")
+    if not summary.preparation_heat.eq("zero").all():
+        raise ValueError("Dataset effective COP uses zero preparation heat")
+    source_dir = figures / "cost_function_effective_cop_cycle"
+    sources = {
+        name: source_dir / f"cycle_{int(name.rsplit('_', 1)[-1]):03d}_publication.png"
+        for name in summary.index
+    }
+    for source in sources.values():
+        if not source.is_file():
+            raise FileNotFoundError(source)
+    archive = figures / "previous_dataset_decisions"
+    archive.mkdir(parents=True, exist_ok=True)
+    if not (archive / "cycle_catalog.json").exists():
+        copy2(dataset_dir / "cycle_catalog.json", archive / "cycle_catalog.json")
+    for record in catalog["cycles"]:
+        name = record["cycle_name"]
+        if name not in sources:
+            continue
+        assets = record["assets"]
+        row = summary.loc[name]
+        decision_key = "effective_cop"
+        for key in (
+            "pareto_decision",
+            "effective_cop_include_decision",
+            "effective_cop_zero_decision",
+            decision_key,
+        ):
+            old = dataset_dir / assets[key] if key in assets else None
+            if old is not None and old.is_file():
+                if not (archive / old.name).exists():
+                    copy2(old, archive / old.name)
+                old.unlink()
+            assets.pop(key, None)
+            record.pop(key, None)
+        relative = f"cycles/{name}_{decision_key}.png"
+        copy2(sources[name], dataset_dir / relative)
+        assets[decision_key] = relative
+        record[decision_key] = {
+            "status": str(row.cycle_status),
+            "preparation_heat": str(row.preparation_heat),
+            "source_table": str((run / "candidate_decisions.csv").resolve()),
+            "selection_method": "refrigerant_effective_cop_maximum",
+        }
+    write_catalog(dataset_dir, catalog)

@@ -72,6 +72,10 @@ def build_validation_table(events: pd.DataFrame, models: dict[str, Any]) -> pd.D
                     row[target] = event.get(target, np.nan)
                     row[prediction_column] = prediction.iloc[position]["prediction"]
                     row[support_column] = prediction.iloc[position]["support_distance"]
+                    row[name + "_in_training_domain"] = bool(
+                        prediction.iloc[position]["support_distance"]
+                        <= prediction.iloc[position]["support_threshold"]
+                    )
             rows.extend(event_rows.values())
     any_valid = pd.Series(False, index=events.index)
     for name, target in OUTCOME_TARGETS.items():
@@ -89,10 +93,55 @@ def build_validation_table(events: pd.DataFrame, models: dict[str, Any]) -> pd.D
             }
         )
     result = pd.DataFrame(rows)
-    result["training_cohort_rule"] = TRAINING_COHORT_RULE
-    result["common_training_event_count"] = len(select_events_complete_for_all_outcomes(events))
+    result["training_cohort_rule"] = models.get("training_cohort_rule", TRAINING_COHORT_RULE)
+    if models.get("training_cohort_rule") != "per_target_valid_events":
+        result["common_training_event_count"] = len(select_events_complete_for_all_outcomes(events))
     for outcome, target in OUTCOME_TARGETS.items():
         result[f"available_event_count_{outcome}"] = (
             len(select_valid_events_for_quantity(events, outcome)) if target in events else 0
         )
     return result
+
+
+def summarize_validation(validation):
+    """LOEO error per experiment and pooled; targets retain their own valid cohort."""
+    rows = []
+    for model_name, model in validation.groupby("model_name"):
+        for outcome, (prediction, _) in _VALIDATION_COLUMNS.items():
+            observed = OUTCOME_TARGETS[outcome]
+            if prediction not in model:
+                continue
+            valid = model.dropna(subset=[observed, prediction])
+            if valid.empty:
+                continue
+            for experiment, group in [("all", valid), *valid.groupby("experiment_id")]:
+                error = group[prediction] - group[observed]
+                rows.append(
+                    {
+                        "model_name": model_name,
+                        "outcome": outcome,
+                        "experiment_id": experiment,
+                        "n_events": len(group),
+                        "n_experiments": group.experiment_id.nunique(),
+                        "mse": (error**2).mean(),
+                        "experiment_macro_mse": (error**2)
+                        .groupby(group.experiment_id)
+                        .mean()
+                        .mean(),
+                        "supported_mse": (error**2)
+                        .loc[group[outcome + "_in_training_domain"].eq(True)]
+                        .mean(),
+                        "observed_mean": group[observed].mean(),
+                        "observed_std": group[observed].std(ddof=0),
+                        "relative_rmse": np.sqrt((error**2).mean()) / group[observed].abs().mean()
+                        if group[observed].abs().mean() > 0
+                        else np.nan,
+                        "in_training_domain_fraction": group[
+                            outcome + "_in_training_domain"
+                        ].mean(),
+                        "mae": error.abs().mean(),
+                        "rmse": np.sqrt((error**2).mean()),
+                        "bias": error.mean(),
+                    }
+                )
+    return pd.DataFrame(rows)

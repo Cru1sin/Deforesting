@@ -15,6 +15,7 @@ import pandas as pd
 
 from dataset_tools import DatasetLoader
 from dataset_tools.local_images import scan_cycle_images
+from plots.pareto_selection import COP_COLOR, OPTIMAL_COLOR, RB_COLOR
 from plots.publication import (
     _plot_decision_image,
     match_decision_rgb_images,
@@ -22,6 +23,7 @@ from plots.publication import (
 )
 
 STYLES = {
+    "effective_cop": (OPTIMAL_COLOR, "D", "COP-optimal defrost trigger"),
     "v1": ("#0072B2", "D", "V1 optimum"),
     "v2": ("#E69F00", "s", "V2 optimum"),
     "v2.1": ("#009E73", "^", "V2.1 optimum"),
@@ -38,7 +40,7 @@ STYLES = {
         "COP–heating-rate Pareto knee",
     ),
     "v2.6.8": ("#333333", "h", "V2.6.8 diagnostic minimum"),
-    "RB": ("#2E7D5B", "o", "Rule defrost"),
+    "RB": (RB_COLOR, "o", "Rule defrost"),
 }
 CURVE_LINESTYLES = {
     "v1": "-",
@@ -267,7 +269,12 @@ def _cycle_points(table: pd.DataFrame, optimum_column: str = "t_star") -> pd.Dat
             {
                 "cycle_name": str(cycle_name),
                 "experiment_id": str(first.get("experiment_id", "unknown")),
-                "length_minutes": (cycle["candidate_defrost_time"].max() - start).total_seconds()
+                "length_minutes": (
+                    pd.to_datetime(
+                        first.get("observation_end", cycle["candidate_defrost_time"].max())
+                    )
+                    - start
+                ).total_seconds()
                 / 60,
                 "optimum_minutes": (first[optimum_column] - start).total_seconds() / 60,
                 "optimum_supported": (
@@ -321,13 +328,108 @@ def _shade_experiment_dates(axis: plt.Axes, experiments: list[str]) -> None:
 
 
 def _comparison_figure(  # noqa: C901
-    tables: Mapping[str, pd.DataFrame], algorithms: tuple[str, ...]
+    tables: Mapping[str, pd.DataFrame], algorithms: tuple[str, ...], *, horizontal=False
 ) -> plt.Figure:
     points = {algorithm: _cycle_points(tables[algorithm]) for algorithm in algorithms}
     cycle_sets = {algorithm: set(values.index) for algorithm, values in points.items()}
     if len(cycle_sets) > 1 and len({frozenset(cycles) for cycles in cycle_sets.values()}) != 1:
         raise ValueError("comparison families must contain identical cycle sets")
     cycles = sorted(set().union(*(set(values.index) for values in points.values())))
+    if horizontal:
+        figure, axis = plt.subplots(figsize=(10, max(6, 0.17 * len(cycles))))
+        y = np.arange(len(cycles))
+        for algorithm in algorithms:
+            values = points[algorithm].reindex(cycles)
+            color, marker, label = _style(algorithm)
+            axis.hlines(y, 0, values.length_minutes, color="#DDE3E7", lw=2, label="Observed cycle")
+            axis.scatter(values.optimum_minutes, y, color=color, marker=marker, s=13, label=label)
+            axis.scatter(
+                np.zeros(len(values.loc[values.optimum_minutes.isna()])),
+                y[values.optimum_minutes.isna()],
+                marker="x",
+                color=color,
+                s=13,
+                label="No supported decision",
+            )
+            source = tables[algorithm].groupby("cycle_name").first().reindex(cycles)
+            for percent, width in ((5, 1.0), (1, 3.0)):
+                left = (
+                    pd.to_datetime(source[f"cycle_cop_basin_{percent}pct_start"])
+                    - pd.to_datetime(source.cycle_start)
+                ).dt.total_seconds() / 60
+                right = (
+                    pd.to_datetime(source[f"cycle_cop_basin_{percent}pct_end"])
+                    - pd.to_datetime(source.cycle_start)
+                ).dt.total_seconds() / 60
+                axis.hlines(
+                    y,
+                    left,
+                    right,
+                    color=COP_COLOR,
+                    lw=width,
+                    alpha=0.5,
+                    label=f"Within {percent}% of optimum",
+                )
+        axis.scatter(
+            points[algorithms[0]].reindex(cycles).rb_minutes,
+            y,
+            facecolors="none",
+            edgecolors=STYLES["RB"][0],
+            s=20,
+            label="RB defrost trigger",
+        )
+        rb_supported = (
+            pd.Series(
+                {
+                    name: (
+                        pd.to_datetime(curve.candidate_defrost_time).eq(
+                            pd.to_datetime(curve.t_RB.iloc[0])
+                        )
+                        & curve.cycle_cop_eligible
+                    ).any()
+                    for name, curve in tables[algorithms[0]].groupby("cycle_name")
+                }
+            )
+            .reindex(cycles)
+            .fillna(False)
+        )
+        axis.scatter(
+            points[algorithms[0]].reindex(cycles).rb_minutes[~rb_supported],
+            y[~rb_supported],
+            marker="x",
+            color=STYLES["RB"][0],
+            s=10,
+            label="RB COP unsupported",
+        )
+        axis.set(
+            yticks=y,
+            yticklabels=[name.rsplit("_", 1)[-1] for name in cycles],
+            xlabel="Time from cycle start [min]",
+            ylabel="Cycle",
+        )
+        axis.tick_params(axis="y", labelsize=6)
+        axis.invert_yaxis()
+        axis.grid(axis="x", alpha=0.15)
+        axis.legend(
+            frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, 1.035), ncol=3
+        )
+        from select_defrost_time import summarize_decisions
+
+        summary = summarize_decisions(tables[algorithms[0]])
+        paired = summary.dropna(subset=["COP_eff_selected", "COP_eff_RB"])
+        gain = paired.COP_relative_change_pct.mean()
+        title = (
+            f"Idealized COP gain vs RB: {gain:+.2f}%  |  paired cycles: {len(paired)}/{len(cycles)}"
+            if len(paired)
+            else "Idealized COP gain vs RB: unavailable (no paired supported COP)"
+        )
+        figure.suptitle(
+            title + "\nMean per-cycle change · model estimates · observed time window",
+            fontsize=10.5,
+            y=0.996,
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.963))
+        return figure
     cycle_ids = [int(cycle.rsplit("_", 1)[-1]) for cycle in cycles]
     x = np.arange(len(cycles))
     figure, axis = plt.subplots(figsize=(max(7.2, 0.19 * len(cycles)), 5.2))
@@ -890,7 +992,9 @@ def _render_cycle_sets(  # noqa: C901
                     else "Minimum"
                 ),
                 minimum_support_label=minimum_support_label,
-                parallel_curve=curve if algorithm == "cop_heating_rate_pareto_knee" else None,
+                parallel_curve=curve
+                if algorithm in {"cop_heating_rate_pareto_knee", "effective_cop"}
+                else None,
             )
 
 
@@ -898,10 +1002,15 @@ def render_current_decision_figures(
     decisions: pd.DataFrame,
     loader: DatasetLoader,
     output: Path,
+    n_jobs: int = 6,
+    fetch_cloud_images: bool = False,
 ) -> None:
     """Render the existing publication layout from one candidate-decision table."""
     table = decisions.copy()
-    table["algorithm"] = "cop_heating_rate_pareto_knee"
+    algorithm = (
+        str(table.algorithm.iloc[0]) if "algorithm" in table else "cop_heating_rate_pareto_knee"
+    )
+    table["algorithm"] = algorithm
     table["t_RB"] = table.get("t_RB", pd.NaT)
     table["rb_status"] = table.get("rb_status", "unavailable")
     table["t_star"] = pd.NaT
@@ -917,11 +1026,68 @@ def render_current_decision_figures(
         str(cycle_name): loader.get_cycle_record(str(cycle_name))
         for cycle_name in table["cycle_name"].drop_duplicates()
     }
-    _render_cycle_sets({"cop_heating_rate_pareto_knee": table}, loader, records, output)
+    if fetch_cloud_images:
+        from dataset_tools.cloud_images import materialize_image_members
+
+        requests = {}
+        for name, curve in table.groupby("cycle_name", sort=False):
+            matches = _decision_images(
+                loader.load_image_metadata(name), loader.load_cycle_images(name), curve
+            )
+            missing = sorted({f"front/{info['file_name']}" for info in matches.values()
+                              if info.get("status") == "physical_image_missing"})
+            if missing:
+                requests[name] = missing
+        with materialize_image_members(loader.dataset_root, requests, n_jobs=n_jobs) as ready:
+            for name in ready:
+                print(f"[decision images] {name}", flush=True)
+    if algorithm == "effective_cop":
+        from joblib import Parallel, delayed, parallel_config
+
+        output.mkdir(parents=True, exist_ok=True)
+        _save_png(
+            _comparison_figure({algorithm: table}, (algorithm,), horizontal=True),
+            output / "timing_vs_RB.png",
+        )
+        from select_defrost_time import summarize_decisions
+
+        summary = summarize_decisions(table)
+        summary.to_csv(output / "timing_vs_RB.csv", index=False)
+        figure, axes = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+        x = np.arange(len(summary))
+        axes[0].scatter(
+            x, summary.COP_eff_selected, color=OPTIMAL_COLOR, s=12, label="Effective COP maximum"
+        )
+        axes[0].scatter(
+            x, summary.COP_eff_RB, facecolors="none", edgecolors=STYLES["RB"][0], s=16, label="RB"
+        )
+        axes[0].set_ylabel("Effective COP [-]")
+        axes[0].legend(frameon=False, fontsize=8)
+        axes[1].scatter(x, summary.COP_relative_change_pct, s=12, color=COP_COLOR)
+        axes[1].set(
+            ylabel="Change vs RB [%]",
+            xlabel="Cycle",
+            xticks=x,
+            xticklabels=summary.cycle_name.str.rsplit("_", n=1).str[-1],
+        )
+        axes[1].tick_params(axis="x", labelrotation=90, labelsize=5)
+        figure.tight_layout()
+        _save_png(figure, output / "effective_COP_vs_RB.png")
+        with parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1):
+            list(
+                Parallel(return_as="generator_unordered")(
+                    delayed(_render_cycle_sets)({algorithm: curve}, loader, records, output)
+                    for _, curve in table.groupby("cycle_name", sort=False)
+                )
+            )
+    else:
+        _render_cycle_sets({algorithm: table}, loader, records, output)
 
 
 def _decision_title(algorithm: str) -> str:
     base = algorithm.split("__", 1)[0]
+    if base == "effective_cop":
+        return "Effective heating COP maximum"
     if algorithm == "v1":
         return "Unit-heat V1 optimum"
     if algorithm == "v2":
@@ -1186,3 +1352,55 @@ def generate_cost_function_figures(
                 loader,
                 output / "cost_curves" / heat_basis,
             )
+
+
+def render_preparation_comparison(paired, output):
+    timing = "time_difference_minutes" in paired
+    if not timing:
+        paired = paired.rename(
+            columns={f"COP_eff_{mode}": f"COP_eff_selected_{mode}" for mode in ("include", "zero")}
+        )
+        paired = paired.assign(common_supported=paired.COP_difference.notna())
+    figure, axes = plt.subplots(
+        3 if timing else 2, 1, figsize=(12, 7 if timing else 5), sharex=True
+    )
+    x = np.arange(len(paired))
+    axes[0].scatter(x, paired.COP_difference, s=12, color=COP_COLOR)
+    axes[0].set_ylabel(("Optimum COP" if timing else "COP") + " include − zero [-]")
+    if timing:
+        axes[1].scatter(x, paired.time_difference_minutes, s=12, color=COP_COLOR)
+        axes[1].set_ylabel("Optimum include − zero [min]")
+    for level, mode in enumerate(("include", "zero")):
+        supported = paired[f"COP_eff_selected_{mode}"].notna()
+        axes[-1].scatter(
+            x[supported],
+            np.full(supported.sum(), level),
+            s=14,
+            label=f"{mode}: {supported.sum()}/{len(paired)}",
+        )
+        axes[-1].scatter(
+            x[~supported], np.full((~supported).sum(), level), s=14, marker="x", color="0.65"
+        )
+    axes[-1].set(
+        yticks=[0, 1],
+        yticklabels=["include", "zero"],
+        xlabel="Cycle",
+        ylim=(-0.5, 1.5),
+        xticks=x,
+        xticklabels=paired.cycle_name.str.rsplit("_", n=1).str[-1],
+    )
+    axes[-1].tick_params(axis="x", labelrotation=90, labelsize=5)
+    axes[-1].legend(frameon=False, fontsize=8)
+    for axis in axes[:-1]:
+        axis.axhline(0, color="0.7", linewidth=0.7)
+    figure.suptitle(
+        (
+            "Preparation heat sensitivity (mode-specific support)"
+            if timing
+            else "Measured cycles at fixed defrost times"
+        )
+        + " · paired available cycles: "
+        f"{paired.common_supported.sum()}/{len(paired)}"
+    )
+    figure.tight_layout()
+    _save_png(figure, output)

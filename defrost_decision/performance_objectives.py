@@ -21,6 +21,7 @@ def _finish_objective(
     predictions_available: pd.Series,
     predictions_in_training_domain: pd.Series,
     allow_model_extrapolation: bool,
+    require_support_run: bool = True,
 ) -> pd.DataFrame:
     finite = np.isfinite(result[name])
     state_valid = result["pre_defrost_feature_window_valid"].fillna(False)
@@ -29,11 +30,15 @@ def _finish_objective(
     allowed = base & (predictions_in_training_domain | allow_model_extrapolation)
     result[f"{name}_measurements_valid"] = measurements_valid
     result[f"{name}_physically_valid"] = physically_valid
-    result[f"{name}_eligible_without_extrapolation"] = in_domain & five_minute_support_runs(
-        result["candidate_defrost_time"], in_domain
+    result[f"{name}_eligible_without_extrapolation"] = in_domain & (
+        five_minute_support_runs(result["candidate_defrost_time"], in_domain)
+        if require_support_run
+        else True
     )
-    result[f"{name}_eligible"] = allowed & five_minute_support_runs(
-        result["candidate_defrost_time"], allowed
+    result[f"{name}_eligible"] = allowed & (
+        five_minute_support_runs(result["candidate_defrost_time"], allowed)
+        if require_support_run
+        else True
     )
     result[f"{name}_uses_model_extrapolation"] = (
         result[f"{name}_eligible"] & ~predictions_in_training_domain
@@ -42,7 +47,10 @@ def _finish_objective(
 
 
 def calculate_cycle_cop(
-    table: pd.DataFrame, *, allow_model_extrapolation: bool = False
+    table: pd.DataFrame,
+    *,
+    allow_model_extrapolation: bool = False,
+    effective: bool = False,
 ) -> pd.DataFrame:
     """Calculate full-cycle heat divided by full-cycle electricity."""
     result = table.copy()
@@ -51,27 +59,28 @@ def calculate_cycle_cop(
         result["pre_defrost_electricity_kwh"] + result["defrost_event_electricity_kwh"]
     )
     result["cycle_cop"] = total_heat / total_electricity
-    predictions_available = (
-        result["defrost_event_electricity_prediction_available"].fillna(False)
-        & result["defrost_event_net_heat_prediction_available"].fillna(False)
-    )
-    predictions_in_domain = (
-        result["defrost_event_electricity_in_training_domain"].fillna(False)
-        & result["defrost_event_net_heat_in_training_domain"].fillna(False)
-    )
-    measurements = (
-        result["pre_defrost_electricity_measurement_valid"].fillna(False)
-        & result["pre_defrost_heat_measurement_valid"].fillna(False)
-    )
+    predictions_available = result["defrost_event_electricity_prediction_available"].fillna(
+        False
+    ) & result["defrost_event_net_heat_prediction_available"].fillna(False)
+    predictions_in_domain = result["defrost_event_electricity_in_training_domain"].fillna(
+        False
+    ) & result["defrost_event_net_heat_in_training_domain"].fillna(False)
+    measurements = result["pre_defrost_electricity_measurement_valid"].fillna(False) & result[
+        "pre_defrost_heat_measurement_valid"
+    ].fillna(False)
     physical = (
         np.isfinite(total_electricity)
         & total_electricity.gt(0)
         & np.isfinite(total_heat)
         & total_heat.gt(0.01)
     )
+    if effective:
+        physical &= result["defrost_event_electricity_kwh"].gt(0)
+        physical &= result["defrost_event_net_heat_kwh"].ge(0)
     return _finish_objective(
         result,
         "cycle_cop",
+        require_support_run=not effective,
         measurements_valid=measurements,
         physically_valid=physical,
         predictions_available=predictions_available,
@@ -89,19 +98,18 @@ def calculate_cycle_heating_rate(
         pd.to_datetime(result["candidate_defrost_time"])
         - pd.to_datetime(result["heating_accounting_start"])
     ).dt.total_seconds() / 3600
-    duration_hours = elapsed_hours + pd.to_numeric(
-        result["defrost_event_duration_minutes"], errors="coerce"
-    ) / 60
+    duration_hours = (
+        elapsed_hours
+        + pd.to_numeric(result["defrost_event_duration_minutes"], errors="coerce") / 60
+    )
     total_heat = result["pre_defrost_heat_kwh"] + result["defrost_event_net_heat_kwh"]
     result["cycle_heating_rate_kw"] = total_heat / duration_hours
-    predictions_available = (
-        result["defrost_event_net_heat_prediction_available"].fillna(False)
-        & result["defrost_event_duration_prediction_available"].fillna(False)
-    )
-    predictions_in_domain = (
-        result["defrost_event_net_heat_in_training_domain"].fillna(False)
-        & result["defrost_event_duration_in_training_domain"].fillna(False)
-    )
+    predictions_available = result["defrost_event_net_heat_prediction_available"].fillna(
+        False
+    ) & result["defrost_event_duration_prediction_available"].fillna(False)
+    predictions_in_domain = result["defrost_event_net_heat_in_training_domain"].fillna(
+        False
+    ) & result["defrost_event_duration_in_training_domain"].fillna(False)
     measurements = result["pre_defrost_heat_measurement_valid"].fillna(False)
     physical = np.isfinite(duration_hours) & duration_hours.gt(0) & np.isfinite(total_heat)
     return _finish_objective(
@@ -124,9 +132,10 @@ def calculate_cycle_evaporator_capacity(
         pd.to_datetime(result["candidate_defrost_time"])
         - pd.to_datetime(result["heating_accounting_start"])
     ).dt.total_seconds() / 3600
-    duration_hours = elapsed_hours + pd.to_numeric(
-        result["defrost_event_duration_minutes"], errors="coerce"
-    ) / 60
+    duration_hours = (
+        elapsed_hours
+        + pd.to_numeric(result["defrost_event_duration_minutes"], errors="coerce") / 60
+    )
     net_output = (
         result["pre_defrost_heat_kwh"]
         - result["pre_defrost_compressor_electricity_kwh"]
@@ -144,10 +153,9 @@ def calculate_cycle_evaporator_capacity(
         & result["defrost_event_duration_in_training_domain"].fillna(False)
         & result["defrost_event_compressor_electricity_in_training_domain"].fillna(False)
     )
-    measurements = (
-        result["pre_defrost_heat_measurement_valid"].fillna(False)
-        & result["pre_defrost_compressor_electricity_measurement_valid"].fillna(False)
-    )
+    measurements = result["pre_defrost_heat_measurement_valid"].fillna(False) & result[
+        "pre_defrost_compressor_electricity_measurement_valid"
+    ].fillna(False)
     physical = np.isfinite(duration_hours) & duration_hours.gt(0) & np.isfinite(net_output)
     return _finish_objective(
         result,
@@ -164,12 +172,10 @@ def calculate_performance_objectives(
     candidate_table: pd.DataFrame, *, allow_model_extrapolation: bool = False
 ) -> pd.DataFrame:
     """Calculate C, H and O without combining or cross-filtering their eligibility."""
-    result = candidate_table.sort_values(
-        "candidate_defrost_time", kind="stable"
-    ).reset_index(drop=True)
-    result = calculate_cycle_cop(
-        result, allow_model_extrapolation=allow_model_extrapolation
+    result = candidate_table.sort_values("candidate_defrost_time", kind="stable").reset_index(
+        drop=True
     )
+    result = calculate_cycle_cop(result, allow_model_extrapolation=allow_model_extrapolation)
     result = calculate_cycle_heating_rate(
         result, allow_model_extrapolation=allow_model_extrapolation
     )
@@ -193,10 +199,13 @@ def _connected_basin(
     return start, end, (end - start).total_seconds() / 60
 
 
-def add_single_objective_optima(objectives: pd.DataFrame) -> pd.DataFrame:
+def add_single_objective_optima(
+    objectives: pd.DataFrame,
+    names=("cycle_cop", "cycle_heating_rate_kw", "cycle_evaporator_capacity_kw"),
+) -> pd.DataFrame:
     """Add each objective's own optimum and connected near-optimal basins."""
     result = objectives.copy()
-    for name in ("cycle_cop", "cycle_heating_rate_kw", "cycle_evaporator_capacity_kw"):
+    for name in names:
         result[f"{name}_t_star"] = pd.NaT
         for percent in (1, 2, 5):
             result[f"{name}_basin_{percent}pct_start"] = pd.NaT
@@ -205,9 +214,7 @@ def add_single_objective_optima(objectives: pd.DataFrame) -> pd.DataFrame:
         eligible = result[f"{name}_eligible"]
         if not eligible.any():
             continue
-        optimum = int(
-            result.index[eligible & result[name].eq(result.loc[eligible, name].max())][0]
-        )
+        optimum = int(result.index[eligible & result[name].eq(result.loc[eligible, name].max())][0])
         result[f"{name}_t_star"] = result.loc[optimum, "candidate_defrost_time"]
         for percent in (1, 2, 5):
             start, end, width = _connected_basin(result, name, optimum, eligible, percent)

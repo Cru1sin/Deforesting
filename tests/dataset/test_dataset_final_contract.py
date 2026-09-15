@@ -9,7 +9,6 @@ import threading
 import time
 from collections import namedtuple
 from pathlib import Path
-from typing import cast
 
 import pandas as pd
 import pytest
@@ -391,7 +390,8 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
     monkeypatch.setenv("no_proxy", "inherited.example")
 
     def fake_run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
-        env = cast(dict[str, str], options["env"])
+        assert "env" not in options
+        env = dict(os.environ)
         calls.append((command, env))
         if command[1] == "lsf":
             return subprocess.CompletedProcess(command, 0, stdout="123\n")
@@ -421,21 +421,10 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
     ]
     assert calls[1][0][calls[1][0].index("--multi-thread-streams") + 1] == "8"
     for command, env in calls:
-        assert command[command.index("--http-proxy") + 1] == ""
-        assert (
-            not {
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-                "RCLONE_HTTP_PROXY",
-            }
-            & env.keys()
-        )
-        assert env["NO_PROXY"] == "*"
-        assert env["no_proxy"] == "*"
+        assert "--http-proxy" not in command
+        assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+        assert env["NO_PROXY"] == "inherited.example"
+        assert env["no_proxy"] == "inherited.example"
     assert (
         tmp_path / "dataset" / "images" / cycle_name / "front_center" / "frame.jpg"
     ).read_bytes() == b"rgb"
@@ -1011,6 +1000,45 @@ def test_validate_dataset_accepts_pipeline_statuses_and_rejects_unknown(
 
     with pytest.raises(ValueError, match="Dataset status is not recognized"):
         _validate_statuses(pd.DataFrame({"status": ["incomplete"]}))
+
+
+def test_pareto_readiness_status_contract_defaults_and_validation(tmp_path: Path) -> None:
+    from dataset_tools.cycle_metadata import build_cycle_record
+    from dataset_tools.load_dataset import DatasetLoader
+    from dataset_tools.validate_dataset import _validate_statuses
+
+    record = build_cycle_record(
+        {
+            "experiment_id": "exp",
+            "experiment_date": "2026-07-14",
+            "cycle_id": "cycle_001",
+            "cycle_status": "valid",
+        },
+        cycle_name="frost_cycle_000001",
+        cycle_uid="exp::cycle_001",
+        processed=pd.DataFrame({"timestamp": ["2026-07-14 10:00:00"]}),
+        original=pd.DataFrame({"timestamp": ["2026-07-14 10:00:00"]}),
+        image_summary={},
+        assets={},
+    )
+    assert record["pareto_knee_status"] == "invalid"
+    assert record["rgb_knee_coverage_status"] == "invalid"
+
+    _write_renderable_dataset(tmp_path)
+    loaded = DatasetLoader(tmp_path).list_cycles().iloc[0]
+    assert loaded["pareto_knee_status"] == "invalid"
+    assert loaded["rgb_knee_coverage_status"] == "invalid"
+
+    with pytest.raises(ValueError, match="Pareto readiness status is not recognized"):
+        _validate_statuses(
+            pd.DataFrame(
+                {
+                    "status": ["valid"],
+                    "pareto_knee_status": ["unknown"],
+                    "rgb_knee_coverage_status": ["valid"],
+                }
+            )
+        )
 
 
 def test_render_only_draws_without_writing_catalog_or_manifest(
@@ -2633,3 +2661,21 @@ def test_cli_render_cloud_fetch_is_explicit(
     )
 
     assert calls == [False, True]
+
+
+@pytest.mark.parametrize("returncode", [1, 3])
+def test_selected_image_network_failure_is_not_reported_as_missing(
+    tmp_path, monkeypatch, returncode
+):
+    from types import SimpleNamespace
+
+    from dataset_tools import cloud_images
+
+    monkeypatch.setattr(cloud_images.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=returncode, stdout="", stderr="network unavailable"))
+    args = (tmp_path, "frost_cycle_000001", ["front/test.jpg"], None, 0)
+    if returncode == 1:
+        with pytest.raises(RuntimeError, match="network unavailable"):
+            cloud_images._plan_image_members(*args)
+    else:
+        assert cloud_images._plan_image_members(*args)[0] == []
