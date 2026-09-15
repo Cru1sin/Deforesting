@@ -59,11 +59,12 @@ PHYSICAL_STATE = [
 ] + LEDGER
 
 def reliable_rgb_cohort(dataset, *, source=None):
-    """Return the 87 cycles valid now, before COP filtering, and for RGB."""
+    """Return cycles valid now, before COP filtering, and for front RGB."""
     loader = dataset if isinstance(dataset, DatasetLoader) else DatasetLoader(dataset)
-    cohort = loader.list_valid_cycles(require_rgb=True)[
-        ["cycle_name", "experiment_id"]
-    ].sort_values(
+    cycles = loader.list_valid_cycles()
+    cohort = cycles.loc[cycles.front_rgb_valid.eq(True), [
+        "cycle_name", "experiment_id",
+    ]].sort_values(
         ["experiment_id", "cycle_name"], kind="stable"
     ).reset_index(drop=True)
     if source is None:
@@ -705,11 +706,8 @@ def apply_reference(base, parameters, rgb="on", *, include_history=True):
     result["defrost_event_net_heat_in_training_domain"] = True
     result = calculate_cycle_cop(result, effective=True)
     result = normalize_curve(result)
-    # Unsupported predictions must not become apparently valid COP-history observations.
     if include_history:
-        history = history_features(
-            result.assign(cycle_cop=result.cycle_cop.where(result.cycle_cop_eligible))
-        )
+        history = history_features(result)
         result = pd.concat([result.reset_index(drop=True), history.reset_index(drop=True)], axis=1)
     result["input_available"] = result.sensor_timestamp.notna() & (
         result.rgb_available if rgb == "on" else True
@@ -795,7 +793,7 @@ def audit(args):
         "dataset": str(args.dataset.resolve()),
         "reference_run": str(args.reference_run.resolve()),
         "decision_run": str(args.decision_run.resolve()),
-        "cohort_rule": "current_valid_and_pre_COP_valid_and_RGB_valid",
+        "cohort_rule": "current_valid_and_pre_COP_valid_and_front_RGB_valid",
         "catalog_valid_cycles": cohort.cycle_name.astype(str).tolist(),
         "rgb_valid_cycles": cohort.cycle_name.astype(str).tolist(),
         "ridge_cv": "sorted_GroupKFold_3",
@@ -2068,6 +2066,31 @@ def _percent_change(value, baseline):
     return (100 * (value / baseline.where(valid) - 1)).where(valid)
 
 
+def add_rb_headroom(metrics):
+    """Add paired RB gain and the fraction of positive ideal COP headroom captured."""
+    result = metrics.copy()
+    scored = result.status.eq("scored")
+    baseline_valid = np.isfinite(result.baseline_rb_cop) & result.baseline_rb_cop.gt(0)
+    ideal = result.reference_cop - result.baseline_rb_cop
+    result["cop_gain_vs_rb_pct"] = (
+        100 * (result.trigger_cop - result.baseline_rb_cop) / result.baseline_rb_cop
+    ).where(scored & baseline_valid)
+    headroom_valid = (
+        scored
+        & baseline_valid
+        & np.isfinite(result.trigger_cop)
+        & np.isfinite(result.reference_cop)
+        & ideal.gt(0)
+    )
+    result["headroom_captured_pct"] = (
+        100 * (result.trigger_cop - result.baseline_rb_cop) / ideal
+    ).where(headroom_valid)
+    result["headroom_remaining_pct"] = (
+        100 - result.headroom_captured_pct
+    ).where(headroom_valid)
+    return result
+
+
 def compare_frozen_policies(args):
     """Replay five policies against one fixed RB, one peak, and two point scopes."""
     if not args.runs or len(args.runs) != 4:
@@ -2344,7 +2367,7 @@ def evaluate_online(args):
             rb = pd.DataFrame(baselines)
             metrics = pd.concat([metrics, rb], ignore_index=True).drop(columns=["baseline_rb_cop", "cop_gain_vs_rb_pct"], errors="ignore")
             metrics = metrics.merge(rb[["cycle_name", "trigger_cop"]].rename(columns={"trigger_cop": "baseline_rb_cop"}), on="cycle_name", validate="many_to_one")
-            metrics["cop_gain_vs_rb_pct"] = (100 * (metrics.trigger_cop / metrics.baseline_rb_cop - 1)).where(metrics.status.eq("scored") & metrics.baseline_rb_cop.gt(0))
+            metrics = add_rb_headroom(metrics)
         missing = []
         for model, group in metrics.groupby("model", sort=False):
             for name in sorted(valid_names - set(group.cycle_name)):
@@ -2418,9 +2441,7 @@ def evaluate_online(args):
         how="left",
         validate="many_to_one",
     )
-    metrics["cop_gain_vs_rb_pct"] = (
-        100 * (metrics.trigger_cop / metrics.baseline_rb_cop - 1)
-    ).where(metrics.status.eq("scored") & metrics.baseline_rb_cop.gt(0))
+    metrics = add_rb_headroom(metrics)
     metrics.to_csv(args.output / "online_cycle_metrics.csv", index=False)
     pd.concat(traces, ignore_index=True).to_parquet(
         args.output / "online_trace.parquet", index=False

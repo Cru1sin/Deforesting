@@ -615,6 +615,26 @@ def test_joint_thresholds_and_missing_confirmation_slots():
     assert np.isnan(choices['first_positive']['threshold'])
 
 
+def test_rb_headroom_uses_positive_ideal_space_and_keeps_cycle_values():
+    from image_models.relative_cop import add_rb_headroom
+
+    rows = pd.DataFrame(
+        {
+            "status": ["scored", "scored", "no_trigger"],
+            "trigger_cop": [4.0, 8.0, np.nan],
+            "baseline_rb_cop": [2.0, 6.0, 2.0],
+            "reference_cop": [5.0, 10.0, 2.0],
+        }
+    )
+
+    result = add_rb_headroom(rows)
+
+    assert result.cop_gain_vs_rb_pct.iloc[:2].tolist() == [100.0, 100 / 3]
+    assert result.headroom_captured_pct.iloc[:2].tolist() == [200 / 3, 50.0]
+    assert result.headroom_remaining_pct.iloc[:2].tolist() == pytest.approx([100 / 3, 50.0])
+    assert result.loc[2, ["cop_gain_vs_rb_pct", "headroom_captured_pct"]].isna().all()
+
+
 def test_joint_singletons_validation_loss_and_train_only_preprocessor():
     from image_models.relative_cop import fit_regression, predict_regression, classification_regression_loss
 

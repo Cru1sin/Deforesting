@@ -3872,6 +3872,8 @@ def _render_binary_cycle_probability_job(
     traces,
     metrics,
     output,
+    name_suffix,
+    formats,
 ):
     from plots.publication import render_effective_cop_probability
 
@@ -3887,12 +3889,24 @@ def _render_binary_cycle_probability_job(
         curve,
         trace,
         metric.iloc[0],
-        output / f"{cycle_name}_chen_probability",
+        output / f"{cycle_name}_chen_probability{name_suffix}",
+        formats=formats,
     )
     return cycle_name
 
 
-def render_binary_cycle_probabilities(run, dataset, decision_run, output, n_jobs=6):
+def render_binary_cycle_probabilities(
+    run,
+    dataset,
+    decision_run,
+    output,
+    n_jobs=6,
+    *,
+    valid_only=False,
+    formats=("png", "pdf"),
+    name_suffix="",
+    save_sources=True,
+):
     """Render every frozen Chen-inspired binary cycle through publication styling."""
     from joblib import Parallel, delayed, parallel_config
 
@@ -3927,7 +3941,11 @@ def render_binary_cycle_probabilities(run, dataset, decision_run, output, n_jobs
         if field in decisions:
             decisions[field] = pd.to_datetime(decisions[field], errors="coerce")
 
-    names = sorted(traces.cycle_name.astype(str).unique())
+    names = set(traces.cycle_name.astype(str).unique())
+    if valid_only:
+        valid = DatasetLoader(dataset).list_valid_cycles(require_rgb=True)
+        names &= set(valid.loc[valid.front_rgb_valid.eq(True), "cycle_name"])
+    names = sorted(names)
     decisions = decisions.loc[decisions.cycle_name.astype(str).isin(names)].copy()
     metrics = metrics.loc[metrics.cycle_name.astype(str).isin(names)].copy()
     if set(names) != set(decisions.cycle_name.astype(str)) or set(names) != set(
@@ -3935,16 +3953,24 @@ def render_binary_cycle_probabilities(run, dataset, decision_run, output, n_jobs
     ):
         raise ValueError("trace, effective-COP decisions, and cycle metrics have different cohorts")
     output.mkdir(parents=True, exist_ok=True)
-    traces.to_parquet(output / "probability_source.parquet", index=False)
-    decisions.to_parquet(output / "effective_cop_source.parquet", index=False)
-    metrics.to_csv(output / "cycle_status.csv", index=False)
+    if save_sources:
+        traces.to_parquet(output / "probability_source.parquet", index=False)
+        decisions.to_parquet(output / "effective_cop_source.parquet", index=False)
+        metrics.to_csv(output / "cycle_status.csv", index=False)
 
     loader = DatasetLoader(dataset)
     with parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1):
         rendered = list(
             Parallel(return_as="generator_unordered")(
                 delayed(_render_binary_cycle_probability_job)(
-                    loader, name, decisions, traces, metrics, output
+                    loader,
+                    name,
+                    decisions,
+                    traces,
+                    metrics,
+                    output,
+                    name_suffix,
+                    formats,
                 )
                 for name in names
             )
@@ -4219,6 +4245,22 @@ def render_online_cop(metrics, output, processing_seconds=30, *, traces=None):
                 record["paired_mean_model_cop"] = paired.trigger_cop.mean()
                 record["paired_mean_rb_cop"] = paired.baseline_rb_cop.mean()
                 record["paired_mean_cop_difference"] = (paired.trigger_cop - paired.baseline_rb_cop).mean()
+            if "headroom_captured_pct" in selected:
+                paired = selected.loc[selected.headroom_captured_pct.notna()]
+                denominator = paired.reference_cop.mean() - paired.baseline_rb_cop.mean()
+                captured = (
+                    100
+                    * (paired.trigger_cop.mean() - paired.baseline_rb_cop.mean())
+                    / denominator
+                    if len(paired) and denominator > 0
+                    else np.nan
+                )
+                record["ideal_headroom_paired_cycles"] = len(paired)
+                record["headroom_captured_pct"] = captured
+                record["headroom_remaining_pct"] = 100 - captured
+                record["median_cycle_headroom_captured_pct"] = (
+                    paired.headroom_captured_pct.median()
+                )
             record["uncalibrated"] = int(rows.status.eq("threshold_uncalibrated").sum())
             summaries.append(record)
     summary = pd.DataFrame(summaries)

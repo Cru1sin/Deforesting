@@ -113,23 +113,23 @@ def cycle_batches(rows: pd.DataFrame, cycles_per_batch: int, seed: int):
 
 
 def action_rows(rows: pd.DataFrame) -> pd.DataFrame:
-    """Keep exactly the rows where the model may act and trusted COP is defined."""
+    """Keep the complete input-available, physically allowed control interval."""
     required = {
-        "cycle_name", "candidate_defrost_time", "cycle_cop", "cycle_cop_eligible",
+        "cycle_name", "candidate_defrost_time", "cycle_cop",
         "model_input_available", "physically_allowed",
     }
     missing = required - set(rows)
     if missing:
         raise ValueError(f"action rows lack columns: {sorted(missing)}")
     allowed = (
-        rows.cycle_cop_eligible.fillna(False)
-        & rows.model_input_available.fillna(False)
-        & np.isfinite(rows.cycle_cop)
+        rows.model_input_available.fillna(False)
+        & rows.physically_allowed.fillna(False)
     )
-    allowed &= rows.physically_allowed.fillna(False)
     result = rows.loc[allowed].sort_values(
         ["cycle_name", "candidate_defrost_time"], kind="stable"
     ).copy()
+    if not np.isfinite(result.cycle_cop).all():
+        raise ValueError("Ridge COP is missing inside the legal control interval")
     if result.empty:
         return result.assign(
             optimal_time=pd.Series(dtype="datetime64[ns]"),
@@ -285,8 +285,7 @@ def policy_cycle_metrics(
     for name, cycle in reference.groupby("cycle_name", sort=False):
         time = pd.to_datetime(cycle.t_RB.iloc[0], errors="coerce")
         supported = (
-            cycle.cycle_cop_eligible.fillna(False)
-            & np.isfinite(cycle.cycle_cop)
+            np.isfinite(cycle.cycle_cop)
             & pd.to_datetime(cycle.candidate_defrost_time).eq(time)
         )
         rb.append({
@@ -694,7 +693,7 @@ def run(args):
         "outer_cv": "leave_one_experiment_out",
         "inner_validation": "next_experiment_by_sorted_rotation",
         "action_set": (
-            "finite_trusted_COP_and_architecture_input_available_between_"
+            "architecture_input_available_between_"
             "stable_heating_start_and_preparation_or_observation_end"
         ),
         "binary_loss": "cycle_mean_of_present_class_means_no_label_smoothing",

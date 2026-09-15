@@ -648,6 +648,9 @@ def _effective_cop_probability_figure(
     trace: pd.DataFrame,
     metric: pd.Series,
     cycle_name: str,
+    *,
+    model_label: str = "Chen-inspired DINOv2-MLP",
+    controllers: pd.DataFrame | None = None,
 ) -> plt.Figure:
     """Combine the publication effective-COP panel with the frozen binary replay."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
@@ -681,22 +684,50 @@ def _effective_cop_probability_figure(
         markersize=2.2,
         label="Positive-class probability",
     )
-    threshold = pd.to_numeric(replay.get("threshold"), errors="coerce").dropna()
-    threshold = float(threshold.iloc[0]) if len(threshold) else 0.5
-    probability_axis.axhline(
-        threshold,
-        color="#6B7280",
-        linestyle=":",
-        linewidth=0.9,
-        label=f"Positive threshold ({threshold:g})",
+    threshold_specs = (
+        ("threshold_first_positive", "1/1 threshold", "#6B7280", ":"),
+        ("threshold_two_of_three", "2/3 threshold", "#8B5E83", "--"),
     )
+    plotted_threshold = False
+    for column, label, color, linestyle in threshold_specs:
+        if column not in replay:
+            continue
+        values = pd.to_numeric(replay[column], errors="coerce").dropna()
+        if len(values):
+            value = float(values.iloc[0])
+            probability_axis.axhline(
+                value, color=color, linestyle=linestyle, linewidth=0.9,
+                label=f"{label} ({value:g})",
+            )
+            plotted_threshold = True
+    if not plotted_threshold:
+        threshold = pd.to_numeric(replay.get("threshold"), errors="coerce").dropna()
+        threshold = float(threshold.iloc[0]) if len(threshold) else 0.5
+        probability_axis.axhline(
+            threshold,
+            color="#6B7280",
+            linestyle=":",
+            linewidth=0.9,
+            label=f"Positive threshold ({threshold:g})",
+        )
 
     first = curve.iloc[0]
-    events = (
+    events = [
         (first.get("t_star"), "COP optimum", OPTIMAL_COLOR, "-."),
         (first.get("t_RB"), "RB trigger", RB_COLOR, "--"),
-        (metric.get("trigger_time"), "2/3 confirmed trigger", "#A34A42", "-"),
-    )
+    ]
+    if controllers is None:
+        events.append(
+            (metric.get("trigger_time"), "2/3 confirmed trigger", "#A34A42", "-")
+        )
+    else:
+        styles = {
+            "first_positive": ("1/1 trigger", "#A34A42", "-"),
+            "two_of_three": ("2/3 trigger", "#8B5E83", "--"),
+        }
+        for row in controllers.itertuples():
+            label, color, linestyle = styles[str(row.strategy)]
+            events.append((row.selected_time, label, color, linestyle))
     for value, label, color, linestyle in events:
         event_time = pd.to_datetime(value, errors="coerce")
         if pd.isna(event_time):
@@ -770,7 +801,7 @@ def _effective_cop_probability_figure(
         fontweight="bold",
     )
     figure.suptitle(
-        f"{cycle_name} | Chen-inspired DINOv2-MLP | {status}",
+        f"{cycle_name} | {model_label} | {status}",
         x=0.08,
         ha="left",
         fontsize=10,
@@ -786,14 +817,19 @@ def render_effective_cop_probability(
     trace: pd.DataFrame,
     metric: pd.Series,
     output_stem: Path,
+    *,
+    formats: tuple[str, ...] = ("png", "pdf"),
+    model_label: str = "Chen-inspired DINOv2-MLP",
+    controllers: pd.DataFrame | None = None,
 ) -> None:
     """Export one Chen-inspired probability figure without recomputing decisions."""
     cycle_name = str(curve.iloc[0]["cycle_name"])
     figure = _effective_cop_probability_figure(
-        cycle_frame, curve, trace, metric, cycle_name
+        cycle_frame, curve, trace, metric, cycle_name,
+        model_label=model_label, controllers=controllers,
     )
     output_stem.parent.mkdir(parents=True, exist_ok=True)
-    for suffix in ("png", "pdf"):
+    for suffix in formats:
         figure.savefig(
             output_stem.with_suffix(f".{suffix}"),
             dpi=300 if suffix == "png" else None,
@@ -801,6 +837,126 @@ def render_effective_cop_probability(
             facecolor="white",
         )
     plt.close(figure)
+
+
+def _render_stopping_cycle_job(
+    loader: Any,
+    curve: pd.DataFrame,
+    trace: pd.DataFrame,
+    controllers: pd.DataFrame,
+    output: Path,
+    model_label: str,
+) -> None:
+    cycle_name = str(curve.cycle_name.iloc[0])
+    curve = curve.copy()
+    curve["t_star"] = controllers.optimal_time.dropna().iloc[0]
+    metric = controllers.iloc[0].copy()
+    metric["status"] = metric.get("evaluation_status", "evaluated")
+    render_effective_cop_probability(
+        loader.load_cycle(cycle_name),
+        curve,
+        trace.assign(score=trace.probability),
+        metric,
+        output / f"{cycle_name}_probability",
+        formats=("png",),
+        model_label=model_label,
+        controllers=controllers,
+    )
+
+
+def _render_stopping_training_loss(results: list[dict[str, Any]], output: Path) -> None:
+    figure, axis = plt.subplots(figsize=(7.2, 4.2), dpi=300)
+    for stage, color in (("inner", "#3C6E8F"), ("outer", "#C77836")):
+        curves = []
+        for result in results:
+            rows = result.get("losses", pd.DataFrame())
+            rows = rows.loc[rows.stage.eq(stage)] if "stage" in rows else rows.iloc[:0]
+            if rows.empty:
+                continue
+            axis.plot(rows.epoch, rows.training_loss, color=color, alpha=0.12, linewidth=0.6)
+            curves.append(rows[["epoch", "training_loss"]])
+        if curves:
+            mean = pd.concat(curves).groupby("epoch", as_index=False).training_loss.mean()
+            axis.plot(mean.epoch, mean.training_loss, color=color, linewidth=1.8, label=stage)
+    axis.set(xlabel="Epoch", ylabel="Training loss")
+    axis.grid(alpha=0.15)
+    axis.legend(frameon=False)
+    figure.tight_layout()
+    figure.savefig(output / "training_loss.png", dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+
+
+def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: int = 6) -> None:
+    """Render every formal stopping probability curve and its training losses."""
+    import json
+    import pickle
+
+    from joblib import Parallel, delayed, parallel_config
+
+    from dataset_tools import DatasetLoader
+
+    labels = {
+        "r_sensor": "R-Sensor",
+        "r_sensor_rgb": "R-Sensor + RGB",
+        "chen_rgb": "Chen RGB",
+        "new_sensor": "New Sensor",
+        "new_rgb_difference": "New RGB Difference",
+        "after_optimum": "Binary loss",
+        "cop_stopping": "COP stopping loss",
+    }
+    run, dataset, output = map(Path, (run, dataset, output))
+    run_settings = json.loads((run / "settings.json").read_text())
+    audit_settings = json.loads((Path(run_settings["data"]) / "settings.json").read_text())
+    decisions = pd.read_csv(
+        Path(audit_settings["decision_run"]) / "candidate_decisions.csv",
+        low_memory=False,
+    )
+    decisions["candidate_defrost_time"] = pd.to_datetime(
+        decisions.candidate_defrost_time, errors="coerce"
+    )
+    for column in ("t_star", "t_RB"):
+        if column in decisions:
+            decisions[column] = pd.to_datetime(decisions[column], errors="coerce")
+    loader = DatasetLoader(dataset)
+    for predictions_path in sorted(run.glob("*/*/seed_*/predictions.parquet")):
+        seed_dir = predictions_path.parent
+        loss_name = seed_dir.parent.name
+        architecture = seed_dir.parent.parent.name
+        destination = output / architecture / loss_name / seed_dir.name
+        destination.mkdir(parents=True, exist_ok=True)
+        predictions = pd.read_parquet(predictions_path)
+        controllers = pd.read_csv(seed_dir / "controller_metrics.csv")
+        for column in ("selected_time", "optimal_time"):
+            controllers[column] = pd.to_datetime(controllers[column], errors="coerce")
+        results = []
+        thresholds: dict[str, dict[str, float]] = {}
+        for path in sorted((seed_dir / "folds").glob("*.pkl")):
+            with path.open("rb") as stream:
+                result = pickle.load(stream)  # noqa: S301 - run-owned checkpoints
+            results.append(result)
+            if result.get("status") == "evaluated":
+                thresholds[str(result["heldout_experiment"])] = result["checkpoint"][
+                    "thresholds"
+                ]
+        for strategy in ("first_positive", "two_of_three"):
+            predictions[f"threshold_{strategy}"] = predictions.heldout_experiment.map(
+                {fold: values[strategy] for fold, values in thresholds.items()}
+            )
+        model_label = (
+            f"{labels[architecture]} | {labels[loss_name]} | "
+            f"{seed_dir.name.replace('_', ' ')}"
+        )
+        jobs = []
+        for cycle_name, trace in predictions.groupby("cycle_name", sort=True):
+            curve = decisions.loc[decisions.cycle_name.eq(cycle_name)].copy()
+            metrics = controllers.loc[controllers.cycle_name.eq(cycle_name)].copy()
+            if not curve.empty and len(metrics) == 2:
+                jobs.append(delayed(_render_stopping_cycle_job)(
+                    loader, curve, trace, metrics, destination, model_label
+                ))
+        with parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1):
+            Parallel()(jobs)
+        _render_stopping_training_loss(results, destination)
 
 
 def render_decision_publication(
