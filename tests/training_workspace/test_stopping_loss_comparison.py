@@ -1,8 +1,11 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
+from image_models import stopping_loss_comparison as stopping
 from image_models.stopping_loss_comparison import (
     ARCHITECTURES,
     _fold_reference,
@@ -251,3 +254,65 @@ def test_saved_fold_results_collect_every_resumable_fold(tmp_path):
     assert [row["heldout_experiment"] for row in _saved_fold_results(tmp_path)] == [
         "a", "b",
     ]
+
+
+def test_reliable_pool_filters_boundaries_and_events(monkeypatch, tmp_path):
+    from image_models import relative_cop
+
+    reliable = pd.DataFrame({
+        "cycle_name": ["b", "a"], "experiment_id": ["e2", "e1"],
+    })
+
+    class Loader:
+        def __init__(self, _):
+            pass
+
+        def list_valid_cycles(self, *, require_rgb):
+            assert require_rgb is True
+            return reliable
+
+    monkeypatch.setattr(relative_cop, "DatasetLoader", Loader)
+    boundaries = pd.DataFrame({
+        "cycle_name": ["rogue", "a", "b"],
+        "experiment_id": ["e9", "e1", "e2"], "boundary": [0, 1, 2],
+    })
+    events = pd.DataFrame({
+        "cycle_name": ["a", "rogue", "b"], "experiment_id": ["e1", "e9", "e2"],
+    })
+    cohort, filtered_events = stopping.reliable_stopping_inputs(
+        SimpleNamespace(dataset=tmp_path), boundaries, events,
+    )
+    assert cohort.cycle_name.tolist() == ["a", "b"]
+    assert filtered_events.cycle_name.tolist() == ["a", "b"]
+
+
+def test_two_of_three_uses_uncompressed_reference_clock_and_forces_final():
+    times = pd.date_range("2026-01-01", periods=5, freq="30s")
+    predicted = pd.DataFrame({
+        "cycle_name": ["a"] * 3, "experiment_id": ["e"] * 3,
+        "candidate_defrost_time": times[[0, 3, 4]], "cycle_cop": [1.0, 4.0, 3.0],
+        "probability": [.9, .9, .1], "optimal_time": [times[3]] * 3,
+        "optimal_cop": [4.0] * 3,
+    })
+    reference = pd.DataFrame({
+        "cycle_name": ["a"] * 5, "experiment_id": ["e"] * 5,
+        "candidate_defrost_time": times, "cycle_cop": [1., 2., 3., 4., 3.],
+        "cycle_cop_eligible": True,
+    })
+    replay = replay_cycles(predicted, .5, strategy="two_of_three", reference=reference)
+    assert replay.selected_time.item() == times[4]
+    assert replay.forced_final.item()
+
+
+def test_frozen_probabilities_select_independent_controller_thresholds():
+    times = pd.date_range("2026-01-01", periods=5, freq="30s")
+    rows = pd.DataFrame({
+        "cycle_name": ["a"] * 5, "candidate_defrost_time": times,
+        "cycle_cop": [1., 1.99, 2., 1.8, 1.7],
+        "probability": [.2, .9, .95, .3, .1], "optimal_time": [times[2]] * 5,
+    })
+    selected, grid = stopping.select_controller_thresholds(rows, thresholds=(.5, .9, .95))
+    assert set(selected) == {"first_positive", "two_of_three"}
+    assert selected["first_positive"] == .95
+    assert selected["two_of_three"] == .9
+    assert set(grid.strategy) == {"first_positive", "two_of_three"}

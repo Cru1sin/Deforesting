@@ -58,6 +58,18 @@ PHYSICAL_STATE = [
     )
 ] + LEDGER
 
+def reliable_rgb_cohort(dataset, *, source=None):
+    """Return the 87 cycles valid now, before COP filtering, and for RGB."""
+    loader = dataset if isinstance(dataset, DatasetLoader) else DatasetLoader(dataset)
+    cohort = loader.list_valid_cycles(require_rgb=True)[
+        ["cycle_name", "experiment_id"]
+    ].sort_values(
+        ["experiment_id", "cycle_name"], kind="stable"
+    ).reset_index(drop=True)
+    if source is None:
+        return cohort
+    return cohort.merge(source, on=["cycle_name", "experiment_id"], how="inner")
+
 
 def feature_columns(rgb="on"):
     return [
@@ -743,10 +755,10 @@ def audit(args):
     if event_settings.get("preparation_heat") != "zero":
         raise ValueError("COP classification audit requires zero preparation heat")
     loader.configure_recovery(event_settings["recovery_settings"])
-    catalog = loader.list_cycles().sort_values(["experiment_id", "cycle_name"]).reset_index(drop=True)
-    catalog["catalog_valid"] = catalog.status.eq("valid")
-    catalog["rgb_valid_cohort"] = catalog.catalog_valid & catalog.rgb_valid.eq(True)
-    cohort = catalog.loc[catalog.catalog_valid].copy()
+    cohort = reliable_rgb_cohort(loader)
+    cohort["catalog_valid"] = True
+    cohort["rgb_valid"] = True
+    cohort["rgb_valid_cohort"] = True
     boundaries = []
     for row in cohort.itertuples():
         record = loader.get_cycle_record(row.cycle_name)
@@ -765,7 +777,7 @@ def audit(args):
         columns=["heating_start", "stable_heating_start", "t_RB", "rb_status"],
         errors="ignore",
     ).merge(boundaries, on=["cycle_name", "experiment_id"], validate="one_to_one")
-    folds = grouped_audit_folds(cohort.loc[cohort.rgb_valid.eq(True)])
+    folds = grouped_audit_folds(cohort)
     events = build_defrost_event_training_table(
         loader, preparation_heat=event_settings["preparation_heat"]
     )
@@ -774,7 +786,7 @@ def audit(args):
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "base").mkdir(exist_ok=True)
     (args.output / "ridge").mkdir(exist_ok=True)
-    _write_matching_csv(args.output / "cohort.csv", catalog)
+    _write_matching_csv(args.output / "cohort.csv", cohort)
     _write_matching_csv(args.output / "defrost_events.csv", events)
     _write_matching_csv(args.output / "recovery_boundaries.csv", boundaries)
     save_settings(args.output / "folds.json", folds)
@@ -783,9 +795,9 @@ def audit(args):
         "dataset": str(args.dataset.resolve()),
         "reference_run": str(args.reference_run.resolve()),
         "decision_run": str(args.decision_run.resolve()),
-        "cohort_rule": "current_catalog_valid",
+        "cohort_rule": "current_valid_and_pre_COP_valid_and_RGB_valid",
         "catalog_valid_cycles": cohort.cycle_name.astype(str).tolist(),
-        "rgb_valid_cycles": cohort.loc[cohort.rgb_valid.eq(True), "cycle_name"].astype(str).tolist(),
+        "rgb_valid_cycles": cohort.cycle_name.astype(str).tolist(),
         "ridge_cv": "sorted_GroupKFold_3",
         "ridge_events": "current_catalog_raw_quantity_valid_event_electricity",
         "event_recovery_settings": event_settings["recovery_settings"],
@@ -1402,6 +1414,9 @@ def run(args):
     from train_pareto_boundary import fold_exclusions, save_settings
 
     binary = args.regression_architecture == "dinov2-binary"
+    current_classification = binary or args.regression_architecture in (
+        "cop-classification", "cop-classification-regression",
+    )
     metric_function = binary_cycle_metrics if binary else cycle_metrics
     source_settings = args.reference_run / "settings.json"
     if source_settings.exists():
@@ -1415,16 +1430,26 @@ def run(args):
         raise ValueError("historical D32 requires --rgb on")
 
     cohort = pd.read_csv(args.decision_run / "cycle_comparison.csv")
-    catalog = DatasetLoader(args.dataset).list_cycles(statuses={"valid"})
-    valid_names = set(catalog.cycle_name)
-    if args.evaluation_cohort == "rgb-valid":
-        catalog = catalog.loc[catalog.rgb_valid.eq(True)]
-    cohort_names = set(catalog.cycle_name)
-    cohort = cohort.loc[cohort.cycle_status.eq("identified_curve") & cohort.cycle_name.isin(cohort_names)].copy()
+    if current_classification:
+        cohort = reliable_rgb_cohort(args.dataset, source=cohort)
+        cohort = cohort.loc[cohort.cycle_status.eq("identified_curve")].copy()
+        valid_names = set(cohort.cycle_name)
+    else:
+        catalog = DatasetLoader(args.dataset).list_cycles(statuses={"valid"})
+        valid_names = set(catalog.cycle_name)
+        if args.evaluation_cohort == "rgb-valid":
+            catalog = catalog.loc[catalog.rgb_valid.eq(True)]
+        cohort_names = set(catalog.cycle_name)
+        cohort = cohort.loc[
+            cohort.cycle_status.eq("identified_curve")
+            & cohort.cycle_name.isin(cohort_names)
+        ].copy()
     args.quality_filtered = True
     if not cohort.preparation_heat.eq("zero").all():
         raise ValueError("relative COP requires zero preparation heat")
     boundaries = pd.read_csv(args.decision_run / "recovery_boundaries.csv")
+    if current_classification:
+        boundaries = reliable_rgb_cohort(args.dataset, source=boundaries)
     cohort = cohort.merge(
         boundaries[["cycle_name", "heating_start"]], on="cycle_name", validate="one_to_one"
     )
@@ -1473,6 +1498,11 @@ def run(args):
         "warmup_epochs": 10,
         "preparation_heat": "zero",
     }
+    if current_classification:
+        args.output.mkdir(parents=True, exist_ok=True)
+        cohort[["cycle_name", "experiment_id"]].to_csv(
+            args.output / "cohort.csv", index=False
+        )
     if args.rgb_projection:
         settings["model_name"] += f"-Projection{args.rgb_projection}"
     joint = args.regression_architecture in ("cop-classification", "cop-classification-regression")
@@ -1508,11 +1538,6 @@ def run(args):
             label="time_ge_earliest_full_supported_cop_maximum",
         )
     save_settings(args.output / "settings.json", settings)
-    if binary:
-        ledger = pd.read_csv(args.decision_run / "cycle_comparison.csv")
-        ledger = ledger[["cycle_name", "experiment_id", "cycle_status"]].copy()
-        ledger["in_training_cohort"] = ledger.cycle_name.isin(cohort.cycle_name)
-        ledger.to_csv(args.output / "cohort.csv", index=False)
     for folder in ("base", "ridge", "folds"):
         (args.output / folder).mkdir(exist_ok=True)
     with parallel_config(backend="loky", n_jobs=args.n_jobs, inner_max_num_threads=1):
@@ -2240,8 +2265,18 @@ def evaluate_online(args):
         quality = update_rgb_validity(args.dataset, pd.read_parquet(source), source=source.resolve())
         args.output.mkdir(parents=True, exist_ok=True)
         quality.to_csv(args.output / "rgb_validity.csv", index=False)
-    catalog = DatasetLoader(args.dataset).list_cycles(statuses={"valid"})
-    if args.evaluation_cohort == "rgb-valid":
+    catalog = (
+        reliable_rgb_cohort(args.dataset)
+        if args.task in (
+            "effective-cop-binary", "cop-classification",
+            "cop-classification-regression",
+        )
+        else DatasetLoader(args.dataset).list_cycles(statuses={"valid"})
+    )
+    if args.task not in (
+        "effective-cop-binary", "cop-classification",
+        "cop-classification-regression",
+    ) and args.evaluation_cohort == "rgb-valid":
         catalog = catalog.loc[catalog.rgb_valid.eq(True)]
     valid_names = set(catalog.cycle_name)
     if args.task in ("cop-classification", "cop-classification-regression"):

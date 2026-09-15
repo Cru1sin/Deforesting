@@ -238,7 +238,7 @@ def update_effective_cop_quality(dataset_dir, rows, *, cycle_names=None, source=
         name = record["cycle_name"]
         if name not in scope:
             continue
-        previous = record.setdefault("pre_cop_status", {
+        record.setdefault("pre_cop_status", {
             "status": record["status"], "status_reason": record.get("status_reason")})
         row = quality.loc[name] if name in quality.index else None
         complete = bool(row.selected) if row is not None else False
@@ -248,9 +248,6 @@ def update_effective_cop_quality(dataset_dir, rows, *, cycle_names=None, source=
             maximum_gap_seconds=30, source=str(source) if source is not None else None,
             before_seconds=float(row.before_seconds) if row is not None else 0.,
             after_seconds=float(row.after_seconds) if row is not None else 0.)
-        if record.get("review_status", previous["status"]) not in {"invalid", "reference"}:
-            record["status"] = "valid" if complete else "invalid"
-            record["status_reason"] = "complete_effective_cop_peak" if complete else "effective_cop_" + reason
     write_catalog(dataset_dir, catalog)
     return quality.reset_index()
 

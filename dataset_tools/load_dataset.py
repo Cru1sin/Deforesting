@@ -130,6 +130,18 @@ class DatasetLoader:
             )
         return result.reset_index(drop=True)
 
+    def list_valid_cycles(self, *, require_rgb: bool = False) -> pd.DataFrame:
+        """Return cycles valid both now and before COP-derived quality updates."""
+        cycles = self.list_cycles(statuses={"valid"})
+        missing = pd.Series(False, index=cycles.index)
+        pre_cop_valid = cycles.get("pre_cop_status", missing).map(
+            lambda value: isinstance(value, Mapping) and value.get("status") == "valid"
+        )
+        selected = pre_cop_valid
+        if require_rgb:
+            selected &= cycles.get("rgb_valid", missing).eq(True)
+        return cycles.loc[selected].reset_index(drop=True)
+
     def get_cycle_record(self, cycle_name: str) -> dict[str, object]:
         for record in self._catalog["cycles"]:
             if isinstance(record, Mapping) and record.get("cycle_name") == cycle_name:

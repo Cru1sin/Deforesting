@@ -2679,3 +2679,59 @@ def test_selected_image_network_failure_is_not_reported_as_missing(
             cloud_images._plan_image_members(*args)
     else:
         assert cloud_images._plan_image_members(*args)[0] == []
+
+
+def test_valid_cycle_queue_requires_pre_cop_quality_and_optionally_rgb():
+    from dataset_tools.load_dataset import DatasetLoader
+
+    loader = object.__new__(DatasetLoader)
+    loader._catalog = {
+        "cycles": [
+            {
+                "cycle_name": "physical_and_rgb",
+                "status": "valid",
+                "pre_cop_status": {"status": "valid"},
+                "rgb_valid": True,
+            },
+            {
+                "cycle_name": "physical_only",
+                "status": "valid",
+                "pre_cop_status": {"status": "valid"},
+                "rgb_valid": False,
+            },
+            {
+                "cycle_name": "partial_pre_cop",
+                "status": "valid",
+                "pre_cop_status": {"status": "partial"},
+                "rgb_valid": True,
+            },
+            {
+                "cycle_name": "invalid_now",
+                "status": "invalid",
+                "pre_cop_status": {"status": "valid"},
+                "rgb_valid": True,
+            },
+        ]
+    }
+
+    assert loader.list_valid_cycles().cycle_name.tolist() == [
+        "physical_and_rgb",
+        "physical_only",
+    ]
+    assert loader.list_valid_cycles(require_rgb=True).cycle_name.tolist() == [
+        "physical_and_rgb"
+    ]
+
+    loader._catalog = {
+        "cycles": [{"cycle_name": "missing_pre_cop", "status": "valid", "rgb_valid": True}]
+    }
+    assert loader.list_valid_cycles().empty
+
+    loader._catalog = {
+        "cycles": [{
+            "cycle_name": "missing_rgb",
+            "status": "valid",
+            "pre_cop_status": {"status": "valid"},
+        }]
+    }
+    assert loader.list_valid_cycles(require_rgb=True).empty

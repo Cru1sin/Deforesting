@@ -30,6 +30,15 @@ SOURCE_RUNS = {
 }
 
 
+def reliable_stopping_inputs(args, boundaries, events):
+    """Align stopping boundaries and Ridge events to the canonical reliable pool."""
+    from image_models.relative_cop import reliable_rgb_cohort
+
+    cohort = reliable_rgb_cohort(args.dataset, source=boundaries)
+    names = set(cohort.cycle_name)
+    return cohort, events.loc[events.cycle_name.astype(str).isin(names)].copy()
+
+
 def architecture_contract(architecture: str) -> tuple[list[str], list[str]]:
     """Return numeric and visual columns in the existing architecture's order."""
     if architecture not in ARCHITECTURES:
@@ -172,13 +181,43 @@ def after_optimum_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tens
     return torch.stack(present).mean()
 
 
-def replay_cycles(rows: pd.DataFrame, threshold: float) -> pd.DataFrame:
-    """Apply the deployed 1/1 rule, forcing the final legal action when none fires."""
+def replay_cycles(
+    rows: pd.DataFrame, threshold: float, *, strategy="first_positive", reference=None,
+) -> pd.DataFrame:
+    """Replay one controller, preserving missing slots for two-of-three confirmation."""
+    from plots.image_models import two_of_three_trigger
+
     records = []
     for name, cycle in rows.groupby("cycle_name", sort=True):
         ordered = cycle.sort_values("candidate_defrost_time", kind="stable")
-        positive = ordered.probability.notna() & ordered.probability.ge(threshold)
-        selected = ordered.loc[positive].iloc[0] if positive.any() else ordered.iloc[-1]
+        clock = ordered
+        if strategy == "two_of_three" and reference is not None:
+            full = reference.loc[reference.cycle_name.eq(name)].sort_values(
+                "candidate_defrost_time", kind="stable"
+            )
+            start, end = ordered.candidate_defrost_time.iloc[[0, -1]]
+            full = full.loc[
+                full.candidate_defrost_time.between(start, end, inclusive="both")
+            ]
+            clock = full[["candidate_defrost_time"]].merge(
+                ordered[["candidate_defrost_time", "probability"]],
+                on="candidate_defrost_time", how="left",
+            )
+        if strategy == "first_positive":
+            positive = clock.probability.notna() & clock.probability.ge(threshold)
+            trigger = (
+                pd.Timestamp(clock.loc[positive, "candidate_defrost_time"].iloc[0])
+                if positive.any() else pd.NaT
+            )
+        else:
+            trigger, _ = two_of_three_trigger(
+                clock.candidate_defrost_time, clock.probability.fillna(-np.inf), threshold
+            )
+        forced = pd.isna(trigger)
+        selected = (
+            ordered.iloc[-1] if forced
+            else ordered.loc[ordered.candidate_defrost_time.eq(trigger)].iloc[0]
+        )
         optimum = pd.Timestamp(ordered.optimal_time.iloc[0])
         records.append({
             "cycle_name": name,
@@ -188,17 +227,22 @@ def replay_cycles(rows: pd.DataFrame, threshold: float) -> pd.DataFrame:
             "selected_cop": float(selected.cycle_cop),
             "optimal_time": optimum,
             "optimal_cop": float(ordered.cycle_cop.max()),
-            "forced_final": not bool(positive.any()),
+            "forced_final": forced,
             "early_trigger": pd.Timestamp(selected.candidate_defrost_time) < optimum,
+            "strategy": strategy,
         })
     return pd.DataFrame(records)
 
 
-def select_cop_threshold(rows: pd.DataFrame, thresholds=THRESHOLDS):
+def select_cop_threshold(
+    rows: pd.DataFrame, thresholds=THRESHOLDS, *, strategy="first_positive", reference=None,
+):
     """Select the inner-validation threshold by mean replayed cycle COP."""
     scored = []
     for threshold in thresholds:
-        replay = replay_cycles(rows, threshold)
+        replay = replay_cycles(
+            rows, threshold, strategy=strategy, reference=reference
+        )
         scored.append({
             "threshold": float(threshold),
             "mean_cycle_cop": float(replay.selected_cop.mean()),
@@ -212,15 +256,30 @@ def select_cop_threshold(rows: pd.DataFrame, thresholds=THRESHOLDS):
     return float(selected.threshold), grid
 
 
+def select_controller_thresholds(rows, *, reference=None, thresholds=THRESHOLDS):
+    """Calibrate 1/1 and 2/3 independently from one frozen probability table."""
+    selected, grids = {}, []
+    for strategy in ("first_positive", "two_of_three"):
+        selected[strategy], grid = select_cop_threshold(
+            rows, thresholds, strategy=strategy, reference=reference
+        )
+        grid.insert(0, "strategy", strategy)
+        grids.append(grid)
+    return selected, pd.concat(grids, ignore_index=True)
+
+
 def policy_cycle_metrics(
     predicted: pd.DataFrame,
     reference: pd.DataFrame,
     threshold: float,
     *,
     loss_name: str,
+    strategy: str = "first_positive",
 ) -> pd.DataFrame:
     """Score hard 1/1 decisions against supported RB and legal-action oracle COP."""
-    metrics = replay_cycles(predicted, threshold)
+    metrics = replay_cycles(
+        predicted, threshold, strategy=strategy, reference=reference
+    )
     rb = []
     soft = {}
     for name, cycle in reference.groupby("cycle_name", sort=False):
@@ -358,6 +417,7 @@ def fit_policy(
     patience: int,
     cycles_per_batch: int,
     thresholds=THRESHOLDS,
+    controller_reference=None,
 ):
     """Fit whole-cycle batches; inner replayed COP selects epoch and threshold."""
     if train.empty or (validation is not None and validation.empty):
@@ -372,7 +432,7 @@ def fit_policy(
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
     best_score, best_epoch, best_threshold = -np.inf, maximum_epochs, .5
-    best_state, stale, history, grids = None, 0, [], []
+    best_state, stale, history = None, 0, []
     for epoch in range(1, maximum_epochs + 1):
         model.train()
         total, steps = 0.0, 0
@@ -396,8 +456,6 @@ def fit_policy(
             }
             predicted = predict_policy(validation, current)
             threshold, grid = select_cop_threshold(predicted, thresholds)
-            grid.insert(0, "epoch", epoch)
-            grids.append(grid)
             score = float(grid.loc[grid.threshold.eq(threshold), "mean_cycle_cop"].iloc[0])
             record.update(validation_mean_cycle_cop=score, threshold=threshold)
             if score > best_score:
@@ -410,15 +468,26 @@ def fit_policy(
             break
     if best_state is not None:
         model.load_state_dict(best_state)
-    return {
+    result = {
         "architecture": architecture, "loss_name": loss_name,
         "numeric_columns": list(numeric_columns), "visual_columns": list(visual_columns),
         "seed": seed, "preprocessor": preprocessor,
         "model_state_dict": copy.deepcopy(model.state_dict()),
         "selected_epoch": best_epoch, "threshold": best_threshold,
         "losses": pd.DataFrame(history),
-        "threshold_grid": pd.concat(grids, ignore_index=True) if grids else pd.DataFrame(),
+        "threshold_grid": pd.DataFrame(),
     }
+    if validation is not None:
+        frozen = predict_policy(validation, result)
+        result["thresholds"], result["threshold_grid"] = select_controller_thresholds(
+            frozen,
+            reference=validation if controller_reference is None else controller_reference,
+            thresholds=thresholds,
+        )
+        result["threshold"] = result["thresholds"]["first_positive"]
+    else:
+        result["thresholds"] = {}
+    return result
 
 
 def architecture_action_rows(rows: pd.DataFrame, architecture: str) -> pd.DataFrame:
@@ -507,7 +576,8 @@ def _fit_fold(args, architecture, loss_name, seed, test, inner, cohort, events, 
         result = {
             "status": status, "heldout_experiment": test, "inner_experiment": inner,
             "predictions": pd.DataFrame(), "cycle_metrics": pd.DataFrame(),
-            "losses": pd.DataFrame(), "threshold_grid": pd.DataFrame(),
+            "controller_metrics": pd.DataFrame(), "losses": pd.DataFrame(),
+            "threshold_grid": pd.DataFrame(),
         }
     else:
         numeric, visual = architecture_contract(architecture)
@@ -517,6 +587,7 @@ def _fit_fold(args, architecture, loss_name, seed, test, inner, cohort, events, 
             numeric_columns=numeric, visual_columns=visual, seed=seed,
             maximum_epochs=args.maximum_epochs, patience=args.patience,
             cycles_per_batch=args.batch_size,
+            controller_reference=inner_validation,
         )
         checkpoint = fit_policy(
             outer_train, None, architecture=architecture, loss_name=loss_name,
@@ -524,19 +595,32 @@ def _fit_fold(args, architecture, loss_name, seed, test, inner, cohort, events, 
             maximum_epochs=nested["selected_epoch"], patience=args.patience,
             cycles_per_batch=args.batch_size,
         )
-        checkpoint["threshold"] = nested["threshold"]
+        checkpoint["thresholds"] = nested["thresholds"]
+        checkpoint["threshold"] = nested["thresholds"]["first_positive"]
         predicted = predict_policy(outer_test, checkpoint)
         metrics = policy_cycle_metrics(
-            predicted, outer_test_reference, nested["threshold"], loss_name=loss_name,
+            predicted, outer_test_reference, nested["thresholds"]["first_positive"],
+            loss_name=loss_name, strategy="first_positive",
         )
-        metrics["evaluation_status"] = np.where(
-            metrics.rb_cop.notna(), "evaluated", "rb_outside_trusted_support"
+        robustness = policy_cycle_metrics(
+            predicted, outer_test_reference, nested["thresholds"]["two_of_three"],
+            loss_name=loss_name, strategy="two_of_three",
         )
         missing = sorted(set(outer_test_reference.cycle_name) - set(metrics.cycle_name))
         if missing:
             metrics = pd.concat([metrics, pd.DataFrame({
-                "cycle_name": missing, "evaluation_status": "no_legal_actions",
+                "cycle_name": missing, "strategy": "first_positive",
             })], ignore_index=True)
+            robustness = pd.concat([robustness, pd.DataFrame({
+                "cycle_name": missing, "strategy": "two_of_three",
+            })], ignore_index=True)
+        for table in (metrics, robustness):
+            table["evaluation_status"] = np.where(
+                table.selected_cop.notna() & table.rb_cop.notna(),
+                "evaluated",
+                np.where(table.selected_cop.notna(), "rb_outside_trusted_support",
+                         "no_legal_actions"),
+            )
         result = {
             "status": status, "heldout_experiment": test, "inner_experiment": inner,
             "checkpoint": checkpoint,
@@ -545,6 +629,10 @@ def _fit_fold(args, architecture, loss_name, seed, test, inner, cohort, events, 
                 heldout_experiment=test,
             ),
             "cycle_metrics": metrics.assign(
+                architecture=architecture, loss_name=loss_name, seed=seed,
+                heldout_experiment=test,
+            ),
+            "controller_metrics": pd.concat([metrics, robustness], ignore_index=True).assign(
                 architecture=architecture, loss_name=loss_name, seed=seed,
                 heldout_experiment=test,
             ),
@@ -587,8 +675,12 @@ def run(args):
     boundaries = pd.read_csv(args.data / "recovery_boundaries.csv")
     boundaries["experiment_id"] = boundaries.experiment_id.astype(str)
     events = pd.read_csv(args.data / "defrost_events.csv")
+    boundaries, events = reliable_stopping_inputs(args, boundaries, events)
     sources = _source_runs(args)
-    missing = [str(path / "base") for path in sources.values() if not (path / "base").exists()]
+    missing = [
+        str(sources[name] / "base") for name in args.stopping_architectures
+        if not (sources[name] / "base").exists()
+    ]
     if missing:
         raise FileNotFoundError(f"missing frozen architecture base directories: {missing}")
     settings = {
@@ -607,8 +699,8 @@ def run(args):
         ),
         "binary_loss": "cycle_mean_of_present_class_means_no_label_smoothing",
         "cop_loss": "cycle_optimal_COP_minus_soft_first_stop_expected_COP",
-        "controller": "first_probability_at_or_above_threshold_else_forced_final",
-        "threshold_selection": "inner_validation_mean_replayed_cycle_COP",
+        "controller": "primary_1_of_1_plus_robustness_2_of_3_both_forced_final",
+        "threshold_selection": "independent_per_controller_on_one_frozen_inner_probability_table",
         "threshold_grid": list(np.arange(5, 100, 5) / 100),
         "optimizer": {"name": "AdamW", "learning_rate": 1e-3, "weight_decay": 1e-4},
     }
@@ -642,6 +734,7 @@ def run(args):
                 results = _saved_fold_results(output / "folds")
                 for key, suffix in (
                     ("predictions", "parquet"), ("cycle_metrics", "csv"),
+                    ("controller_metrics", "csv"),
                     ("losses", "csv"), ("threshold_grid", "csv"),
                 ):
                     tables = [result[key] for result in results if not result[key].empty]

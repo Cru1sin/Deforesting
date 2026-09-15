@@ -701,12 +701,12 @@ def test_dataset_peak_quality_preserves_prior_status_and_updates_only_requested_
     rows = pd.concat([curve,curve.assign(cycle_name='b')],ignore_index=True)
     update_effective_cop_quality(tmp_path, rows, cycle_names=['a','b','c'])
     got=read_catalog(tmp_path)['cycles']
-    assert [r['status'] for r in got]==['valid','invalid','invalid']
-    assert got[1]['status_reason']=='original'
+    assert [(r['status'],r['status_reason']) for r in got]==[
+        ('valid','original'),('invalid','original'),('partial','original')]
     assert got[2]['pre_cop_status']['status']=='partial'
     update_effective_cop_quality(tmp_path, curve.iloc[:9])
     got=read_catalog(tmp_path)['cycles']
-    assert got[0]['status']=='invalid' and got[0]['pre_cop_status']['status']=='valid'
+    assert got[0]['status']=='valid' and got[0]['pre_cop_status']['status']=='valid'
     assert got[1]['status_reason']=='original'
     update_effective_cop_quality(tmp_path, curve)
     assert read_catalog(tmp_path)['cycles'][0]['status']=='valid'
@@ -714,7 +714,7 @@ def test_dataset_peak_quality_preserves_prior_status_and_updates_only_requested_
     reviewed['cycles'][1]['review_status'] = 'valid'
     write_catalog(tmp_path, reviewed)
     update_effective_cop_quality(tmp_path, rows)
-    assert read_catalog(tmp_path)['cycles'][1]['status']=='valid'
+    assert read_catalog(tmp_path)['cycles'][1]['status']=='invalid'
     assert read_catalog(tmp_path)['cycles'][1]['pre_cop_status']['status']=='invalid'
 
 
