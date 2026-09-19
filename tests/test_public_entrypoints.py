@@ -6,10 +6,8 @@ def test_public_entrypoints_name_their_scientific_tasks() -> None:
         "validate_dataset.py",
         "fit_defrost_event_models.py",
         "select_defrost_time.py",
-        "calculate_v1_label_reference.py",
-        "build_image_labels.py",
-        "train_image_models.py",
-        "evaluate_image_models.py",
+        "calculate_rb_reference.py",
+        "train_defrost_models.py",
     }
     ambiguous = {
         "main_data.py",

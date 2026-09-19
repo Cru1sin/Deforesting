@@ -17,14 +17,17 @@ from matplotlib.patches import Rectangle
 
 from dataset_tools.local_images import RGB_PANEL_MAX_OFFSET
 from defrost_decision.baselines.electricity import water_side_heating_kw
-from plots.pareto_selection import (
-    plot_cop_heating_rate_pareto,
+from plots.cop import (
+    COP_COLOR,
+    OPTIMAL_COLOR,
+    RB_COLOR,
     plot_normalized,
     plot_objectives,
 )
 
 _PANELS = (
     (("compressor_frequency", "compressor_frequency_setpoint"), "Compressor frequency [Hz]"),
+    (("pressure_difference",), "Pc − Pe [MPa]"),
     (
         ("heating_capacity", "evaporator_capacity", "compressor_power", "power_total"),
         "Capacity / power [kW]",
@@ -40,7 +43,7 @@ _PANELS = (
             "plate_heat_exchanger_inlet_temperature",
             "water_temperature_setpoint",
         ),
-        "Temperature [degC]",
+        "Condensing / inlet temperature [degC]",
     ),
     (
         ("ambient_temperature", "coil_temperature", "evaporating_temperature"),
@@ -54,19 +57,21 @@ _COLORS = {
     "evaporator_capacity": "#B24C63",
     "compressor_power": "#4D4D4D",
     "power_total": "#7884B4",
-    "cop": "#009E73",
-    "water_cop": "#0072B2",
+    "cop": "#4C8A83",
+    "water_cop": "#657BA5",
     "ambient_temperature": "#374151",
-    "water_in_temperature": "#E69F00",
-    "water_out_temperature": "#CC79A7",
+    "water_in_temperature": "#5E8CA8",
+    "water_out_temperature": "#C98B69",
     "condensing_temperature": "#D55E00",
-    "plate_heat_exchanger_inlet_temperature": "#0072B2",
+    "plate_heat_exchanger_inlet_temperature": "#009E73",
+    "pressure_difference": "#7B2CBF",
     "evaporating_temperature": "#56B4E9",
     "coil_temperature": "#7B2CBF",
     "water_temperature_setpoint": "#6B7280",
 }
 _STAGE_COLORS = {
     "recovery": "#78A6BC",
+    "cold_start": "#78A6BC",
     "frost_development": "#F2A35E",
     "defrost_preparation": "#A78BBA",
     "defrost": "#70B184",
@@ -320,7 +325,14 @@ def render_cycle_publication(
     """Render the Dataset's cycle-level scientific overview."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    bounds = cycle_record.get("boundaries", {})
     origin = frame["timestamp"].min()
+    if bounds.get("heating_origin") in {"cold_start", "not_started"}:
+        origin = pd.to_datetime(bounds.get("heating_start"))
+        frame = frame.loc[frame.timestamp.ge(origin)].copy()
+        if frame.empty:
+            return
+
     minutes = (frame["timestamp"] - origin).dt.total_seconds() / 60.0
     humidity = [
         str(column)
@@ -342,6 +354,30 @@ def render_cycle_publication(
         },
     )
     stage_spans = _stage_spans(frame, minutes)
+
+    boundaries = cycle_record.get("boundaries")
+    boundaries = boundaries if isinstance(boundaries, Mapping) else cycle_record
+    if "recovery_status" in cycle_record:
+        boundary = pd.to_datetime(boundaries.get("stable_heating_start"))
+        if pd.notna(boundary):
+            transition = (boundary - origin).total_seconds() / 60
+            stage_spans = [
+                (
+                    stage,
+                    transition if stage == "frost_development" else start,
+                    transition if stage == "recovery" else end,
+                )
+                for stage, start, end in stage_spans
+            ]
+    if bounds.get("heating_origin") == "cold_start":
+        stage_spans = [
+            (
+                "cold_start" if stage == "recovery" else stage,
+                0.0 if stage == "recovery" else start,
+                end,
+            )
+            for stage, start, end in stage_spans
+        ]
     _plot_availability_panel(
         axes[0],
         origin,
@@ -349,16 +385,6 @@ def render_cycle_publication(
         sensor_intervals or {"available": [], "missing": []},
         rgb_intervals or {"available": [], "missing": []},
     )
-
-    boundaries = cycle_record.get("boundaries")
-    baseline = boundaries if isinstance(boundaries, Mapping) else cycle_record
-    baseline_start = pd.to_datetime(str(baseline.get("baseline_start")), errors="coerce")
-    baseline_end = pd.to_datetime(str(baseline.get("baseline_end")), errors="coerce")
-    if not pd.isna(baseline_start) and not pd.isna(baseline_end):
-        left = (cast(pd.Timestamp, baseline_start) - origin).total_seconds() / 60.0
-        right = (cast(pd.Timestamp, baseline_end) - origin).total_seconds() / 60.0
-    else:
-        left = right = np.nan
 
     missing_spans = [
         (
@@ -377,8 +403,6 @@ def render_cycle_publication(
             label,
             stage_spans,
             missing_spans,
-            left,
-            right,
         )
 
     if humidity:
@@ -391,8 +415,6 @@ def render_cycle_publication(
                 label=_display_label(channel),
             )
         _shade_cycle_stages(axis, stage_spans, missing_spans)
-        if np.isfinite(left) and np.isfinite(right):
-            axis.axvspan(left, right, color="#6B7280", alpha=0.12, zorder=0)
         axis.set_ylabel("Relative humidity [%]", fontsize=8)
         axis.grid(axis="x", alpha=0.12)
         axis.legend(
@@ -404,9 +426,14 @@ def render_cycle_publication(
         )
 
     axes[-1].set_xlabel("Time from cycle start [min]", fontsize=8)
+    recovery_note = (
+        " | Recovery boundary unidentified"
+        if cycle_record.get("recovery_status") not in (None, "identified_offline")
+        else ""
+    )
     figure.suptitle(
         f"{cycle_record.get('cycle_name', cycle_record.get('cycle_id', 'Cycle'))} | "
-        f"{cycle_record.get('status', cycle_record.get('cycle_status', ''))}",
+        f"{cycle_record.get('status', cycle_record.get('cycle_status', ''))}{recovery_note}",
         x=0.12,
         ha="left",
         fontsize=10,
@@ -549,6 +576,354 @@ def cost_curve_optimal_time(
     return pd.Timestamp(curve.loc[values.idxmin(), "candidate_defrost_time"])
 
 
+def _plot_effective_cop_panel(
+    axis: Any,
+    curve: pd.DataFrame,
+    origin: pd.Timestamp,
+    stage_spans: list[tuple[str, float, float]],
+) -> Any:
+    """Draw the effective-COP panel shared by publication and trigger figures."""
+    plot_objectives(
+        axis, curve, origin, stage_spans, _shade_cycle_stages, metrics=("cycle_cop",)
+    )
+    axis.set_ylabel("Effective cycle COP [-]", fontsize=8)
+    relative_axis = axis.twinx()
+    plot_normalized(relative_axis, curve, origin, metrics=("cycle_cop",))
+    relative_axis.spines["right"].set_visible(True)
+    relative_axis.spines["right"].set_color("black")
+    relative_axis.tick_params(axis="y", colors="black")
+    relative_axis.yaxis.label.set_color("black")
+    relative_axis.get_legend().remove()
+    first = curve.iloc[0]
+    for percent, alpha in ((5, 0.07), (2, 0.10), (1, 0.14)):
+        left = pd.to_datetime(first.get(f"cycle_cop_basin_{percent}pct_start"), errors="coerce")
+        right = pd.to_datetime(first.get(f"cycle_cop_basin_{percent}pct_end"), errors="coerce")
+        if pd.notna(left) and pd.notna(right):
+            axis.axvspan(
+                (left - origin).total_seconds() / 60,
+                (right - origin).total_seconds() / 60,
+                color=COP_COLOR,
+                alpha=alpha,
+                label=f"Within {percent}% of best COP",
+            )
+    candidate_times = pd.to_datetime(curve["candidate_defrost_time"], errors="coerce")
+    eligible = curve["cycle_cop_eligible"].fillna(False).astype(bool)
+    for field, color in (("t_star", OPTIMAL_COLOR), ("t_RB", RB_COLOR)):
+        value = pd.to_datetime(first.get(field), errors="coerce")
+        selected = curve.loc[candidate_times.eq(value) & eligible]
+        if len(selected):
+            axis.scatter(
+                (pd.to_datetime(selected.candidate_defrost_time) - origin).dt.total_seconds() / 60,
+                selected.cycle_cop,
+                color=color,
+                marker="D" if field == "t_star" else "o",
+                s=26,
+                zorder=5,
+            )
+    if not eligible.any():
+        axis.text(
+            0.02,
+            0.5,
+            str(first.get("cycle_status", "no supported reference")).replace("_", " "),
+            transform=axis.transAxes,
+            fontsize=8,
+        )
+    return relative_axis
+
+
+def _effective_cop_probability_figure(
+    cycle_frame: pd.DataFrame,
+    curve: pd.DataFrame,
+    trace: pd.DataFrame,
+    metric: pd.Series,
+    cycle_name: str,
+    *,
+    model_label: str = "Chen-inspired DINOv2-MLP",
+    controllers: pd.DataFrame | None = None,
+) -> plt.Figure:
+    """Combine the publication effective-COP panel with the frozen binary replay."""
+    frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = frame.dropna(subset=["timestamp"])
+    origin = pd.Timestamp(frame["timestamp"].min())
+    minutes = (frame["timestamp"] - origin).dt.total_seconds() / 60
+    stage_spans = _stage_spans(frame, minutes)
+    figure, (cop_axis, probability_axis) = plt.subplots(
+        2,
+        1,
+        figsize=(9, 6.2),
+        dpi=300,
+        sharex=True,
+        gridspec_kw={"height_ratios": [1.35, 1], "hspace": 0.18},
+    )
+    relative_axis = _plot_effective_cop_panel(cop_axis, curve, origin, stage_spans)
+    _shade_cycle_stages(probability_axis, stage_spans, [])
+
+    replay = trace.sort_values("candidate_defrost_time", kind="stable").copy()
+    replay["candidate_defrost_time"] = pd.to_datetime(
+        replay["candidate_defrost_time"], errors="coerce"
+    )
+    replay_minutes = (replay["candidate_defrost_time"] - origin).dt.total_seconds() / 60
+    probability_axis.plot(
+        replay_minutes,
+        pd.to_numeric(replay["score"], errors="coerce"),
+        color="#C77836",
+        linewidth=1.25,
+        marker="o",
+        markersize=2.2,
+        label="Positive-class probability",
+    )
+    threshold_specs = (
+        ("threshold_first_positive", "1/1 threshold", "#6B7280", ":"),
+        ("threshold_two_of_three", "2/3 threshold", "#8B5E83", "--"),
+    )
+    plotted_threshold = False
+    for column, label, color, linestyle in threshold_specs:
+        if column not in replay:
+            continue
+        values = pd.to_numeric(replay[column], errors="coerce").dropna()
+        if len(values):
+            value = float(values.iloc[0])
+            probability_axis.axhline(
+                value, color=color, linestyle=linestyle, linewidth=0.9,
+                label=f"{label} ({value:g})",
+            )
+            plotted_threshold = True
+    if not plotted_threshold:
+        threshold = pd.to_numeric(replay.get("threshold"), errors="coerce").dropna()
+        threshold = float(threshold.iloc[0]) if len(threshold) else 0.5
+        probability_axis.axhline(
+            threshold,
+            color="#6B7280",
+            linestyle=":",
+            linewidth=0.9,
+            label=f"Positive threshold ({threshold:g})",
+        )
+
+    first = curve.iloc[0]
+    events = [
+        (first.get("t_star"), "COP optimum", OPTIMAL_COLOR, "-."),
+        (first.get("t_RB"), "RB trigger", RB_COLOR, "--"),
+    ]
+    if controllers is None:
+        events.append(
+            (metric.get("trigger_time"), "2/3 confirmed trigger", "#A34A42", "-")
+        )
+    else:
+        styles = {
+            "first_positive": ("1/1 trigger", "#A34A42", "-"),
+            "two_of_three": ("2/3 trigger", "#8B5E83", "--"),
+        }
+        for row in controllers.itertuples():
+            label, color, linestyle = styles[str(row.strategy)]
+            if getattr(row, "forced_final", False):
+                label = label.replace("trigger", "final fallback")
+            events.append((row.selected_time, label, color, linestyle))
+    for value, label, color, linestyle in events:
+        event_time = pd.to_datetime(value, errors="coerce")
+        if pd.isna(event_time):
+            continue
+        event_minute = (event_time - origin).total_seconds() / 60
+        for axis in (cop_axis, probability_axis):
+            axis.axvline(
+                event_minute,
+                color=color,
+                linestyle=linestyle,
+                linewidth=1.0,
+                label=label,
+                zorder=4,
+            )
+
+    probability_axis.set(
+        ylabel="Trigger probability",
+        xlabel="Time from cycle start [min]",
+        ylim=(-0.03, 1.03),
+    )
+    probability_axis.set_yticks([0, 0.25, 0.5, 0.75, 1])
+    probability_axis.grid(axis="x", alpha=0.12)
+    status = str(metric.get("status", "unknown")).replace("_", " ")
+    if pd.isna(pd.to_datetime(metric.get("trigger_time"), errors="coerce")):
+        probability_axis.text(
+            0.99,
+            0.05,
+            status,
+            transform=probability_axis.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=7,
+            color="#6B7280",
+        )
+    duration = max(float(minutes.max()), float(replay_minutes.max()), 1.0)
+    cop_axis.set_xlim(0, duration)
+
+    cop_handles, cop_labels = cop_axis.get_legend_handles_labels()
+    relative_handles, relative_labels = relative_axis.get_legend_handles_labels()
+    unique = dict(
+        zip(
+            [*cop_labels, *relative_labels],
+            [*cop_handles, *relative_handles],
+            strict=True,
+        )
+    )
+    cop_axis.legend(
+        unique.values(),
+        unique.keys(),
+        frameon=False,
+        fontsize=6.2,
+        loc="lower left",
+        bbox_to_anchor=(0, 1.01),
+        ncol=4,
+        columnspacing=1.0,
+    )
+    handles, labels = probability_axis.get_legend_handles_labels()
+    unique = dict(zip(labels, handles, strict=True))
+    probability_axis.legend(
+        unique.values(), unique.keys(), frameon=False, fontsize=6.5, ncol=3, loc="best"
+    )
+    cop_axis.text(
+        -0.14, 1.16, "(a)", transform=cop_axis.transAxes, fontsize=10, fontweight="bold"
+    )
+    probability_axis.text(
+        -0.14,
+        1.03,
+        "(b)",
+        transform=probability_axis.transAxes,
+        fontsize=10,
+        fontweight="bold",
+    )
+    figure.suptitle(
+        f"{cycle_name} | {model_label} | {status}",
+        x=0.08,
+        ha="left",
+        fontsize=10,
+        fontweight="bold",
+    )
+    figure.subplots_adjust(left=0.12, right=0.88, bottom=0.1, top=0.88)
+    return figure
+
+
+def render_effective_cop_probability(
+    cycle_frame: pd.DataFrame,
+    curve: pd.DataFrame,
+    trace: pd.DataFrame,
+    metric: pd.Series,
+    output_stem: Path,
+    *,
+    formats: tuple[str, ...] = ("png", "pdf"),
+    model_label: str = "Chen-inspired DINOv2-MLP",
+    controllers: pd.DataFrame | None = None,
+) -> None:
+    """Export one Chen-inspired probability figure without recomputing decisions."""
+    cycle_name = str(curve.iloc[0]["cycle_name"])
+    figure = _effective_cop_probability_figure(
+        cycle_frame, curve, trace, metric, cycle_name,
+        model_label=model_label, controllers=controllers,
+    )
+    output_stem.parent.mkdir(parents=True, exist_ok=True)
+    for suffix in formats:
+        figure.savefig(
+            output_stem.with_suffix(f".{suffix}"),
+            dpi=300 if suffix == "png" else None,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+    plt.close(figure)
+
+
+def _render_stopping_cycle_job(
+    loader: Any,
+    curve: pd.DataFrame,
+    trace: pd.DataFrame,
+    controllers: pd.DataFrame,
+    output: Path,
+    model_label: str,
+) -> None:
+    cycle_name = str(curve.cycle_name.iloc[0])
+    curve = curve.copy()
+    curve["t_star"] = controllers.optimal_time.dropna().iloc[0]
+    metric = controllers.iloc[0].copy()
+    metric["status"] = metric.get("evaluation_status", "evaluated")
+    metric["trigger_time"] = metric.get("selected_time")
+    render_effective_cop_probability(
+        loader.load_cycle(cycle_name),
+        curve,
+        trace.assign(score=trace.probability),
+        metric,
+        output / f"{cycle_name}_probability",
+        formats=("png",),
+        model_label=model_label,
+        controllers=controllers,
+    )
+
+
+def _render_stopping_training_loss(results: list[dict[str, Any]], output: Path) -> None:
+    figure, axis = plt.subplots(figsize=(7.2, 4.2), dpi=300)
+    for stage, color in (("inner", "#3C6E8F"), ("outer", "#C77836")):
+        curves = []
+        for result in results:
+            rows = result.get("losses", pd.DataFrame())
+            rows = rows.loc[rows.stage.eq(stage)] if "stage" in rows else rows.iloc[:0]
+            if rows.empty:
+                continue
+            axis.plot(rows.epoch, rows.training_loss, color=color, alpha=0.12, linewidth=0.6)
+            curves.append(rows[["epoch", "training_loss"]])
+        if curves:
+            mean = pd.concat(curves).groupby("epoch", as_index=False).training_loss.mean()
+            axis.plot(mean.epoch, mean.training_loss, color=color, linewidth=1.8, label=stage)
+    axis.set(xlabel="Epoch", ylabel="Training loss")
+    axis.grid(alpha=0.15)
+    axis.legend(frameon=False)
+    figure.tight_layout()
+    figure.savefig(output / "training_loss.png", dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+
+
+def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: int = 6, *, seed: int | None = None) -> None:
+    """Render every formal stopping probability curve and its training losses."""
+    import json
+
+    from joblib import Parallel, delayed, parallel_config
+
+    from dataset_tools import DatasetLoader
+
+    labels = {"F_core": "F_core | Sensor", "G_core": "G_core | Sensor + RGB",
+              "B0": "Chen B0 | RGB"}
+    run, dataset, output = map(Path, (run, dataset, output))
+    settings = json.loads((run / "settings.json").read_text())
+    columns = ["cycle_name", "candidate_defrost_time", "cycle_cop", "cycle_cop_eligible",
+               "cycle_cop_uses_model_extrapolation", "t_RB"]
+    decisions = pd.concat([pd.read_parquet(path, columns=columns)
+                          for path in sorted((run / "ridge").glob("*_reference.parquet"))],
+                          ignore_index=True)
+    for column in ("candidate_defrost_time", "t_RB"):
+        decisions[column] = pd.to_datetime(decisions[column], errors="coerce")
+    loader = DatasetLoader(dataset)
+    loader.configure_recovery(settings["causal_boundary_settings"])
+    for predictions_path in sorted(run.glob("*/seed_*/predictions.parquet")):
+        seed_dir = predictions_path.parent
+        if seed is not None and seed_dir.name != f"seed_{seed}":
+            continue
+        architecture = seed_dir.parent.name
+        destination = output / architecture / seed_dir.name
+        destination.mkdir(parents=True, exist_ok=True)
+        predictions = pd.read_parquet(predictions_path)
+        predictions["threshold_first_positive"] = .5
+        controllers = pd.read_csv(seed_dir / "cycle_metrics.csv")
+        for column in ("selected_time", "optimal_time"):
+            controllers[column] = pd.to_datetime(controllers[column], errors="coerce")
+        model_label = f"{labels[architecture]} | Binary loss | {seed_dir.name.replace('_', ' ')}"
+        jobs = []
+        for cycle_name, trace in predictions.groupby("cycle_name", sort=True):
+            curve = decisions.loc[decisions.cycle_name.eq(cycle_name)].copy()
+            metrics = controllers.loc[controllers.cycle_name.eq(cycle_name)].copy()
+            if not curve.empty and len(metrics) == 1:
+                jobs.append(delayed(_render_stopping_cycle_job)(
+                    loader, curve, trace, metrics, destination, model_label))
+        with parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1):
+            Parallel()(jobs)
+        print(f"[cycle figures] {architecture} {seed_dir.name}: {len(jobs)}", flush=True)
+
+
 def render_decision_publication(
     cycle_frame: pd.DataFrame,
     cycle_record: Mapping[str, object],
@@ -577,25 +952,21 @@ def render_decision_publication(
     boundaries = boundaries if isinstance(boundaries, Mapping) else cycle_record
     stable = pd.to_datetime(boundaries.get("stable_heating_start"), errors="coerce")
     stable = pd.NaT if pd.isna(stable) else pd.Timestamp(stable)
-    baseline_start = pd.to_datetime(boundaries.get("baseline_start"), errors="coerce")
-    baseline_end = pd.to_datetime(boundaries.get("baseline_end"), errors="coerce")
-    baseline_left = (
-        (pd.Timestamp(baseline_start) - origin).total_seconds() / 60.0
-        if not pd.isna(baseline_start)
-        else np.nan
-    )
-    baseline_right = (
-        (pd.Timestamp(baseline_end) - origin).total_seconds() / 60.0
-        if not pd.isna(baseline_end)
-        else np.nan
-    )
-
     parallel = parallel_curve is not None
-    figure = plt.figure(figsize=(10.4, 16.8) if parallel else (7.2, 8.25), dpi=300)
+    effective = (
+        parallel
+        and "algorithm" in parallel_curve
+        and parallel_curve.algorithm.eq("effective_cop").all()
+    )
+    figure = plt.figure(
+        figsize=(9, 9.8) if effective else (10.4, 16.8) if parallel else (7.2, 8.25), dpi=300
+    )
     grid = figure.add_gridspec(
-        6 if parallel else 4,
+        6 if parallel and not effective else 4,
         2,
-        height_ratios=[2.15, 0.92, 1.05, 1.45, 1.05, 10.0]
+        height_ratios=[3.0, 1.1, 1.1, 2.0]
+        if effective
+        else [2.15, 0.92, 1.05, 1.45, 1.05, 10.0]
         if parallel
         else [2.15, 0.92, 1.05, 1.08],
         hspace=0.42 if parallel else 0.62,
@@ -612,7 +983,7 @@ def render_decision_publication(
         figure.add_subplot(grid[2, :]),
         figure.add_subplot(grid[3, :]),
     ]
-    if parallel:
+    if parallel and not effective:
         panel_axes.extend([figure.add_subplot(grid[4, :]), figure.add_subplot(grid[5, :])])
     _plot_cycle_panel(
         panel_axes[0],
@@ -622,8 +993,6 @@ def render_decision_publication(
         "COP [-]",
         stage_spans,
         [],
-        baseline_left,
-        baseline_right,
     )
     _plot_cycle_panel(
         panel_axes[1],
@@ -633,17 +1002,17 @@ def render_decision_publication(
         "Water temperature [degC]",
         stage_spans,
         [],
-        baseline_left,
-        baseline_right,
     )
-    if parallel_curve is not None:
-        plot_objectives(panel_axes[2], parallel_curve, origin, stage_spans, _shade_cycle_stages)
-        plot_normalized(panel_axes[3], parallel_curve, origin, stage_spans, _shade_cycle_stages)
-        plot_cop_heating_rate_pareto(
-            panel_axes[4],
-            parallel_curve,
-            origin,
-            rb_time=decision_images.get("rb", {}).get("target_time"),
+    if effective and "reference_outlet_temperature" in parallel_curve:
+        tref = parallel_curve.reference_outlet_temperature.iloc[0]
+        if pd.notna(tref):
+            panel_axes[1].axhline(tref, color="#333333", ls=":", lw=1,
+                                 label=f"Tref = {tref:.2f} °C (recovery end)")
+            panel_axes[1].legend(fontsize=6, frameon=False, loc="best")
+    if effective:
+        axis = panel_axes[2]
+        relative_axis = _plot_effective_cop_panel(
+            axis, parallel_curve, origin, stage_spans
         )
     else:
         curve = cost_curve if cost_curve is not None else pd.DataFrame()
@@ -658,7 +1027,7 @@ def render_decision_publication(
             minimum_label=minimum_label,
             minimum_support_label=minimum_support_label,
         )
-    time_axes = panel_axes[:4] if parallel else panel_axes
+    time_axes = panel_axes if effective else panel_axes[:4] if parallel else panel_axes
     for axis in time_axes:
         axis.set_xlim(0.0, duration)
     _plot_decision_markers(
@@ -668,6 +1037,51 @@ def render_decision_publication(
         optimal_label,
         target_times=parallel,
     )
+    if effective:
+        from matplotlib.lines import Line2D
+        from matplotlib.patches import Patch
+
+        axis = panel_axes[2]
+        handles, labels = axis.get_legend_handles_labels()
+        other_handles, other_labels = relative_axis.get_legend_handles_labels()
+        handles.extend(other_handles)
+        labels.extend(other_labels)
+        for label, color, marker, style in (
+            ("RB defrost trigger", RB_COLOR, "o", "--"),
+            ("COP-optimal defrost trigger", OPTIMAL_COLOR, "D", "-."),
+        ):
+            if label in labels:
+                handles[labels.index(label)] = Line2D(
+                    [], [], color=color, marker=marker, linestyle=style, markersize=4, linewidth=1
+                )
+        handles.append(Line2D([], [], color="#65717C", linestyle="--", linewidth=1.2))
+        labels.append("Assumed extrapolation")
+        axis.legend(
+            handles,
+            labels,
+            frameon=False,
+            fontsize=6.7,
+            loc="lower left",
+            bbox_to_anchor=(0, 1.01),
+            ncol=4,
+            columnspacing=1.1,
+        )
+        figure.legend(
+            handles=[
+                Patch(
+                    facecolor=("#76528F" if stage == "defrost_preparation"
+                               else _STAGE_COLORS.get(stage, "#D9DEE5")),
+                    alpha=0.20 if stage == "defrost_preparation" else 0.10,
+                    label=_display_label(stage),
+                )
+                for stage in dict.fromkeys(stage for stage, _, _ in stage_spans)
+            ],
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.015),
+            ncol=4,
+            frameon=False,
+            fontsize=7,
+        )
     labels = panel_axes[2].get_legend_handles_labels()
     if labels[0] and not parallel:
         panel_axes[2].legend(
@@ -679,14 +1093,18 @@ def render_decision_publication(
             ncol=min(len(labels[0]), 4),
         )
     cycle_name = str(cycle_record.get("cycle_name", cycle_record.get("cycle_id", "Cycle")))
+    if effective:
+        cycle_name += " | Refrigerant effective COP | preparation: " + str(
+            parallel_curve.preparation_heat.iloc[0]
+        )
     figure.suptitle(cycle_name, x=0.08, ha="left", fontsize=10, fontweight="bold")
-    if figure_note:
-        figure.text(0.08, 0.945, figure_note, ha="left", va="top", fontsize=6.5, color="#4B5563")
-    panel_axes[3 if parallel else 2].set_xlabel("Time from cycle start [min]", fontsize=8)
+    panel_axes[3 if parallel and not effective else 2].set_xlabel(
+        "Time from cycle start [min]", fontsize=8
+    )
     figure.subplots_adjust(
         left=0.12 if parallel else 0.14,
-        right=0.82 if parallel else 0.98,
-        bottom=0.06,
+        right=0.88 if effective else 0.82 if parallel else 0.98,
+        bottom=0.10 if effective else 0.06,
         top=0.92,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -723,7 +1141,7 @@ def _plot_decision_image(
         )
     for spine in axis.spines.values():
         spine.set_visible(True)
-        spine.set_color("#2E7D5B" if "RB" in label else "#E28E2C")
+        spine.set_color(RB_COLOR if label.startswith("RB") else OPTIMAL_COLOR)
         spine.set_linewidth(1.0)
     target_time = pd.to_datetime(info.get("target_time"), errors="coerce")
     image_time = pd.to_datetime(info.get("image_time"), errors="coerce")
@@ -752,13 +1170,13 @@ def _plot_decision_markers(
     target_times: bool = False,
 ) -> None:
     markers = (
-        ("rb", "RB RGB frame", "#2E7D5B"),
-        ("optimal", f"{optimal_label} RGB frame", "#E28E2C"),
+        ("rb", "RB RGB frame", RB_COLOR),
+        ("optimal", f"{optimal_label} RGB frame", OPTIMAL_COLOR),
     )
     for target_type, label, color in markers:
         info = decision_images.get(target_type, {})
         if target_times:
-            label = "RB trigger" if target_type == "rb" else optimal_label
+            label = "RB defrost trigger" if target_type == "rb" else "COP-optimal defrost trigger"
         marker_time = pd.to_datetime(
             info.get("target_time") if target_times else info.get("image_time"),
             errors="coerce",
@@ -770,7 +1188,7 @@ def _plot_decision_markers(
             axis.axvline(
                 x,
                 color=color,
-                linestyle=":",
+                linestyle="--" if target_type == "rb" else "-.",
                 linewidth=0.9,
                 label=label if axis_index == len(axes) - 1 else "_nolegend_",
                 zorder=4,
@@ -1221,8 +1639,6 @@ def _plot_cycle_panel(
     label: str,
     stage_spans: list[tuple[str, float, float]],
     missing_spans: list[tuple[float, float]],
-    baseline_start: float,
-    baseline_end: float,
 ) -> None:
     for channel in channels:
         values = _observed_values(frame, channel)
@@ -1236,8 +1652,6 @@ def _plot_cycle_panel(
                 label=_display_label(channel),
             )
     _shade_cycle_stages(axis, stage_spans, missing_spans)
-    if np.isfinite(baseline_start) and np.isfinite(baseline_end):
-        axis.axvspan(baseline_start, baseline_end, color="#6B7280", alpha=0.12, zorder=0)
     axis.set_ylabel(label, fontsize=8)
     axis.grid(axis="x", alpha=0.12)
     if axis.lines:
@@ -1274,6 +1688,8 @@ def _display_label(channel: str) -> str:
         return "Plate HX Inlet Temperature"
     if channel == "cop":
         return "Refrigerant-side COP"
+    if channel == "pressure_difference":
+        return "Pc − Pe"
     if channel == "water_cop":
         return "Water-side COP"
     if channel == "environment_relative_humidity":
@@ -1311,6 +1727,10 @@ def _shade_cycle_stages(
 
 
 def _observed_values(frame: pd.DataFrame, channel: str) -> pd.Series[Any]:
+    if channel == "pressure_difference":
+        return _observed_values(frame, "condensing_pressure") - _observed_values(
+            frame, "evaporating_pressure"
+        )
     if channel == "water_cop":
         dependencies = (
             "water_flow",
@@ -1350,3 +1770,93 @@ def _stage_spans(frame: pd.DataFrame, minutes: pd.Series[Any]) -> list[tuple[str
         for _, group in frame.groupby(groups, sort=False)
         if pd.notna(group["cycle_stage"].iloc[0])
     ]
+
+
+def render_recovery_audit(frame, record, traces, output_path):
+    """Show each offline boundary against the same observed startup signals."""
+    frame = frame.copy()
+    frame["timestamp"] = pd.to_datetime(frame.timestamp)
+    origin = pd.Timestamp(record["boundaries"].get("heating_start") or frame.timestamp.min())
+    minute = (frame.timestamp - origin).dt.total_seconds() / 60
+    frame["pressure_difference"] = frame.condensing_pressure - frame.evaporating_pressure
+    fig, axes = plt.subplots(4, 1, figsize=(9, 8), sharex=True, dpi=150)
+    panels = (
+        (("compressor_frequency_setpoint", "compressor_frequency"), "Frequency [Hz]"),
+        (("pressure_difference",), "Pc − Pe [MPa]"),
+        (("condensing_temperature", "water_temperature_setpoint"), "Temperature [degC]"),
+    )
+    for axis, (channels, label) in zip(axes[:3], panels, strict=True):
+        _plot_cycle_panel(axis, frame, minute, channels, label, [], [])
+    colors = ("#0072B2", "#D55E00", "#7B2CBF", "#009E73")
+    for index, ((rule, trace), color) in enumerate(
+        zip(traces.items(), colors[: len(traces)], strict=True)
+    ):
+        x = (trace.timestamp - origin).dt.total_seconds() / 60
+        axes[-1].plot(x, trace.normal_heating.astype(float) * 0.65 + index, color=color, label=rule)
+        confirmed = trace.loc[trace.normal_heating, "timestamp"]
+        if len(confirmed):
+            t = (confirmed.iloc[0] - origin).total_seconds() / 60
+            for axis in axes[:3]:
+                axis.axvline(t, color=color, lw=0.8, ls="--")
+    axes[-1].set_yticks(range(4), list(traces), fontsize=7)
+    axes[-1].set_xlabel("Time from heating start [min]")
+    axes[-1].set_xlim(0, min(60, max(float(minute.max()), 1)))
+    fig.suptitle(f"{record['cycle_name']} | ramp → regulation | offline boundaries", fontsize=11)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+
+
+def render_recovery_overviews(loader, boundaries, output):
+    """Review every detected startup together, including delayed and missing transitions."""
+    names = list(boundaries.cycle_name.unique())
+    for first in range(0, len(names), 18):
+        fig, axes = plt.subplots(6, 3, figsize=(15, 15), dpi=160)
+        for axis, name in zip(axes.flat, names[first : first + 18], strict=False):
+            frame = loader.load_cycle_original(name)
+            frame.timestamp = pd.to_datetime(frame.timestamp)
+            rows = boundaries.loc[boundaries.cycle_name.eq(name)]
+            start = pd.Timestamp(rows.heating_start.iloc[0])
+            end = pd.to_datetime(rows.stable_heating_start).max()
+            xmax = max(25.0, (end - start).total_seconds() / 60 + 4) if pd.notna(end) else 40.0
+            x = (frame.timestamp - start).dt.total_seconds() / 60
+            axis.plot(x, frame.compressor_frequency_setpoint, color="#0072B2", lw=0.8)
+            pressure_axis = axis.twinx()
+            pressure_axis.plot(
+                x,
+                _observed_values(frame, "pressure_difference"),
+                color="#7B2CBF",
+                lw=0.6,
+                alpha=0.5,
+            )
+            pressure_axis.tick_params(axis="y", labelsize=5, colors="#7B2CBF")
+            colors = dict(
+                zip(
+                    (
+                        "frequency-setpoint",
+                        "frequency-actual",
+                        "pressure-difference",
+                        "frequency-pressure",
+                    ),
+                    ("#0072B2", "#D55E00", "#7B2CBF", "#009E73"),
+                    strict=True,
+                )
+            )
+            for _, row in rows.iterrows():
+                color = colors[row.recovery_rule]
+                t = pd.to_datetime(row.stable_heating_start)
+                if pd.notna(t):
+                    axis.axvline((t - start).total_seconds() / 60, color=color, lw=0.7, ls="--")
+            axis.set_xlim(0, min(xmax, max(x.max(), 1)))
+            axis.set_title(name, fontsize=9)
+            axis.tick_params(labelsize=7)
+        for axis in list(axes.flat)[len(names[first : first + 18]) :]:
+            axis.set_visible(False)
+        fig.suptitle(
+            "All-cycle review | frequency [Hz, left], Pc−Pe [MPa, right] | "
+            "blue=setpoint, orange=actual, purple=pressure, green=joint"
+        )
+        fig.tight_layout()
+        fig.savefig(output / f"overview_{first // 18 + 1:02d}.png", bbox_inches="tight")
+        plt.close(fig)

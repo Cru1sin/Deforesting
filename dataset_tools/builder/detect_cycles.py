@@ -266,9 +266,7 @@ def find_stable_heating_start(
         )
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
     water_out = pd.to_numeric(frame["water_out_temperature"], errors="coerce")
-    setpoint = pd.to_numeric(
-        frame["water_temperature_setpoint"], errors="coerce"
-    )
+    setpoint = pd.to_numeric(frame["water_temperature_setpoint"], errors="coerce")
     mask = timestamps.ge(heating_start) & timestamps.notna() & water_out.notna() & setpoint.notna()
     if isinstance(defrost_start, pd.Timestamp):
         mask &= timestamps.lt(defrost_start)
@@ -285,9 +283,9 @@ def find_stable_heating_start(
         observations["water_out"].ge(observations["setpoint"] - 2.0),
         "timestamp",
     ]
-    elapsed = (
-        observations["timestamp"] - pd.Timestamp(heating_start)
-    ).dt.total_seconds().to_numpy(dtype=float) / 60.0
+    elapsed = (observations["timestamp"] - pd.Timestamp(heating_start)).dt.total_seconds().to_numpy(
+        dtype=float
+    ) / 60.0
     knee = find_global_knee(
         elapsed,
         observations["water_out"].to_numpy(dtype=float),
@@ -317,9 +315,11 @@ def find_defrost_preparation_start(
     start = defrost_start - pd.Timedelta(seconds=lookback)
     if isinstance(stable_start, pd.Timestamp):
         start = max(start, stable_start)
-    observations = pd.DataFrame(
-        {"timestamp": timestamps, "setpoint": setpoint}
-    ).loc[timestamps.ge(start) & timestamps.lt(defrost_start)].dropna()
+    observations = (
+        pd.DataFrame({"timestamp": timestamps, "setpoint": setpoint})
+        .loc[timestamps.ge(start) & timestamps.le(defrost_start)]
+        .dropna()
+    )
     observations = observations.sort_values("timestamp", kind="stable").drop_duplicates(
         "timestamp", keep="last"
     )
@@ -471,9 +471,7 @@ def _defrost_runs(
         elif value is False and active_event is not None:
             end = timestamps.iloc[position]
             active_event["end"] = end
-            active_event["duration"] = (
-                end - active_event["start"]
-            ).total_seconds()
+            active_event["duration"] = (end - active_event["start"]).total_seconds()
             events.append(active_event)
             active_event = None
 
@@ -648,9 +646,9 @@ def _label_unassigned_rows(
         )
         if preparation_start is not None and defrost_start is not None:
             times = pd.to_datetime(segment["timestamp"], errors="coerce")
-            segment_stages.loc[
-                times.ge(preparation_start) & times.lt(defrost_start)
-            ] = "defrost_preparation"
+            segment_stages.loc[times.ge(preparation_start) & times.lt(defrost_start)] = (
+                "defrost_preparation"
+            )
         if defrost_start is not None and defrost_end is None:
             segment_end = pd.Timestamp(segment["timestamp"].max())
             following_starts = [
@@ -722,14 +720,14 @@ def _partial_stage_context(  # noqa: C901
         else pd.Series(np.nan, index=segment.index, dtype="float64")
     )
     active_times = times.loc[states.eq(True)].dropna().sort_values(kind="stable")
-    defrost_start = (
-        pd.Timestamp(active_times.iloc[0]) if not active_times.empty else None
-    )
+    defrost_start = pd.Timestamp(active_times.iloc[0]) if not active_times.empty else None
     defrost_end: pd.Timestamp | None = None
     if defrost_start is not None:
-        inactive_after_start = times.loc[
-            states.eq(False) & times.gt(defrost_start)
-        ].dropna().sort_values(kind="stable")
+        inactive_after_start = (
+            times.loc[states.eq(False) & times.gt(defrost_start)]
+            .dropna()
+            .sort_values(kind="stable")
+        )
         if not inactive_after_start.empty:
             defrost_end = pd.Timestamp(inactive_after_start.iloc[0])
 
@@ -737,9 +735,7 @@ def _partial_stage_context(  # noqa: C901
     required = {"timestamp", "water_out_temperature", "water_temperature_setpoint"}
     if required <= set(segment.columns):
         water_out = pd.to_numeric(segment["water_out_temperature"], errors="coerce")
-        setpoint = pd.to_numeric(
-            segment["water_temperature_setpoint"], errors="coerce"
-        )
+        setpoint = pd.to_numeric(segment["water_temperature_setpoint"], errors="coerce")
         observed = times.notna() & water_out.notna() & setpoint.notna()
         has_temperature_evidence = bool(observed.any())
         if has_temperature_evidence:
@@ -766,9 +762,7 @@ def _partial_stage_context(  # noqa: C901
         return stages, heating_start, None, defrost_start, defrost_end
 
     stages = pd.Series("partial", index=segment.index, dtype="string")
-    before_defrost = (
-        times.lt(defrost_start) if defrost_start is not None else times.notna()
-    )
+    before_defrost = times.lt(defrost_start) if defrost_start is not None else times.notna()
     if stable_start is not None:
         stages.loc[before_defrost & times.lt(stable_start)] = "recovery"
         stages.loc[before_defrost & times.ge(stable_start)] = "frost_development"
@@ -808,9 +802,7 @@ def _add_cycle_coordinates(labeled: pd.DataFrame, cycles: list[dict[str, object]
         ):
             continue
         cycle_id = str(row["cycle_id"])
-        mask = labeled["cycle_id"].eq(cycle_id) & labeled["cycle_stage"].eq(
-            "frost_development"
-        )
+        mask = labeled["cycle_id"].eq(cycle_id) & labeled["cycle_stage"].eq("frost_development")
         elapsed = (labeled.loc[mask, "timestamp"] - stable_start).dt.total_seconds()
         duration = (frost_end - stable_start).total_seconds()
         if duration <= 0:
@@ -854,3 +846,348 @@ def _cycle_columns() -> list[str]:
         "preceding_defrost_duration_seconds",
         "terminal_defrost_duration_seconds",
     ]
+
+
+RECOVERY_RULES = ("frequency-setpoint", "frequency-actual")
+RECOVERY_DEFAULTS = {
+    "recovery_rule": "frequency-setpoint",
+    "startup_frequency_max": 42.0,
+    "frequency_ramp": 1.0,
+    "slow_fraction": 0.25,
+    "minimum_state_observations": 3,
+    "control_intervals": 3,
+    "gap_seconds": 30.0,
+}
+
+
+def add_recovery_arguments(parser):
+    parser.add_argument(
+        "--recovery-rule", choices=RECOVERY_RULES, default=RECOVERY_DEFAULTS["recovery_rule"]
+    )
+    for name, default in RECOVERY_DEFAULTS.items():
+        if name != "recovery_rule":
+            parser.add_argument(
+                "--" + name.replace("_", "-"),
+                type=int if name in {"minimum_state_observations", "control_intervals"} else float,
+                default=default,
+            )
+
+
+def recovery_settings(args):
+    return {name: getattr(args, name) for name in RECOVERY_DEFAULTS}
+
+
+def recovery_control_trace(frame: pd.DataFrame, settings: Mapping) -> pd.DataFrame:
+    """Offline control-state segmentation from frequency changes and their intervals.
+
+    A slower command and subsequent command pattern identify normal regulation.
+    The ramp reference is the median of preceding intervals, not startup speed. A
+    terminal plateau must outlast the observed ramp cadence; a truncated short
+    hold cannot prove recovery. No confirmation delay is added to the boundary.
+    """
+    if set(settings) - set(RECOVERY_DEFAULTS):
+        raise ValueError("obsolete recovery settings: use the offline frequency-state definition")
+    cfg = {**RECOVERY_DEFAULTS, **settings}
+    if cfg["recovery_rule"] not in RECOVERY_RULES:
+        raise ValueError("offline recovery uses frequency setpoint or actual frequency")
+    if any(float(cfg[key]) <= 0 for key in RECOVERY_DEFAULTS if key != "recovery_rule"):
+        raise ValueError("recovery thresholds must be positive")
+    if cfg["slow_fraction"] >= 1:
+        raise ValueError("slow fraction must be less than one")
+    values = frame.copy()
+    values["timestamp"] = pd.to_datetime(values.timestamp, errors="coerce")
+    values = (
+        values.dropna(subset=["timestamp"])
+        .sort_values("timestamp", kind="stable")
+        .drop_duplicates("timestamp", keep="last")
+        .reset_index(drop=True)
+    )
+    signal = (
+        "compressor_frequency_setpoint"
+        if cfg["recovery_rule"] == "frequency-setpoint"
+        else "compressor_frequency"
+    )
+    raw = pd.to_numeric(
+        values.get(signal, pd.Series(np.nan, index=values.index)), errors="coerce"
+    ).replace([np.inf, -np.inf], np.nan)
+    result = values[["timestamp"]].copy()
+    for column in (
+        "compressor_frequency_setpoint",
+        "compressor_frequency",
+        "condensing_pressure",
+        "evaporating_pressure",
+        "condensing_temperature",
+        "plate_heat_exchanger_inlet_temperature",
+        "water_temperature_setpoint",
+    ):
+        if column in values:
+            result[column] = pd.to_numeric(values[column], errors="coerce")
+    if {"condensing_pressure", "evaporating_pressure"} <= set(result):
+        result["pressure_difference"] = result.condensing_pressure - result.evaporating_pressure
+    result["normal_heating"] = False
+    result[signal + "_slope_per_minute"] = np.nan
+    result[signal + "_fast_reference"] = np.nan
+    result["recovery_status"] = "missing_signal"
+    observed = pd.DataFrame({"timestamp": values.timestamp, "value": raw}).dropna()
+    if observed.empty:
+        return result
+    low = observed.loc[observed.value.between(0, cfg["startup_frequency_max"])]
+    result["recovery_status"] = "awaiting_startup_observation"
+    if low.empty:
+        return result
+    groups = observed.value.ne(observed.value.shift()).cumsum()
+    states = observed.groupby(groups).agg(
+        timestamp=("timestamp", "first"),
+        end=("timestamp", "last"),
+        value=("value", "first"),
+        count=("value", "size"),
+    )
+    states = states.loc[states["count"].ge(cfg["minimum_state_observations"])]
+    states = states.loc[
+        states.timestamp.gt(low.timestamp.iloc[0]) & states.value.gt(cfg["startup_frequency_max"])
+    ].reset_index(drop=True)
+    result["recovery_status"] = "awaiting_sustained_ramp"
+    count = cfg["control_intervals"]
+    if len(states) <= count:
+        return result
+    intervals = states.timestamp.shift(-1).sub(states.timestamp).dt.total_seconds() / 60
+    rates = states.value.shift(-1).sub(states.value).div(intervals)
+    references = rates.expanding(min_periods=count).median().shift()
+    sampling_minutes = float(observed.timestamp.diff().dt.total_seconds().median()) / 60
+    increments = states.value.shift(-1).sub(states.value)
+    reference_uppers = (
+        increments.div((intervals - sampling_minutes).clip(lower=sampling_minutes))
+        .expanding(min_periods=count)
+        .median()
+        .shift()
+    )
+    reference = float(references.iloc[count])
+    reference_upper = float(reference_uppers.iloc[count])
+    result[signal + "_fast_reference"] = reference
+    result[signal + "_reference_upper"] = reference_upper
+    result["sampling_interval_seconds"] = sampling_minutes * 60
+    if not np.isfinite(reference) or reference < cfg["frequency_ramp"]:
+        return result
+    # The final hold is evidence only if the record covers a normal ramp update interval.
+    cadence = float(intervals.loc[rates.gt(reference * cfg["slow_fraction"])].max())
+    if (states.end.iloc[-1] - states.timestamp.iloc[-1]).total_seconds() / 60 >= cadence:
+        rates.iloc[-1] = 0.0
+    positions = (
+        np.searchsorted(states.timestamp.to_numpy(), values.timestamp.to_numpy(), side="right") - 1
+    )
+    valid = positions >= 0
+    result.loc[valid, signal + "_slope_per_minute"] = rates.to_numpy()[positions[valid]]
+    # Command timestamps have one sampling interval of uncertainty at each interval estimate.
+    lower_rates = increments.div(intervals + sampling_minutes)
+    result.loc[valid, signal + "_slope_lower"] = lower_rates.to_numpy()[positions[valid]]
+    lower_rates.iloc[-1] = rates.iloc[-1]
+    # A small individual step is not a mode change: the subsequent command pattern
+    # must also be slow. Offline evidence locates the start, without a time offset.
+    following_rates = lower_rates.iloc[::-1].rolling(count, min_periods=1).median().iloc[::-1]
+    thresholds = reference_uppers * cfg["slow_fraction"]
+    eligible = (
+        lower_rates.le(thresholds)
+        & following_rates.le(thresholds)
+        & references.ge(cfg["frequency_ramp"])
+    )
+    result["recovery_status"] = "transition_not_observed"
+    if not eligible.any():
+        if (
+            observed.loc[observed.timestamp.ge(states.timestamp.iloc[0]), "timestamp"]
+            .diff()
+            .dt.total_seconds()
+            .gt(cfg["gap_seconds"])
+            .any()
+        ):
+            result["recovery_status"] = "transition_hidden_by_gap"
+        return result
+    position = int(np.flatnonzero(eligible)[0])
+    boundary = states.timestamp.iloc[position]
+    result[signal + "_fast_reference"] = references.iloc[position]
+    result[signal + "_reference_upper"] = reference_uppers.iloc[position]
+    support_position = min(position + count, len(states) - 1)
+    support_end = states.timestamp.iloc[support_position]
+    if support_position == len(states) - 1 and pd.notna(rates.iloc[-1]):
+        support_end += pd.Timedelta(minutes=cadence)
+    # A directly observed hold supplies local evidence without waiting for remote
+    # commands. Its duration scales with the preceding command cadence, not seconds.
+    hold_minutes = float(intervals.iloc[:position].median()) / cfg["slow_fraction"]
+    hold_end = boundary + pd.Timedelta(minutes=hold_minutes)
+    if states.end.iloc[position] >= hold_end:
+        support_end = min(support_end, hold_end)
+    evidence = observed.loc[observed.timestamp.between(states.timestamp.iloc[0], support_end)]
+    if evidence.timestamp.diff().dt.total_seconds().gt(cfg["gap_seconds"]).any():
+        result["recovery_status"] = "transition_hidden_by_gap"
+        return result
+    result["normal_heating"] = values.timestamp.ge(boundary)
+    result["recovery_status"] = np.where(result.normal_heating, "identified_offline", "recovery")
+    result["transition_support_end"] = support_end
+    return result
+
+
+def heating_episode_bounds(loader, cycle_name, frame):
+    """Exclude pre-start standby only when no adjacent defrost precedes startup."""
+    record = loader.get_cycle_record(cycle_name)
+    bounds = dict(record["boundaries"])
+    recorded = pd.to_datetime(bounds.get("recorded_heating_start", bounds.get("heating_start")))
+    bounds.update(
+        recorded_heating_start=recorded,
+        heating_start=recorded,
+        heating_origin="post_defrost",
+        excluded_prestart_seconds=0.0,
+    )
+    cycles = loader.list_cycles()
+    experiment = cycles.loc[cycles.experiment_id.eq(record["experiment_id"])].reset_index(drop=True)
+    position = int(experiment.index[experiment.cycle_name.eq(cycle_name)][0])
+    preceding_end = (
+        pd.to_datetime(experiment.iloc[position - 1].get("defrost_end")) if position else pd.NaT
+    )
+    if pd.notna(preceding_end) and abs((recorded - preceding_end).total_seconds()) <= 60:
+        return bounds
+    bounds["heating_origin"] = "initial_recording" if position == 0 else "restart_recording"
+    end = pd.to_datetime(bounds.get("defrost_preparation_start") or bounds.get("defrost_start"))
+    observed = frame.reindex(columns=["timestamp", "compressor_frequency_setpoint"]).copy()
+    observed["compressor_frequency_setpoint"] = pd.to_numeric(
+        observed.compressor_frequency_setpoint, errors="coerce"
+    )
+    observed["timestamp"] = pd.to_datetime(observed.timestamp)
+    observed = observed.loc[observed.timestamp.ge(recorded)]
+    if pd.notna(end):
+        observed = observed.loc[observed.timestamp.lt(end)]
+    observed = observed.dropna().sort_values("timestamp").drop_duplicates("timestamp")
+    if observed.empty or observed.compressor_frequency_setpoint.iloc[0] != 0:
+        return bounds
+    running = observed.loc[observed.compressor_frequency_setpoint.gt(0), "timestamp"]
+    start = running.iloc[0] if len(running) else pd.NaT
+    bounds.update(
+        heating_start=start,
+        heating_origin="cold_start" if len(running) else "not_started",
+        excluded_prestart_seconds=(start - recorded).total_seconds(),
+    )
+    return bounds
+
+
+def recovery_stages(frame, boundaries):
+    """Apply a confirmed recovery boundary, preserving preparation/defrost observations."""
+    times = pd.to_datetime(frame.timestamp)
+    stage = frame.cycle_stage.copy()
+    preparation = pd.to_datetime(boundaries.get("defrost_preparation_start"))
+    before = (
+        times.lt(preparation)
+        if pd.notna(preparation)
+        else ~stage.isin(["defrost", "defrost_preparation"])
+    )
+    stage.loc[before] = "recovery"
+    if "heating_origin" in boundaries:
+        stage.loc[times.lt(pd.to_datetime(boundaries.get("heating_start")))] = pd.NA
+    stable = pd.to_datetime(boundaries.get("stable_heating_start"))
+    if pd.notna(stable):
+        stage.loc[before & times.ge(stable)] = "frost_development"
+    return stage
+
+
+def audit_recovery_cycle(loader, cycle_name, settings, output=None, *, figures=False):
+    """Use the same detector for all recipes; keep raw controller codes as evidence."""
+    record = loader.get_cycle_record(cycle_name)
+    frame = loader.load_cycle_original(cycle_name)
+    frame["timestamp"] = pd.to_datetime(frame.timestamp)
+    bounds = heating_episode_bounds(loader, cycle_name, frame)
+    start = pd.to_datetime(bounds.get("heating_start"))
+    end = pd.to_datetime(bounds.get("defrost_preparation_start") or bounds.get("defrost_start"))
+    heating = frame.loc[frame.timestamp.ge(start)] if pd.notna(start) else frame.iloc[:0]
+    if pd.notna(end):
+        heating = heating.loc[heating.timestamp.lt(end)]
+    rows, traces, codes = [], {}, []
+    for rule in RECOVERY_RULES:
+        trace = recovery_control_trace(heating, {**settings, "recovery_rule": rule})
+        traces[rule] = trace
+        confirmed = trace.loc[trace.normal_heating, "timestamp"]
+        boundary = confirmed.iloc[0] if len(confirmed) else pd.NaT
+        evidence = {}
+        for signal in (
+            "compressor_frequency_setpoint",
+            "compressor_frequency",
+            "pressure_difference",
+        ):
+            column = signal + "_slope_per_minute"
+            if pd.isna(boundary) or column not in trace:
+                continue
+            at_boundary = trace.loc[trace.timestamp.eq(boundary)].iloc[0]
+            reference = at_boundary[signal + "_fast_reference"]
+            after = trace.loc[
+                trace.timestamp.ge(boundary)
+                & trace.timestamp.le(boundary + pd.Timedelta(seconds=120))
+            ]
+            evidence[signal + "_reference"] = reference
+            evidence[signal + "_reference_upper"] = at_boundary.get(signal + "_reference_upper")
+            evidence[signal + "_next_command_slope_lower"] = at_boundary.get(
+                signal + "_slope_lower"
+            )
+            evidence["sampling_interval_seconds"] = at_boundary.get("sampling_interval_seconds")
+            evidence["transition_support_end"] = at_boundary.get("transition_support_end")
+            evidence[signal + "_slope_at_boundary"] = at_boundary[column]
+            observed_after = after.dropna(subset=[signal])
+            if len(observed_after) >= 2:
+                x = (observed_after.timestamp - boundary).dt.total_seconds().to_numpy() / 60
+                evidence[signal + "_next120_raw_slope"] = float(
+                    np.polyfit(x, observed_after[signal], 1)[0]
+                )
+        rows.append(
+            {
+                "cycle_name": cycle_name,
+                "experiment_id": record["experiment_id"],
+                "catalog_status": record["status"],
+                "recovery_rule": rule,
+                "heating_start": start,
+                "recorded_heating_start": bounds["recorded_heating_start"],
+                "heating_origin": bounds["heating_origin"],
+                "excluded_prestart_seconds": bounds["excluded_prestart_seconds"],
+                "stable_heating_start": boundary,
+                "old_stable_heating_start": bounds.get("stable_heating_start"),
+                **evidence,
+                "recovery_minutes": (boundary - start).total_seconds() / 60,
+                "recovery_status": trace.recovery_status.iloc[-1]
+                if len(trace)
+                else "no_heating_observations",
+            }
+        )
+    for column in (
+        "p1__压机状态'1_00",
+        "p1__系统状态'1_00'",
+        "p1__频率状态<1_00>",
+        "p1__FF调节状态",
+        "p1__四通阀",
+    ):
+        values = frame.get(column, pd.Series(dtype=object)).dropna()
+        changes = values.ne(values.shift())
+        for index in values.index[changes]:
+            codes.append(
+                {
+                    "cycle_name": cycle_name,
+                    "field": column,
+                    "timestamp": frame.loc[index, "timestamp"],
+                    "value": values.loc[index],
+                    "coverage": len(values) / max(len(frame), 1),
+                }
+            )
+    if output is not None:
+        if figures:
+            from plots.publication import render_recovery_audit
+
+            render_recovery_audit(frame, record, traces, output / f"{cycle_name}.png")
+        tables = []
+        for row in rows:
+            trace = traces[row["recovery_rule"]]
+            stages = frame[["timestamp", "cycle_stage"]].copy()
+            stages["cycle_stage"] = recovery_stages(
+                frame, {**bounds, "stable_heating_start": row["stable_heating_start"]}
+            )
+            tables.append(
+                stages.merge(trace, on="timestamp", how="left").assign(
+                    recovery_rule=row["recovery_rule"]
+                )
+            )
+        pd.concat(tables, ignore_index=True).to_parquet(
+            output / f"{cycle_name}_states.parquet", index=False
+        )
+    return rows, codes

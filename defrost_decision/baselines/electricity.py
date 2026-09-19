@@ -1,17 +1,9 @@
-"""Measured heating electricity and frozen empirical transition electricity."""
-
-from __future__ import annotations
-
-import json
-from pathlib import Path
-from typing import Any
-
+"""Measured heating electricity integration with explicit gap handling."""
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 MINIMUM_COVERAGE = 0.95
-
 
 def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
     """Return raw water-side heating capacity in kW."""
@@ -23,7 +15,6 @@ def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
             - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
         )
     )
-
 
 def integrate_energy_kwh(
     timestamps: pd.Series | pd.DatetimeIndex,
@@ -52,7 +43,6 @@ def integrate_energy_kwh(
     coverage = float(dt.where(valid, 0.0).sum() / span) if span > 0 else 0.0
     return float(energy), coverage
 
-
 def integrate_energy_curve_kwh(
     timestamps: pd.Series | pd.DatetimeIndex,
     power_kw: pd.Series,
@@ -61,6 +51,7 @@ def integrate_energy_curve_kwh(
     maximum_gap_seconds: float = 5.0,
     bridge_internal_gaps: bool = False,
     extrapolate_endpoints: bool = False,
+    causal_candidates: bool = False,
 ) -> pd.DataFrame:
     """Return gap-aware cumulative energy and coverage at many candidate times."""
     raw = pd.DataFrame(
@@ -157,16 +148,22 @@ def integrate_energy_curve_kwh(
             where=segment_seconds > 0,
         )
         partial_power = left_power + (right_power - left_power) * fraction
-        cumulative += np.where(
-            inside,
-            (left_power + partial_power) / 2 * partial_seconds / 3600,
-            0.0,
+        if not causal_candidates:
+            cumulative += np.where(
+                inside,
+                (left_power + partial_power) / 2 * partial_seconds / 3600,
+                0.0,
+            )
+            covered += partial_seconds
+        bridged_candidates = (
+            inside.copy() if not causal_candidates else np.zeros(len(candidates), bool)
         )
-        covered += partial_seconds
-        bridged_candidates = inside.copy()
         for gap_index in np.flatnonzero(bridged_segments):
-            bridged_candidates |= (candidate_ns > observed_ns[gap_index - 1]) & (
-                candidate_ns < observed_ns[gap_index]
+            bridged_candidates |= (
+                candidate_ns >= observed_ns[gap_index]
+                if causal_candidates
+                else (candidate_ns > observed_ns[gap_index - 1])
+                & (candidate_ns < observed_ns[gap_index])
             )
         spans = np.where(
             candidates >= raw_time[0],
@@ -193,63 +190,6 @@ def integrate_energy_curve_kwh(
         }
     )
 
-
-def load_parameters() -> dict[str, Any]:
-    """Load the checked-in empirical parameters."""
-    path = Path(__file__).with_name("parameters") / "empirical_models.json"
-    value: Any = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise ValueError("empirical_models.json must contain an object")
-    return value
-
-
-def heating_energy(
-    frame: pd.DataFrame,
-    boundaries: pd.DataFrame,
-    integration_protocol: str = "historical_reconstruction",
-    *,
-    historical_start: pd.Timestamp | None = None,
-) -> pd.DataFrame:
-    """Integrate measured total power from the recipe's heating boundary."""
-    start = pd.Timestamp(boundaries["heating_accounting_start"].iloc[0])
-    curve = integrate_heating_curve(
-        frame["timestamp"],
-        pd.to_numeric(frame["power_total"], errors="coerce"),
-        boundaries["candidate_defrost_time"],
-        start,
-        integration_protocol,
-        historical_start,
-    )
-    coverage = curve["coverage"]
-    supported = coverage.ge(MINIMUM_COVERAGE)
-    strict_supported = curve["strict_coverage"].ge(MINIMUM_COVERAGE)
-    start_rule = str(boundaries["heating_accounting_start_rule"].iloc[0])
-    if integration_protocol == "historical_reconstruction":
-        rule = (
-            "offline_historical_reconstruction_stable_block_bridged_internal_gaps_"
-            "endpoint_extrapolation_plus_bridged_observed_heating_start_prefix"
-            if historical_start is not None and historical_start != start
-            else "offline_historical_reconstruction_bridged_internal_gaps_"
-            f"endpoint_extrapolation_from_{start_rule}"
-        )
-    else:
-        rule = f"strict_causal_gap_aware_5s_from_{start_rule}"
-    return pd.DataFrame(
-        {
-            "pre_defrost_electricity_kwh": curve["energy_kwh"].to_numpy(),
-            "heating_energy_coverage": coverage.to_numpy(),
-            "heating_energy_supported": supported.to_numpy(),
-            "strict_pre_defrost_electricity_kwh": curve["strict_energy_kwh"].to_numpy(),
-            "strict_heating_energy_coverage": curve["strict_coverage"].to_numpy(),
-            "strict_heating_energy_supported": strict_supported.to_numpy(),
-            "heating_energy_model": "measured_total_power",
-            "heating_energy_rule": rule,
-            "heating_energy_status": np.where(supported, "supported", "incomplete"),
-            "strict_heating_energy_status": np.where(strict_supported, "supported", "incomplete"),
-        }
-    )
-
-
 def integrate_heating_curve(
     timestamps: pd.Series,
     power_kw: pd.Series,
@@ -257,6 +197,8 @@ def integrate_heating_curve(
     start: pd.Timestamp,
     integration_protocol: str = "historical_reconstruction",
     historical_start: pd.Timestamp | None = None,
+    *,
+    causal_candidates: bool = False,
 ) -> pd.DataFrame:
     """Return the selected heating integral plus the causal strict diagnostic.
 
@@ -276,8 +218,9 @@ def integrate_heating_curve(
             pd.to_numeric(power_kw.loc[source], errors="coerce"),
             candidates,
             bridge_internal_gaps=True,
-            extrapolate_endpoints=True,
-        )[["energy_kwh", "coverage"]]
+            extrapolate_endpoints=not causal_candidates,
+            causal_candidates=causal_candidates,
+        )[["energy_kwh", "coverage", "bridged_internal_gap"]]
         if base_start != start:
             prefix = parsed.between(min(start, base_start), max(start, base_start))
             adjustment, coverage = integrate_energy_kwh(
@@ -294,7 +237,6 @@ def integrate_heating_curve(
         strict_energy_kwh=strict_curve["energy_kwh"].to_numpy(),
         strict_coverage=strict_curve["coverage"].to_numpy(),
     )
-
 
 def _strict_heating_curve(
     timestamps: pd.Series,
@@ -326,147 +268,3 @@ def _strict_heating_curve(
             }
         )
     return pd.DataFrame(rows)
-
-
-def _historical_pressure(frame: pd.DataFrame, end: pd.Timestamp) -> float:
-    """Reproduce the formal whole-cycle interpolation on the pre-action grid."""
-    values = frame[["timestamp", "evaporating_pressure"]].copy()
-    values["timestamp"] = pd.to_datetime(values["timestamp"], errors="coerce")
-    values["evaporating_pressure"] = pd.to_numeric(values["evaporating_pressure"], errors="coerce")
-    values = (
-        values.dropna(subset=["timestamp"])
-        .sort_values("timestamp", kind="stable")
-        .drop_duplicates("timestamp")
-        .set_index("timestamp")
-    )
-    grid = pd.date_range(end - pd.Timedelta(seconds=60), periods=60, freq="s")
-    interpolated = values["evaporating_pressure"].reindex(values.index.union(grid).sort_values())
-    interpolated = interpolated.interpolate(method="time", limit_area="inside").reindex(grid)
-    finite = values["evaporating_pressure"].dropna().sort_index()
-    if len(finite) >= 2:
-        finite_time = finite.index
-        finite_values = finite.to_numpy(dtype=float)
-        left_slope = (finite_values[1] - finite_values[0]) / (
-            finite_time[1] - finite_time[0]
-        ).total_seconds()
-        right_slope = (finite_values[-1] - finite_values[-2]) / (
-            finite_time[-1] - finite_time[-2]
-        ).total_seconds()
-        left = grid < finite_time[0]
-        right = grid > finite_time[-1]
-        grid_ns: Any = grid.view("i8").astype(float)
-        interpolated.loc[left] = (
-            finite_values[0] + left_slope * (grid_ns[left] - finite_time[0].value) / 1e9
-        )
-        interpolated.loc[right] = (
-            finite_values[-1] + right_slope * (grid_ns[right] - finite_time[-1].value) / 1e9
-        )
-    return float(interpolated.median()) if interpolated.notna().any() else float("nan")
-
-
-def _strict_pressure(frame: pd.DataFrame, end: pd.Timestamp) -> tuple[float, int]:
-    values = frame[["timestamp", "evaporating_pressure"]].copy()
-    values["timestamp"] = pd.to_datetime(values["timestamp"], errors="coerce")
-    values["evaporating_pressure"] = pd.to_numeric(values["evaporating_pressure"], errors="coerce")
-    start = end - pd.Timedelta(seconds=60)
-    values = values.loc[values["timestamp"].ge(start) & values["timestamp"].lt(end)]
-    complete = values.dropna().copy()
-    complete["timestamp"] = complete["timestamp"].dt.floor("s")
-    complete_seconds = len(complete.drop_duplicates("timestamp"))
-    values = values.dropna(subset=["timestamp"]).drop_duplicates("timestamp").set_index("timestamp")
-    grid = pd.date_range(start, periods=60, freq="s")
-    interpolated = values["evaporating_pressure"].reindex(values.index.union(grid).sort_values())
-    interpolated = interpolated.interpolate(method="time", limit_area="inside").reindex(grid)
-    median = float(interpolated.median()) if interpolated.notna().any() else float("nan")
-    return median, complete_seconds
-
-
-def transition_energy(
-    frame: pd.DataFrame,
-    boundaries: pd.DataFrame,
-    experiment_id: str,
-    *,
-    include_fixed_recovery: bool,
-    state_protocol: str = "historical_interpolation",
-) -> pd.DataFrame:
-    """Predict ED from the selected Pe protocol and emit strict causal diagnostics."""
-    parameters = load_parameters()
-    try:
-        model = parameters["pe_quadratic"][experiment_id]
-    except KeyError as exc:
-        raise ValueError(f"no Pe quadratic parameters for {experiment_id}") from exc
-    coefficients = [float(value) for value in model["coefficients"]]
-    lower, upper = (float(value) for value in model["support"])
-    strict_features = [
-        _strict_pressure(frame, pd.Timestamp(value))
-        for value in boundaries["candidate_defrost_time"]
-    ]
-    strict_pe = pd.Series([value for value, _ in strict_features])
-    complete_seconds = pd.Series([count for _, count in strict_features])
-    if state_protocol == "historical_interpolation":
-        pe = pd.Series(
-            [
-                _historical_pressure(frame, pd.Timestamp(value))
-                for value in boundaries["candidate_defrost_time"]
-            ]
-        )
-    elif state_protocol == "strict_causal":
-        pe = strict_pe
-    else:
-        raise ValueError("state protocol must be historical_interpolation or strict_causal")
-    defrost = coefficients[0] + coefficients[1] * pe + coefficients[2] * pe.pow(2)
-    strict_defrost = (
-        coefficients[0] + coefficients[1] * strict_pe + coefficients[2] * strict_pe.pow(2)
-    )
-    recovery = (
-        float(parameters["v1"]["fixed_recovery_electricity_kwh"]) if include_fixed_recovery else 0.0
-    )
-    evaluable = (
-        pe.notna()
-        if state_protocol == "historical_interpolation"
-        else pe.notna() & complete_seconds.ge(48)
-    )
-    in_support = evaluable & pe.between(lower, upper)
-    status = np.select(
-        [pe.isna(), ~evaluable, pe.lt(lower), pe.gt(upper)],
-        ["missing", "incomplete", "below_support", "above_support"],
-        default="supported",
-    )
-    strict_supported = strict_pe.notna() & complete_seconds.ge(48)
-    strict_status = np.select(
-        [strict_pe.isna(), ~strict_supported, strict_pe.lt(lower), strict_pe.gt(upper)],
-        ["missing", "incomplete", "below_support", "above_support"],
-        default="supported",
-    )
-    rule = (
-        "offline_historical_interpolation_[tau-60s,tau)"
-        if state_protocol == "historical_interpolation"
-        else "strict_causal_[tau-60s,tau)"
-    )
-    return pd.DataFrame(
-        {
-            "defrost_event_electricity_kwh": defrost + recovery,
-            "preparation_energy_kwh": 0.0,
-            "defrost_energy_kwh": defrost,
-            "recovery_energy_kwh": recovery,
-            "evaporating_pressure_mpa": pe,
-            "strict_defrost_event_electricity_kwh": strict_defrost + recovery,
-            "strict_defrost_energy_kwh": strict_defrost,
-            "strict_evaporating_pressure_mpa": strict_pe,
-            "strict_pe_complete_seconds": complete_seconds,
-            "pe_quadratic_intercept_kwh": coefficients[0],
-            "pe_quadratic_linear_kwh_per_mpa": coefficients[1],
-            "pe_quadratic_squared_kwh_per_mpa2": coefficients[2],
-            "pe_support_min_mpa": lower,
-            "pe_support_max_mpa": upper,
-            "defrost_event_electricity_evaluable": evaluable,
-            "defrost_event_electricity_in_training_domain": in_support,
-            "strict_ET_supported": strict_supported,
-            "transition_energy_model": (
-                "pe_quadratic_plus_fixed_recovery" if include_fixed_recovery else "pe_quadratic"
-            ),
-            "transition_energy_rule": rule,
-            "transition_energy_status": status,
-            "strict_transition_energy_status": strict_status,
-        }
-    )

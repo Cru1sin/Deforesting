@@ -278,7 +278,7 @@ def mean_outcome_model(events: pd.DataFrame, target: str) -> dict[str, object]:
 
 
 def load_defrost_event_models(path: Path | None = None) -> dict[str, Any]:
-    source = path or Path(__file__).with_name("parameters") / "released_ridge_models.json"
+    source = path or Path("output/defrost_event_models/complete_defrost_events_zero/candidate_model_parameters.json")
     try:
         value: Any = json.loads(source.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:

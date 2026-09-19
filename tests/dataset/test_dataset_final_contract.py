@@ -9,7 +9,6 @@ import threading
 import time
 from collections import namedtuple
 from pathlib import Path
-from typing import cast
 
 import pandas as pd
 import pytest
@@ -391,7 +390,8 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
     monkeypatch.setenv("no_proxy", "inherited.example")
 
     def fake_run(command: list[str], **options: object) -> subprocess.CompletedProcess[str]:
-        env = cast(dict[str, str], options["env"])
+        assert "env" not in options
+        env = dict(os.environ)
         calls.append((command, env))
         if command[1] == "lsf":
             return subprocess.CompletedProcess(command, 0, stdout="123\n")
@@ -421,21 +421,10 @@ def test_materialize_cycle_images_downloads_default_cloud_zip_with_rclone(
     ]
     assert calls[1][0][calls[1][0].index("--multi-thread-streams") + 1] == "8"
     for command, env in calls:
-        assert command[command.index("--http-proxy") + 1] == ""
-        assert (
-            not {
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-                "RCLONE_HTTP_PROXY",
-            }
-            & env.keys()
-        )
-        assert env["NO_PROXY"] == "*"
-        assert env["no_proxy"] == "*"
+        assert "--http-proxy" not in command
+        assert env["HTTP_PROXY"] == "http://127.0.0.1:7890"
+        assert env["NO_PROXY"] == "inherited.example"
+        assert env["no_proxy"] == "inherited.example"
     assert (
         tmp_path / "dataset" / "images" / cycle_name / "front_center" / "frame.jpg"
     ).read_bytes() == b"rgb"
@@ -1013,6 +1002,45 @@ def test_validate_dataset_accepts_pipeline_statuses_and_rejects_unknown(
         _validate_statuses(pd.DataFrame({"status": ["incomplete"]}))
 
 
+def test_pareto_readiness_status_contract_defaults_and_validation(tmp_path: Path) -> None:
+    from dataset_tools.cycle_metadata import build_cycle_record
+    from dataset_tools.load_dataset import DatasetLoader
+    from dataset_tools.validate_dataset import _validate_statuses
+
+    record = build_cycle_record(
+        {
+            "experiment_id": "exp",
+            "experiment_date": "2026-07-14",
+            "cycle_id": "cycle_001",
+            "cycle_status": "valid",
+        },
+        cycle_name="frost_cycle_000001",
+        cycle_uid="exp::cycle_001",
+        processed=pd.DataFrame({"timestamp": ["2026-07-14 10:00:00"]}),
+        original=pd.DataFrame({"timestamp": ["2026-07-14 10:00:00"]}),
+        image_summary={},
+        assets={},
+    )
+    assert record["pareto_knee_status"] == "invalid"
+    assert record["rgb_knee_coverage_status"] == "invalid"
+
+    _write_renderable_dataset(tmp_path)
+    loaded = DatasetLoader(tmp_path).list_cycles().iloc[0]
+    assert loaded["pareto_knee_status"] == "invalid"
+    assert loaded["rgb_knee_coverage_status"] == "invalid"
+
+    with pytest.raises(ValueError, match="Pareto readiness status is not recognized"):
+        _validate_statuses(
+            pd.DataFrame(
+                {
+                    "status": ["valid"],
+                    "pareto_knee_status": ["unknown"],
+                    "rgb_knee_coverage_status": ["valid"],
+                }
+            )
+        )
+
+
 def test_render_only_draws_without_writing_catalog_or_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1052,26 +1080,6 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     assert (tmp_path / "dataset_manifest.json").read_bytes() == manifest_before
 
 
-def test_render_can_draw_only_cached_pareto_decision(tmp_path: Path, monkeypatch) -> None:
-    from dataset_tools import dataset_maintenance
-
-    cycle_name, _ = _write_renderable_dataset(tmp_path)
-    rendered: list[str] = []
-    monkeypatch.setattr(
-        dataset_maintenance,
-        "render_pareto_decision_asset",
-        lambda _root, record, **_options: rendered.append(str(record["cycle_name"])),
-    )
-
-    dataset_maintenance.render_dataset(
-        tmp_path,
-        cycle_name,
-        publication=False,
-        panel=False,
-        decision=True,
-    )
-
-    assert rendered == [cycle_name]
 
 
 def test_rgb_panel_coverage_uses_full_metadata_not_materialized_cells(
@@ -1260,7 +1268,7 @@ def test_render_without_cycle_renders_all_catalog_panels(
         lambda record, *_args, **_kwargs: rendered.append(str(record["cycle_name"])),
     )
 
-    render_dataset(tmp_path, None, publication=False, panel=True)
+    render_dataset(tmp_path, None, publication=False, panel=True, n_jobs=1)
 
     assert rendered == [cycle_name]
 
@@ -1940,8 +1948,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
     assert loader.load_cycle_original("frost_cycle_000001")["humidity"].isna().all()
     new_record = loader.get_cycle_record("frost_cycle_000003")
     assert new_record["boundaries"]["stable_heating_start"].endswith("10:00:30")
-    assert new_record["boundaries"]["baseline_start"].endswith("10:00:30")
-    assert new_record["boundaries"]["baseline_end"].endswith("10:01:00")
+    assert new_record["boundaries"]["baseline_start"] is None
+    assert new_record["boundaries"]["baseline_end"] is None
 
 
 def test_dataset_io_exposes_direct_writes_without_transactions() -> None:
@@ -2698,98 +2706,77 @@ def test_image_member_range_read_reports_remote_error(monkeypatch):
         )
 
 
-@pytest.mark.parametrize("panel", [False, True])
-def test_decision_cloud_render_shares_panel_queue(tmp_path, monkeypatch, panel):
-    from contextlib import contextmanager
+
+
+@pytest.mark.parametrize("returncode", [1, 3])
+def test_selected_image_network_failure_is_not_reported_as_missing(
+    tmp_path, monkeypatch, returncode
+):
+    from types import SimpleNamespace
 
     from dataset_tools import cloud_images
-    from dataset_tools import dataset_maintenance as maintenance
 
-    cycle, _ = _write_renderable_dataset(tmp_path)
-    queued = []
-    rendered = []
-    table = pd.DataFrame({"candidate": [1]})
-    monkeypatch.setattr(
-        maintenance,
-        "_pareto_decision_inputs",
-        lambda *a, **k: (table, ["front/knee.jpg", "front/rb.jpg"]),
-    )
-    monkeypatch.setattr(
-        maintenance,
-        "_rgb_panel_inputs",
-        lambda *a: ({}, pd.DataFrame(), [], ["front/knee.jpg", "front/stage.jpg"]),
-    )
-    monkeypatch.setattr(maintenance, "_render_rgb_panel", lambda *a, **k: None)
-    monkeypatch.setattr(
-        maintenance, "render_pareto_decision_asset", lambda *a, **k: rendered.append(k)
-    )
-
-    @contextmanager
-    def materialize(root, requests, **options):
-        queued.append((requests, options))
-        yield iter(requests)
-
-    monkeypatch.setattr(cloud_images, "materialize_image_members", materialize)
-    maintenance.render_dataset(
-        tmp_path,
-        None,
-        publication=False,
-        panel=panel,
-        decision=True,
-        fetch_cloud_images=True,
-        n_jobs=6,
-    )
-    expected = ["front/knee.jpg", "front/rb.jpg"] + (["front/stage.jpg"] if panel else [])
-    assert queued == [({cycle: expected}, {"cleanup_downloaded": False, "n_jobs": 6})]
-    assert len(rendered) == 1
-    assert rendered[0]["decisions"] is table
-    assert not rendered[0].get("fetch_cloud_images")
+    monkeypatch.setattr(cloud_images.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=returncode, stdout="", stderr="network unavailable"))
+    args = (tmp_path, "frost_cycle_000001", ["front/test.jpg"], None, 0)
+    if returncode == 1:
+        with pytest.raises(RuntimeError, match="network unavailable"):
+            cloud_images._plan_image_members(*args)
+    else:
+        assert cloud_images._plan_image_members(*args)[0] == []
 
 
-def test_pareto_decision_inputs_reuses_cached_candidate_table(tmp_path, monkeypatch):
-    from dataset_tools import dataset_maintenance as maintenance
+def test_valid_cycle_queue_requires_pre_cop_quality_and_optionally_rgb():
+    from dataset_tools.load_dataset import DatasetLoader
 
-    source = tmp_path / "candidate_decisions.csv"
-    source.write_text("placeholder")
-    table = pd.DataFrame(
-        {
-            "cycle_name": ["frost_cycle_000001", "frost_cycle_000002"],
-            "is_selected": [True, True],
-            "rb_status": ["not_triggered", "not_triggered"],
-            "candidate_defrost_time": pd.to_datetime(
-                ["2026-07-14 10:00:00", "2026-07-14 11:00:00"]
-            ),
-        }
-    )
-    reads = []
+    loader = object.__new__(DatasetLoader)
+    loader._catalog = {
+        "cycles": [
+            {
+                "cycle_name": "physical_and_rgb",
+                "status": "valid",
+                "pre_cop_status": {"status": "valid"},
+                "rgb_valid": True,
+            },
+            {
+                "cycle_name": "physical_only",
+                "status": "valid",
+                "pre_cop_status": {"status": "valid"},
+                "rgb_valid": False,
+            },
+            {
+                "cycle_name": "partial_pre_cop",
+                "status": "valid",
+                "pre_cop_status": {"status": "partial"},
+                "rgb_valid": True,
+            },
+            {
+                "cycle_name": "invalid_now",
+                "status": "invalid",
+                "pre_cop_status": {"status": "valid"},
+                "rgb_valid": True,
+            },
+        ]
+    }
 
-    class Loader:
-        def __init__(self, _root):
-            pass
+    assert loader.list_valid_cycles().cycle_name.tolist() == [
+        "physical_and_rgb",
+        "physical_only",
+    ]
+    assert loader.list_valid_cycles(require_rgb=True).cycle_name.tolist() == [
+        "physical_and_rgb"
+    ]
 
-        def load_image_metadata(self, _cycle):
-            return pd.DataFrame()
+    loader._catalog = {
+        "cycles": [{"cycle_name": "missing_pre_cop", "status": "valid", "rgb_valid": True}]
+    }
+    assert loader.list_valid_cycles().empty
 
-        def load_cycle_images(self, _cycle):
-            return pd.DataFrame()
-
-    monkeypatch.setattr("dataset_tools.DatasetLoader", Loader)
-    monkeypatch.setattr(
-        "plots.publication.match_decision_rgb_images",
-        lambda *_args, **_kwargs: pd.DataFrame(columns=["status", "file_name"]),
-    )
-    monkeypatch.setattr(
-        maintenance.pd,
-        "read_csv",
-        lambda *_args, **_kwargs: reads.append(source) or table,
-    )
-    cache = {}
-    for cycle in ("frost_cycle_000001", "frost_cycle_000002"):
-        decisions, _ = maintenance._pareto_decision_inputs(
-            tmp_path,
-            {"cycle_name": cycle, "pareto_decision": {"source_table": str(source)}},
-            table_cache=cache,
-        )
-        assert decisions is not None and decisions["cycle_name"].tolist() == [cycle]
-
-    assert reads == [source]
+    loader._catalog = {
+        "cycles": [{
+            "cycle_name": "missing_rgb",
+            "status": "valid",
+            "pre_cop_status": {"status": "valid"},
+        }]
+    }
+    assert loader.list_valid_cycles(require_rgb=True).empty

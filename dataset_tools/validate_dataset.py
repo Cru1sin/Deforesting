@@ -49,6 +49,18 @@ def _validate_statuses(cycles: pd.DataFrame) -> None:
         and not cycles["status"].isin({"valid", "invalid", "partial", "reference"}).all()
     ):
         raise ValueError("Dataset status is not recognized")
+    fields = [
+        field
+        for field in (
+            "pareto_knee_status",
+            "rgb_knee_coverage_status",
+            "pareto_extrapolated_knee_status",
+            "rgb_extrapolated_knee_coverage_status",
+        )
+        if field in cycles
+    ]
+    if fields and not cycles[fields].isin({"valid", "invalid"}).all().all():
+        raise ValueError("Pareto readiness status is not recognized")
 
 
 def _check_time(frame: pd.DataFrame, cycle_name: str, *, unique: bool) -> None:

@@ -39,7 +39,6 @@ def validate_processed(frame: pd.DataFrame, cycle_summary: pd.DataFrame) -> None
     for column in frame.columns:
         if str(column).endswith("__imputed") and not is_bool_dtype(frame[column]):
             raise ValueError(f"{column} must be boolean")
-    _validate_baseline_contract(frame, cycle_summary)
     source_suffixes = ("__missing", "__invalid", "__duplicate", "__conflict")
     if any(str(column).endswith(source_suffixes) for column in frame.columns):
         raise ValueError("processed data contains Prepared source-quality columns")
@@ -96,28 +95,6 @@ def _cycle_key_set(frame: pd.DataFrame) -> set[tuple[object, object]]:
     return set(
         frame[columns].drop_duplicates().itertuples(index=False, name=None)
     )
-
-
-def _validate_baseline_contract(frame: pd.DataFrame, summary: pd.DataFrame) -> None:
-    _require(summary, ["baseline_status", "baseline_failure_reason"])
-    for _, cycle in summary.iterrows():
-        mask = frame["experiment_id"].eq(cycle["experiment_id"]) & frame["cycle_id"].eq(
-            cycle["cycle_id"]
-        )
-        baseline_columns = [
-            column for column in frame.columns if str(column).endswith("__baseline")
-        ]
-        residual_columns = [
-            column for column in frame.columns if str(column).endswith("__baseline_residual")
-        ]
-        if cycle["baseline_status"] != "available":
-            if any(
-                frame.loc[mask, column].notna().any()
-                for column in [*baseline_columns, *residual_columns]
-            ):
-                raise ValueError("unavailable baseline must leave baseline values NaN")
-        elif pd.isna(cycle.get("baseline_start")) or pd.isna(cycle.get("baseline_end")):
-            raise ValueError("available baseline must have a window")
 
 
 def _require(frame: pd.DataFrame, columns: list[str]) -> None:

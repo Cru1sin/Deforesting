@@ -42,6 +42,76 @@ def test_half_open_integral_excludes_right_boundary_and_does_not_bridge_gap() ->
     assert not audit["valid"]
 
 
+def test_candidate_measurement_reconstruction_is_explicit_and_traceable() -> None:
+    from defrost_decision.candidate_quantities import build_measured_candidate_quantities
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 1201).drop(index=range(700, 820))
+
+    class Loader:
+        def get_cycle_record(self, _: str) -> dict[str, object]:
+            return {
+                "experiment_id": "experiment",
+                "boundaries": {
+                    "heating_start": start,
+                    "defrost_preparation_start": start + pd.Timedelta(minutes=20),
+                },
+            }
+
+        def load_cycle_original(self, _: str, *, columns: list[str]) -> pd.DataFrame:
+            return frame[columns]
+
+    strict = build_measured_candidate_quantities(Loader(), "cycle")
+    reconstructed = build_measured_candidate_quantities(
+        Loader(), "cycle", allow_measurement_reconstruction=True
+    )
+
+    assert not strict.pre_defrost_electricity_measurement_valid.iloc[-1]
+    assert reconstructed.pre_defrost_electricity_measurement_valid.iloc[-1]
+    assert reconstructed.pre_defrost_electricity_uses_measurement_reconstruction.iloc[-1]
+    assert reconstructed.pre_defrost_heat_uses_measurement_reconstruction.iloc[-1]
+    assert reconstructed.pre_defrost_compressor_uses_measurement_reconstruction.iloc[-1]
+
+
+def test_candidate_before_accounting_start_retains_missing_causal_integrals() -> None:
+    from defrost_decision.candidate_quantities import build_measured_candidate_quantities
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 61)
+
+    class Loader:
+        def get_cycle_record(self, _: str) -> dict[str, object]:
+            return {
+                "experiment_id": "experiment",
+                "boundaries": {
+                    "heating_start": start,
+                    "defrost_preparation_start": start + pd.Timedelta(seconds=9),
+                },
+            }
+
+        def load_cycle_original(self, _: str, *, columns: list[str]) -> pd.DataFrame:
+            return frame[columns]
+
+    candidates = pd.DataFrame({
+        "cycle_name": ["cycle"], "experiment_id": ["experiment"],
+        "candidate_defrost_time": [start + pd.Timedelta(seconds=9)],
+        "minutes_since_heating_start": [.15],
+        "heating_accounting_start": [start + pd.Timedelta(minutes=9)],
+        "heating_accounting_start_rule": ["fixed_post_defrost_9min"],
+        "heating_start": [start],
+        "observed_defrost_preparation_start": [start + pd.Timedelta(seconds=9)],
+    })
+
+    result = build_measured_candidate_quantities(
+        Loader(), "cycle", candidates, allow_measurement_reconstruction=True
+    ).iloc[0]
+
+    assert pd.isna(result.online_pre_defrost_electricity_kwh)
+    assert not result.online_pre_defrost_electricity_measurement_valid
+    assert pd.isna(result.pre_defrost_heat_kwh)
+    assert not result.pre_defrost_heat_measurement_valid
+
+
 def test_features_are_strictly_pre_action_and_require_counts() -> None:
     from defrost_event_models.training_data import extract_pre_defrost_features
 
@@ -108,169 +178,12 @@ def test_fixed9_candidates_start_at_heating_plus_ten_and_keep_exact_end() -> Non
     assert ten_seconds["candidate_defrost_time"].iloc[-1] == preparation - pd.Timedelta(seconds=5)
 
 
-def test_measurement_gate_breaks_support_run_and_connected_basin() -> None:
-    from defrost_decision.baselines.ridge_inverse_cop_v268 import finalize_curve
-
-    times = pd.date_range("2026-01-01", periods=8, freq="min")
-    curve = pd.DataFrame(
-        {
-            "candidate_defrost_time": times,
-            "inverse_cop": [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.45, 0.5],
-            "heating_measurement_valid": [True, True, True, False, True, True, True, True],
-            "defrost_event_electricity_evaluable": True,
-            "defrost_event_net_heat_evaluable": True,
-            "defrost_event_electricity_in_training_domain": True,
-            "defrost_event_net_heat_in_training_domain": True,
-            "pre_action_window_valid": True,
-            "physical_valid": True,
-        }
-    )
-    result = finalize_curve(curve)
-    assert not result["optimization_eligible"].any()
-    assert result["diagnostic_minimum"].isna().all()
-
-    curve["heating_measurement_valid"] = True
-    result = finalize_curve(curve)
-    assert result["diagnostic_minimum"].iloc[0] == times[5]
-    assert result["basin_1pct_width_minutes"].iloc[0] == 0
-    assert result["is_selected"].sum() == 1
-    assert result["selected_defrost_time"].eq(times[5]).all()
-    assert result["selection_method"].eq("supported_inverse_cop_minimum").all()
-    assert result["selection_reason"].eq("continuous_supported_minimum").all()
 
 
-def test_v268_requires_in_support_even_when_transition_is_evaluable() -> None:
-    from defrost_decision.baselines.ridge_inverse_cop_v268 import finalize_curve
-
-    times = pd.date_range("2026-01-01", periods=6, freq="min")
-    curve = pd.DataFrame(
-        {
-            "candidate_defrost_time": times,
-            "inverse_cop": np.linspace(1.0, 0.5, 6),
-            "heating_measurement_valid": True,
-            "defrost_event_electricity_evaluable": True,
-            "defrost_event_net_heat_evaluable": True,
-            "defrost_event_electricity_in_training_domain": False,
-            "defrost_event_net_heat_in_training_domain": True,
-            "pre_action_window_valid": True,
-            "physical_valid": True,
-        }
-    )
-
-    result = finalize_curve(curve)
-
-    assert result["defrost_event_electricity_evaluable"].all()
-    assert not result["model_supported"].any()
-    assert not result["optimization_eligible"].any()
-    assert result["support_rule"].eq("require_empirical_support").all()
 
 
-def test_main_curve_decomposition_is_nan_and_labels_are_disabled() -> None:
-    from defrost_decision.baselines.ridge_inverse_cop_v268 import finalize_curve
-
-    times = pd.date_range("2026-01-01", periods=6, freq="min")
-    curve = pd.DataFrame(
-        {
-            "candidate_defrost_time": times,
-            "inverse_cop": np.linspace(1.0, 0.5, 6),
-            "heating_measurement_valid": True,
-            "defrost_event_electricity_evaluable": True,
-            "defrost_event_net_heat_evaluable": True,
-            "defrost_event_electricity_in_training_domain": True,
-            "defrost_event_net_heat_in_training_domain": True,
-            "pre_action_window_valid": True,
-            "physical_valid": True,
-        }
-    )
-    result = finalize_curve(curve)
-    assert result["recommended_time"].isna().all()
-    assert not result["hard_label_eligible"].any()
-    for phase in ("preparation", "defrost", "recovery"):
-        assert result[f"{phase}_energy_kwh"].isna().all()
-        assert result[f"{phase}_heat_kwh"].isna().all()
 
 
-def test_calculate_cycle_executes_declared_independent_event_components(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from defrost_decision import candidate_quantities
-    from defrost_decision.baselines import ridge_inverse_cop_v268 as module
-
-    heating = pd.Timestamp("2026-01-01")
-
-    class Loader:
-        def get_cycle_record(self, _: str) -> dict[str, object]:
-            return {
-                "experiment_id": "experiment",
-                "heating_start": heating,
-                "defrost_preparation_start": heating + pd.Timedelta(minutes=15),
-            }
-
-        def load_cycle_original(self, _: str, *, columns: list[str] | None = None) -> pd.DataFrame:
-            return pd.DataFrame({"timestamp": [heating]})
-
-    audited: list[tuple[str, int]] = []
-
-    def integral(_frame, _start, candidates, quantity):
-        audited.append((quantity, len(candidates)))
-        energy = {"power_total": 1.0, "water_heat": 3.0, "compressor_power": 0.5}[quantity]
-        return pd.DataFrame({"energy": energy, "valid": True}, index=range(len(candidates)))
-
-    monkeypatch.setattr(candidate_quantities, "candidate_integral_table", integral)
-    monkeypatch.setattr(
-        candidate_quantities,
-        "extract_pre_defrost_features",
-        lambda _frame, candidates, _heating: pd.DataFrame(
-            {"pre_defrost_feature_window_valid": True}, index=range(len(candidates))
-        ),
-    )
-    selected: dict[str, object] = {}
-
-    def predict(energy, heat, values, experiment_id, *, prediction_mode):
-        selected.update(energy=energy, heat=heat, experiment_id=experiment_id)
-        selected["prediction_mode"] = prediction_mode
-        return pd.DataFrame(
-            {
-                "defrost_event_electricity_kwh": 1.0,
-                "defrost_event_net_heat_kwh": 2.0,
-                "defrost_event_electricity_training_distance": 0.0,
-                "defrost_event_net_heat_training_distance": 0.0,
-                "defrost_event_electricity_prediction_available": True,
-                "defrost_event_net_heat_prediction_available": True,
-                "defrost_event_electricity_in_training_domain": True,
-                "defrost_event_net_heat_in_training_domain": True,
-            },
-            index=values.index,
-        )
-
-    monkeypatch.setattr(candidate_quantities, "predict_independent_targets", predict)
-    static_energy, mean_heat = object(), object()
-    models = {
-        "models": {
-            "ridge_basic_state_5": {"event_electricity": static_energy},
-            "experiment_balanced_mean": {"event_net_heat": mean_heat},
-        }
-    }
-    recipe = dict(module.DEFAULT_RECIPE)
-    recipe.update(
-        run_name="mixed",
-        transition_energy_model="ridge_basic_state_5",
-        transition_heat_model="experiment_balanced_mean",
-    )
-
-    result = module.calculate_cycle(Loader(), "cycle", recipe, models, candidate_step_seconds=10)
-
-    assert selected == {
-        "energy": static_energy,
-        "heat": mean_heat,
-        "experiment_id": "experiment",
-        "prediction_mode": "cross-fitted",
-    }
-    assert result["defrost_event_electricity_kwh"].eq(1.0).all()
-    assert result["defrost_event_net_heat_kwh"].eq(2.0).all()
-    assert audited == [("power_total", 31), ("water_heat", 31), ("compressor_power", 31)]
-    assert result["pre_defrost_compressor_electricity_kwh"].eq(0.5).all()
-    assert result["pre_defrost_compressor_electricity_measurement_valid"].all()
 
 
 def test_event_compressor_audit_has_independent_validity() -> None:

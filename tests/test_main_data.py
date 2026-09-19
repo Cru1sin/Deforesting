@@ -134,10 +134,10 @@ def test_advanced_dataset_maintenance_keeps_render_options(tmp_path: Path, monke
             {
                 "publication": True,
                 "panel": True,
-                "decision": True,
                 "fetch_cloud_images": False,
                 "cleanup_downloaded_images": False,
                 "n_jobs": 6,
+                "recovery_boundaries": None,
             },
         )
     ]
@@ -161,36 +161,15 @@ def test_render_without_cycle_targets_all_default_dataset_panels(monkeypatch) ->
             {
                 "publication": False,
                 "panel": True,
-                "decision": False,
                 "fetch_cloud_images": True,
                 "cleanup_downloaded_images": False,
                 "n_jobs": 6,
+                "recovery_boundaries": None,
             },
         )
     ]
 
 
-def test_render_can_select_only_pareto_decision(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
-
-    calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        manage_dataset,
-        "render_dataset",
-        lambda _dataset, _cycle, **options: calls.append(options) or Path("dataset"),
-    )
-
-    assert manage_dataset.main(["render", "frost_cycle_000007", "--decision"]) == 0
-    assert calls == [
-        {
-            "publication": False,
-            "panel": False,
-            "decision": True,
-            "fetch_cloud_images": False,
-            "cleanup_downloaded_images": False,
-            "n_jobs": 6,
-        }
-    ]
 
 
 def test_render_cleanup_is_explicit(monkeypatch) -> None:
@@ -213,10 +192,10 @@ def test_render_cleanup_is_explicit(monkeypatch) -> None:
         {
             "publication": False,
             "panel": True,
-            "decision": False,
             "fetch_cloud_images": True,
             "cleanup_downloaded_images": True,
             "n_jobs": 6,
+            "recovery_boundaries": None,
         }
     ]
 

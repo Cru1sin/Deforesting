@@ -1,310 +1,74 @@
-# Image-guided heat-pump defrost timing
+# Effective heating COP defrost control
 
-This repository is a Dataset-ready research workflow for selecting heat-pump defrost times
-and learning the resulting timing labels from RGB images. The processed experimental Dataset
-is not included; prepare it according to [DATASET_FORMAT.md](DATASET_FORMAT.md) first.
-
-The code has two deliberately separate routes.
-
-## Route A — Current multi-objective defrost decision
+在主目录、`main` 分支工作。主线只有：
 
 ```text
-Dataset
-→ fit complete defrost-event models
-→ calculate candidate quantities
-→ cycle COP / heating rate / evaporator capacity
-→ cycle-COP–heating-rate Pareto front
-→ selected defrost time
+Dataset → 完整除霜事件 Ridge → 有效供热 COP 参考曲线
+        → F_core / Chen B0 / G_core → 统一触发评价与循环图
 ```
 
-Cycle COP and cycle heating rate select the Pareto compromise. Evaporator capacity is an
-independent reference objective: it is reported and plotted but never changes the selected
-time.
-
-For a candidate defrost time \(\tau\), the three reported objectives are
-
-\[
-C(\tau)=\frac{Q_H(\tau)+\hat Q_T(\tau)}{E_H(\tau)+\hat E_T(\tau)},
-\]
-
-\[
-H(\tau)=\frac{Q_H(\tau)+\hat Q_T(\tau)}{t_H(\tau)+\hat D_T(\tau)},
-\]
-
-\[
-O(\tau)=\frac{Q_H(\tau)-E_{\mathrm{comp},H}(\tau)
-+\hat Q_T(\tau)-\hat E_{\mathrm{comp},T}(\tau)}
-{t_H(\tau)+\hat D_T(\tau)}.
-\]
-
-The symbols remain useful in the paper; CSV files and Python interfaces use complete names:
-`cycle_cop`, `cycle_heating_rate_kw`, and `cycle_evaporator_capacity_kw`.
-
-## Route B — Stable image-classification baseline
-
-```text
-frozen V1 inverse-COP reference
-→ image timing labels
-→ color-gradient image features + RBF SVM
-→ leave-one-experiment-out evaluation
-```
-
-V1 is retained only as the frozen label reference. It is not mixed with Route A.
-
-## 1. Install
-
-Python 3.11 and [uv](https://docs.astral.sh/uv/) are required.
+## 环境与数据
 
 ```bash
-uv sync
-```
-
-Install end-to-end ResNet50 or optional W&B support only when needed:
-
-```bash
-uv sync --extra ml
-uv sync --extra tracking
-```
-
-## 2. Validate the Dataset
-
-Place the processed Dataset at `dataset/`, then run:
-
-```bash
+uv sync --extra ml --extra dev
 uv run python validate_dataset.py --dataset dataset
 ```
 
-Dataset 管理命令见 [`dataset/README.md`](dataset/README.md)。
+原始传感器和图像保存在 `data/`、`dataset/`，不进入 Git。
+数据维护命令见 [dataset/README.md](dataset/README.md)。
 
-## 3A. Fit complete defrost-event models
+## 当前定义
 
-The released model file is
-`defrost_event_models/parameters/released_ridge_models.json`. Refit after adding experiments:
+事件从除霜准备开始，到下一循环重新进入有效供热状态；恢复边界由频率设定值阶段判据识别，
+不使用固定 9 min。事件有效热量为零，成本为整个事件的**总电耗**。
+制热阶段只积分达到恢复末端参考出水温度的有效热量。
 
-```bash
-uv run python fit_defrost_event_models.py \
-  --dataset dataset \
-  --run-name new_data_refit \
-  --workers 6 \
-  --output-root output
-```
+`COP_eff(t) = Q_eff(t) / [E_heating(t) + Ridge_event_electricity(t)]`。
 
-```text
-output/defrost_event_models/new_data_refit/
-├── defrost_events.csv
-├── model_validation.csv
-├── candidate_model_parameters.json
-└── run_settings.json
-```
+当前 Ridge 为 8 输入、106 有效事件、21 实验；按实验等权，标准化及 α 选择仅使用训练实验。
+事件资格不依赖 RGB 或 pre-COP 状态。分类队列另行要求当前状态、pre-COP、front RGB 有效，
+正式结果为 80 循环、18 实验。模型外推不排除候选、RB 或触发评分；图上外推部分用虚线。
+非有限值、负事件电耗或无效实测账本仍不能作为物理有效 COP。
 
-`candidate_model_parameters.json` is review-only and never overwrites the released parameters
-automatically. Promote it only after scientific review and full-cycle parity checks.
+| 模型 | 输入 | 分类头 |
+|---|---|---|
+| F_core | 189 运行统计 + 因果时间、电量、有效热量 | 192→60→60→32→32→1，SiLU |
+| Chen B0 | 冻结 DINOv2 当前正面图像 | 384→1000→64→2，ReLU |
+| G_core | F_core 输入 + 当前 DINOv2 | 576→256→128→64→32→1，SiLU |
 
-All four event outcomes currently use the same complete-case training cohort. This keeps their
-empirical support domain comparable, but discards events missing any one outcome;
-`model_validation.csv` records both each outcome's available count and the final common count.
+三个模型共享循环及循环内现有类别等权 Binary loss、AdamW、外层 LOEO 和训练折预处理。
+正式协议保留：内部验证以固定 2/3@0.5 的 COP 选择轮数；最终评价为 30 s 网格首次 p≥0.5，
+未触发时取最后有效动作并标记兜底。验证选轮与最终控制的差别是已有实验定义，不是可搜索接口。
 
-## 4A. Select defrost times and render publication figures
-
-For leakage-free retrospective evaluation of experiments already represented by saved LOEO
-folds, use `cross-fitted`:
+## 运行
 
 ```bash
-uv run python select_defrost_time.py \
-  --dataset dataset \
-  --model-file defrost_event_models/parameters/released_ridge_models.json \
-  --prediction-mode cross-fitted \
-  --run-name current \
-  --workers 6 \
-  --figures \
-  --output-root output
+# 复用现有输入与106事件；已有折会跳过
+uv run python train_defrost_models.py train --n-jobs 6
+# 新训练必须写新目录，避免混用协议和断点
+uv run python train_defrost_models.py train --output output/image_models/new_run --n-jobs 6
+# 从已存折重新汇总
+uv run python train_defrost_models.py summary
+# 三模型全部循环，只画 seed 0
+uv run python train_defrost_models.py figures --figure-seed 0 --n-jobs 6
+# 重新提取和拟合完整事件；新名称保护当前成果
+uv run python fit_defrost_event_models.py --run-name ridge_refit --preparation-heat zero --n-jobs 6 --figures
 ```
 
-After refitting, point the same command at
-`output/defrost_event_models/new_data_refit/candidate_model_parameters.json` to evaluate the
-new experimental batch without training on each held-out experiment.
+当前模型输入在正式运行的 `base/`，恢复边界在 `recovery_boundaries.csv`；重新训练不依赖旧审计结果。
+DINOv2 缓存在 `output/image_models/_cache/dinov2_vits14_r256_c224_front_v1/cycles/`，无需重新提取。
 
-For application to a genuinely new experiment whose ID has no saved retrospective fold, use
-the model fitted on all available training experiments:
+## 当前成果
+
+- `output/image_models/core_comparison_ridge106/`：三模型、三个 seed、162 个折 checkpoint、预测、参考曲线和汇总。
+- `output/defrost_event_models/complete_defrost_events_zero/`：106 事件 Ridge、边界、验证和参数。
+- `output/cycles/core_comparison_ridge106/`：seed 0 的 240 张循环 PNG。
+- `output/test/complete_defrost_events_zero/ridge_calibration/`：事件电耗和有效 COP 校准图及源数据。
+
+核心代码：`image_models/inputs.py` 构造参考，`core.py` 定义三模型并调度折，
+`policy.py` 训练与评价；`plots/publication.py` 统一循环绘图，`plots/event_calibration.py` 绘制 Ridge 校准。
+旧实验代码保存在 Git 历史，不再作为主目录入口。
 
 ```bash
-uv run python select_defrost_time.py \
-  --dataset dataset \
-  --model-file defrost_event_models/parameters/released_ridge_models.json \
-  --prediction-mode full-model \
-  --run-name new_experiment \
-  --workers 6 \
-  --figures \
-  --output-root output
+uv run python -m pytest
 ```
-
-Both `candidate_decisions.csv` and `run_settings.json` record the prediction mode and model
-training scope; cross-fitted and full-model results must not be presented as the same estimate.
-
-```text
-output/defrost_decisions/current/
-├── candidate_decisions.csv
-├── run_settings.json
-└── figures/
-```
-
-`candidate_decisions.csv` contains every candidate quantity, each objective's own eligibility and
-near-optimal basin, the C–H Pareto front, and `selected_defrost_time`. The Pareto panel colours
-points by the reference-only evaporator-capacity objective. It also records the independently
-replayed historical RB trigger for comparison; RB never participates in objective selection.
-
-## Historical RB reference baseline
-
-RB is a frozen reference baseline and must remain available independently of the learned models
-and cost objectives. Replay it for every Dataset cycle, including incomplete cycles that cannot
-enter the current decision calculation:
-
-```bash
-uv run python calculate_rb_reference.py \
-  --dataset dataset \
-  --run-name rb_reference \
-  --n-jobs 6 \
-  --output-root output
-```
-
-This writes `output/defrost_decisions/rb_reference/rb_defrost_triggers.csv`. The calculation
-replays the historical controller on the raw one-second timeline and reports either its exact
-first trigger or `right_censored` at the observed cycle boundary. The restored definition comes
-from the historical implementation removed in commit `0adc438`; its temperature thresholds,
-device timer fields, 20-second confirmation windows, and independent 150-minute fallback are
-kept unchanged.
-
-To train against the current Pareto-selected boundary rather than the frozen V1 reference:
-
-```bash
-uv run python build_image_labels.py \
-  --dataset dataset \
-  --label-source selected-time \
-  --source-table output/defrost_decisions/current/candidate_decisions.csv \
-  --output output/image_labels/current_pareto
-```
-
-Use `--labels output/image_labels/current_pareto/image_timing_labels.parquet` and
-`--label-column binary_target` in the training command below.
-
-## 3B. Calculate the frozen V1 label reference
-
-```bash
-uv run python calculate_v1_label_reference.py \
-  --dataset dataset \
-  --output-root output
-```
-
-This writes `output/defrost_decisions/v1_label_reference/candidate_decisions.csv` and
-`run_settings.json`.
-
-## 4B. Build image labels
-
-```bash
-uv run python build_image_labels.py \
-  --dataset dataset \
-  --label-source cost-optimum \
-  --source-table output/defrost_decisions/v1_label_reference/candidate_decisions.csv \
-  --output output/image_labels/v1_label_reference \
-  --figures
-```
-
-The training table is
-`output/image_labels/v1_label_reference/image_timing_labels.parquet`.
-
-## 5B. Train a fast CPU baseline
-
-The first runnable model uses image-derived colour/gradient features and needs no external
-feature cache:
-
-```bash
-uv run python train_image_models.py \
-  --dataset dataset \
-  --labels output/image_labels/v1_label_reference/image_timing_labels.parquet \
-  --output output/image_models/color_gradient_rbf \
-  --task binary \
-  --image-features color_gradient \
-  --classifiers rbf_svm \
-  --camera-groups front \
-  --input-features image_only \
-  --workers 6 \
-  --seed 0
-```
-
-Training writes `training_settings.csv`, `fold_metrics.csv`, `predictions.parquet`,
-`fold_log.jsonl`, and `run_settings.json` into the selected run directory.
-
-## 6B. Evaluate image models
-
-```bash
-uv run python evaluate_image_models.py \
-  --results output/image_models/color_gradient_rbf \
-  --output output/evaluations/color_gradient_rbf \
-  --task binary \
-  --figures
-```
-
-Evaluation is leave-one-experiment-out (LOEO), not a random image split.
-
-## End-to-end ResNet50
-
-```bash
-uv run python train_image_models.py \
-  --dataset dataset \
-  --labels output/image_labels/v1_label_reference/image_timing_labels.parquet \
-  --output output/image_models/resnet50_front \
-  --task binary \
-  --image-features resnet50_end_to_end \
-  --classifiers resnet_mlp \
-  --camera-groups front \
-  --input-features image_only \
-  --workers 1 \
-  --epochs 5 \
-  --seed 0
-```
-
-ResNet50 uses one worker because each fold trains on one accelerator. Frozen CPU matrices use
-six outer workers, while each worker's model internals remain single-threaded.
-
-## DINOv2 and sensor inputs
-
-DINOv2 is advanced usage because this repository currently consumes a precomputed feature
-cache. Provide it explicitly with `--dinov2-feature-cache`. Sensor options are
-`image_plus_current_sensors` and `image_plus_sensor_slopes`; they are joined causally to the
-image latent features before classification.
-
-## Weights & Biases
-
-W&B remains optional and is controlled only at the public training entry:
-
-```bash
-uv run python train_image_models.py ... \
-  --wandb-project PROJECT \
-  --wandb-run-name RUN_NAME
-```
-
-Training remains valid without W&B; tracking failures do not change fold calculations.
-
-## Source layout
-
-```text
-dataset_tools/          Dataset loading, validation and Raw→Dataset operations
-defrost_event_models/   observed defrost events, Ridge fitting and LOEO validation
-defrost_decision/       candidate quantities, objectives and Pareto selection
-image_labels/           image-time label construction
-image_models/           image/sensor features, classifiers, ResNet50 and evaluation
-plots/                  one shared publication rendering path
-tests/                  scientific, interface and parity checks
-```
-
-Historical inverse-COP and RB definitions are isolated under `defrost_decision/baselines/`.
-The current Pareto route attaches RB only after selection so the baseline cannot move the
-multi-objective decision.
-
-## Release scope
-
-This is a **Dataset-ready** code release, not a clone-and-run data release. The processed
-experimental Dataset is not included. Do not describe the repository as fully reproducible
-until the Dataset or a public download route is released. Repository renaming, license choice,
-and citation metadata remain release-owner decisions and are intentionally not fabricated by
-this refactor.

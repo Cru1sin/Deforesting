@@ -7,6 +7,7 @@ import pandas as pd
 
 import fit_defrost_event_models
 import select_defrost_time
+from dataset_tools.builder.detect_cycles import RECOVERY_DEFAULTS
 from defrost_decision.candidate_quantities import DEFAULT_OUTCOME_MODEL
 from defrost_decision.candidate_times import catalog_exclusion_reason
 from defrost_event_models.ridge_models import OUTCOME_TARGETS
@@ -17,7 +18,7 @@ def test_public_defrost_commands_have_direct_help() -> None:
     for script in (
         "fit_defrost_event_models.py",
         "select_defrost_time.py",
-        "calculate_v1_label_reference.py",
+        "train_defrost_models.py",
         "calculate_rb_reference.py",
     ):
         result = subprocess.run(
@@ -31,28 +32,6 @@ def test_public_defrost_commands_have_direct_help() -> None:
         assert "--variant" not in result.stdout
 
 
-def test_shared_batch_uses_each_cycle_prediction_mode(monkeypatch) -> None:
-    calls: list[tuple[str, str]] = []
-
-    def calculate(_loader, cycle: str, _models, **options):
-        calls.append((cycle, options["prediction_mode"]))
-        return pd.DataFrame(
-            {"cycle_name": [cycle], "candidate_defrost_time": [pd.Timestamp("2026-01-01")]}
-        )
-
-    monkeypatch.setattr(select_defrost_time, "calculate_cycle", calculate)
-    table = select_defrost_time.calculate_cycles(
-        object(),
-        ["cycle_a", "cycle_b"],
-        {},
-        candidate_step_seconds=10,
-        allow_extrapolation=True,
-        prediction_modes={"cycle_a": "cross-fitted", "cycle_b": "full-model"},
-        workers=1,
-    )
-
-    assert calls == [("cycle_a", "cross-fitted"), ("cycle_b", "full-model")]
-    assert table["cycle_name"].tolist() == ["cycle_a", "cycle_b"]
 
 
 def test_metadata_gate_excludes_cycles_without_the_fixed_ten_minute_candidate_start() -> None:
@@ -98,15 +77,12 @@ def test_selection_dry_run_checks_model_cohort_without_raw_cycles(
     }
 
     class Loader:
-        pass
+        def list_cycles(self, **kwargs):
+            return pd.DataFrame({"cycle_name": ["cycle_001"]})
 
     monkeypatch.setattr(select_defrost_time, "load_defrost_event_models", lambda _: models)
     monkeypatch.setattr(select_defrost_time, "DatasetLoader", lambda _: Loader())
-    monkeypatch.setattr(
-        select_defrost_time,
-        "metadata_eligible_cycles",
-        lambda *_: ["cycle_001"],
-    )
+    models.update(cop_definition="refrigerant_effective_heat", recovery_settings=RECOVERY_DEFAULTS)
     assert (
         select_defrost_time.main(
             [
@@ -128,30 +104,30 @@ def test_full_model_dry_run_does_not_restrict_cycles_to_saved_folds(
     models = {
         "models": {
             "ridge_dynamic_state_8": {
-                name: {"folds": {}, "full_data_model": parameters}
-                for name in OUTCOME_TARGETS
+                name: {"folds": {}, "full_data_model": parameters} for name in OUTCOME_TARGETS
             }
         }
     }
-    received: list[set[str] | None] = []
+    models.update(cop_definition="refrigerant_effective_heat", recovery_settings=RECOVERY_DEFAULTS)
+
+    class Loader:
+        def list_cycles(self, **kwargs):
+            return pd.DataFrame({"cycle_name": ["cycle_new"]})
 
     monkeypatch.setattr(select_defrost_time, "load_defrost_event_models", lambda _: models)
-    monkeypatch.setattr(select_defrost_time, "DatasetLoader", lambda _: object())
-    monkeypatch.setattr(
-        select_defrost_time,
-        "metadata_eligible_cycles",
-        lambda _loader, _cycles, experiments: received.append(experiments) or ["cycle_new"],
-    )
+    monkeypatch.setattr(select_defrost_time, "DatasetLoader", lambda _: Loader())
 
-    assert select_defrost_time.main(
-        [
-            "--prediction-mode",
-            "full-model",
-            "--model-file",
-            str(tmp_path / "models.json"),
-            "--output-root",
-            str(tmp_path),
-            "--dry-run",
-        ]
-    ) == 0
-    assert received == [None]
+    assert (
+        select_defrost_time.main(
+            [
+                "--prediction-mode",
+                "full-model",
+                "--model-file",
+                str(tmp_path / "models.json"),
+                "--output-root",
+                str(tmp_path),
+                "--dry-run",
+            ]
+        )
+        == 0
+    )

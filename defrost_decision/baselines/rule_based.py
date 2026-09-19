@@ -58,7 +58,9 @@ def first_trigger(
     frame: pd.DataFrame,
     heating_start: pd.Timestamp,
     observation_end: pd.Timestamp,
-) -> dict[str, object]:
+    *,
+    return_trace: bool = False,
+) -> dict[str, object] | pd.DataFrame:
     """Return the first causal RB trigger on the historical unfilled one-second grid."""
     columns = {
         "coil_temperature": "T3_C",
@@ -117,6 +119,8 @@ def first_trigger(
     condition8 = values["T1_min"].ge(150)
 
     triggered = condition1 | condition2 | condition7 | condition8
+    if return_trace:
+        return values.assign(case=case, triggered=triggered)
     if not triggered.any():
         return {
             "t_RB": pd.NaT,

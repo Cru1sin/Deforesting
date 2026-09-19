@@ -221,6 +221,7 @@ def _read_zip_member(
     archive_size: int,
     remote: str | None = None,
     transferred: list[int] | None = None,
+    payload: bytes | memoryview | None = None,
 ) -> bytes:
     (
         local_offset,
@@ -230,7 +231,7 @@ def _read_zip_member(
         filename_size,
         extra_size,
     ) = member
-    payload = _read_zip_range(
+    payload = payload if payload is not None else _read_zip_range(
         archive,
         local_offset,
         min(
@@ -261,7 +262,7 @@ def _read_zip_member(
     data_offset = 30 + filename_size + extra_size
     payload = payload[data_offset : data_offset + compressed_size]
     if method == 0:
-        data = payload
+        data = bytes(payload)
     elif method == 8:
         data = zlib.decompress(payload, -15)
     else:
@@ -304,13 +305,10 @@ def _plan_image_members(
                 "--files-only",
                 "--format",
                 "s",
-                "--http-proxy",
-                "",
             ],
             check=False,
             capture_output=True,
             text=True,
-            env=_direct_rclone_env(),
         )
         raw_size = result.stdout.strip()
         if result.returncode in (3, 4) or (result.returncode == 0 and not raw_size):
@@ -516,13 +514,10 @@ def materialize_cycle_images(  # noqa: C901
                 "--files-only",
                 "--format",
                 "s",
-                "--http-proxy",
-                "",
             ],
             check=False,
             capture_output=True,
             text=True,
-            env=_direct_rclone_env(),
         )
         remote_size = remote.stdout.strip()
         if remote.returncode != 0 or not remote_size.isdigit():
@@ -570,11 +565,8 @@ def materialize_cycle_images(  # noqa: C901
                     "10",
                     "--retries-sleep",
                     "10s",
-                    "--http-proxy",
-                    "",
                 ],
                 check=True,
-                env=_direct_rclone_env(),
             )
         else:
             shutil.copyfile(archive, local_archive)
