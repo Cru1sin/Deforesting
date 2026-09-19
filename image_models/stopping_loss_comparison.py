@@ -31,12 +31,11 @@ SOURCE_RUNS = {
 
 
 def reliable_stopping_inputs(args, boundaries, events):
-    """Align stopping boundaries and Ridge events to the canonical reliable pool."""
+    """Filter the classifier cohort without restricting the independent event pool."""
     from image_models.relative_cop import reliable_rgb_cohort
 
     cohort = reliable_rgb_cohort(args.dataset, source=boundaries)
-    names = set(cohort.cycle_name)
-    return cohort, events.loc[events.cycle_name.astype(str).isin(names)].copy()
+    return cohort, events.copy()
 
 
 def architecture_contract(architecture: str) -> tuple[list[str], list[str]]:
@@ -79,6 +78,9 @@ def build_model(
     architecture: str, *, numeric_width: int, visual_width: int, seed: int
 ) -> nn.Module:
     """Build one of the five frozen architectures from a paired random seed."""
+    from image_models.upgrade_chain import PARENTS, CORE_PARENTS, model
+    if architecture in PARENTS or architecture in CORE_PARENTS:
+        return model(architecture, numeric_width, visual_width, seed)
     if architecture not in ARCHITECTURES:
         raise ValueError(f"unknown stopping architecture: {architecture}")
     from image_models.relative_cop import RelativeCOP
@@ -226,7 +228,7 @@ def replay_cycles(
             "selected_time": pd.Timestamp(selected.candidate_defrost_time),
             "selected_cop": float(selected.cycle_cop),
             "optimal_time": optimum,
-            "optimal_cop": float(ordered.cycle_cop.max()),
+            "optimal_cop": float(ordered.optimal_cop.iloc[0]) if "optimal_cop" in ordered else float(ordered.cycle_cop.max()),
             "forced_final": forced,
             "early_trigger": pd.Timestamp(selected.candidate_defrost_time) < optimum,
             "strategy": strategy,
@@ -275,10 +277,12 @@ def policy_cycle_metrics(
     *,
     loss_name: str,
     strategy: str = "first_positive",
+    controller_reference=None,
 ) -> pd.DataFrame:
     """Score hard 1/1 decisions against supported RB and legal-action oracle COP."""
     metrics = replay_cycles(
-        predicted, threshold, strategy=strategy, reference=reference
+        predicted, threshold, strategy=strategy,
+        reference=reference if controller_reference is None else controller_reference
     )
     rb = []
     soft = {}
@@ -288,6 +292,8 @@ def policy_cycle_metrics(
             np.isfinite(cycle.cycle_cop)
             & pd.to_datetime(cycle.candidate_defrost_time).eq(time)
         )
+        if controller_reference is not None:
+            supported &= cycle.cycle_cop_eligible.fillna(False)
         rb.append({
             "cycle_name": name,
             "rb_cop": float(cycle.loc[supported, "cycle_cop"].iloc[0])
@@ -421,8 +427,10 @@ def fit_policy(
     """Fit whole-cycle batches; inner replayed COP selects epoch and threshold."""
     if train.empty or (validation is not None and validation.empty):
         raise ValueError("stopping policy requires non-empty train and validation cycles")
+    from image_models.upgrade_chain import PARENTS, CORE_PARENTS
+    chain = architecture in PARENTS or architecture in CORE_PARENTS
     columns = _ordered_columns(architecture, numeric_columns, visual_columns)
-    preprocessor = make_pipeline(SimpleImputer(strategy="median"), StandardScaler())
+    preprocessor = make_pipeline(SimpleImputer(strategy="median", keep_empty_features=True), StandardScaler())
     preprocessor.fit(train[columns])
     x = _model_values(train, columns, preprocessor)
     model = build_model(
@@ -454,7 +462,9 @@ def fit_policy(
                 "model_state_dict": model.state_dict(),
             }
             predicted = predict_policy(validation, current)
-            threshold, grid = select_cop_threshold(predicted, thresholds)
+            threshold, grid = select_cop_threshold(
+                predicted, thresholds, strategy="two_of_three" if chain else "first_positive",
+                reference=controller_reference if chain else None)
             score = float(grid.loc[grid.threshold.eq(threshold), "mean_cycle_cop"].iloc[0])
             record.update(validation_mean_cycle_cop=score, threshold=threshold)
             if score > best_score:
@@ -478,7 +488,8 @@ def fit_policy(
     }
     if validation is not None:
         frozen = predict_policy(validation, result)
-        result["thresholds"], result["threshold_grid"] = select_controller_thresholds(
+        result["thresholds"], result["threshold_grid"] = ({
+            "two_of_three": .5, "first_positive": .5}, pd.DataFrame()) if chain else select_controller_thresholds(
             frozen,
             reference=validation if controller_reference is None else controller_reference,
             thresholds=thresholds,
@@ -530,6 +541,7 @@ def _fold_reference(args, cohort, events, excluded, base_root):
     configured.rgb = "off"
     configured.require_rgb_input = False
     configured.quality_filtered = True
+    configured.allow_extrapolation = True
     rows = build_fold_rows(
         configured, cohort, events, tuple(excluded), include_history=True,
         base_root=base_root,
@@ -617,7 +629,7 @@ def _fit_fold(args, architecture, loss_name, seed, test, inner, cohort, events, 
             table["evaluation_status"] = np.where(
                 table.selected_cop.notna() & table.rb_cop.notna(),
                 "evaluated",
-                np.where(table.selected_cop.notna(), "rb_outside_trusted_support",
+                np.where(table.selected_cop.notna(), "rb_cop_unavailable",
                          "no_legal_actions"),
             )
         result = {
@@ -673,7 +685,7 @@ def run(args):
     (args.output / "ridge").mkdir(exist_ok=True)
     boundaries = pd.read_csv(args.data / "recovery_boundaries.csv")
     boundaries["experiment_id"] = boundaries.experiment_id.astype(str)
-    events = pd.read_csv(args.data / "defrost_events.csv")
+    events = pd.read_csv(args.event_run / "defrost_events.csv")
     boundaries, events = reliable_stopping_inputs(args, boundaries, events)
     sources = _source_runs(args)
     missing = [
@@ -684,6 +696,8 @@ def run(args):
         raise FileNotFoundError(f"missing frozen architecture base directories: {missing}")
     settings = {
         "schema": "paired_stopping_loss_v1",
+        "allow_model_extrapolation": True,
+        "event_run": str(args.event_run.resolve()),
         "task": "cop-classification", "action": "compare-stopping-losses",
         "architectures": args.stopping_architectures,
         "losses": args.stopping_losses, "seeds": args.seeds,

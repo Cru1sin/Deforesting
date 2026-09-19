@@ -256,19 +256,19 @@ def test_saved_fold_results_collect_every_resumable_fold(tmp_path):
     ]
 
 
-def test_reliable_pool_filters_boundaries_and_events(monkeypatch, tmp_path):
+def test_reliable_pool_keeps_independent_event_cohort(monkeypatch, tmp_path):
     from image_models import relative_cop
 
     reliable = pd.DataFrame({
-        "cycle_name": ["b", "a"], "experiment_id": ["e2", "e1"],
+        "cycle_name": ["b", "a", "extra"], "experiment_id": ["e2", "e1", "e3"],
+        "front_rgb_valid": [True, True, False],
     })
 
     class Loader:
         def __init__(self, _):
             pass
 
-        def list_valid_cycles(self, *, require_rgb):
-            assert require_rgb is True
+        def list_valid_cycles(self):
             return reliable
 
     monkeypatch.setattr(relative_cop, "DatasetLoader", Loader)
@@ -277,13 +277,13 @@ def test_reliable_pool_filters_boundaries_and_events(monkeypatch, tmp_path):
         "experiment_id": ["e9", "e1", "e2"], "boundary": [0, 1, 2],
     })
     events = pd.DataFrame({
-        "cycle_name": ["a", "rogue", "b"], "experiment_id": ["e1", "e9", "e2"],
+        "cycle_name": ["a", "rogue", "b", "extra"], "experiment_id": ["e1", "e9", "e2", "e3"],
     })
     cohort, filtered_events = stopping.reliable_stopping_inputs(
         SimpleNamespace(dataset=tmp_path), boundaries, events,
     )
     assert cohort.cycle_name.tolist() == ["a", "b"]
-    assert filtered_events.cycle_name.tolist() == ["a", "b"]
+    assert filtered_events.cycle_name.tolist() == ["a", "rogue", "b", "extra"]
 
 
 def test_two_of_three_uses_uncompressed_reference_clock_and_forces_final():

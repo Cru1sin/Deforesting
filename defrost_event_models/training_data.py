@@ -381,7 +381,7 @@ def measure_defrost_event_quantities(
 def build_defrost_event_training_table(
     loader: Any, *, preparation_heat: str | None = None
 ) -> pd.DataFrame:  # noqa: C901
-    """Extract valid-cycle events; retain full chronology for their recovery endpoints."""
+    """Extract observed events independently of cycle quality; audit each event window."""
     values = catalog(loader)
     next_rows: dict[str, pd.Series] = {}
     for _, experiment in values.groupby("experiment_id", sort=False):
@@ -391,7 +391,7 @@ def build_defrost_event_training_table(
     cache: dict[str, pd.DataFrame] = {}
     rows: list[dict[str, object]] = []
     real = values.loc[
-        values["status"].eq("valid") & (
+        (values["status"].eq("valid") if preparation_heat is None else True) & (
             values["defrost_preparation_start"].notna()
             | (values["defrost_start"].notna() & values["defrost_end"].notna())
         )
@@ -459,6 +459,9 @@ def build_defrost_event_training_table(
             extract_pre_defrost_features(current, [preparation], heating).iloc[0].to_dict(),
         )
         audit_reasons: list[str] = []
+        if preparation_heat is not None and not features["pre_defrost_feature_window_valid"]:
+            observed["energy_event_valid"] = False
+            audit_reasons.append("pre_defrost_feature_window_incomplete")
         if not observed["phase_partition_valid"]:
             audit_reasons.append("phase_partition")
         if not observed["event_valid"]:

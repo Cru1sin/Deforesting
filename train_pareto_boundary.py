@@ -107,7 +107,7 @@ def build_parser() -> argparse.ArgumentParser:
             "overview", "screen",
             "audit", "develop", "compare-development", "refit-development",
             "evaluate-frozen-development", "compare-frozen-policies",
-            "compare-stopping-losses", "render-cycles",
+            "compare-stopping-losses", "upgrade-chain", "render-cycles",
         ),
         default=None,
     )
@@ -155,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--decision-run", type=Path,
                         default=Path("output/defrost_decisions/effective_cop_tref"))
     parser.add_argument("--event-run", type=Path,
-                        default=Path("output/defrost_event_models/heating_start_zero"))
+                        default=Path("output/defrost_event_models/complete_defrost_events_zero"))
     parser.add_argument("--figure-output", type=Path)
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument(
@@ -203,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=25)
     parser.add_argument("--n-jobs", type=int, default=6)
     parser.add_argument("--heldout-experiment")
+    parser.add_argument("--chain-models", nargs="+",
+                        help="Explicit upgrade-chain recipes, all evaluated with 1/1@0.5")
+    parser.add_argument("--chain-finalize-from", type=Path,
+                        help="Replay frozen Binary chain scores at 1/1@0.5; train only F_core")
     parser.add_argument("--wandb-project")
     parser.add_argument("--allow-extrapolation", action="store_true")
     parser.add_argument("--diagnose-state", action="store_true")
@@ -2238,6 +2242,18 @@ def main() -> None:
         from image_models.relative_cop import compare_frozen_policies
 
         compare_frozen_policies(args)
+        return
+    if args.action == "upgrade-chain":
+        if args.task != "cop-classification":
+            parser.error("upgrade-chain requires --task cop-classification")
+        from image_models.upgrade_chain import run, PARENTS, CORE_PARENTS
+        if args.chain_models and (args.chain_finalize_from or
+                len(set(args.chain_models)) != len(args.chain_models) or
+                any(name not in {**PARENTS, **CORE_PARENTS} for name in args.chain_models)):
+            parser.error("choose unique known chain models without --chain-finalize-from")
+        if args.output == Path("output/test/pareto_boundary/current"):
+            args.output = Path("output/image_models/upgrade_chain")
+        run(args)
         return
     if args.action == "compare-stopping-losses":
         if args.task != "cop-classification":

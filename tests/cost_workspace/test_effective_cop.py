@@ -312,3 +312,38 @@ def test_outlet_threshold_integrates_crossings_without_low_temperature_heat():
                         minimum_outlet_temperature=40.)["energy"] == 0
     assert not window_audit(frame, start, end, "heating_capacity",
                             minimum_outlet_temperature=np.nan)["valid"]
+
+
+def test_event_pool_ignores_cycle_labels_and_uses_next_recovery(monkeypatch):
+    from defrost_event_models import training_data as data
+
+    start = pd.Timestamp('2026-01-01')
+    recovery = start + pd.Timedelta(minutes=26)
+    catalog = pd.DataFrame([
+        dict(cycle_name='a', experiment_id='e', status='invalid',
+             pre_cop_status={'status': 'invalid'}, start_time=start,
+             heating_start=start, defrost_preparation_start=start + pd.Timedelta(minutes=10),
+             defrost_start=start + pd.Timedelta(minutes=11),
+             defrost_end=start + pd.Timedelta(minutes=20), stable_heating_start=start),
+        dict(cycle_name='b', experiment_id='e', status='invalid',
+             pre_cop_status={'status': 'invalid'}, start_time=start + pd.Timedelta(minutes=20),
+             heating_start=start + pd.Timedelta(minutes=20),
+             defrost_preparation_start=pd.NaT, defrost_start=pd.NaT, defrost_end=pd.NaT,
+             stable_heating_start=recovery),
+    ])
+    monkeypatch.setattr(data, 'catalog', lambda loader: catalog)
+    monkeypatch.setattr(data, 'load_frame', lambda *a, **kw: pd.DataFrame())
+    monkeypatch.setattr(data, 'extract_pre_defrost_features', lambda *a: pd.DataFrame(
+        {'pre_defrost_feature_window_valid': [True]}))
+
+    def measure(*args, **kwargs):
+        assert kwargs['recovery_end'] == recovery
+        assert kwargs['preparation_heat'] == 'zero'
+        return dict(phase_partition_valid=True, event_valid=True, energy_event_valid=True)
+
+    monkeypatch.setattr(data, 'measure_defrost_event_quantities', measure)
+    events = data.build_defrost_event_training_table(None, preparation_heat='zero')
+    assert events.cycle_name.tolist() == ['a']
+    assert events.energy_event_valid.all()
+    assert events.recovery_duration_minutes.tolist() == [6.]
+    assert 'recovery_end_fixed9' not in events

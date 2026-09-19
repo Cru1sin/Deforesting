@@ -239,11 +239,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.output_root / "test" / args.run_name,
             targets=targets,
             bootstrap_replicates=0,
+            focus_model="ridge_dynamic_state_8" if args.preparation_heat == "zero" else None,
             labels={
                 OUTCOME_TARGETS["event_electricity"]: "Total event electricity [kWh]",
                 OUTCOME_TARGETS["event_net_heat"]: "Preparation refrigerant heat [kWh]",
             },
         )
+    if args.figures and args.preparation_heat == "zero":
+        from plots.pareto_learning import render_effective_cop_calibration
+
+        render_effective_cop_calibration(loader, events, predictions,
+                                         args.output_root / "test" / args.run_name)
     (run / "candidate_model_parameters.json").write_text(
         json.dumps(parameters, sort_keys=True, allow_nan=False, separators=(",", ":")),
         encoding="utf-8",

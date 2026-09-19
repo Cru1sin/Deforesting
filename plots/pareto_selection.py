@@ -80,7 +80,9 @@ def plot_objectives(
         eligible = curve[f"{metric}_eligible"].fillna(False).astype(bool)
         if len(metrics) == 1:
             handles.append(_plot_supported_curve(
-                target, curve["minutes"], raw, eligible, color=color, label="Effective cycle COP"
+                target, curve["minutes"], raw, eligible & ~curve.get(
+                    f"{metric}_uses_model_extrapolation", pd.Series(False, index=curve.index)
+                ).fillna(False), color=color, label="Effective cycle COP"
             ))
         else:
             target.plot(
@@ -150,7 +152,9 @@ def plot_normalized(
         normalized = 100 * raw / best if np.isfinite(best) and best != 0 else raw * np.nan
         if len(metrics) == 1:
             _plot_supported_curve(
-                axis, curve["minutes"], normalized, eligible,
+                axis, curve["minutes"], normalized, eligible & ~curve.get(
+                    f"{metric}_uses_model_extrapolation", pd.Series(False, index=curve.index)
+                ).fillna(False),
                 color="black", label="Normalized cycle COP",
             )
         else:

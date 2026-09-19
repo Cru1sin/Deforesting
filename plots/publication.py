@@ -727,6 +727,8 @@ def _effective_cop_probability_figure(
         }
         for row in controllers.itertuples():
             label, color, linestyle = styles[str(row.strategy)]
+            if getattr(row, "forced_final", False):
+                label = label.replace("trigger", "final fallback")
             events.append((row.selected_time, label, color, linestyle))
     for value, label, color, linestyle in events:
         event_time = pd.to_datetime(value, errors="coerce")
@@ -852,6 +854,7 @@ def _render_stopping_cycle_job(
     curve["t_star"] = controllers.optimal_time.dropna().iloc[0]
     metric = controllers.iloc[0].copy()
     metric["status"] = metric.get("evaluation_status", "evaluated")
+    metric["trigger_time"] = metric.get("selected_time")
     render_effective_cop_probability(
         loader.load_cycle(cycle_name),
         curve,
@@ -886,7 +889,7 @@ def _render_stopping_training_loss(results: list[dict[str, Any]], output: Path) 
     plt.close(figure)
 
 
-def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: int = 6) -> None:
+def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: int = 6, *, seed: int | None = None) -> None:
     """Render every formal stopping probability curve and its training losses."""
     import json
     import pickle
@@ -903,14 +906,23 @@ def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: 
         "new_rgb_difference": "New RGB Difference",
         "after_optimum": "Binary loss",
         "cop_stopping": "COP stopping loss",
+        "F_core": "F_core | Sensor",
+        "G_core": "G_core | Sensor + RGB",
+        "B0": "Chen B0 | RGB",
     }
     run, dataset, output = map(Path, (run, dataset, output))
     run_settings = json.loads((run / "settings.json").read_text())
     audit_settings = json.loads((Path(run_settings["data"]) / "settings.json").read_text())
-    decisions = pd.read_csv(
-        Path(audit_settings["decision_run"]) / "candidate_decisions.csv",
-        low_memory=False,
-    )
+    chain = "parents" in run_settings
+    if chain:
+        columns = ["cycle_name", "candidate_defrost_time", "cycle_cop", "cycle_cop_eligible",
+                   "cycle_cop_uses_model_extrapolation", "t_RB"]
+        decisions = pd.concat([pd.read_parquet(path, columns=columns)
+                              for path in sorted((run / "ridge").glob("*_reference.parquet"))],
+                              ignore_index=True)
+    else:
+        decisions = pd.read_csv(
+            Path(audit_settings["decision_run"]) / "candidate_decisions.csv", low_memory=False)
     decisions["candidate_defrost_time"] = pd.to_datetime(
         decisions.candidate_defrost_time, errors="coerce"
     )
@@ -918,19 +930,24 @@ def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: 
         if column in decisions:
             decisions[column] = pd.to_datetime(decisions[column], errors="coerce")
     loader = DatasetLoader(dataset)
-    for predictions_path in sorted(run.glob("*/*/seed_*/predictions.parquet")):
+    loader.configure_recovery(run_settings.get("causal_boundary_settings") or audit_settings["event_recovery_settings"])
+    pattern = "*/seed_*/predictions.parquet" if chain else "*/*/seed_*/predictions.parquet"
+    for predictions_path in sorted(run.glob(pattern)):
         seed_dir = predictions_path.parent
-        loss_name = seed_dir.parent.name
-        architecture = seed_dir.parent.parent.name
-        destination = output / architecture / loss_name / seed_dir.name
+        if seed is not None and seed_dir.name != f"seed_{seed}":
+            continue
+        loss_name = "after_optimum" if chain else seed_dir.parent.name
+        architecture = seed_dir.parent.name if chain else seed_dir.parent.parent.name
+        destination = (output / architecture / seed_dir.name if chain else
+                       output / architecture / loss_name / seed_dir.name)
         destination.mkdir(parents=True, exist_ok=True)
         predictions = pd.read_parquet(predictions_path)
-        controllers = pd.read_csv(seed_dir / "controller_metrics.csv")
+        controllers = pd.read_csv(seed_dir / ("cycle_metrics.csv" if chain else "controller_metrics.csv"))
         for column in ("selected_time", "optimal_time"):
             controllers[column] = pd.to_datetime(controllers[column], errors="coerce")
         results = []
         thresholds: dict[str, dict[str, float]] = {}
-        for path in sorted((seed_dir / "folds").glob("*.pkl")):
+        for path in ([] if chain else sorted((seed_dir / "folds").glob("*.pkl"))):
             with path.open("rb") as stream:
                 result = pickle.load(stream)  # noqa: S301 - run-owned checkpoints
             results.append(result)
@@ -938,7 +955,9 @@ def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: 
                 thresholds[str(result["heldout_experiment"])] = result["checkpoint"][
                     "thresholds"
                 ]
-        for strategy in ("first_positive", "two_of_three"):
+        if chain:
+            predictions["threshold_first_positive"] = .5
+        for strategy in (() if chain else ("first_positive", "two_of_three")):
             predictions[f"threshold_{strategy}"] = predictions.heldout_experiment.map(
                 {fold: values[strategy] for fold, values in thresholds.items()}
             )
@@ -950,13 +969,15 @@ def render_stopping_loss_cycles(run: Path, dataset: Path, output: Path, n_jobs: 
         for cycle_name, trace in predictions.groupby("cycle_name", sort=True):
             curve = decisions.loc[decisions.cycle_name.eq(cycle_name)].copy()
             metrics = controllers.loc[controllers.cycle_name.eq(cycle_name)].copy()
-            if not curve.empty and len(metrics) == 2:
+            if not curve.empty and len(metrics) == (1 if chain else 2):
                 jobs.append(delayed(_render_stopping_cycle_job)(
                     loader, curve, trace, metrics, destination, model_label
                 ))
         with parallel_config(backend="loky", n_jobs=n_jobs, inner_max_num_threads=1):
             Parallel()(jobs)
-        _render_stopping_training_loss(results, destination)
+        if not chain:
+            _render_stopping_training_loss(results, destination)
+        print(f"[cycle figures] {architecture} {seed_dir.name}: {len(jobs)}", flush=True)
 
 
 def render_decision_publication(

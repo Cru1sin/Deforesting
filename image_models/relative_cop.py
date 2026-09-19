@@ -691,7 +691,8 @@ def ridge_parameters(events, excluded):
     )
 
 
-def apply_reference(base, parameters, rgb="on", *, include_history=True):
+def apply_reference(base, parameters, rgb="on", *, include_history=True,
+                    allow_model_extrapolation=False):
     result = base.copy()
     prediction = predict_with_model_parameters(parameters, result)
     result["defrost_event_electricity_kwh"] = prediction.prediction.to_numpy()
@@ -704,7 +705,9 @@ def apply_reference(base, parameters, rgb="on", *, include_history=True):
     result["defrost_event_net_heat_kwh"] = 0.0
     result["defrost_event_net_heat_prediction_available"] = True
     result["defrost_event_net_heat_in_training_domain"] = True
-    result = calculate_cycle_cop(result, effective=True)
+    result = calculate_cycle_cop(
+        result, effective=True, allow_model_extrapolation=allow_model_extrapolation
+    )
     result = normalize_curve(result)
     if include_history:
         history = history_features(result)
@@ -779,7 +782,6 @@ def audit(args):
     events = build_defrost_event_training_table(
         loader, preparation_heat=event_settings["preparation_heat"]
     )
-    events = events.loc[events.cycle_name.isin(cohort.cycle_name)].reset_index(drop=True)
 
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "base").mkdir(exist_ok=True)
@@ -885,6 +887,7 @@ def build_fold_rows(
                 base, model,
                 "on" if getattr(args, "require_rgb_input", False) else args.rgb,
                 include_history=include_history,
+                allow_model_extrapolation=getattr(args, "allow_extrapolation", False),
             ))
     return pd.concat(tables, ignore_index=True), parameters
 
