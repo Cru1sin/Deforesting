@@ -74,13 +74,7 @@ Place the processed Dataset at `dataset/`, then run:
 uv run python validate_dataset.py --dataset dataset
 ```
 
-Raw-to-Dataset construction and infrequent maintenance remain available as advanced commands:
-
-```bash
-uv run python -m dataset_tools.manage_dataset --help
-```
-
-Raw files and `dataset/` are data, not source code, and are never moved by these workflows.
+Dataset 管理命令见 [`dataset/README.md`](dataset/README.md)。
 
 ## 3A. Fit complete defrost-event models
 
@@ -156,7 +150,29 @@ output/defrost_decisions/current/
 
 `candidate_decisions.csv` contains every candidate quantity, each objective's own eligibility and
 near-optimal basin, the C–H Pareto front, and `selected_defrost_time`. The Pareto panel colours
-points by the reference-only evaporator-capacity objective.
+points by the reference-only evaporator-capacity objective. It also records the independently
+replayed historical RB trigger for comparison; RB never participates in objective selection.
+
+## Historical RB reference baseline
+
+RB is a frozen reference baseline and must remain available independently of the learned models
+and cost objectives. Replay it for every Dataset cycle, including incomplete cycles that cannot
+enter the current decision calculation:
+
+```bash
+uv run python calculate_rb_reference.py \
+  --dataset dataset \
+  --run-name rb_reference \
+  --n-jobs 6 \
+  --output-root output
+```
+
+This writes `output/defrost_decisions/rb_reference/rb_defrost_triggers.csv`. The calculation
+replays the historical controller on the raw one-second timeline and reports either its exact
+first trigger or `right_censored` at the observed cycle boundary. The restored definition comes
+from the historical implementation removed in commit `0adc438`; its temperature thresholds,
+device timer fields, 20-second confirmation windows, and independent 150-minute fallback are
+kept unchanged.
 
 To train against the current Pareto-selected boundary rather than the frozen V1 reference:
 
@@ -281,8 +297,9 @@ plots/                  one shared publication rendering path
 tests/                  scientific, interface and parity checks
 ```
 
-Historical inverse-COP definitions are isolated under `defrost_decision/baselines/`; the
-current Pareto route does not import them.
+Historical inverse-COP and RB definitions are isolated under `defrost_decision/baselines/`.
+The current Pareto route attaches RB only after selection so the baseline cannot move the
+multi-objective decision.
 
 ## Release scope
 

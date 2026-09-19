@@ -17,6 +17,7 @@ from joblib import parallel_config
 from sklearn.utils.parallel import Parallel, delayed
 
 from dataset_tools import DatasetLoader
+from defrost_decision.baselines import rule_based
 from defrost_decision.candidate_quantities import build_candidate_quantities
 from defrost_decision.candidate_times import clean_anchor_cycles, metadata_eligible_cycles
 from defrost_decision.pareto_selection import select_cop_heating_rate_pareto_knee
@@ -124,7 +125,49 @@ def calculate_cycle(
         add_single_objective_optima(objectives),
         minimum_time=boundary_source.get("stable_heating_start"),
     )
+    trigger = rule_based.calculate_cycle(loader, cycle_name)
+    for column in ("t_RB", "rb_status", "trigger_type", "case"):
+        result[column] = trigger[column]
     return result
+
+
+def calculate_cycles(
+    loader: Any,
+    cycles: Sequence[str],
+    models: Mapping[str, Any],
+    *,
+    candidate_step_seconds: int,
+    allow_extrapolation: bool,
+    prediction_modes: Mapping[str, str] | str,
+    workers: int,
+) -> pd.DataFrame:
+    """Calculate cycles through the same path for CLI and Dataset maintenance."""
+    mode_for = (
+        (lambda cycle: str(prediction_modes[cycle]))
+        if isinstance(prediction_modes, Mapping)
+        else (lambda _cycle: str(prediction_modes))
+    )
+    tables: list[pd.DataFrame] = []
+    with parallel_config(backend="loky", n_jobs=workers, inner_max_num_threads=1):
+        results = Parallel(return_as="generator_unordered")(
+            delayed(calculate_cycle)(
+                loader,
+                cycle_name,
+                models,
+                candidate_step_seconds=candidate_step_seconds,
+                allow_extrapolation=allow_extrapolation,
+                prediction_mode=mode_for(cycle_name),
+            )
+            for cycle_name in cycles
+        )
+        for completed, table in enumerate(results, start=1):
+            tables.append(table)
+            print(f"Cycles complete: {completed}/{len(cycles)}")
+    if not tables:
+        return pd.DataFrame()
+    return pd.concat(tables, ignore_index=True).sort_values(
+        ["cycle_name", "candidate_defrost_time"], kind="stable"
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -160,24 +203,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     cycles, excluded = clean_anchor_cycles(loader, cycles, explicit=bool(args.cycles))
     print(f"Selected {len(cycles)} cycle(s); excluded {excluded} by clean-anchor gate")
-    tables = []
-    with parallel_config(backend="loky", n_jobs=args.workers, inner_max_num_threads=1):
-        results = Parallel(return_as="generator_unordered")(
-            delayed(calculate_cycle)(
-                loader,
-                cycle_name,
-                models,
-                candidate_step_seconds=args.candidate_step_seconds,
-                allow_extrapolation=args.allow_extrapolation,
-                prediction_mode=args.prediction_mode,
-            )
-            for cycle_name in cycles
-        )
-        for completed, table in enumerate(results, start=1):
-            tables.append(table)
-            print(f"Cycles complete: {completed}/{len(cycles)}")
-    decisions = pd.concat(tables, ignore_index=True).sort_values(
-        ["cycle_name", "candidate_defrost_time"], kind="stable"
+    decisions = calculate_cycles(
+        loader,
+        cycles,
+        models,
+        candidate_step_seconds=args.candidate_step_seconds,
+        allow_extrapolation=args.allow_extrapolation,
+        prediction_modes=args.prediction_mode,
+        workers=args.workers,
     )
     run.mkdir(parents=True, exist_ok=True)
     decisions.to_csv(run / "candidate_decisions.csv", index=False)

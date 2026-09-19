@@ -35,6 +35,14 @@ _PANELS = (
         "Water temperature [degC]",
     ),
     (
+        (
+            "condensing_temperature",
+            "plate_heat_exchanger_inlet_temperature",
+            "water_temperature_setpoint",
+        ),
+        "Temperature [degC]",
+    ),
+    (
         ("ambient_temperature", "coil_temperature", "evaporating_temperature"),
         "Temperature [degC]",
     ),
@@ -51,6 +59,8 @@ _COLORS = {
     "ambient_temperature": "#374151",
     "water_in_temperature": "#E69F00",
     "water_out_temperature": "#CC79A7",
+    "condensing_temperature": "#D55E00",
+    "plate_heat_exchanger_inlet_temperature": "#0072B2",
     "evaporating_temperature": "#56B4E9",
     "coil_temperature": "#7B2CBF",
     "water_temperature_setpoint": "#6B7280",
@@ -306,7 +316,6 @@ def render_cycle_publication(
     *,
     sensor_intervals: Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]] | None = None,
     rgb_intervals: Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]] | None = None,
-    cost_curve: pd.DataFrame | None = None,
 ) -> None:
     """Render the Dataset's cycle-level scientific overview."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
@@ -320,8 +329,7 @@ def render_cycle_publication(
         and not str(column).endswith("__imputed")
         and _observed_values(frame, str(column)).notna().any()
     ]
-    has_cost = cost_curve is not None and not cost_curve.empty
-    row_count = 1 + len(_PANELS) + bool(has_cost) + bool(humidity)
+    row_count = 1 + len(_PANELS) + bool(humidity)
     figure, axes = plt.subplots(
         row_count,
         1,
@@ -371,14 +379,6 @@ def render_cycle_publication(
             missing_spans,
             left,
             right,
-        )
-
-    if has_cost:
-        _plot_cost_panel(
-            axes[1 + len(_PANELS)],
-            cast(pd.DataFrame, cost_curve),
-            origin,
-            stage_spans,
         )
 
     if humidity:
@@ -483,10 +483,10 @@ def match_decision_rgb_images(
         distance = (metadata["image_time"] - target_time).abs()
         nearest = metadata.loc[distance.idxmin()]
         image_time = pd.Timestamp(nearest["image_time"])
-        offset_seconds = float(abs((image_time - target_time).total_seconds()))
+        offset_seconds = float((image_time - target_time).total_seconds())
         file_name = str(nearest.get("file_name", ""))
         path = physical_by_name.get(file_name)
-        if offset_seconds > max_offset.total_seconds():
+        if abs(offset_seconds) > max_offset.total_seconds():
             status = "offset_exceeds_2min"
             available = False
             image_path = ""
@@ -563,6 +563,7 @@ def render_decision_publication(
     minimum_label: str = "Minimum",
     minimum_support_label: str | None = None,
     parallel_curve: pd.DataFrame | None = None,
+    figure_note: str | None = None,
 ) -> None:
     """Render two decision frames above the shared historical or selection panels."""
     frame = cycle_frame.sort_values("timestamp", kind="stable").copy()
@@ -601,7 +602,7 @@ def render_decision_publication(
         wspace=0.08,
     )
     image_axes = [figure.add_subplot(grid[0, 0]), figure.add_subplot(grid[0, 1])]
-    image_specs = (("rb", "RB trigger"), ("optimal", optimal_label))
+    image_specs = (("rb", "Hypothetical RB trigger"), ("optimal", optimal_label))
     for axis, (target_type, label) in zip(image_axes, image_specs, strict=True):
         info = decision_images.get(target_type, {})
         _plot_decision_image(axis, info, label, origin, stable)
@@ -679,6 +680,8 @@ def render_decision_publication(
         )
     cycle_name = str(cycle_record.get("cycle_name", cycle_record.get("cycle_id", "Cycle")))
     figure.suptitle(cycle_name, x=0.08, ha="left", fontsize=10, fontweight="bold")
+    if figure_note:
+        figure.text(0.08, 0.945, figure_note, ha="left", va="top", fontsize=6.5, color="#4B5563")
     panel_axes[3 if parallel else 2].set_xlabel("Time from cycle start [min]", fontsize=8)
     figure.subplots_adjust(
         left=0.12 if parallel else 0.14,
@@ -720,28 +723,23 @@ def _plot_decision_image(
         )
     for spine in axis.spines.values():
         spine.set_visible(True)
-        spine.set_color("#2E7D5B" if label.startswith("RB") else "#E28E2C")
+        spine.set_color("#2E7D5B" if "RB" in label else "#E28E2C")
         spine.set_linewidth(1.0)
+    target_time = pd.to_datetime(info.get("target_time"), errors="coerce")
     image_time = pd.to_datetime(info.get("image_time"), errors="coerce")
-    if available and not pd.isna(image_time):
-        cycle_minutes = (pd.Timestamp(image_time) - origin).total_seconds() / 60.0
-        stable_minutes = (
-            (pd.Timestamp(image_time) - stable).total_seconds() / 60.0
-            if not pd.isna(stable)
-            else np.nan
-        )
-        stable_text = (
-            f"stable +{stable_minutes:.1f} min" if np.isfinite(stable_minutes) else "stable n/a"
-        )
+    target_text = (
+        f"target {pd.Timestamp(target_time):%H:%M:%S}"
+        if not pd.isna(target_time)
+        else "target unavailable"
+    )
+    if not pd.isna(image_time):
         title = (
-            f"{label}\n"
-            f"image {pd.Timestamp(image_time):%H:%M:%S} · cycle +{cycle_minutes:.1f} min · "
-            f"{stable_text} · Δ {float(info.get('offset_seconds', np.nan)):.1f} s"
+            f"{label} · {target_text}\n"
+            f"image {pd.Timestamp(image_time):%H:%M:%S} · "
+            f"Δ {float(info.get('offset_seconds', np.nan)):+.1f} s"
         )
     else:
-        title = (
-            f"{label}\nRGB unavailable · {str(info.get('status', 'unavailable')).replace('_', ' ')}"
-        )
+        title = f"{label} · {target_text}\nRGB unavailable"
     axis.set_title(title, fontsize=7.2, pad=5, loc="left")
 
 
@@ -1272,6 +1270,8 @@ def _plot_cycle_panel(
 
 
 def _display_label(channel: str) -> str:
+    if channel == "plate_heat_exchanger_inlet_temperature":
+        return "Plate HX Inlet Temperature"
     if channel == "cop":
         return "Refrigerant-side COP"
     if channel == "water_cop":

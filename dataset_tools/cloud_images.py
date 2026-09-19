@@ -28,9 +28,7 @@ DEFAULT_CLOUD_IMAGES_REMOTE = os.environ.get(
 
 def _cloud_file(name: str) -> str:
     if not DEFAULT_CLOUD_IMAGES_REMOTE:
-        raise ValueError(
-            "cloud image access requires HEAT_PUMP_DEFROST_IMAGE_REMOTE or cloud_root"
-        )
+        raise ValueError("cloud image access requires HEAT_PUMP_DEFROST_IMAGE_REMOTE or cloud_root")
     return f"{DEFAULT_CLOUD_IMAGES_REMOTE}/{name}"
 
 
@@ -50,9 +48,7 @@ def _direct_rclone_env() -> dict[str, str]:
     return env
 
 
-def _require_free_space(
-    path: Path, required: int, action: str, minimum_free_gib: float
-) -> None:
+def _require_free_space(path: Path, required: int, action: str, minimum_free_gib: float) -> None:
     if required + minimum_free_gib * 1024**3 > shutil.disk_usage(path).free:
         raise OSError(
             f"{action} would cross the {minimum_free_gib:g} GiB safety floor; "
@@ -75,22 +71,26 @@ def _read_zip_range(
             stream.seek(offset)
             data = stream.read(count)
     else:
-        result = subprocess.run(
-            [
-                "rclone",
-                "cat",
-                remote,
-                "--offset",
-                str(offset),
-                "--count",
-                str(count),
-                "--http-proxy",
-                "",
-            ],
-            check=True,
-            capture_output=True,
-            env=_direct_rclone_env(),
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "rclone",
+                    "cat",
+                    remote,
+                    "--offset",
+                    str(offset),
+                    "--count",
+                    str(count),
+                    "--http-proxy",
+                    "",
+                ],
+                check=True,
+                capture_output=True,
+                env=_direct_rclone_env(),
+            )
+        except subprocess.CalledProcessError as error:
+            detail = error.stderr.decode(errors="replace").strip() if error.stderr else str(error)
+            raise RuntimeError(f"cannot read cloud ZIP {remote}: {detail}") from error
         data = result.stdout
         if isinstance(data, str):
             data = data.encode()
@@ -152,9 +152,7 @@ def _zip_member_index(
         values = struct.unpack("<4sQ2H2L4Q", record)
         if values[0] != b"PK\x06\x06" or values[1] < 44:
             raise ValueError("invalid ZIP64 end-of-central-directory record")
-        _, _, _, _, disk, central_disk, entries_disk, entries, central_size, central_offset = (
-            values
-        )
+        _, _, _, _, disk, central_disk, entries_disk, entries, central_size, central_offset = values
     if disk or central_disk or entries_disk != entries:
         raise NotImplementedError("multi-disk ZIP is not supported")
     if entries == 0:
@@ -257,9 +255,7 @@ def _read_zip_member(
         _uncompressed,
         filename_size,
         extra_size,
-    ) = (
-        struct.unpack("<4s5H3L2H", header)
-    )
+    ) = struct.unpack("<4s5H3L2H", header)
     if flags & 0x1:
         raise NotImplementedError("encrypted ZIP members are not supported")
     data_offset = 30 + filename_size + extra_size
@@ -287,9 +283,7 @@ def _plan_image_members(
     images_root = Path(dataset_dir).resolve() / "images"
     cycle_dir = images_root / cycle_name
     requested = sorted({PurePosixPath(str(name)) for name in file_names if str(name)}, key=str)
-    if any(
-        path.is_absolute() or ".." in path.parts or len(path.parts) > 2 for path in requested
-    ):
+    if any(path.is_absolute() or ".." in path.parts or len(path.parts) > 2 for path in requested):
         raise ValueError("unsafe requested ZIP member name")
     requested = [
         path if len(path.parts) == 2 else PurePosixPath("front") / path for path in requested
@@ -319,9 +313,14 @@ def _plan_image_members(
             env=_direct_rclone_env(),
         )
         raw_size = result.stdout.strip()
-        if result.returncode != 0 or not raw_size.isdigit():
-            print(f"[images] no local directory or cloud ZIP: {cycle_name}", flush=True)
+        if result.returncode in (3, 4) or (result.returncode == 0 and not raw_size):
+            print(f"[images] cloud ZIP missing: {cycle_name}", flush=True)
             return [], [0], time.monotonic()
+        if result.returncode != 0 or not raw_size.isdigit():
+            raise RuntimeError(
+                f"{cycle_name}: cannot inspect cloud ZIP {remote}: "
+                f"{result.stderr.strip() or repr(raw_size)}"
+            )
         archive_size = int(raw_size)
         archive: Path | str = archive_name
     else:
@@ -343,11 +342,9 @@ def _plan_image_members(
     members = [index.get(f"{cycle_name}/{path.as_posix()}") for path in requested]
     if any(member is None for member in members):
         missing = [
-            str(path)
-            for path, member in zip(requested, members, strict=True)
-            if member is None
+            str(path) for path, member in zip(requested, members, strict=True) if member is None
         ]
-        raise FileNotFoundError("ZIP members are missing: " + ", ".join(missing))
+        print(f"[images] {cycle_name}: ZIP members missing: " + ", ".join(missing), flush=True)
     required = sum(member[2] for member in members if member is not None)
     _require_free_space(
         images_root,
@@ -422,7 +419,7 @@ def materialize_image_members(
             print(f"[images:index] {completed}/{len(cycles)} {cycle}", flush=True)
         jobs = [job for cycle in cycles for job in plans[cycle]]
         downloaded = [job[-1] for job in jobs]
-        print(f"[images] {len(jobs)} missing panel images with {n_jobs} workers", flush=True)
+        print(f"[images] {len(jobs)} missing images with {n_jobs} workers", flush=True)
         remaining = Counter(job[0] for job in jobs)
         futures: dict[Future[Path], str] = {
             executor.submit(_download_image_member, job): job[0] for job in jobs

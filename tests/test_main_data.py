@@ -30,6 +30,9 @@ def test_validate_dataset_help_exposes_only_read_only_validation(tmp_path: Path)
         "review-cycle",
         "edit",
         "render",
+        "upload-data",
+        "upload-images",
+        "dts-download",
     ):
         assert maintenance_action not in result.stdout
 
@@ -131,9 +134,10 @@ def test_advanced_dataset_maintenance_keeps_render_options(tmp_path: Path, monke
             {
                 "publication": True,
                 "panel": True,
+                "decision": True,
                 "fetch_cloud_images": False,
                 "cleanup_downloaded_images": False,
-                "n_jobs": 10,
+                "n_jobs": 6,
             },
         )
     ]
@@ -157,11 +161,35 @@ def test_render_without_cycle_targets_all_default_dataset_panels(monkeypatch) ->
             {
                 "publication": False,
                 "panel": True,
+                "decision": False,
                 "fetch_cloud_images": True,
                 "cleanup_downloaded_images": False,
-                "n_jobs": 10,
+                "n_jobs": 6,
             },
         )
+    ]
+
+
+def test_render_can_select_only_pareto_decision(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "render_dataset",
+        lambda _dataset, _cycle, **options: calls.append(options) or Path("dataset"),
+    )
+
+    assert manage_dataset.main(["render", "frost_cycle_000007", "--decision"]) == 0
+    assert calls == [
+        {
+            "publication": False,
+            "panel": False,
+            "decision": True,
+            "fetch_cloud_images": False,
+            "cleanup_downloaded_images": False,
+            "n_jobs": 6,
+        }
     ]
 
 
@@ -185,9 +213,143 @@ def test_render_cleanup_is_explicit(monkeypatch) -> None:
         {
             "publication": False,
             "panel": True,
+            "decision": False,
             "fetch_cloud_images": True,
             "cleanup_downloaded_images": True,
-            "n_jobs": 10,
+            "n_jobs": 6,
+        }
+    ]
+
+
+def test_upload_data_accepts_multiple_dates(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[tuple[Path, list[str] | None]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "upload_date_data",
+        lambda data, dates: calls.append((data, dates)) or data,
+        raising=False,
+    )
+
+    assert manage_dataset.main(["upload-data", "0806", "0807"]) == 0
+    assert calls == [(Path("data"), ["0806", "0807"])]
+
+
+def test_upload_data_all_selects_every_date(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[tuple[Path, list[str] | None]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "upload_date_data",
+        lambda data, dates: calls.append((data, dates)) or data,
+        raising=False,
+    )
+
+    assert manage_dataset.main(["upload-data", "all"]) == 0
+    assert calls == [(Path("data"), None)]
+
+
+def test_upload_images_all_preserves_local_images_by_default(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[tuple[Path, list[str] | None, bool]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "upload_cycle_images",
+        lambda dataset, cycles, cleanup: calls.append((dataset, cycles, cleanup)) or dataset,
+        raising=False,
+    )
+
+    assert manage_dataset.main(["upload-images", "all"]) == 0
+    assert calls == [(Path("dataset"), None, False)]
+
+
+def test_upload_images_cleanup_is_explicit(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[tuple[Path, list[str] | None, bool]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "upload_cycle_images",
+        lambda dataset, cycles, cleanup: calls.append((dataset, cycles, cleanup)) or dataset,
+        raising=False,
+    )
+
+    assert (
+        manage_dataset.main(
+            ["upload-images", "frost_cycle_000001", "--cleanup-uploaded-images"]
+        )
+        == 0
+    )
+    assert calls == [(Path("dataset"), ["frost_cycle_000001"], True)]
+
+
+def test_dts_download_defaults_to_all_files_in_data(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "download_shared_data",
+        lambda url, **options: calls.append({"url": url, **options}) or Path("data"),
+        raising=False,
+    )
+
+    assert manage_dataset.main(["dts-download", "https://example.com/share"]) == 0
+    assert calls == [
+        {
+            "url": "https://example.com/share",
+            "data_dir": Path("data"),
+            "password": None,
+            "start_no": 1,
+            "end_no": None,
+            "workers": 2,
+            "retry_delay": 5,
+        }
+    ]
+
+
+def test_dts_download_keeps_optional_range_controls(monkeypatch) -> None:
+    from dataset_tools import manage_dataset
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        manage_dataset,
+        "download_shared_data",
+        lambda url, **options: calls.append({"url": url, **options}) or Path("data"),
+        raising=False,
+    )
+
+    assert (
+        manage_dataset.main(
+            [
+                "dts-download",
+                "https://example.com/share",
+                "--password",
+                "secret",
+                "--start-no",
+                "13",
+                "--end-no",
+                "30",
+                "--workers",
+                "1",
+                "--retry-delay",
+                "8",
+            ]
+        )
+        == 0
+    )
+    assert calls == [
+        {
+            "url": "https://example.com/share",
+            "data_dir": Path("data"),
+            "password": "secret",
+            "start_no": 13,
+            "end_no": 30,
+            "workers": 1,
+            "retry_delay": 8,
         }
     ]
 

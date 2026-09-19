@@ -3,9 +3,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pandas as pd
+
 import fit_defrost_event_models
 import select_defrost_time
 from defrost_decision.candidate_quantities import DEFAULT_OUTCOME_MODEL
+from defrost_decision.candidate_times import catalog_exclusion_reason
 from defrost_event_models.ridge_models import OUTCOME_TARGETS
 
 
@@ -15,6 +18,7 @@ def test_public_defrost_commands_have_direct_help() -> None:
         "fit_defrost_event_models.py",
         "select_defrost_time.py",
         "calculate_v1_label_reference.py",
+        "calculate_rb_reference.py",
     ):
         result = subprocess.run(
             [str(root / ".venv/bin/python"), script, "--help"],
@@ -25,6 +29,46 @@ def test_public_defrost_commands_have_direct_help() -> None:
         assert result.returncode == 0
         assert "--action" not in result.stdout
         assert "--variant" not in result.stdout
+
+
+def test_shared_batch_uses_each_cycle_prediction_mode(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def calculate(_loader, cycle: str, _models, **options):
+        calls.append((cycle, options["prediction_mode"]))
+        return pd.DataFrame(
+            {"cycle_name": [cycle], "candidate_defrost_time": [pd.Timestamp("2026-01-01")]}
+        )
+
+    monkeypatch.setattr(select_defrost_time, "calculate_cycle", calculate)
+    table = select_defrost_time.calculate_cycles(
+        object(),
+        ["cycle_a", "cycle_b"],
+        {},
+        candidate_step_seconds=10,
+        allow_extrapolation=True,
+        prediction_modes={"cycle_a": "cross-fitted", "cycle_b": "full-model"},
+        workers=1,
+    )
+
+    assert calls == [("cycle_a", "cross-fitted"), ("cycle_b", "full-model")]
+    assert table["cycle_name"].tolist() == ["cycle_a", "cycle_b"]
+
+
+def test_metadata_gate_excludes_cycles_without_the_fixed_ten_minute_candidate_start() -> None:
+    start = pd.Timestamp("2026-01-01")
+    record = {
+        "experiment_id": "exp",
+        "boundaries": {
+            "heating_start": start,
+            "stable_heating_start": start,
+            "defrost_preparation_start": start + pd.Timedelta(minutes=9, seconds=59),
+            "defrost_start": start + pd.Timedelta(minutes=10),
+            "defrost_end": start + pd.Timedelta(minutes=11),
+        },
+    }
+
+    assert catalog_exclusion_reason(record, None) == "candidate interval is shorter than 10 minutes"
 
 
 def test_candidate_quantities_use_released_dynamic_ridge_models() -> None:

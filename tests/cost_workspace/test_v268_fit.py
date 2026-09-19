@@ -362,6 +362,16 @@ def test_selection_composes_candidate_quantities_objectives_and_pareto(monkeypat
             )
         ),
     )
+    monkeypatch.setattr(
+        selection_command.rule_based,
+        "calculate_cycle",
+        lambda *_: {
+            "t_RB": pd.NaT,
+            "rb_status": "right_censored",
+            "trigger_type": "",
+            "case": np.nan,
+        },
+    )
 
     result = selection_command.calculate_cycle(
         Loader(),

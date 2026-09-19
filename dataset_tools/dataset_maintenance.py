@@ -39,6 +39,16 @@ def parse_cycle_name(name: str) -> int:
     return int(match.group(1))
 
 
+def _experiment_cycle_names(dataset_dir: Path, experiment_id: str) -> list[str]:
+    from .cycle_metadata import read_catalog
+
+    return [
+        str(record["cycle_name"])
+        for record in read_catalog(dataset_dir)["cycles"]
+        if isinstance(record, Mapping) and str(record.get("experiment_id")) == experiment_id
+    ]
+
+
 def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
     """Build or append one date directly from raw input."""
     input_path = Path(input_dir).resolve()
@@ -76,12 +86,14 @@ def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
         print("[add] preparing and processing")
         build = build_experiment(input_path, config)
         _append_build(target, build)
+        update_dataset_pareto_decisions(target, _experiment_cycle_names(target, experiment_id))
         print("[add] done")
         return target
 
     print("[add] preparing and processing")
     build = build_experiment(input_path, config)
     _materialize_builds(target, [build])
+    update_dataset_pareto_decisions(target)
     print("[add] done")
     return target
 
@@ -225,9 +237,7 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
         print(f"[replace] publishing images: 0/{len(images)}")
         for index, image in enumerate(images, start=1):
             path = root / str(image["image_path"])
-            reusable = reusable_images.get(
-                (str(image["camera_role"]), str(image["file_name"]))
-            )
+            reusable = reusable_images.get((str(image["camera_role"]), str(image["file_name"])))
             reusable_path = backup / reusable if reusable is not None else None
             if reusable_path is not None and reusable_path.is_file():
                 move(reusable_path, path)
@@ -263,15 +273,17 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
             )
             reviewed = old_by_uid.get(str(record["cycle_uid"]))
             same_boundaries = reviewed is not None and all(
-                reviewed.get("boundaries", {}).get(name)
-                == record.get("boundaries", {}).get(name)
+                reviewed.get("boundaries", {}).get(name) == record.get("boundaries", {}).get(name)
                 for name in ("heating_start", "defrost_start", "defrost_end")
             )
-            if same_boundaries and reviewed is not None and (
-                reviewed.get("status"), reviewed.get("status_reason")
-            ) != (
-                reviewed.get("pipeline_status"),
-                reviewed.get("pipeline_status_reason"),
+            if (
+                same_boundaries
+                and reviewed is not None
+                and (reviewed.get("status"), reviewed.get("status_reason"))
+                != (
+                    reviewed.get("pipeline_status"),
+                    reviewed.get("pipeline_status_reason"),
+                )
             ):
                 record["status"] = reviewed.get("status")
                 record["status_reason"] = reviewed.get("status_reason")
@@ -339,6 +351,14 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
     shutil.rmtree(backup)
     print(f"[replace] cycles={len(replaced)}->{len(names)}, shift={delta:+d}")
     print(f"[replace] images reused={reused}, copied={copied}")
+    update_dataset_pareto_decisions(
+        root,
+        [
+            str(record["cycle_name"])
+            for record in final_records
+            if parse_cycle_name(str(record["cycle_name"])) >= start
+        ],
+    )
     print("[replace] done")
     return root
 
@@ -416,9 +436,7 @@ def remove_dataset(dataset_dir: Path, date: str) -> Path:  # noqa: C901
     return root
 
 
-def update_cycle_columns(
-    dataset_dir: Path, updates: Mapping[str, pd.DataFrame]
-) -> None:
+def update_cycle_columns(dataset_dir: Path, updates: Mapping[str, pd.DataFrame]) -> None:
     """Add or replace timestamp-aligned columns in existing Processed cycles."""
     from .dataset_paths import write_csv, write_parquet
 
@@ -516,6 +534,8 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
         raise ValueError("Dataset has no cycles")
     if target.name == "cycles":
         write_json(output_registry, root / "channel_registry.json")
+        for record in records:
+            render_pareto_decision_asset(root, record)
     return target
 
 
@@ -559,9 +579,7 @@ def _prepared_from_original(
     return pd.concat([prepared, pd.DataFrame(channel_columns)], axis=1)
 
 
-def _summary_from_original(
-    record: Mapping[str, Any], prepared: pd.DataFrame
-) -> dict[str, Any]:
+def _summary_from_original(record: Mapping[str, Any], prepared: pd.DataFrame) -> dict[str, Any]:
     boundaries = record.get("boundaries", {})
     partial = str(record["cycle_id"]).startswith("partial_")
     return {
@@ -859,9 +877,7 @@ def _materialize_builds(  # noqa: C901
         }
         for row in summary.to_dict(orient="records")
     }
-    builds_by_experiment = {
-        str(build.config.experiment_id): build for build in builds
-    }
+    builds_by_experiment = {str(build.config.experiment_id): build for build in builds}
     records: list[dict[str, Any]] = []
     ordered_names = sorted(names.items(), key=lambda item: parse_cycle_name(item[1]))
     for index, (key, cycle_name) in enumerate(ordered_names, start=1):
@@ -1094,10 +1110,9 @@ def render_publication_asset(
     dataset_dir: Path,
     record: Mapping[str, Any],
     *,
-    cost_curve: pd.DataFrame | None = None,
     output_path: Path | None = None,
 ) -> None:
-    """Render one Dataset publication, optionally with an analysis cost curve."""
+    """Render one Dataset physical-state publication."""
     from plots.publication import render_cycle_publication
 
     from .cycle_metadata import read_catalog
@@ -1127,8 +1142,235 @@ def render_publication_asset(
         output_path or dataset_dir / str(assets["publication"]),
         sensor_intervals=_sensor_coverage_intervals(frame, registry),
         rgb_intervals=rgb_overall_intervals(frame, intervals, roles),
-        cost_curve=cost_curve,
     )
+
+
+def _pareto_decision_inputs(
+    dataset_dir: Path,
+    record: Mapping[str, Any],
+    decisions: pd.DataFrame | None = None,
+    table_cache: dict[Path, pd.DataFrame] | None = None,
+) -> tuple[pd.DataFrame | None, list[str]]:
+    from dataset_tools import DatasetLoader
+    from plots.publication import match_decision_rgb_images
+
+    cycle_name = str(record["cycle_name"])
+    state = record.get("pareto_decision")
+    if decisions is None and isinstance(state, Mapping) and state.get("source_table"):
+        source = Path(str(state["source_table"]))
+        source = source if source.is_absolute() else _resolve_project_root() / source
+        if source.is_file():
+            if table_cache is not None and source in table_cache:
+                table = table_cache[source]
+            else:
+                table = pd.read_csv(source, low_memory=False)
+                if table_cache is not None:
+                    table_cache[source] = table
+            decisions = table.loc[table["cycle_name"].astype(str).eq(cycle_name)].copy()
+    if decisions is None or decisions.empty:
+        return decisions, []
+    loader = DatasetLoader(dataset_dir)
+    metadata = loader.load_image_metadata(cycle_name)
+    images = loader.load_cycle_images(cycle_name)
+    selected = decisions.loc[decisions["is_selected"].fillna(False).astype(bool)]
+    first = decisions.iloc[0]
+    rb_time = first.get("t_RB") if first.get("rb_status") == "triggered" else pd.NaT
+    knee_time = pd.NaT if selected.empty else selected.iloc[0]["candidate_defrost_time"]
+    expected = match_decision_rgb_images(
+        metadata,
+        images,
+        {"rb": rb_time, "optimal": knee_time},
+    )
+    missing = sorted(
+        {
+            f"front/{name}"
+            for name in expected.loc[expected["status"].eq("physical_image_missing"), "file_name"]
+            if str(name)
+        }
+    )
+    return decisions, missing
+
+
+def render_pareto_decision_asset(
+    dataset_dir: Path,
+    record: Mapping[str, Any],
+    *,
+    decisions: pd.DataFrame | None = None,
+    fetch_cloud_images: bool = False,
+    cleanup_downloaded_images: bool = False,
+) -> None:
+    """Render one cached current Pareto decision without recalculating it."""
+    from contextlib import nullcontext
+
+    from dataset_tools import DatasetLoader
+    from plots.defrost_decision import render_current_decision_cycle
+
+    from .local_images import scan_cycle_images
+
+    cycle_name = str(record["cycle_name"])
+    assets = record.get("assets")
+    output_path = dataset_dir / (
+        str(assets.get("pareto_decision"))
+        if isinstance(assets, Mapping) and assets.get("pareto_decision")
+        else f"cycles/{cycle_name}_pareto_decision.png"
+    )
+    decisions, missing = _pareto_decision_inputs(dataset_dir, record, decisions)
+    state = record.get("pareto_decision")
+    if decisions is None or decisions.empty:
+        from plots.defrost_decision import render_unavailable_decision
+
+        reason = (
+            str(state.get("reason", "decision result unavailable"))
+            if isinstance(state, Mapping)
+            else "decision result unavailable"
+        )
+        render_unavailable_decision(cycle_name, reason, output_path)
+        return
+
+    loader = DatasetLoader(dataset_dir)
+    metadata = loader.load_image_metadata(cycle_name)
+    images = loader.load_cycle_images(cycle_name)
+    source = nullcontext(None)
+    if fetch_cloud_images and missing:
+        from .cloud_images import materialize_cycle_image_members
+
+        source = materialize_cycle_image_members(
+            dataset_dir,
+            cycle_name,
+            missing,
+            fetch_cloud=True,
+            cleanup_downloaded=cleanup_downloaded_images,
+        )
+    with source as cycle_dir:
+        if cycle_dir is not None:
+            images = scan_cycle_images(dataset_dir, cycle_name, metadata, cycle_dir=cycle_dir)
+        render_current_decision_cycle(decisions, loader, output_path, images=images)
+
+
+def update_dataset_pareto_decisions(
+    dataset_dir: Path,
+    cycle_names: Sequence[str] | None = None,
+    *,
+    n_jobs: int = 6,
+) -> Path:
+    """Calculate current Pareto decisions and publish their per-cycle Dataset assets."""
+    import json
+    from datetime import datetime, timezone
+
+    from dataset_tools import DatasetLoader
+    from defrost_decision.candidate_times import (
+        catalog_exclusion_reason,
+        clean_anchor_cycles,
+        clean_anchor_exclusion_reason,
+    )
+    from defrost_event_models.ridge_models import OUTCOME_TARGETS, load_defrost_event_models
+    from select_defrost_time import OUTCOME_MODEL, calculate_cycles
+
+    from .cycle_metadata import read_catalog, write_catalog
+
+    if n_jobs < 1:
+        raise ValueError("n_jobs must be positive")
+    root = Path(dataset_dir).resolve()
+    project = _resolve_project_root()
+    model_file = project / "defrost_event_models/parameters/released_ridge_models.json"
+    models = load_defrost_event_models(model_file)
+    loader = DatasetLoader(root)
+    catalog = read_catalog(root)
+    requested = set(cycle_names or [])
+    records = [
+        record
+        for record in catalog["cycles"]
+        if isinstance(record, dict) and (not requested or str(record["cycle_name"]) in requested)
+    ]
+    metadata_eligible = [
+        str(record["cycle_name"])
+        for record in records
+        if record.get("status") == "valid" and catalog_exclusion_reason(record, None) is None
+    ]
+    eligible = metadata_eligible
+    if eligible:
+        eligible, _excluded = clean_anchor_cycles(loader, eligible, explicit=False)
+    model_set = models["models"][OUTCOME_MODEL]
+    fold_experiments = set.intersection(
+        *(set(model_set[name]["folds"]) for name in OUTCOME_TARGETS)
+    )
+    modes = {
+        cycle: (
+            "cross-fitted"
+            if str(loader.get_cycle_record(cycle)["experiment_id"]) in fold_experiments
+            else "full-model"
+        )
+        for cycle in eligible
+    }
+    decisions = calculate_cycles(
+        loader,
+        eligible,
+        models,
+        candidate_step_seconds=10,
+        allow_extrapolation=True,
+        prediction_modes=modes,
+        workers=n_jobs,
+    )
+    run = (
+        project
+        / "output/defrost_decisions"
+        / ("dataset_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ"))
+    )
+    run.mkdir(parents=True)
+    source = run / "candidate_decisions.csv"
+    decisions.to_csv(source, index=False)
+    settings = {
+        "candidate_step_seconds": 10,
+        "allow_extrapolation": True,
+        "model_file": str(model_file.relative_to(project)),
+        "prediction_modes": sorted(set(modes.values())),
+        "objective_selection": "cycle_cop_and_heating_rate_pareto_compromise",
+        "evaporator_capacity_role": "reference_only",
+        "workers": n_jobs,
+    }
+    (run / "run_settings.json").write_text(
+        json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    relative_source = str(source.relative_to(project))
+    eligible_set = set(eligible)
+    for record in records:
+        cycle_name = str(record["cycle_name"])
+        record.setdefault("assets", {}).setdefault(
+            "pareto_decision", f"cycles/{cycle_name}_pareto_decision.png"
+        )
+        curve = (
+            decisions.loc[decisions["cycle_name"].astype(str).eq(cycle_name)].copy()
+            if "cycle_name" in decisions
+            else pd.DataFrame()
+        )
+        if cycle_name in eligible_set and not curve.empty:
+            selected = curve.loc[curve["is_selected"].fillna(False).astype(bool)]
+            record["pareto_decision"] = {
+                "status": "rendered" if not selected.empty else "abstained",
+                "source_table": relative_source,
+                "prediction_mode": modes[cycle_name],
+                "allow_extrapolation": True,
+                "selection_method": str(curve.iloc[0].get("pareto_selection_method", "unknown")),
+                "selected_point_in_training_domain": (
+                    None
+                    if selected.empty
+                    else bool(selected.iloc[0]["selected_point_in_training_domain"])
+                ),
+            }
+            render_pareto_decision_asset(root, record, decisions=curve)
+        else:
+            reason = (
+                f"cycle status {record.get('status', 'unknown')} is not decision-eligible"
+                if record.get("status") != "valid"
+                else catalog_exclusion_reason(record, None)
+                if cycle_name not in metadata_eligible
+                else clean_anchor_exclusion_reason(loader.load_cycle_original(cycle_name), record)
+                or "cycle is not decision-eligible"
+            )
+            record["pareto_decision"] = {"status": "unavailable", "reason": reason}
+            render_pareto_decision_asset(root, record, decisions=pd.DataFrame())
+    write_catalog(root, catalog)
+    return root
 
 
 def _render_rgb_panel(
@@ -1139,9 +1381,7 @@ def _render_rgb_panel(
     camera_roles: tuple[str, ...],
     frame: pd.DataFrame | None = None,
     images: pd.DataFrame | None = None,
-    intervals: (
-        Mapping[str, Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] | None
-    ) = None,
+    intervals: (Mapping[str, Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]]] | None) = None,
 ) -> None:
     from plots.publication import render_rgb_panel
 
@@ -1166,8 +1406,7 @@ def _render_rgb_panel(
         images,
         intervals,
         camera_roles,
-        dataset_dir
-        / str(assets["rgb_panel"]),
+        dataset_dir / str(assets["rgb_panel"]),
     )
 
 
@@ -1262,6 +1501,7 @@ def review_cycle(
                 record["rgb_defrost_status"] = rgb_defrost
             render_publication_asset(dataset_dir, record)
             write_catalog(dataset_dir, catalog)
+            update_dataset_pareto_decisions(dataset_dir, [cycle_name])
             return dataset_dir
     raise KeyError(f"unknown cycle: {cycle_name}")
 
@@ -1368,9 +1608,7 @@ def edit_dataset(  # noqa: C901
             if metadata is not None
             else ()
         )
-        publication_intervals = image_coverage_intervals(
-            processed, publication_metadata, registry
-        )
+        publication_intervals = image_coverage_intervals(processed, publication_metadata, registry)
         render_cycle_publication(
             processed,
             record,
@@ -1396,6 +1634,8 @@ def edit_dataset(  # noqa: C901
         write_parquet(metadata, dataset_dir / "image_metadata.parquet")
     write_json(registry, dataset_dir / "channel_registry.json")
     write_catalog(dataset_dir, catalog)
+    if stage_edit:
+        update_dataset_pareto_decisions(dataset_dir)
     return dataset_dir
 
 
@@ -1458,9 +1698,9 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
         metadata = metadata.sort_values(
             ["cycle_name", "camera_role", "image_time", "file_name"], kind="stable"
         ).reset_index(drop=True)
-        metadata["frame_index"] = metadata.groupby(
-            ["cycle_name", "camera_role"], sort=False
-        ).cumcount() + 1
+        metadata["frame_index"] = (
+            metadata.groupby(["cycle_name", "camera_role"], sort=False).cumcount() + 1
+        )
         print("[refresh] updating image metadata")
         write_parquet(metadata, root / "image_metadata.parquet")
 
@@ -1536,6 +1776,7 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
                 registry,
                 _experiment_camera_roles(catalog, metadata, str(record["experiment_id"])),
             )
+            render_pareto_decision_asset(root, record)
     else:
         for index, record in enumerate(records, start=1):
             print(
@@ -1550,6 +1791,7 @@ def refresh_dataset(dataset_dir: Path, mode: str) -> Path:  # noqa: C901
                 registry,
                 _experiment_camera_roles(catalog, metadata, str(record["experiment_id"])),
             )
+            render_pareto_decision_asset(root, record)
             legacy = record.get("assets", {}).pop("rgb_coverage", None)
             if legacy is not None:
                 legacy_path = (root / str(legacy)).resolve()
@@ -1568,6 +1810,7 @@ def render_dataset(
     *,
     publication: bool = True,
     panel: bool = True,
+    decision: bool = False,
     fetch_cloud_images: bool = False,
     cleanup_downloaded_images: bool = False,
     n_jobs: int = 1,
@@ -1581,7 +1824,7 @@ def render_dataset(
         records = [record for record in catalog["cycles"] if isinstance(record, Mapping)]
         if n_jobs < 1:
             raise ValueError("n_jobs must be positive")
-        if fetch_cloud_images and panel:
+        if fetch_cloud_images and (panel or decision):
             from .cloud_images import materialize_image_members
             from .local_images import scan_cycle_images
 
@@ -1590,12 +1833,27 @@ def render_dataset(
                 raise ValueError("channel_registry.json must contain an object")
             metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
             contexts = {
-                str(record["cycle_name"]): _rgb_panel_inputs(
-                    dataset_dir, record, catalog, metadata
+                str(record["cycle_name"]): _rgb_panel_inputs(dataset_dir, record, catalog, metadata)
+                for record in records
+                if panel
+            }
+            decision_tables: dict[Path, pd.DataFrame] = {}
+            decision_contexts = {
+                str(record["cycle_name"]): _pareto_decision_inputs(
+                    dataset_dir, record, table_cache=decision_tables
+                )
+                for record in records
+                if decision
+            }
+            requests = {
+                str(record["cycle_name"]): sorted(
+                    set(
+                        contexts.get(str(record["cycle_name"]), (None, None, None, []))[3]
+                        + decision_contexts.get(str(record["cycle_name"]), (None, []))[1]
+                    )
                 )
                 for record in records
             }
-            requests = {cycle: context[3] for cycle, context in contexts.items()}
             by_name = {str(record["cycle_name"]): record for record in records}
             print(f"[render] {len(records)} cycles with {n_jobs} workers", flush=True)
             if publication:
@@ -1608,17 +1866,24 @@ def render_dataset(
                 n_jobs=n_jobs,
             ) as completed_cycles:
                 for completed, name in enumerate(completed_cycles, start=1):
-                    roles, frame, _, _ = contexts[name]
-                    images = scan_cycle_images(dataset_dir, name, metadata)
-                    _render_rgb_panel(
-                        dataset_dir,
-                        by_name[name],
-                        metadata,
-                        registry,
-                        roles,
-                        frame=frame,
-                        images=images,
-                    )
+                    if panel:
+                        roles, frame, _, _ = contexts[name]
+                        images = scan_cycle_images(dataset_dir, name, metadata)
+                        _render_rgb_panel(
+                            dataset_dir,
+                            by_name[name],
+                            metadata,
+                            registry,
+                            roles,
+                            frame=frame,
+                            images=images,
+                        )
+                    if decision:
+                        render_pareto_decision_asset(
+                            dataset_dir,
+                            by_name[name],
+                            decisions=decision_contexts[name][0],
+                        )
                     print(f"[render:done] {completed}/{len(records)} {name}", flush=True)
             return dataset_dir
         from joblib import parallel_config
@@ -1634,6 +1899,7 @@ def render_dataset(
                     panel,
                     fetch_cloud_images,
                     cleanup_downloaded_images,
+                    decision,
                 )
                 for record in records
             )
@@ -1675,9 +1941,7 @@ def render_dataset(
                 fetch_cloud=True,
                 cleanup_downloaded=cleanup_downloaded_images,
             ) as cycle_dir:
-                images = scan_cycle_images(
-                    dataset_dir, cycle_name, metadata, cycle_dir=cycle_dir
-                )
+                images = scan_cycle_images(dataset_dir, cycle_name, metadata, cycle_dir=cycle_dir)
         _render_rgb_panel(
             dataset_dir,
             record,
@@ -1686,6 +1950,13 @@ def render_dataset(
             roles,
             frame=frame if fetch_cloud_images else None,
             images=images,
+        )
+    if decision:
+        render_pareto_decision_asset(
+            dataset_dir,
+            record,
+            fetch_cloud_images=fetch_cloud_images,
+            cleanup_downloaded_images=cleanup_downloaded_images,
         )
     return dataset_dir
 
@@ -1738,6 +2009,7 @@ def _render_cycle_job(
     panel: bool,
     fetch_cloud_images: bool,
     cleanup_downloaded_images: bool,
+    decision: bool = False,
 ) -> str:
     print(f"[render:start] {cycle_name}", flush=True)
     render_dataset(
@@ -1747,6 +2019,7 @@ def _render_cycle_job(
         panel=panel,
         fetch_cloud_images=fetch_cloud_images,
         cleanup_downloaded_images=cleanup_downloaded_images,
+        decision=decision,
     )
     return cycle_name
 

@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 from pathlib import Path
 
+from .cloud_upload import upload_cycle_images, upload_date_data
 from .dataset_maintenance import (
     add_dataset,
     aggregate_original,
@@ -16,6 +17,7 @@ from .dataset_maintenance import (
     replace_dataset,
     review_cycle,
 )
+from .dts_downloader import DEFAULT_WORKERS, download_shared_data
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,16 +63,35 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--dataset", type=Path, default=Path("dataset"))
     render.add_argument("--publication", action="store_true")
     render.add_argument("--panel", action="store_true")
+    render.add_argument("--decision", action="store_true")
     render.add_argument("--fetch-cloud-images", action="store_true")
     render.add_argument("--cleanup-downloaded-images", action="store_true")
     render.add_argument(
-        "--n-jobs", type=int, default=10, help="maximum concurrent OneDrive requests"
+        "--n-jobs", type=int, default=6, help="outer workers for rendering and decisions"
     )
+
+    upload = actions.add_parser("upload-data", help="package raw dates and upload to OneDrive")
+    upload.add_argument("dates", nargs="+")
+    upload.add_argument("--data", type=Path, default=Path("data"))
+
+    images = actions.add_parser("upload-images", help="package cycle images and upload to OneDrive")
+    images.add_argument("cycles", nargs="+")
+    images.add_argument("--dataset", type=Path, default=Path("dataset"))
+    images.add_argument("--cleanup-uploaded-images", action="store_true")
+
+    download = actions.add_parser("dts-download", help="download shared Midea DTS archives")
+    download.add_argument("url", help="DTS download page or Outlook Safe Links URL")
+    download.add_argument("--password")
+    download.add_argument("--start-no", type=int, default=1)
+    download.add_argument("--end-no", type=int)
+    download.add_argument("--workers", type=int, choices=(1, 2), default=DEFAULT_WORKERS)
+    download.add_argument("--retry-delay", type=float, default=5)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.action == "add":
         print(add_dataset(args.input_dir, args.dataset))
@@ -103,13 +124,41 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
                 render_rgb_panels=not args.skip_rgb_panels,
             )
         )
+    elif args.action == "upload-data":
+        if "all" in args.dates and args.dates != ["all"]:
+            parser.error("'all' cannot be combined with explicit dates")
+        print(upload_date_data(args.data, None if args.dates == ["all"] else args.dates))
+    elif args.action == "upload-images":
+        if "all" in args.cycles and args.cycles != ["all"]:
+            parser.error("'all' cannot be combined with explicit cycles")
+        print(
+            upload_cycle_images(
+                args.dataset,
+                None if args.cycles == ["all"] else args.cycles,
+                args.cleanup_uploaded_images,
+            )
+        )
+    elif args.action == "dts-download":
+        print(
+            download_shared_data(
+                args.url,
+                data_dir=Path("data"),
+                password=args.password,
+                start_no=args.start_no,
+                end_no=args.end_no,
+                workers=args.workers,
+                retry_delay=args.retry_delay,
+            )
+        )
     else:
+        selected = args.publication or args.panel or args.decision
         print(
             render_dataset(
                 args.dataset,
                 args.cycle,
-                publication=args.publication or not args.panel,
-                panel=args.panel or not args.publication,
+                publication=args.publication or not selected,
+                panel=args.panel or not selected,
+                decision=args.decision or not selected,
                 fetch_cloud_images=args.fetch_cloud_images,
                 cleanup_downloaded_images=args.cleanup_downloaded_images,
                 n_jobs=args.n_jobs,

@@ -4,7 +4,7 @@ from http.client import IncompleteRead
 from pathlib import Path
 from urllib.parse import quote
 
-import download_shared_dataset as downloader
+from dataset_tools import dts_downloader as downloader
 
 
 def test_plan_no_7_to_12_as_0807(tmp_path: Path) -> None:
@@ -87,7 +87,4 @@ def test_download_resumes_part_file(monkeypatch, tmp_path: Path) -> None:
 
 
 def test_two_downloads_is_the_default() -> None:
-    args = downloader.build_parser().parse_args(
-        ["https://example.com/#/info/share/stamp", "--password", "secret"]
-    )
-    assert args.workers == 2
+    assert downloader.DEFAULT_WORKERS == 2

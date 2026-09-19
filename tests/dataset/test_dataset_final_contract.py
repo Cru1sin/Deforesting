@@ -1052,6 +1052,28 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     assert (tmp_path / "dataset_manifest.json").read_bytes() == manifest_before
 
 
+def test_render_can_draw_only_cached_pareto_decision(tmp_path: Path, monkeypatch) -> None:
+    from dataset_tools import dataset_maintenance
+
+    cycle_name, _ = _write_renderable_dataset(tmp_path)
+    rendered: list[str] = []
+    monkeypatch.setattr(
+        dataset_maintenance,
+        "render_pareto_decision_asset",
+        lambda _root, record, **_options: rendered.append(str(record["cycle_name"])),
+    )
+
+    dataset_maintenance.render_dataset(
+        tmp_path,
+        cycle_name,
+        publication=False,
+        panel=False,
+        decision=True,
+    )
+
+    assert rendered == [cycle_name]
+
+
 def test_rgb_panel_coverage_uses_full_metadata_not_materialized_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1261,9 +1283,7 @@ def test_cloud_render_flattens_all_cycles_into_one_image_queue(
     catalog["cycles"].append(second_record)
     write_json(catalog, tmp_path / "cycle_catalog.json")
     metadata = pd.read_parquet(tmp_path / "image_metadata.parquet")
-    metadata = pd.concat(
-        [metadata, metadata.assign(cycle_name=second)], ignore_index=True
-    )
+    metadata = pd.concat([metadata, metadata.assign(cycle_name=second)], ignore_index=True)
     metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
     queued: list[tuple[dict[str, list[str]], dict[str, object]]] = []
     rendered: list[str] = []
@@ -1301,9 +1321,12 @@ def test_render_cycle_job_reports_start(tmp_path: Path, monkeypatch, capsys) -> 
 
     monkeypatch.setattr(dataset_maintenance, "render_dataset", lambda *_args, **_kwargs: tmp_path)
 
-    assert dataset_maintenance._render_cycle_job(
-        tmp_path, "frost_cycle_000001", False, True, True, False
-    ) == "frost_cycle_000001"
+    assert (
+        dataset_maintenance._render_cycle_job(
+            tmp_path, "frost_cycle_000001", False, True, True, False
+        )
+        == "frost_cycle_000001"
+    )
     assert capsys.readouterr().out == "[render:start] frost_cycle_000001\n"
 
 
@@ -1313,6 +1336,7 @@ def test_cycle_assets_has_publication_and_panel_without_coverage() -> None:
     assets = cycle_assets("frost_cycle_000001")
 
     assert assets["rgb_panel"] == "cycles/frost_cycle_000001_rgb_panel.png"
+    assert assets["pareto_decision"] == "cycles/frost_cycle_000001_pareto_decision.png"
     assert "rgb_coverage" not in assets
 
 
@@ -2633,3 +2657,139 @@ def test_cli_render_cloud_fetch_is_explicit(
     )
 
     assert calls == [False, True]
+
+
+@pytest.mark.parametrize(
+    "code,stdout,stderr",
+    [(1, "", "DNS lookup failed"), (5, "", "token expired"), (0, "invalid", "")],
+)
+def test_image_member_remote_errors_are_not_missing_archives(
+    tmp_path, monkeypatch, code, stdout, stderr
+):
+    from dataset_tools import cloud_images
+
+    monkeypatch.setattr(
+        cloud_images.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, code, stdout, stderr),
+    )
+    with pytest.raises(RuntimeError, match="frost_cycle_000007: cannot inspect cloud ZIP"):
+        cloud_images._plan_image_members(
+            tmp_path, "frost_cycle_000007", ["front/frame.jpg"], None, 0
+        )
+
+
+def test_image_member_range_read_reports_remote_error(monkeypatch):
+    from dataset_tools import cloud_images
+
+    def fail(*_args, **_kwargs):
+        raise subprocess.CalledProcessError(1, "rclone", stderr=b"token expired")
+
+    monkeypatch.setattr(cloud_images.subprocess, "run", fail)
+    with pytest.raises(
+        RuntimeError,
+        match="cannot read cloud ZIP .*frost_cycle_000007.zip: token expired",
+    ):
+        cloud_images._read_zip_range(
+            "unused",
+            0,
+            1,
+            remote="cloud/frost_cycle_000007.zip",
+        )
+
+
+@pytest.mark.parametrize("panel", [False, True])
+def test_decision_cloud_render_shares_panel_queue(tmp_path, monkeypatch, panel):
+    from contextlib import contextmanager
+
+    from dataset_tools import cloud_images
+    from dataset_tools import dataset_maintenance as maintenance
+
+    cycle, _ = _write_renderable_dataset(tmp_path)
+    queued = []
+    rendered = []
+    table = pd.DataFrame({"candidate": [1]})
+    monkeypatch.setattr(
+        maintenance,
+        "_pareto_decision_inputs",
+        lambda *a, **k: (table, ["front/knee.jpg", "front/rb.jpg"]),
+    )
+    monkeypatch.setattr(
+        maintenance,
+        "_rgb_panel_inputs",
+        lambda *a: ({}, pd.DataFrame(), [], ["front/knee.jpg", "front/stage.jpg"]),
+    )
+    monkeypatch.setattr(maintenance, "_render_rgb_panel", lambda *a, **k: None)
+    monkeypatch.setattr(
+        maintenance, "render_pareto_decision_asset", lambda *a, **k: rendered.append(k)
+    )
+
+    @contextmanager
+    def materialize(root, requests, **options):
+        queued.append((requests, options))
+        yield iter(requests)
+
+    monkeypatch.setattr(cloud_images, "materialize_image_members", materialize)
+    maintenance.render_dataset(
+        tmp_path,
+        None,
+        publication=False,
+        panel=panel,
+        decision=True,
+        fetch_cloud_images=True,
+        n_jobs=6,
+    )
+    expected = ["front/knee.jpg", "front/rb.jpg"] + (["front/stage.jpg"] if panel else [])
+    assert queued == [({cycle: expected}, {"cleanup_downloaded": False, "n_jobs": 6})]
+    assert len(rendered) == 1
+    assert rendered[0]["decisions"] is table
+    assert not rendered[0].get("fetch_cloud_images")
+
+
+def test_pareto_decision_inputs_reuses_cached_candidate_table(tmp_path, monkeypatch):
+    from dataset_tools import dataset_maintenance as maintenance
+
+    source = tmp_path / "candidate_decisions.csv"
+    source.write_text("placeholder")
+    table = pd.DataFrame(
+        {
+            "cycle_name": ["frost_cycle_000001", "frost_cycle_000002"],
+            "is_selected": [True, True],
+            "rb_status": ["not_triggered", "not_triggered"],
+            "candidate_defrost_time": pd.to_datetime(
+                ["2026-07-14 10:00:00", "2026-07-14 11:00:00"]
+            ),
+        }
+    )
+    reads = []
+
+    class Loader:
+        def __init__(self, _root):
+            pass
+
+        def load_image_metadata(self, _cycle):
+            return pd.DataFrame()
+
+        def load_cycle_images(self, _cycle):
+            return pd.DataFrame()
+
+    monkeypatch.setattr("dataset_tools.DatasetLoader", Loader)
+    monkeypatch.setattr(
+        "plots.publication.match_decision_rgb_images",
+        lambda *_args, **_kwargs: pd.DataFrame(columns=["status", "file_name"]),
+    )
+    monkeypatch.setattr(
+        maintenance.pd,
+        "read_csv",
+        lambda *_args, **_kwargs: reads.append(source) or table,
+    )
+    cache = {}
+    for cycle in ("frost_cycle_000001", "frost_cycle_000002"):
+        decisions, _ = maintenance._pareto_decision_inputs(
+            tmp_path,
+            {"cycle_name": cycle, "pareto_decision": {"source_table": str(source)}},
+            table_cache=cache,
+        )
+        assert decisions is not None and decisions["cycle_name"].tolist() == [cycle]
+
+    assert reads == [source]

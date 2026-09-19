@@ -13,6 +13,9 @@ import pandas as pd
 import pytest
 from matplotlib.colors import to_rgb
 
+from plots.pareto_selection import extrapolation_facecolors, nearest_rb_candidate
+from plots.publication import match_decision_rgb_images
+
 
 def _module():
     path = Path("plots/defrost_decision.py")
@@ -241,6 +244,57 @@ def test_cycle_points_preserves_unknown_support() -> None:
     points = module._cycle_points(table)
 
     assert points["optimum_supported"].isna().all()
+
+
+def test_extrapolation_filter_preserves_o_hue_and_marks_ch_or_o_support() -> None:
+    values = pd.DataFrame(
+        {
+            "cycle_evaporator_capacity_kw": [1.0, 2.0, np.nan],
+            "cycle_cop_uses_model_extrapolation": [False, True, False],
+            "cycle_heating_rate_kw_uses_model_extrapolation": [False, False, False],
+            "cycle_evaporator_capacity_kw_uses_model_extrapolation": [False, False, True],
+        }
+    )
+
+    colors, extrapolated, has_o = extrapolation_facecolors(values)
+
+    assert extrapolated.tolist() == [False, True, True]
+    assert has_o.tolist() == [True, True, False]
+    assert np.all(colors[1, :3] > colors[0, :3] * 0.5)
+    assert colors[2, 3] == 0.0
+
+
+def test_rb_performance_point_requires_one_candidate_step_and_eligibility() -> None:
+    start = pd.Timestamp("2026-01-01")
+    curve = pd.DataFrame(
+        {
+            "candidate_defrost_time": [start, start + pd.Timedelta(seconds=10)],
+            "cycle_cop_eligible": [False, True],
+            "cycle_heating_rate_kw_eligible": [False, True],
+        }
+    )
+
+    assert nearest_rb_candidate(curve, start + pd.Timedelta(seconds=3), 10) == 1
+    assert nearest_rb_candidate(curve, start + pd.Timedelta(seconds=7), 10) == 1
+    assert nearest_rb_candidate(curve, start + pd.Timedelta(seconds=25), 10) is None
+
+
+def test_decision_image_offset_keeps_before_after_direction(tmp_path: Path) -> None:
+    target = pd.Timestamp("2026-01-01 00:01:00")
+    image_path = tmp_path / "front.jpg"
+    image_path.touch()
+    metadata = pd.DataFrame(
+        {
+            "camera_role": ["front"],
+            "image_time": [target - pd.Timedelta(seconds=11)],
+            "file_name": [image_path.name],
+        }
+    )
+    images = metadata.assign(path=[image_path])
+
+    matched = match_decision_rgb_images(metadata, images, {"rb": target, "optimal": target})
+
+    assert matched["offset_seconds"].tolist() == [-11.0, -11.0]
 
 
 def test_water_reference_curve_uses_its_own_selected_defrost_time() -> None:

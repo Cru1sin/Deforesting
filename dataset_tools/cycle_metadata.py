@@ -24,6 +24,7 @@ def cycle_assets(cycle_name: str) -> dict[str, str]:
         "original_csv": f"cycles_original/{cycle_name}.csv",
         "publication": f"cycles/{cycle_name}.png",
         "rgb_panel": f"cycles/{cycle_name}_rgb_panel.png",
+        "pareto_decision": f"cycles/{cycle_name}_pareto_decision.png",
     }
 
 

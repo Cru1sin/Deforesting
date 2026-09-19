@@ -33,6 +33,8 @@ def catalog_exclusion_reason(
             return f"missing required boundary: {name}"
     if not (values[0] <= values[1] < values[2] <= values[3] < values[4]):
         return "required boundaries are not ordered"
+    if values[2] < values[0] + pd.Timedelta(minutes=10):
+        return "candidate interval is shorter than 10 minutes"
     experiment = str(record.get("experiment_id"))
     if parameter_experiments is not None and experiment not in parameter_experiments:
         return f"missing retrospective model fold for experiment {experiment}"

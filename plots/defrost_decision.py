@@ -920,6 +920,77 @@ def render_current_decision_figures(
     _render_cycle_sets({"cop_heating_rate_pareto_knee": table}, loader, records, output)
 
 
+def render_current_decision_cycle(
+    decisions: pd.DataFrame,
+    loader: DatasetLoader,
+    output_path: Path,
+    *,
+    images: pd.DataFrame | None = None,
+) -> None:
+    """Render one current Pareto decision to an explicit Dataset asset path."""
+    cycle_names = decisions["cycle_name"].drop_duplicates().astype(str).tolist()
+    if len(cycle_names) != 1:
+        raise ValueError("one cycle is required for a Dataset decision asset")
+    cycle_name = cycle_names[0]
+    curve = decisions.copy()
+    selected = curve.loc[curve["is_selected"].fillna(False).astype(bool)]
+    selected_time = (
+        pd.NaT
+        if selected.empty
+        else pd.Timestamp(selected.iloc[0]["candidate_defrost_time"])
+    )
+    record = loader.get_cycle_record(cycle_name)
+    metadata = loader.load_image_metadata(cycle_name)
+    physical = loader.load_cycle_images(cycle_name) if images is None else images
+    rb_time = (
+        curve.iloc[0].get("t_RB")
+        if curve.iloc[0].get("rb_status") == "triggered"
+        else pd.NaT
+    )
+    matches = match_decision_rgb_images(
+        metadata,
+        physical,
+        {"rb": rb_time, "optimal": selected_time},
+    )
+    decision_images = {str(row["target_type"]): row.to_dict() for _, row in matches.iterrows()}
+    first = curve.iloc[0]
+    method = str(first.get("pareto_selection_method", "unknown")).replace("_", " ")
+    mode = str(first.get("prediction_mode", "unknown"))
+    supported = (
+        "n/a"
+        if selected.empty or pd.isna(selected.iloc[0].get("selected_point_in_training_domain"))
+        else "in training support"
+        if bool(selected.iloc[0]["selected_point_in_training_domain"])
+        else "uses model extrapolation"
+    )
+    render_decision_publication(
+        loader.load_cycle(cycle_name),
+        record,
+        curve,
+        decision_images,
+        output_path,
+        optimal_label=f"Pareto knee ({method})",
+        parallel_curve=curve,
+        full_candidate_domain=True,
+        figure_note=(
+            f"Prediction: {mode} · extrapolation allowed · selected C/H: {supported} · "
+            "O colours points only"
+        ),
+    )
+
+
+def render_unavailable_decision(cycle_name: str, reason: str, output_path: Path) -> None:
+    """Replace a stale decision asset with an explicit unavailable state."""
+    figure, axis = plt.subplots(figsize=(7.2, 2.4), dpi=300)
+    axis.axis("off")
+    axis.text(0.02, 0.78, cycle_name, fontsize=11, fontweight="bold", transform=axis.transAxes)
+    axis.text(0.02, 0.48, "Pareto decision unavailable", fontsize=10, transform=axis.transAxes)
+    axis.text(0.02, 0.26, reason, fontsize=8, color="#59636E", transform=axis.transAxes)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(figure)
+
+
 def _decision_title(algorithm: str) -> str:
     base = algorithm.split("__", 1)[0]
     if algorithm == "v1":

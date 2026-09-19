@@ -9,6 +9,8 @@ import matplotlib.patheffects as path_effects
 import numpy as np
 import pandas as pd
 from adjustText import adjust_text
+from matplotlib import colormaps
+from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 
@@ -17,6 +19,48 @@ _STYLES = {
     "cycle_heating_rate_kw": ("#B64A50", "-", "Heating rate [kW]"),
     "cycle_evaporator_capacity_kw": ("#2A788E", "--", "Evaporator capacity [kW]"),
 }
+
+
+def extrapolation_facecolors(
+    values: pd.DataFrame, norm: Normalize | None = None
+) -> tuple[np.ndarray, pd.Series, pd.Series]:
+    """Return O-coloured faces with a 40% white filter on any extrapolated evidence."""
+    o = pd.to_numeric(values["cycle_evaporator_capacity_kw"], errors="coerce")
+    has_o = o.notna()
+    if norm is None:
+        finite = o.dropna()
+        norm = (
+            Normalize(float(finite.min()), float(finite.max()) or 1.0)
+            if not finite.empty
+            else Normalize(0, 1)
+        )
+    colors = colormaps["viridis"](norm(o.fillna(0).to_numpy(dtype=float)))
+    extrapolated = pd.Series(False, index=values.index)
+    for metric in ("cycle_cop", "cycle_heating_rate_kw", "cycle_evaporator_capacity_kw"):
+        column = f"{metric}_uses_model_extrapolation"
+        if column in values:
+            extrapolated |= values[column].fillna(False).astype(bool)
+    colors[extrapolated.to_numpy(), :3] = 0.6 * colors[extrapolated.to_numpy(), :3] + 0.4
+    colors[~has_o.to_numpy(), 3] = 0.0
+    return colors, extrapolated, has_o
+
+
+def nearest_rb_candidate(
+    curve: pd.DataFrame, rb_time: pd.Timestamp, candidate_step_seconds: float
+) -> int | None:
+    """Return a jointly eligible candidate only when RB lies within one candidate step."""
+    eligible = (
+        curve["cycle_cop_eligible"].fillna(False).astype(bool)
+        & curve["cycle_heating_rate_kw_eligible"].fillna(False).astype(bool)
+    )
+    if not eligible.any():
+        return None
+    times = pd.to_datetime(curve.loc[eligible, "candidate_defrost_time"], errors="coerce")
+    distances = (times - pd.Timestamp(rb_time)).abs()
+    if distances.dropna().empty:
+        return None
+    index = int(distances.idxmin())
+    return index if distances.loc[index] <= pd.Timedelta(seconds=candidate_step_seconds) else None
 
 
 def plot_objectives(
@@ -149,6 +193,7 @@ def plot_cop_heating_rate_pareto(
     origin: pd.Timestamp,
     *,
     rb_time: object | None = None,
+    candidate_step_seconds: float | None = None,
 ) -> None:
     """Plot the stored C/H Pareto result, using O only as point colour."""
     curve = values.copy()
@@ -170,11 +215,13 @@ def plot_cop_heating_rate_pareto(
     selected = curve.loc[curve["is_selected_pareto_point"].fillna(False).astype(bool)]
     rb_timestamp = pd.to_datetime(rb_time, errors="coerce")
     rb = curve.iloc[0:0]
-    if pd.notna(rb_timestamp) and valid.any():
-        rb_index = (
-            (curve.loc[valid, "candidate_defrost_time"] - pd.Timestamp(rb_timestamp)).abs().idxmin()
-        )
-        rb = curve.loc[[rb_index]]
+    if pd.notna(rb_timestamp):
+        if candidate_step_seconds is None:
+            steps = curve["candidate_defrost_time"].sort_values().diff().dt.total_seconds().dropna()
+            candidate_step_seconds = float(steps.median()) if not steps.empty else 0.0
+        rb_index = nearest_rb_candidate(curve, pd.Timestamp(rb_timestamp), candidate_step_seconds)
+        if rb_index is not None:
+            rb = curve.loc[[rb_index]]
 
     if selected.empty:
         display_focus = valid.copy()
@@ -233,22 +280,35 @@ def plot_cop_heating_rate_pareto(
         zorder=0,
     )
     coloured = valid & pd.to_numeric(curve["cycle_evaporator_capacity_kw"], errors="coerce").notna()
-    points = axis.scatter(
-        curve.loc[coloured, "cycle_cop"],
-        curve.loc[coloured, "cycle_heating_rate_kw"],
-        c=curve.loc[coloured, "cycle_evaporator_capacity_kw"],
-        cmap="viridis",
-        norm=norm,
+    facecolors, extrapolated, has_o = extrapolation_facecolors(curve.loc[valid], norm)
+    axis.scatter(
+        curve.loc[valid & has_o.reindex(curve.index, fill_value=False), "cycle_cop"],
+        curve.loc[valid & has_o.reindex(curve.index, fill_value=False), "cycle_heating_rate_kw"],
+        c=facecolors[has_o.to_numpy()],
         s=24,
         alpha=0.52,
         linewidths=0,
     )
+    missing_o = valid & ~has_o.reindex(curve.index, fill_value=False)
+    if missing_o.any():
+        axis.scatter(
+            curve.loc[missing_o, "cycle_cop"],
+            curve.loc[missing_o, "cycle_heating_rate_kw"],
+            s=24,
+            facecolors="none",
+            edgecolors="#98A2B3",
+            linewidths=0.6,
+            label="O unavailable",
+        )
     if coloured.any():
         colourbar = axis.figure.colorbar(
-            points, cax=axis.inset_axes([1.02, 0, 0.018, 1], transform=axis.transAxes)
+            ScalarMappable(norm=norm, cmap="viridis"),
+            cax=axis.inset_axes([1.02, 0, 0.018, 1], transform=axis.transAxes),
         )
         colourbar.set_label("Evaporator capacity [kW]", fontsize=8)
         colourbar.ax.tick_params(labelsize=6.5)
+    if extrapolated.any():
+        axis.scatter([], [], s=24, color="#D9DEE3", label="Extrapolated (40% white filter)")
     axis.scatter(
         pareto["cycle_cop"],
         pareto["cycle_heating_rate_kw"],
@@ -279,7 +339,7 @@ def plot_cop_heating_rate_pareto(
             facecolors="none",
             edgecolors="#2E7D5B",
             linewidths=1.0,
-            label="RB trigger",
+            label="RB nearest eligible candidate",
             zorder=4,
         )
         axis.annotate(
@@ -287,6 +347,15 @@ def plot_cop_heating_rate_pareto(
             (rb["cycle_cop"].iloc[0], rb["cycle_heating_rate_kw"].iloc[0]),
             xytext=(6, -7),
             textcoords="offset points",
+            fontsize=5.5,
+            color="#2E7D5B",
+        )
+    elif pd.notna(rb_timestamp):
+        axis.text(
+            0.01,
+            0.01,
+            "RB performance unavailable: no eligible candidate within one step",
+            transform=axis.transAxes,
             fontsize=5.5,
             color="#2E7D5B",
         )

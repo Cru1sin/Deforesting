@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import getpass
 import json
 import os
@@ -11,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from http.client import IncompleteRead
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
@@ -20,18 +19,7 @@ LIST_URL = "https://dts.midea.com:8066/v1/dtp/service/share/file/list"
 DOWNLOAD_URL = "https://dts.midea.com:8066/v1/dtp/service/share/down"
 USER_AGENT = "Mozilla/5.0"
 CHUNK_BYTES = 8 * 1024 * 1024
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("url", help="DTS download page or Outlook Safe Links URL")
-    parser.add_argument("--password", help="omit to enter it without saving it in shell history")
-    parser.add_argument("--data", type=Path, default=Path("data"))
-    parser.add_argument("--start-no", type=int, default=1)
-    parser.add_argument("--end-no", type=int)
-    parser.add_argument("--workers", type=int, choices=(1, 2), default=2)
-    parser.add_argument("--retry-delay", type=float, default=5)
-    return parser
+DEFAULT_WORKERS = 2
 
 
 def share_identity(url: str) -> tuple[str, str]:
@@ -170,29 +158,29 @@ def download_file(file: dict[str, Any], destination: Path, retry_delay: float) -
             time.sleep(retry_delay)
 
 
-def run(args: argparse.Namespace) -> int:
-    password = args.password or os.environ.get("MIDEA_DTS_PASSWORD") or getpass.getpass(
+def download_shared_data(
+    url: str,
+    *,
+    data_dir: Path = Path("data"),
+    password: str | None = None,
+    start_no: int = 1,
+    end_no: int | None = None,
+    workers: int = DEFAULT_WORKERS,
+    retry_delay: float = 5,
+) -> Path:
+    password = password or os.environ.get("MIDEA_DTS_PASSWORD") or getpass.getpass(
         "Download password: "
     )
-    files = list_shared_files(args.url, password)
-    jobs = plan_downloads(files, args.data, start_no=args.start_no, end_no=args.end_no)
+    files = list_shared_files(url, password)
+    jobs = plan_downloads(files, data_dir, start_no=start_no, end_no=end_no)
     total_gib = sum(int(job["filesize"]) for job in jobs) / 1024**3
-    print(f"[plan] {len(jobs)} ZIPs, {total_gib:.2f} GiB, workers={args.workers}", flush=True)
+    print(f"[plan] {len(jobs)} ZIPs, {total_gib:.2f} GiB, workers={workers}", flush=True)
     for job in jobs:
         print(f"[plan] No.{job['number']} -> {job['destination']}", flush=True)
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
-            executor.submit(download_file, job, job["destination"], args.retry_delay)
-            for job in jobs
+            executor.submit(download_file, job, job["destination"], retry_delay) for job in jobs
         ]
         for future in futures:
             future.result()
-    return 0
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    return run(build_parser().parse_args(argv))
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return data_dir
