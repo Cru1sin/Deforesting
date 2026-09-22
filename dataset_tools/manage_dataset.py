@@ -142,7 +142,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
         print(
             download_shared_data(
                 args.url,
-                data_dir=Path("data"),
+                data_dir=Path("/Volumes/Proust/DefrostingSensor/data"),
                 password=args.password,
                 start_no=args.start_no,
                 end_no=args.end_no,

@@ -18,14 +18,15 @@ CATALOG_FILENAME = "cycle_catalog.json"
 MANIFEST_FILENAME = "dataset_manifest.json"
 
 
-def cycle_assets(cycle_name: str) -> dict[str, str]:
+def cycle_assets(cycle_name: str, *, rb: bool = False) -> dict[str, str]:
+    directory = "cycles_RB" if rb else "cycles"
     return {
-        "parquet": f"cycles/{cycle_name}.parquet",
-        "csv": f"cycles/{cycle_name}.csv",
+        "parquet": f"{directory}/{cycle_name}.parquet",
+        "csv": f"{directory}/{cycle_name}.csv",
         "original_csv": f"cycles_original/{cycle_name}.csv",
-        "publication": f"cycles/{cycle_name}.png",
-        "rgb_panel": f"cycles/{cycle_name}_rgb_panel.png",
-        "pareto_decision": f"cycles/{cycle_name}_pareto_decision.png",
+        "publication": f"{directory}/{cycle_name}.png",
+        "rgb_panel": f"{directory}/{cycle_name}_rgb_panel.png",
+        "pareto_decision": f"{directory}/{cycle_name}_pareto_decision.png",
     }
 
 
@@ -81,11 +82,15 @@ def image_root(dataset_dir: Path, manifest: Mapping[str, Any] | None = None) -> 
         else (manifest or {})
     )
     configured = Path(str(payload.get("images_root", "images"))).expanduser()
-    return (
+    from .dataset_paths import require_external_storage
+
+    resolved = (
         configured.resolve()
         if configured.is_absolute()
         else (dataset_dir / configured).resolve()
     )
+    require_external_storage(resolved)
+    return resolved
 
 
 def read_catalog(dataset_dir: Path) -> dict[str, Any]:

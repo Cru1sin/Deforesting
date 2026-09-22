@@ -205,9 +205,23 @@ def candidate_integral_table(
 
 
 def extract_pre_defrost_features(
-    frame: pd.DataFrame, candidates: Sequence[pd.Timestamp], heating_start: pd.Timestamp
+    frame: pd.DataFrame, candidates: Sequence[pd.Timestamp], heating_start: pd.Timestamp,
+    *, pressure_statistic: str = "median", frequency_statistic: str = "median",
+    coil_statistic: str = "median",
 ) -> pd.DataFrame:
-    """Extract state medians and Pe slope from samples strictly before tau."""
+    """Extract pre-action states with explicit pressure, frequency and coil representations.
+
+    The mean reuses window_audit linear segments, short-gap bridging and limited
+    trailing hold. Normalize by supported time; retain original sample-count
+    eligibility. Current states use the latest pre-action observation within
+    30 s; original coverage checks still apply. The five-minute slope is unchanged.
+    """
+    if pressure_statistic not in {"median", "time-weighted-mean"}:
+        raise ValueError(f"unknown pressure statistic: {pressure_statistic}")
+    if frequency_statistic not in {"median", "current"}:
+        raise ValueError(f"unknown frequency statistic: {frequency_statistic}")
+    if coil_statistic not in {"median", "time-weighted-mean", "current"}:
+        raise ValueError(f"unknown coil statistic: {coil_statistic}")
     state_names = (
         "water_in_temperature",
         "water_out_temperature",
@@ -236,6 +250,27 @@ def extract_pre_defrost_features(
             row[name] = float(np.median(values[finite])) if finite.any() else np.nan
             counts[name] = int(np.unique(seconds[left:right][finite]).size)
             row[f"{name}_valid_second_count"] = counts[name]
+        for name, statistic in (("compressor_frequency", frequency_statistic),
+                                ("coil_temperature", coil_statistic),
+                                ("evaporating_pressure", pressure_statistic)):
+            if statistic == "current":
+                valid = np.flatnonzero(np.isfinite(arrays[name][left:right]))
+                latest = left + int(valid[-1]) if valid.size else None
+                row[name] = (
+                    float(arrays[name][latest])
+                    if latest is not None and timestamps[latest] >= heating_start
+                    and (candidate - timestamps[latest]).total_seconds() <= MAXIMUM_GAP_SECONDS
+                    else np.nan
+                )
+            elif statistic == "time-weighted-mean":
+                start = max(candidate - pd.Timedelta(seconds=60), pd.Timestamp(heating_start))
+                audit = window_audit(frame, start, candidate, name)
+                covered_seconds = float(audit["coverage"]) * (candidate - start).total_seconds()
+                row[name] = (
+                    float(audit["energy"]) * 3600 / covered_seconds
+                    if covered_seconds > 0 and audit["maximum_gap_seconds"] <= MAXIMUM_GAP_SECONDS
+                    else np.nan
+                )
         row["mean_water_temperature"] = (
             float(row["water_in_temperature"]) + float(row["water_out_temperature"])
         ) / 2
@@ -379,7 +414,8 @@ def measure_defrost_event_quantities(
 
 
 def build_defrost_event_training_table(
-    loader: Any, *, preparation_heat: str | None = None
+    loader: Any, *, preparation_heat: str | None = None, pressure_statistic: str = "median",
+    frequency_statistic: str = "median", coil_statistic: str = "median",
 ) -> pd.DataFrame:  # noqa: C901
     """Extract observed events independently of cycle quality; audit each event window."""
     values = catalog(loader)
@@ -456,7 +492,10 @@ def build_defrost_event_training_table(
         )
         features = cast(
             dict[str, object],
-            extract_pre_defrost_features(current, [preparation], heating).iloc[0].to_dict(),
+            extract_pre_defrost_features(
+                current, [preparation], heating, pressure_statistic=pressure_statistic,
+                frequency_statistic=frequency_statistic, coil_statistic=coil_statistic
+            ).iloc[0].to_dict(),
         )
         audit_reasons: list[str] = []
         if preparation_heat is not None and not features["pre_defrost_feature_window_valid"]:

@@ -6,6 +6,7 @@
 !.python-version
 !AGENTS.md
 !README.md
+!RB_RULES_FROZEN.md
 !DATASET_FORMAT.md
 !dataset/
 dataset/*

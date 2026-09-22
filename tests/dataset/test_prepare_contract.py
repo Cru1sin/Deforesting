@@ -1508,3 +1508,55 @@ def test_config_rejects_impossible_iso_date(tmp_path: Path) -> None:
             experiment_date="2026-02-31",
             input_dir=tmp_path,
         )
+
+
+def test_xlsx_uses_standard_groups_and_preserves_duplicate_records(tmp_path: Path) -> None:
+    from dataset_tools.builder.raw import discover_inputs
+    from dataset_tools.dataset_maintenance import _load_config_for_input
+
+    path = tmp_path / "DataExport20260831090000~20260831110000.xlsx"
+    path.touch()
+    config = _load_config_for_input(tmp_path, tmp_path)
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active.title = "中间变量"
+    workbook.active.append(["DateTime", "Deforst"])
+    workbook.active.append([pd.Timestamp("2026-08-31 09:00:00"), 1])
+    for sheet, header, values in (
+        ("参数页0", ["Deforst", "Te'2_20", "extra"], [[0, -5, "a"], [1, -6, "b"]]),
+        ("参数页1", ["总功率", "芯片2接收", "芯片2接收"], [[2000, 1, 2]]),
+        ("参数页4", ["FlowQ", "压机功率"], [[150, 1800]]),
+    ):
+        table = workbook.create_sheet(sheet)
+        table.append(["DateTime", *header])
+        for row in values:
+            table.append([pd.Timestamp("2026-08-31 09:00:00"), *row])
+    workbook.save(tmp_path / "DataExport20260831090000~20260831110000.xlsx")
+    (tmp_path / ".~DataExport20260831090000~20260831110000.xlsx").write_bytes(b"lock")
+    config = _load_config_for_input(tmp_path, tmp_path)
+    assert config.experiment_date == "2026-08-31"
+    inputs = discover_inputs(config)
+    assert len(inputs.sensor_files) == 1
+    channels = load_channels()
+    frames = prepare_module._load_prepare_channel_frames(inputs.sensor_files, config, channels)
+    timestamps = prepare_module._all_timestamps(frames)
+    assert timestamps.tolist() == [pd.Timestamp("2026-08-31 09:00:00")]
+    power = prepare_module._combine_channel(
+        frames["power_total"], channels["power_total"], timestamps
+    )
+    assert power["value"].tolist() == [2.0]
+    state = prepare_module._combine_channel(
+        frames["defrost_active"], channels["defrost_active"], timestamps
+    )
+    assert not state["__duplicate"].any()
+    assert state["value"].tolist() == [True]
+    prepared = pd.DataFrame({"timestamp": timestamps, "experiment_id": config.experiment_id})
+    original = prepare_module.prepare_original(config, prepared)
+    assert len(original) == 2
+    assert original["p1__Deforst"].tolist() == [0, 1]
+    assert original["p1__extra"].tolist() == ["a", "b"]
+    assert original["p2__总功率"].iloc[0] == 2000
+    assert original["p2__芯片2接收.1"].iloc[0] == 2
+    assert original["p5__FlowQ"].iloc[0] == 150
+    assert not any("中间变量" in name or name.startswith("p0__") for name in original)

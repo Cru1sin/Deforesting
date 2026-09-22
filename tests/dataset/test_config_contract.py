@@ -18,7 +18,7 @@ def test_python_defaults_match_the_frozen_raw_dataset_contract(tmp_path: Path) -
 
     assert config.experiment_id == "exp_20260715"
     assert config.input_dir == input_dir
-    assert config.sensor_globs == ("*.xls", "*.edf")
+    assert config.sensor_globs == ("*.xls", "*.xlsx", "*.edf")
     assert config.image_extensions == (".jpg", ".png")
     assert config.timestamp_column == "时间"
     assert config.expected_sensor_interval_seconds == 1
@@ -90,3 +90,12 @@ def test_cycle_settings_still_validate_explicit_overrides() -> None:
 
     settings = CycleSettings(maximum_state_gap_seconds=0)
     assert settings.maximum_state_gap_seconds == 0
+
+
+def test_external_storage_requires_mounted_drive(monkeypatch):
+    from dataset_tools.dataset_paths import require_external_storage
+
+    monkeypatch.setattr(Path, "is_mount", lambda self: False)
+    with pytest.raises(FileNotFoundError, match="Proust"):
+        require_external_storage(Path('/Volumes/Proust/DefrostingSensor/data/0831'))
+    require_external_storage(Path('/tmp/local-test'))

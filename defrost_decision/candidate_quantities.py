@@ -36,6 +36,9 @@ def build_measured_candidate_quantities(
     candidate_step_seconds: int = 60,
     allow_measurement_reconstruction: bool = False,
     heat_column: str = "water_heat",
+    pressure_statistic: str = "median",
+    frequency_statistic: str = "median",
+    coil_statistic: str = "median",
 ) -> pd.DataFrame:
     """Measure G-independent inputs at a grid or explicitly supplied timestamps."""
     record = loader.get_cycle_record(cycle_name)
@@ -64,6 +67,8 @@ def build_measured_candidate_quantities(
         candidate_times,
         heating_start,
         heat_column=heat_column,
+        pressure_statistic=pressure_statistic,
+        frequency_statistic=frequency_statistic, coil_statistic=coil_statistic,
         allow_measurement_reconstruction=allow_measurement_reconstruction,
     )
 
@@ -74,6 +79,9 @@ def measure_candidate_quantities(
     heating_start,
     *,
     heat_column="water_heat",
+    pressure_statistic="median",
+    frequency_statistic="median",
+    coil_statistic="median",
     allow_measurement_reconstruction=False,
 ):
     """One raw-frame calculation used by Dataset replay and a live cycle prefix."""
@@ -195,13 +203,17 @@ def measure_candidate_quantities(
             result[f"pre_defrost_{name}_kwh"] = table["energy"].to_numpy()
             result[f"pre_defrost_{name}_measurement_valid"] = table["valid"].to_numpy()
         return pd.concat([result.reset_index(drop=True), extract_pre_defrost_features(
-            frame, candidates, heating_start
+            frame, candidates, heating_start, pressure_statistic=pressure_statistic,
+            frequency_statistic=frequency_statistic, coil_statistic=coil_statistic,
         )], axis=1)
     compressor = integral("compressor_power")
     online_electricity = online_integral("power_total")
     online_heat = online_integral("water_heat")
     online_compressor = online_integral("compressor_power")
-    features = extract_pre_defrost_features(frame, candidates, heating_start)
+    features = extract_pre_defrost_features(
+        frame, candidates, heating_start, pressure_statistic=pressure_statistic,
+        frequency_statistic=frequency_statistic, coil_statistic=coil_statistic,
+    )
 
     result = pd.concat(
         [
@@ -261,10 +273,13 @@ def build_candidate_quantities(
     prediction_mode: str = "cross-fitted",
 ) -> pd.DataFrame:
     """Return neutral candidate quantities without selecting a defrost time."""
-    measured = build_measured_candidate_quantities(
-        loader, cycle_name, candidate_step_seconds=candidate_step_seconds
-    )
     model_file = dict(load_defrost_event_models() if models is None else models)
+    measured = build_measured_candidate_quantities(
+        loader, cycle_name, candidate_step_seconds=candidate_step_seconds,
+        pressure_statistic=model_file.get("pressure_statistic", "median"),
+        frequency_statistic=model_file.get("frequency_statistic", "median"),
+        coil_statistic=model_file.get("coil_statistic", "median"),
+    )
     predicted = predict_independent_targets(
         model_file["models"][defrost_event_electricity_model]["event_electricity"],
         model_file["models"][defrost_event_heat_model]["event_net_heat"],
@@ -309,7 +324,10 @@ def effective_candidate_cop(
         {"candidate_defrost_time": candidates, "heating_accounting_start": recovery_start}
     )
     result = measure_candidate_quantities(
-        frame, times, heating_start, heat_column="heating_capacity"
+        frame, times, heating_start, heat_column="heating_capacity",
+        pressure_statistic=models.get("pressure_statistic", "median"),
+        frequency_statistic=models.get("frequency_statistic", "median"),
+        coil_statistic=models.get("coil_statistic", "median"),
     )
     targets = models["models"][DEFAULT_OUTCOME_MODEL]
     for quantity, outcome in (("electricity", "event_electricity"), ("net_heat", "event_net_heat")):
@@ -333,6 +351,9 @@ def effective_candidate_cop(
             result[prefix + "_in_training_domain"] = predicted.support_distance.le(
                 predicted.support_threshold
             ).to_numpy()
+    result["pressure_statistic"] = models.get("pressure_statistic", "median")
+    result["frequency_statistic"] = models.get("frequency_statistic", "median")
+    result["coil_statistic"] = models.get("coil_statistic", "median")
     result["preparation_heat"] = preparation_heat
     result["prediction_mode"] = prediction_mode
     result["model_training_scope"] = (

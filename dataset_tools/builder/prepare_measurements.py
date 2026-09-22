@@ -6,7 +6,7 @@ import codecs
 import csv
 import re
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -106,19 +106,15 @@ def prepare_original(config: Config, prepared: pd.DataFrame) -> pd.DataFrame:
     from .schema import export_original_frame
 
     inputs = discover_inputs(config)
-    grouped_paths: dict[str, list[Path]] = defaultdict(list)
-    for path in inputs.sensor_files:
-        if path.suffix.lower() == ".edf":
-            continue
-        grouped_paths[_parameter_group(path) or path.stem].append(path)
+    grouped_tables: dict[str, list[pd.DataFrame]] = defaultdict(list)
+    main_paths = tuple(path for path in inputs.sensor_files if path.suffix.lower() != ".edf")
+    for path in main_paths:
+        for group, table in _read_sensor_tables((path,), config.timestamp_column, preserve_raw=True):
+            grouped_tables[group or path.stem].append(table)
 
     occurrence = "__raw_timestamp_occurrence"
     raw: pd.DataFrame | None = None
-    for group, paths in grouped_paths.items():
-        tables = [
-            _read_sensor_table(path, config.timestamp_column, infer_types=True)
-            for path in paths
-        ]
+    for group, tables in grouped_tables.items():
         combined = pd.concat(tables, ignore_index=True, sort=False)
         combined = combined.rename(
             columns={
@@ -248,13 +244,11 @@ def _load_channel_frames(
             source_to_channels[str(source)].add(name)
 
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
-    for path in paths:
-        table = _read_sensor_table(path, timestamp_column)
+    for group, table in _read_sensor_tables(paths, timestamp_column):
 
         if table.empty:
             continue
 
-        group = _parameter_group(path)
         for raw_column in table.columns:
             if raw_column == "timestamp":
                 continue
@@ -269,6 +263,33 @@ def _load_channel_frames(
                 )
 
     return frames
+
+
+def _read_sensor_tables(
+    paths: tuple[Path, ...], timestamp_column: str, *, preserve_raw: bool = False
+) -> Iterator[tuple[str | None, pd.DataFrame]]:
+    """Normalize text exports and workbook parameter pages at the input boundary."""
+    for path in paths:
+        if path.suffix.lower() != ".xlsx":
+            yield _parameter_group(path), _read_sensor_table(
+                path, timestamp_column, infer_types=preserve_raw
+            )
+            continue
+
+        # 中间变量是合并视图，不作为第四份观测重复读入。
+        # 按字段名映射，参数页0中的开关列顺序与文本参数1不同。
+        with pd.ExcelFile(path, engine="openpyxl") as workbook:
+            for sheet, group in (("参数页0", "1"), ("参数页1", "2"), ("参数页4", "5")):
+                table = pd.read_excel(
+                    workbook, sheet_name=sheet,
+                    **({} if preserve_raw else {"dtype": str, "keep_default_na": False}),
+                )
+                table = _normalize_sensor_table(table, "DateTime", path)
+                if not preserve_raw:
+                    # Workbook rows are successive controller refreshes within one clock second.
+                    # Prepared uses the final snapshot; original export retains every raw row.
+                    table = table.drop_duplicates("timestamp", keep="last").reset_index(drop=True)
+                yield group, table
 
 
 def _read_sensor_table(
@@ -311,6 +332,12 @@ def _read_sensor_table(
     )
     table = pd.read_csv(path, sep=delimiter, encoding=encoding, **options)
 
+    return _normalize_sensor_table(table, timestamp_column, path)
+
+
+def _normalize_sensor_table(
+    table: pd.DataFrame, timestamp_column: str, path: Path
+) -> pd.DataFrame:
     table.columns = [str(column).strip() for column in table.columns]
 
     if timestamp_column not in table.columns:
@@ -322,6 +349,8 @@ def _read_sensor_table(
     # 删除无效时间戳行并重建连续索引。
     # 注意：这里只删除无法定位到时间轴的行，不删除通道值为空或非法的行。
     return table.loc[table["timestamp"].notna()].reset_index(drop=True)
+
+
 def _combine_channel(
     frames: list[pd.DataFrame], settings: Mapping[str, Any], timestamps: pd.Series
 ) -> pd.DataFrame:

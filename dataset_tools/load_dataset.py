@@ -90,10 +90,13 @@ class DatasetLoader:
         *,
         statuses: set[str] | None = None,
         experiment_ids: set[str] | None = None,
+        include_rb: bool = True,
     ) -> pd.DataFrame:
         records = [record for record in self._catalog["cycles"] if isinstance(record, Mapping)]
         rows: list[dict[str, Any]] = []
         for record in records:
+            if not include_rb and str(record["assets"]["parquet"]).startswith("cycles_RB/"):
+                continue
             boundaries = record.get("boundaries")
             data = record.get("data")
             image = record.get("image")
@@ -130,9 +133,9 @@ class DatasetLoader:
             )
         return result.reset_index(drop=True)
 
-    def list_valid_cycles(self, *, require_rgb: bool = False) -> pd.DataFrame:
+    def list_valid_cycles(self, *, require_rgb: bool = False, include_rb: bool = True) -> pd.DataFrame:
         """Return cycles valid both now and before COP-derived quality updates."""
-        cycles = self.list_cycles(statuses={"valid"})
+        cycles = self.list_cycles(statuses={"valid"}, include_rb=include_rb)
         missing = pd.Series(False, index=cycles.index)
         pre_cop_valid = cycles.get("pre_cop_status", missing).map(
             lambda value: isinstance(value, Mapping) and value.get("status") == "valid"

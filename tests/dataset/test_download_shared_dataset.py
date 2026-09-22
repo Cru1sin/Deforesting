@@ -7,7 +7,7 @@ from urllib.parse import quote
 from dataset_tools import dts_downloader as downloader
 
 
-def test_plan_no_7_to_12_as_0807(tmp_path: Path) -> None:
+def test_plan_no_7_to_12_as_0807(tmp_path: Path, monkeypatch) -> None:
     direct = (
         "https://dts.midea.com:8066/download.html?lang=en"
         "#/home/fronthome/download/info/share-key/stamp-value"
@@ -31,6 +31,7 @@ def test_plan_no_7_to_12_as_0807(tmp_path: Path) -> None:
     ]
     files = [{"filename": name, "filesize": index} for index, name in enumerate(names, 1)]
 
+    monkeypatch.setattr(downloader, "camera_archive_date", lambda file: "0807")
     jobs = downloader.plan_downloads(files, tmp_path, start_no=7, end_no=12)
 
     assert [job["number"] for job in jobs] == list(range(7, 13))

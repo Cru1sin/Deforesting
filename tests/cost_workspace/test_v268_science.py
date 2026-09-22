@@ -331,3 +331,107 @@ def test_candidate_cohort_excludes_experiments_without_parameter_folds() -> None
             return frame if columns is None else frame[columns]
 
     assert candidate_cohort(Loader(), {"with_fold"}) == (["with_fold"], 6)
+
+
+def test_pressure_mean_is_time_weighted_causal_and_changes_only_pressure():
+    from defrost_event_models.training_data import extract_pre_defrost_features
+
+    start = pd.Timestamp('2026-01-01')
+    frame = _raw_frame(start, 602)
+    tau = start + pd.Timedelta(seconds=600)
+    frame.loc[540:599, 'evaporating_pressure'] = .4 + .001 * np.arange(60)
+    frame.loc[600:, 'evaporating_pressure'] = 999.
+    old = extract_pre_defrost_features(frame, [tau], start)
+    new = extract_pre_defrost_features(frame, [tau], start,
+                                      pressure_statistic='time-weighted-mean')
+    expected = ((.4 + .459) / 2 * 59 + .459) / 60
+    assert new.evaporating_pressure.iloc[0] == pytest.approx(expected)
+    pd.testing.assert_frame_equal(old.drop(columns='evaporating_pressure'),
+                                  new.drop(columns='evaporating_pressure'))
+    prefix = extract_pre_defrost_features(frame[frame.timestamp.lt(tau)], [tau], start,
+                                         pressure_statistic='time-weighted-mean')
+    pd.testing.assert_frame_equal(new, prefix)
+    irregular = frame.drop(index=[i for i in range(540, 600) if i not in [540, 541, 550, 570, 599]])
+    result = extract_pre_defrost_features(irregular, [tau], start,
+                                          pressure_statistic='time-weighted-mean')
+    assert result.evaporating_pressure.iloc[0] == pytest.approx(expected)
+    assert not result.pre_defrost_feature_window_valid.iloc[0]
+    long_gap = frame.drop(index=range(550, 590))
+    result = extract_pre_defrost_features(long_gap, [tau], start,
+                                          pressure_statistic='time-weighted-mean')
+    assert pd.isna(result.evaporating_pressure.iloc[0])
+    assert not result.pre_defrost_feature_window_valid.iloc[0]
+
+
+def test_pressure_mean_does_not_flip_one_quantization_level_at_majority_change():
+    from defrost_event_models.training_data import extract_pre_defrost_features
+
+    start = pd.Timestamp('2026-01-01')
+    frame = _raw_frame(start, 602)
+    valid = [i for i in range(540, 600) if i not in range(550, 555)]
+    frame.loc[540:601, 'evaporating_pressure'] = .42
+    frame.loc[550:554, 'evaporating_pressure'] = np.nan
+    frame.loc[valid[:28], 'evaporating_pressure'] = .43
+    times = [start + pd.Timedelta(seconds=s) for s in [600, 601]]
+    old = extract_pre_defrost_features(frame, times, start)
+    new = extract_pre_defrost_features(frame, times, start,
+                                      pressure_statistic='time-weighted-mean')
+    assert old.evaporating_pressure.diff().iloc[1] == pytest.approx(-.01)
+    assert abs(new.evaporating_pressure.diff().iloc[1]) < .001
+    assert new.pre_defrost_feature_window_valid.all()
+
+
+def test_current_frequency_is_pre_action_fresh_and_does_not_restore_bad_coverage():
+    from defrost_event_models.training_data import extract_pre_defrost_features
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 602)
+    tau = start + pd.Timedelta(seconds=600)
+    frame.loc[540:598, "compressor_frequency"] = 95.0
+    frame.loc[599, "compressor_frequency"] = 97.0
+    frame.loc[600:, "compressor_frequency"] = 120.0
+    old = extract_pre_defrost_features(frame, [tau], start)
+    new = extract_pre_defrost_features(frame, [tau], start, frequency_statistic="current")
+    assert new.compressor_frequency.iloc[0] == 97.0
+    pd.testing.assert_frame_equal(old.drop(columns="compressor_frequency"),
+                                  new.drop(columns="compressor_frequency"))
+    prefix = extract_pre_defrost_features(frame[frame.timestamp.lt(tau)], [tau], start,
+                                         frequency_statistic="current")
+    pd.testing.assert_frame_equal(new, prefix)
+    frame.loc[599, "compressor_frequency"] = np.nan
+    held = extract_pre_defrost_features(frame, [tau], start, frequency_statistic="current")
+    assert held.compressor_frequency.iloc[0] == 95.0
+    frame.loc[570:599, "compressor_frequency"] = np.nan
+    stale = extract_pre_defrost_features(frame, [tau], start, frequency_statistic="current")
+    assert pd.isna(stale.compressor_frequency.iloc[0])
+    assert not stale.pre_defrost_feature_window_valid.iloc[0]
+    frame.loc[599, "compressor_frequency"] = 97.0
+    sparse = extract_pre_defrost_features(frame, [tau], start, frequency_statistic="current")
+    assert sparse.compressor_frequency.iloc[0] == 97.0
+    assert not sparse.pre_defrost_feature_window_valid.iloc[0]
+
+
+@pytest.mark.parametrize("statistic", ["time-weighted-mean", "current"])
+def test_coil_representation_rebuilds_difference_without_changing_other_states(statistic):
+    from defrost_event_models.training_data import extract_pre_defrost_features
+
+    start = pd.Timestamp("2026-01-01")
+    frame = _raw_frame(start, 602)
+    tau = start + pd.Timedelta(seconds=600)
+    frame.loc[540:599, "coil_temperature"] = -2.0 + .1 * np.arange(60)
+    frame.loc[600:, "coil_temperature"] = 999.0
+    old = extract_pre_defrost_features(frame, [tau], start)
+    new = extract_pre_defrost_features(frame, [tau], start, coil_statistic=statistic)
+    expected = 3.9 if statistic == "current" else ((-2.0 + 3.9) / 2 * 59 + 3.9) / 60
+    assert new.coil_temperature.iloc[0] == pytest.approx(expected)
+    assert new.ambient_coil_difference.iloc[0] == pytest.approx(
+        old.ambient_temperature.iloc[0] - expected)
+    pd.testing.assert_frame_equal(old.drop(columns=["coil_temperature", "ambient_coil_difference"]),
+                                  new.drop(columns=["coil_temperature", "ambient_coil_difference"]))
+    prefix = extract_pre_defrost_features(frame[frame.timestamp.lt(tau)], [tau], start,
+                                         coil_statistic=statistic)
+    pd.testing.assert_frame_equal(new, prefix)
+    frame.loc[570:599, "coil_temperature"] = np.nan
+    stale = extract_pre_defrost_features(frame, [tau], start, coil_statistic=statistic)
+    assert pd.isna(stale.coil_temperature.iloc[0])
+    assert not stale.pre_defrost_feature_window_valid.iloc[0]

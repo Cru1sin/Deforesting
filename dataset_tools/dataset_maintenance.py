@@ -17,6 +17,7 @@ import pandas as pd
 from .builder.build_experiment import ExperimentBuild, build_experiment
 from .builder.dataset_settings import find_project_root
 from .cycle_metadata import DATASET_ID, DATASET_SCHEMA_VERSION
+from .dataset_paths import require_external_storage
 
 CYCLE_NAME_WIDTH = 6
 CycleKey = tuple[str, str]
@@ -52,6 +53,7 @@ def _experiment_cycle_names(dataset_dir: Path, experiment_id: str) -> list[str]:
 def add_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:
     """Build or append one date directly from raw input."""
     input_path = Path(input_dir).resolve()
+    require_external_storage(input_path)
     project_root = _resolve_project_root()
     target = Path(dataset_dir).resolve() if dataset_dir is not None else project_root / "dataset"
     _validate_date_input(input_path)
@@ -115,6 +117,7 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
     from .validate_dataset import validate_dataset
 
     input_path = Path(input_dir).resolve()
+    require_external_storage(input_path)
     project_root = _resolve_project_root()
     root = Path(dataset_dir).resolve() if dataset_dir is not None else project_root / "dataset"
     _validate_date_input(input_path)
@@ -213,7 +216,9 @@ def replace_dataset(input_dir: Path, dataset_dir: Path | None = None) -> Path:  
         for record in later:
             old_name = str(record["cycle_name"])
             new_name = later_names[old_name]
-            shifted_record = {**record, "cycle_name": new_name, "assets": cycle_assets(new_name)}
+            shifted_record = {**record, "cycle_name": new_name, "assets": cycle_assets(
+                new_name, rb=Path(str(record["assets"]["csv"])).parent.name == "cycles_RB"
+            )}
             for key, target_relative in shifted_record["assets"].items():
                 source_relative = record["assets"].get(key)
                 if source_relative is None:
@@ -430,8 +435,11 @@ def update_cycle_columns(dataset_dir: Path, updates: Mapping[str, pd.DataFrame])
     """Add or replace timestamp-aligned columns in existing Processed cycles."""
     from .dataset_paths import write_csv, write_parquet
 
+    from .cycle_metadata import read_catalog
+
+    assets = {r["cycle_name"]: r["assets"] for r in read_catalog(dataset_dir)["cycles"]}
     for cycle_name, update in updates.items():
-        parquet_path = dataset_dir / "cycles" / f"{cycle_name}.parquet"
+        parquet_path = dataset_dir / assets[cycle_name]["parquet"]
         csv_path = parquet_path.with_suffix(".csv")
         frame = pd.read_parquet(parquet_path)
         frame["timestamp"] = pd.to_datetime(frame["timestamp"])
@@ -509,8 +517,9 @@ def aggregate_original(dataset_dir: Path, *, seconds: int = 10) -> Path:
             cycle_name=str(record["cycle_name"]),
             cycle_uid=str(record["cycle_uid"]),
         )
-        write_csv(canonical, target / f"{record['cycle_name']}.csv")
-        write_parquet(canonical, target / f"{record['cycle_name']}.parquet")
+        directory = root / Path(record["assets"]["csv"]).parent if folder == "cycles" else target
+        write_csv(canonical, directory / f"{record['cycle_name']}.csv")
+        write_parquet(canonical, directory / f"{record['cycle_name']}.parquet")
 
     if output_registry is None:
         raise ValueError("Dataset has no cycles")
@@ -663,11 +672,20 @@ def _validate_date_input(input_path: Path) -> None:
 def _load_config_for_input(input_path: Path, project_root: Path) -> Any:
     from .builder.dataset_settings import load_config
 
-    # EDF 可能分段或补录；实验日期只认 XLS 参数文件名。
-    matches = [re.search(r"\d{4}-\d{2}-\d{2}", path.name) for path in input_path.glob("*.xls")]
-    dates = {match.group() for match in matches if match}
-    if not matches or len(dates) != 1 or any(match is None for match in matches):
-        raise ValueError("XLS filenames must contain one shared date")
+    # EDF 可能分段或补录；实验日期只认控制器导出文件名。
+    dates: set[str] = set()
+    for pattern in ("*.xls", "*.xlsx"):
+        for path in input_path.glob(pattern):
+            if not path.is_file() or path.name.startswith((".", "~$")):
+                continue
+            expression = r"\d{4}-\d{2}-\d{2}" if pattern == "*.xls" else r"(?<=DataExport)\d{8}"
+            match = re.search(expression, path.name)
+            if match is None:
+                raise ValueError("sensor filenames must contain one shared date")
+            value = match.group()
+            dates.add(value if "-" in value else f"{value[:4]}-{value[4:6]}-{value[6:8]}")
+    if len(dates) != 1:
+        raise ValueError("sensor filenames must contain one shared date")
     return load_config(
         project_root=project_root,
         experiment_date=dates.pop(),
@@ -722,7 +740,10 @@ def _materialize_cycle(
     )
     from .cycle_metadata import cycle_assets
 
-    assets = cycle_assets(cycle_name)
+    # First confirmed RB heating episode: 0827 16:58:32, defrost at 17:46:57.
+    # DefTim2 is a running timer, not the configured trigger threshold.
+    rb = pd.to_datetime(original["timestamp"]).min() >= pd.Timestamp("2026-08-27 16:58:32")
+    assets = cycle_assets(cycle_name, rb=bool(rb))
     record = build_cycle_record(
         summary_row,
         cycle_name=cycle_name,
@@ -1819,7 +1840,7 @@ def publish_effective_decision_assets(dataset_dir: Path, run: Path, figures: Pat
                 old.unlink()
             assets.pop(key, None)
             record.pop(key, None)
-        relative = f"cycles/{name}_{decision_key}.png"
+        relative = str(Path(assets["csv"]).with_name(f"{name}_{decision_key}.png"))
         copy2(sources[name], dataset_dir / relative)
         assets[decision_key] = relative
         record[decision_key] = {

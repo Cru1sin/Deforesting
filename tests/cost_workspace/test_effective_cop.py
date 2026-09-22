@@ -129,6 +129,22 @@ def test_live_candidate_prefix_and_heat_mode_share_the_same_energy():
     selected = add_single_objective_optima(full, names=("cycle_cop",))
     assert selected.cycle_cop_t_star.iloc[0] == now
 
+    # The saved model selects the same pressure representation for full and prefix replay.
+    from defrost_event_models.training_data import extract_pre_defrost_features
+    models["pressure_statistic"] = "time-weighted-mean"
+    models["frequency_statistic"] = "current"
+    models["coil_statistic"] = "time-weighted-mean"
+    frame["evaporating_pressure"] = .3 + np.arange(len(frame)) * .001
+    new = effective_candidate_cop(frame, [now], preparation_heat="zero", **kwargs)
+    expected = extract_pre_defrost_features(
+        frame, [now], start, pressure_statistic="time-weighted-mean",
+        frequency_statistic="current", coil_statistic="time-weighted-mean")
+    assert new.evaporating_pressure.iloc[0] == pytest.approx(expected.evaporating_pressure.iloc[0])
+    assert new.coil_temperature.iloc[0] == pytest.approx(expected.coil_temperature.iloc[0])
+    prefix = effective_candidate_cop(
+        frame[frame.timestamp.lt(now)], [now], preparation_heat="zero", **kwargs)
+    pd.testing.assert_frame_equal(new, prefix)
+
 
 def test_live_input_without_required_observations_reports_unavailable():
     from dataset_tools.builder.detect_cycles import RECOVERY_DEFAULTS
@@ -267,7 +283,7 @@ def test_hypothetical_defrost_uses_observed_open_heating(status, defrost, availa
     monkeypatch.setattr(
         decision.rule_based,
         "calculate_cycle",
-        lambda *_: {"rb_status": "triggered", "t_RB": start + pd.Timedelta(minutes=25)},
+        lambda *_, **kwargs: {"rb_status": "triggered", "t_RB": start + pd.Timedelta(minutes=25)},
     )
     calls = []
 
@@ -333,7 +349,7 @@ def test_event_pool_ignores_cycle_labels_and_uses_next_recovery(monkeypatch):
     ])
     monkeypatch.setattr(data, 'catalog', lambda loader: catalog)
     monkeypatch.setattr(data, 'load_frame', lambda *a, **kw: pd.DataFrame())
-    monkeypatch.setattr(data, 'extract_pre_defrost_features', lambda *a: pd.DataFrame(
+    monkeypatch.setattr(data, 'extract_pre_defrost_features', lambda *a, **kw: pd.DataFrame(
         {'pre_defrost_feature_window_valid': [True]}))
 
     def measure(*args, **kwargs):
@@ -347,3 +363,14 @@ def test_event_pool_ignores_cycle_labels_and_uses_next_recovery(monkeypatch):
     assert events.energy_event_valid.all()
     assert events.recovery_duration_minutes.tolist() == [6.]
     assert 'recovery_end_fixed9' not in events
+
+
+def test_action_grid_constrains_optimum_without_changing_support_or_basin():
+    from defrost_decision.performance_objectives import add_single_objective_optima
+    rows = pd.DataFrame({'candidate_defrost_time': pd.date_range('2026-01-01', periods=4, freq='10s'),
+                         'cycle_cop': [2., 2.01, 2.005, 2.001], 'cycle_cop_eligible': True})
+    result = add_single_objective_optima(rows, names=('cycle_cop',),
+                                       selection_mask=pd.Series([True, False, False, True]))
+    assert result.cycle_cop_t_star.eq(rows.candidate_defrost_time.iloc[3]).all()
+    assert result.cycle_cop_eligible.all()
+    assert result.cycle_cop_basin_1pct_start.eq(rows.candidate_defrost_time.iloc[0]).all()

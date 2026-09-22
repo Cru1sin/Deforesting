@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -28,7 +29,7 @@ def test_public_defrost_commands_have_direct_help() -> None:
             text=True,
         )
         assert result.returncode == 0
-        assert "--action" not in result.stdout
+        assert not re.search(r"--action(?![\w-])", result.stdout)
         assert "--variant" not in result.stdout
 
 

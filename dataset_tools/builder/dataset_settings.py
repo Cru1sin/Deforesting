@@ -156,7 +156,7 @@ class Config:
     experiment_id: str
     experiment_date: str
     input_dir: Path
-    sensor_globs: tuple[str, ...] = ("*.xls", "*.edf")
+    sensor_globs: tuple[str, ...] = ("*.xls", "*.xlsx", "*.edf")
     image_extensions: tuple[str, ...] = (".jpg", ".png")
     timestamp_column: str = "时间"
 

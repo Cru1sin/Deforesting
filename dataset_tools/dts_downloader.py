@@ -15,6 +15,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
+from .dataset_paths import require_external_storage
+
 LIST_URL = "https://dts.midea.com:8066/v1/dtp/service/share/file/list"
 DOWNLOAD_URL = "https://dts.midea.com:8066/v1/dtp/service/share/down"
 USER_AGENT = "Mozilla/5.0"
@@ -68,28 +70,24 @@ def plan_downloads(
         raise ValueError(f"No. range must be within 1-{len(files)}")
 
     jobs: list[dict[str, Any]] = []
-    for group_start in range(0, len(files), 6):
-        group = files[group_start : group_start + 6]
-        marker = next(
-            (
-                match.group(1)
-                for file in group
-                if (match := re.fullmatch(r"(\d{4})S\.zip", str(file["filename"]), re.I))
-            ),
-            f"batch_{group_start + 1:03d}",
-        )
-        for offset, file in enumerate(group):
-            number = group_start + offset + 1
-            if start_no <= number <= end_no:
-                filename = Path(str(file["filename"])).name
-                jobs.append(
-                    {
-                        **file,
-                        "number": number,
-                        "destination": data_dir / marker / filename,
-                    }
-                )
+    for number, file in enumerate(files, 1):
+        if start_no <= number <= end_no:
+            filename = Path(str(file["filename"])).name
+            marker = re.fullmatch(r"(\d{4})S\.zip", filename, re.I)
+            date = marker.group(1) if marker else camera_archive_date(file)
+            jobs.append({**file, "number": number, "destination": data_dir / date / filename})
     return jobs
+
+
+def camera_archive_date(file: dict[str, Any]) -> str:
+    """Read only the ZIP header containing the first timestamped camera filename."""
+    request = Request(request_download_url(file), headers={"Range": "bytes=0-65535"})
+    with urlopen(request, timeout=60) as response:
+        header = response.read(65536)
+    match = re.search(rb"20\d{2}(\d{4})\d{9}\.jpg", header, re.I)
+    if match is None:
+        raise ValueError(f"No camera date in ZIP header: {file['filename']}")
+    return match.group(1).decode()
 
 
 def request_download_url(file: dict[str, Any]) -> str:
@@ -161,13 +159,14 @@ def download_file(file: dict[str, Any], destination: Path, retry_delay: float) -
 def download_shared_data(
     url: str,
     *,
-    data_dir: Path = Path("data"),
+    data_dir: Path = Path("/Volumes/Proust/DefrostingSensor/data"),
     password: str | None = None,
     start_no: int = 1,
     end_no: int | None = None,
     workers: int = DEFAULT_WORKERS,
     retry_delay: float = 5,
 ) -> Path:
+    require_external_storage(data_dir)
     password = password or os.environ.get("MIDEA_DTS_PASSWORD") or getpass.getpass(
         "Download password: "
     )

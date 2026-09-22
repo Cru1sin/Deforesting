@@ -24,7 +24,16 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=Path, default=Path("dataset"))
     parser.add_argument("--cycles", nargs="*")
+    parser.add_argument("--all-cycles", action="store_true", help="also render excluded cycles with no optimal label")
+    parser.add_argument("--action-step-seconds", type=int, default=None)
     parser.add_argument("--model-file", type=Path, required=True)
+    parser.add_argument("--rb-condition1-drop-c", type=int, default=1)
+    parser.add_argument("--rb-forced-timeout-min", type=int, default=150,
+                        help="historical timeout; 0 excludes this unverified branch")
+    parser.add_argument("--rb-case-boundary", choices=("warmer", "colder"), default="warmer")
+    parser.add_argument("--rb-sample-tolerance-seconds", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--rb-confirmation-missing-seconds", type=int, choices=range(4), default=0)
+    parser.add_argument("--rb-condition1-tolerance-c", type=float, choices=(0, 0.1), default=0)
     parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--run-name", default="effective_cop")
     parser.add_argument("--candidate-step-seconds", type=int, default=10)
@@ -57,6 +66,13 @@ def calculate_cycle(
     models,
     *,
     candidate_step_seconds=10,
+    action_step_seconds=None,
+    rb_condition1_drop_c=1,
+    rb_forced_timeout_min=150,
+    rb_sample_tolerance_seconds=0,
+    rb_confirmation_missing_seconds=0,
+    rb_condition1_tolerance_c=0.0,
+    rb_case_boundary="warmer",
     prediction_mode="cross-fitted",
     preparation_heat="zero",
 ):
@@ -73,7 +89,12 @@ def calculate_cycle(
     open_heating = end is None and timestamp(bounds.get("defrost_start")) is None
     if open_heating:
         end = observation_end
-    rb = rule_based.calculate_cycle(loader, cycle_name)
+    rb = rule_based.calculate_cycle(loader, cycle_name, condition1_drop_c=rb_condition1_drop_c,
+                                    forced_timeout_min=rb_forced_timeout_min,
+                                    sample_tolerance_seconds=rb_sample_tolerance_seconds,
+                                    confirmation_missing_seconds=rb_confirmation_missing_seconds,
+                                    condition1_tolerance_c=rb_condition1_tolerance_c,
+                                    case_boundary=rb_case_boundary)
     reason = (
         str(record.get("recovery_status", "recovery_not_identified"))
         if recovery is None
@@ -113,7 +134,13 @@ def calculate_cycle(
             preparation_heat=preparation_heat,
             prediction_mode=prediction_mode,
         )
-    result = add_single_objective_optima(result, names=("cycle_cop",))
+    result["on_action_grid"] = True if action_step_seconds is None else (
+        (result.candidate_defrost_time - result.candidate_defrost_time.min())
+        .dt.total_seconds().mod(action_step_seconds).eq(0)
+    )
+    result = add_single_objective_optima(
+        result, names=("cycle_cop",), selection_mask=result.on_action_grid
+    )
     result["is_selected"] = result.candidate_defrost_time.eq(result.cycle_cop_t_star)
     result["selected_point_in_training_domain"] = result.is_selected & result.cycle_cop_eligible
     result["t_star"] = result.cycle_cop_t_star
@@ -236,7 +263,9 @@ def compare_preparation_runs(run, other_run, output):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.n_jobs < 1 or args.candidate_step_seconds < 1:
+    if (args.n_jobs < 1 or args.candidate_step_seconds < 1
+            or (args.action_step_seconds is not None and (args.action_step_seconds < 1
+                or args.action_step_seconds % args.candidate_step_seconds))):
         raise ValueError("workers and candidate step must be positive")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", args.run_name):
         raise ValueError("invalid run name")
@@ -262,7 +291,7 @@ def main(argv=None):
     if run.exists() and not args.overwrite and not args.figures_only:
         raise FileExistsError(f"run exists: {run}")
     loader = DatasetLoader(args.dataset)
-    valid_names = set(loader.list_cycles(statuses={"valid"}).cycle_name)
+    valid_names = set(loader.list_cycles(statuses=None if args.all_cycles else {"valid"}).cycle_name)
     cycles = [name for name in (args.cycles or sorted(valid_names)) if name in valid_names]
     if not cycles:
         raise ValueError("no valid cycles selected")
@@ -305,6 +334,13 @@ def main(argv=None):
                 name,
                 models,
                 candidate_step_seconds=args.candidate_step_seconds,
+                action_step_seconds=args.action_step_seconds,
+                rb_condition1_drop_c=args.rb_condition1_drop_c,
+                rb_forced_timeout_min=args.rb_forced_timeout_min,
+                rb_sample_tolerance_seconds=args.rb_sample_tolerance_seconds,
+                rb_confirmation_missing_seconds=args.rb_confirmation_missing_seconds,
+                rb_condition1_tolerance_c=args.rb_condition1_tolerance_c,
+                rb_case_boundary=args.rb_case_boundary,
                 prediction_mode=args.prediction_mode,
                 preparation_heat=args.preparation_heat,
             )

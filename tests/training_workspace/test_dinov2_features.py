@@ -2,6 +2,7 @@ import importlib.util
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 def test_exact_key_cache_is_teacher_independent_and_additive(tmp_path):
@@ -45,3 +46,29 @@ def test_grouped_zip_payload_matches_direct_member(tmp_path):
         payload=memoryview(archive.read_bytes())[member[0] :],
     )
     assert direct == grouped == b"rgb" * 100
+
+
+def test_local_only_leaves_missing_images_blank_without_cloud(tmp_path, monkeypatch):
+    import torch
+    from image_models import dinov2_features as features
+
+    rows = pd.DataFrame({'cycle_name': ['cycle', 'cycle'], 'camera_role': ['front'] * 2,
+                         'file_name': ['local.jpg', 'missing.jpg']})
+    rows = rows.reindex(columns=features.KEYS + features.DINO_COLUMNS)
+    folder = tmp_path / 'images/cycle/front'
+    folder.mkdir(parents=True)
+    (folder / 'local.jpg').write_bytes(b'local')
+    monkeypatch.setattr(features, '_plan_image_members', lambda *a: pytest.fail('cloud called'))
+    monkeypatch.setattr(features, '_embed', lambda payloads, *a: np.ones((len(payloads), 384)))
+    result, audit = features._complete_cycle(rows, dataset=tmp_path, model=None,
+        device=torch.device('cpu'), n_jobs=1, batch_size=2, local_only=True)
+    assert result.loc[0, features.DINO_COLUMNS].eq(1).all()
+    assert result.loc[1, features.DINO_COLUMNS].isna().all()
+    assert audit['generated_count'] == 1 and audit['cloud_source_count'] == 0
+
+
+def test_unreadable_image_embedding_stays_blank():
+    import torch
+    from image_models.dinov2_features import _embed
+    values = _embed([b'broken jpeg'], None, torch.device('cpu'))
+    assert values.shape == (1, 384) and np.isnan(values).all()

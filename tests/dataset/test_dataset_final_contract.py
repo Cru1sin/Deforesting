@@ -2413,12 +2413,18 @@ def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
     assert metrics["rgb_defrost_auto_status"] == "invalid"
 
 
-def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(tmp_path: Path) -> None:
+@pytest.mark.parametrize("directory", ["cycles", "cycles_RB"])
+def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(
+    tmp_path: Path, directory: str
+) -> None:
     from dataset_tools.dataset_maintenance import update_cycle_columns
 
     cycle_name = "frost_cycle_000001"
-    cycles = tmp_path / "cycles"
+    cycles = tmp_path / directory
     cycles.mkdir()
+    (tmp_path / "cycle_catalog.json").write_text(json.dumps({"cycles": [{
+        "cycle_name": cycle_name, "assets": {"parquet": f"{directory}/{cycle_name}.parquet"}
+    }]}))
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s")
     frame = pd.DataFrame({"timestamp": timestamps, "heating_capacity": [10.0, 12.0]})
     frame.to_parquet(cycles / f"{cycle_name}.parquet", index=False)
@@ -2780,3 +2786,25 @@ def test_valid_cycle_queue_requires_pre_cop_quality_and_optionally_rgb():
         }]
     }
     assert loader.list_valid_cycles(require_rgb=True).empty
+
+
+def test_full_cycle_download_completes_partial_directory(tmp_path, monkeypatch):
+    from zipfile import ZipFile
+    from dataset_tools.cloud_images import materialize_cycle_images
+
+    _allow_image_download(monkeypatch)
+    dataset = tmp_path / 'dataset'
+    cycle = 'frost_cycle_000001'
+    local = dataset / 'images' / cycle
+    local.mkdir(parents=True)
+    (local / 'a.jpg').write_bytes(b'a')
+    cloud = tmp_path / 'cloud'
+    cloud.mkdir()
+    with ZipFile(cloud / (cycle + '.zip'), 'w') as z:
+        z.writestr(cycle + '/a.jpg', b'a')
+        z.writestr(cycle + '/b.jpg', b'b')
+    with materialize_cycle_images(dataset, cycle, fetch_cloud=True, cloud_root=cloud,
+                                  complete_existing=True) as result:
+        assert (result / 'b.jpg').read_bytes() == b'b'
+        assert not list((dataset / 'images').rglob('*.zip'))
+    assert (local / 'a.jpg').read_bytes() == b'a'

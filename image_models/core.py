@@ -58,6 +58,14 @@ def save_settings(path, settings):
     path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n")
 
 
+def common_cycle_metrics(metrics, *, model_count=None):
+    """Use only cycles scored by every compared model within the same seed."""
+    scored = metrics.loc[metrics.selected_cop.notna() & metrics.rb_cop.notna()]
+    coverage = scored.groupby(["seed", "cycle_name"]).version.transform("nunique")
+    count = metrics.version.nunique() if model_count is None else model_count
+    return scored.loc[coverage.eq(count)].copy()
+
+
 def common_actions(rows):
     """Select the clock after defining the common full valid-curve optimum."""
     from image_models.inputs import processing_rows
@@ -318,9 +326,7 @@ def summarize(output, parents=PARENTS):
         return
     all_cycles = pd.concat(tables, ignore_index=True)
     all_cycles.to_csv(output / "cycle_metrics.csv", index=False)
-    scored = all_cycles.loc[all_cycles.selected_cop.notna() & all_cycles.rb_cop.notna()]
-    coverage = scored.groupby(["seed", "cycle_name"]).version.transform("nunique")
-    common = scored.loc[coverage.eq(len(parents))]
+    common = common_cycle_metrics(all_cycles, model_count=len(parents))
     for index, row in summary.iterrows():
         paired = common.loc[common.version.eq(row.version) & common.seed.eq(row.seed)]
         for key, value in summarize_metrics(paired).items():

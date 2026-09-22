@@ -9,6 +9,12 @@ from typing import Any
 import pandas as pd
 
 
+def require_external_storage(path: Path) -> None:
+    """Fail before IO when a Proust directory link points to an unmounted drive."""
+    if path.resolve().is_relative_to("/Volumes/Proust") and not Path("/Volumes/Proust").is_mount():
+        raise FileNotFoundError("external drive is not mounted: /Volumes/Proust")
+
+
 def write_json(data: object, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

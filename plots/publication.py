@@ -1860,3 +1860,66 @@ def render_recovery_overviews(loader, boundaries, output):
         fig.tight_layout()
         fig.savefig(output / f"overview_{first // 18 + 1:02d}.png", bbox_inches="tight")
         plt.close(fig)
+
+
+def render_event_prediction_cycle(cycle_frame, cycle_record, curve, output_path):
+    """Event electricity versus candidate time, with shared cycle panels and markers."""
+    from plots.cop import _plot_supported_curve
+
+    frame = cycle_frame.sort_values("timestamp").copy()
+    frame["timestamp"] = pd.to_datetime(frame.timestamp)
+    curve = curve.sort_values("candidate_defrost_time").copy()
+    curve["candidate_defrost_time"] = pd.to_datetime(curve.candidate_defrost_time)
+    origin = frame.timestamp.min()
+    minutes = (frame.timestamp - origin).dt.total_seconds() / 60
+    candidate_minutes = (curve.candidate_defrost_time - origin).dt.total_seconds() / 60
+    spans = _stage_spans(frame, minutes)
+    optimum = pd.Timestamp(curve.t_star.dropna().iloc[0])
+    peak_minute = (optimum - origin).total_seconds() / 60
+    markers = {"optimal": {"target_time": optimum},
+               "rb": {"target_time": curve.t_RB.dropna().iloc[0]
+                      if curve.t_RB.notna().any() else pd.NaT}}
+    fig, axes = plt.subplots(3, 2, figsize=(12, 9), sharex="col")
+    for column in range(2):
+        _plot_cycle_panel(axes[0, column], frame, minutes,
+                          ("heating_capacity", "power_total"), "Capacity / power [kW]", spans, [])
+        axis = axes[1, column]
+        supported = curve.defrost_event_electricity_in_training_domain.fillna(False)
+        _plot_supported_curve(axis, candidate_minutes, curve.defrost_event_electricity_kwh,
+                              supported, color=COP_COLOR, label="Predicted event E (Ridge)")
+        _shade_cycle_stages(axis, spans, [])
+        axis.set_ylabel("Predicted event electricity [kWh]", fontsize=8)
+        axis.grid(axis="x", alpha=.12)
+        axis.legend(frameon=False, fontsize=7, loc="lower left", bbox_to_anchor=(0, 1.01))
+        relative = _plot_effective_cop_panel(axes[2, column], curve, origin, spans)
+        _plot_decision_markers(list(axes[:, column]), markers, origin,
+                               "Effective COP maximum", target_times=True)
+        limits = (0, minutes.max()) if column == 0 else (
+            max(0, peak_minute - 5), min(minutes.max(), peak_minute + 5))
+        for axis in axes[:, column]:
+            axis.set_xlim(*limits)
+            axis.tick_params(labelsize=7)
+        if column == 1:
+            local = candidate_minutes.between(*limits)
+            for axis, values in ((axes[1, column], curve.defrost_event_electricity_kwh),
+                                 (axes[2, column], curve.cycle_cop)):
+                values = values.loc[local].dropna()
+                if len(values):
+                    pad = max((values.max() - values.min()) * .12, .001)
+                    axis.set_ylim(values.min() - pad, values.max() + pad)
+            best = curve.loc[curve.cycle_cop_eligible, "cycle_cop"].max()
+            relative.set_ylim(*(100 * np.array(axes[2, column].get_ylim()) / best))
+        axes[2, column].set_xlabel("Time from cycle start [min]", fontsize=8)
+    axes[0, 0].set_title("Full cycle", fontsize=10, pad=30)
+    axes[0, 1].set_title("Within 5 minutes of COP optimum", fontsize=10, pad=30)
+    fig.suptitle(f"{cycle_record.get('cycle_name', 'Cycle')} | Event electricity prediction",
+                 fontsize=12, fontweight="bold", y=.98)
+    fig.text(.5, .015,
+             "Orange dash-dot: COP optimum; green dashed: RB. "
+             "Dashed E curve: outside model domain. Event Q is fixed at zero (not predicted).",
+             ha="center", fontsize=8)
+    fig.subplots_adjust(left=.075, right=.92, bottom=.08, top=.88, hspace=.5, wspace=.42)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)

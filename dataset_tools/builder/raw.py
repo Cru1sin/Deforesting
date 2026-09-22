@@ -25,7 +25,7 @@ def discover_inputs(config: Config) -> InputFiles:
                 path
                 for pattern in config.sensor_globs
                 for path in input_dir.glob(pattern)
-                if path.is_file()
+                if path.is_file() and not path.name.startswith((".", "~$"))
             }
         )
     )

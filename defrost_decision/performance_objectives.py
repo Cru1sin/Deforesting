@@ -202,6 +202,7 @@ def _connected_basin(
 def add_single_objective_optima(
     objectives: pd.DataFrame,
     names=("cycle_cop", "cycle_heating_rate_kw", "cycle_evaporator_capacity_kw"),
+    *, selection_mask=None,
 ) -> pd.DataFrame:
     """Add each objective's own optimum and connected near-optimal basins."""
     result = objectives.copy()
@@ -212,9 +213,10 @@ def add_single_objective_optima(
             result[f"{name}_basin_{percent}pct_end"] = pd.NaT
             result[f"{name}_basin_{percent}pct_width_minutes"] = np.nan
         eligible = result[f"{name}_eligible"]
-        if not eligible.any():
+        selectable = eligible if selection_mask is None else eligible & selection_mask
+        if not selectable.any():
             continue
-        optimum = int(result.index[eligible & result[name].eq(result.loc[eligible, name].max())][0])
+        optimum = int(result.index[selectable & result[name].eq(result.loc[selectable, name].max())][0])
         result[f"{name}_t_star"] = result.loc[optimum, "candidate_defrost_time"]
         for percent in (1, 2, 5):
             start, end, width = _connected_basin(result, name, optimum, eligible, percent)

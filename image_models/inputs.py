@@ -23,13 +23,22 @@ STATISTICS = ("current", "mean", "std", "skew", "kurt", "slope", "entropy")
 RGB = [f"dinov2_{i:03d}" for i in range(384)]
 
 
-def reliable_rgb_cohort(dataset, *, source=None):
+def reliable_rgb_cohort(dataset, *, source=None, include_rb=False, require_complete_peak=False):
     """Return cycles valid now, before COP filtering, and for front RGB."""
     loader = dataset if isinstance(dataset, DatasetLoader) else DatasetLoader(dataset)
-    cycles = loader.list_valid_cycles()
+    cycles = loader.list_valid_cycles(include_rb=include_rb)
+    if require_complete_peak:
+        complete = cycles.cop_peak_quality.map(lambda x: isinstance(x, dict) and x.get("complete") is True)
+        cycles = cycles.loc[complete]
+    front_valid = cycles.get("front_rgb_valid", pd.Series(index=cycles.index, dtype=object))
+    if front_valid.isna().any():
+        metadata = loader.load_image_metadata()
+        available = set(metadata.loc[metadata.camera_role.eq("front"), "cycle_name"])
+        audited = cycles.get("rgb_frost_status", pd.Series(index=cycles.index, dtype=object)).eq("valid")
+        front_valid = front_valid.where(front_valid.notna(), cycles.cycle_name.isin(available) & audited)
     cohort = (
         cycles.loc[
-            cycles.front_rgb_valid.eq(True),
+            front_valid.eq(True),
             [
                 "cycle_name",
                 "experiment_id",

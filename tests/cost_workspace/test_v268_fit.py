@@ -318,7 +318,7 @@ def test_selection_uses_only_supported_cop_and_earliest_tie(monkeypatch):
     monkeypatch.setattr(
         command.rule_based,
         "calculate_cycle",
-        lambda *_: {"t_RB": start + pd.Timedelta(minutes=6), "rb_status": "triggered"},
+        lambda *_, **kwargs: {"t_RB": start + pd.Timedelta(minutes=6), "rb_status": "triggered"},
     )
 
     def candidates(frame, times, *args, **kwargs):

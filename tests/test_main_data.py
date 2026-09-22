@@ -280,7 +280,7 @@ def test_dts_download_defaults_to_all_files_in_data(monkeypatch) -> None:
     assert calls == [
         {
             "url": "https://example.com/share",
-            "data_dir": Path("data"),
+            "data_dir": Path("/Volumes/Proust/DefrostingSensor/data"),
             "password": None,
             "start_no": 1,
             "end_no": None,
@@ -323,7 +323,7 @@ def test_dts_download_keeps_optional_range_controls(monkeypatch) -> None:
     assert calls == [
         {
             "url": "https://example.com/share",
-            "data_dir": Path("data"),
+            "data_dir": Path("/Volumes/Proust/DefrostingSensor/data"),
             "password": "secret",
             "start_no": 13,
             "end_no": 30,

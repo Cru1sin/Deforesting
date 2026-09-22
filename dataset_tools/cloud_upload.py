@@ -10,6 +10,8 @@ from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
 
 from .cloud_images import _direct_rclone_env
+from .cycle_metadata import image_root
+from .dataset_paths import require_external_storage
 
 DATE_REMOTE = "onedrive_hkust:HKUST/Project/Defrost/data"
 IMAGE_REMOTE = "onedrive_hkust:HKUST/Project/Defrost/dataset/images"
@@ -20,6 +22,7 @@ def upload_date_data(
 ) -> Path:
     """Upload selected four-digit dates, or every date when dates is None."""
     data = Path(data_dir).resolve()
+    require_external_storage(data)
     if not data.is_dir():
         raise FileNotFoundError(f"data directory not found: {data}")
     selected = list(dates) if dates is not None else _available_dates(data)
@@ -57,7 +60,7 @@ def upload_cycle_images(
 ) -> Path:
     """Upload selected cycle-image directories, or every cycle when cycles is None."""
     dataset = Path(dataset_dir).resolve()
-    images = dataset / "images"
+    images = image_root(dataset)
     if not images.is_dir():
         raise FileNotFoundError(f"cycle images directory not found: {images}")
     selected = list(cycles) if cycles is not None else _available_cycles(images)
@@ -67,7 +70,7 @@ def upload_cycle_images(
     if invalid:
         raise ValueError("invalid cycle names: " + ", ".join(invalid))
 
-    temporary = dataset / ".image_archive_tmp"
+    temporary = images.parent / ".image_archive_tmp"
     temporary.mkdir(exist_ok=True)
     for index, cycle in enumerate(selected, start=1):
         source = images / cycle

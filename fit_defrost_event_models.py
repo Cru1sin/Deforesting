@@ -51,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="render boundary audit or held-out event calibration figures",
     )
     parser.add_argument("--preparation-heat", choices=("include", "zero"), default="zero")
+    parser.add_argument("--pressure-statistic", choices=("median", "time-weighted-mean"),
+                        default="median")
+    parser.add_argument("--frequency-statistic", choices=("median", "current"),
+                        default="median")
+    parser.add_argument("--coil-statistic", choices=("median", "time-weighted-mean", "current"),
+                        default="median")
     add_recovery_arguments(parser)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
@@ -63,12 +69,15 @@ def _fit_ridge_outcome(
     target: str,
     features: tuple[str, ...],
     events: pd.DataFrame,
+    workers: int = 1,
 ) -> tuple[str, str, dict[str, object]]:
     experiments = sorted(events["experiment_id"].astype(str).unique())
-    folds = {
-        heldout: fit_model_for_heldout_experiment(events, heldout, features, target)
+    # One parallel layer: independent outer folds; inner LOEO remains serial.
+    fitted_folds = Parallel(n_jobs=workers, verbose=5)(
+        delayed(fit_model_for_heldout_experiment)(events, heldout, features, target)
         for heldout in experiments
-    }
+    )
+    folds = dict(zip(experiments, fitted_folds, strict=True))
     fitted = assemble_target_model(
         target,
         features,
@@ -114,17 +123,19 @@ def _fit_models(events: pd.DataFrame, workers: int, preparation_heat=None) -> di
         }
     models: dict[str, Any] = {"experiment_balanced_mean": mean_models}
     with parallel_config(backend="loky", n_jobs=workers, inner_max_num_threads=1):
-        fitted = Parallel()(
-            delayed(_fit_ridge_outcome)(
+        fitted = [
+            _fit_ridge_outcome(
                 model_name,
                 outcome,
                 target,
                 features,
                 outcome_events[outcome],
+                workers=workers,
             )
-            for model_name, features in MODEL_FEATURES.items() if model_name == "ridge_dynamic_state_8"
+            for model_name, features in MODEL_FEATURES.items()
+            if model_name == "ridge_dynamic_state_8"
             for outcome, target in targets.items()
-        )
+        ]
     for model_name, outcome, model in fitted:
         models.setdefault(model_name, {})[outcome] = model
     return models
@@ -185,7 +196,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(pd.DataFrame(rows).groupby(["recovery_rule", "recovery_status"]).size().to_string())
         return 0
     boundaries = loader.configure_recovery(recovery_settings(args))
-    events = build_defrost_event_training_table(loader, preparation_heat=args.preparation_heat)
+    events = build_defrost_event_training_table(
+        loader, preparation_heat=args.preparation_heat, pressure_statistic=args.pressure_statistic,
+        frequency_statistic=args.frequency_statistic, coil_statistic=args.coil_statistic
+    )
     valid_events = select_valid_events_for_quantity(events, "event_electricity")
     if valid_events.empty:
         raise ValueError("no valid observed defrost events")
@@ -195,6 +209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "training_cohort_rule": "per_target_valid_events",
         "cop_definition": "refrigerant_effective_heat",
         "preparation_heat": args.preparation_heat,
+        "pressure_statistic": args.pressure_statistic,
+        "frequency_statistic": args.frequency_statistic,
+        "coil_statistic": args.coil_statistic,
         "recovery_settings": recovery_settings(args),
         "models": _fit_models(events, args.workers, args.preparation_heat),
     }
@@ -261,6 +278,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "training_cohort_rule": "per_target_valid_events",
         "cop_definition": "refrigerant_effective_heat",
         "preparation_heat": args.preparation_heat,
+        "pressure_statistic": args.pressure_statistic,
+        "frequency_statistic": args.frequency_statistic,
+        "coil_statistic": args.coil_statistic,
         "recovery_settings": recovery_settings(args),
         "energy_training_event_count": len(valid_events),
     }

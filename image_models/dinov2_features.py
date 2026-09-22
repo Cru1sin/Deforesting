@@ -59,14 +59,23 @@ def _load_backbone(device: torch.device) -> torch.nn.Module:
 def _embed(payloads: list[bytes], model: torch.nn.Module, device: torch.device) -> np.ndarray:
     convert = _transform()
     tensors = []
-    for payload in payloads:
-        with Image.open(io.BytesIO(payload)) as image:
-            tensors.append(convert(image.convert("RGB")))
+    positions = []
+    result = np.full((len(payloads), len(DINO_COLUMNS)), np.nan, dtype=np.float32)
+    for index, payload in enumerate(payloads):
+        try:
+            with Image.open(io.BytesIO(payload)) as image:
+                tensors.append(convert(image.convert("RGB")))
+            positions.append(index)
+        except OSError:
+            continue
+    if not tensors:
+        return result
     with torch.inference_mode():
         values = model(torch.stack(tensors).to(device)).detach().cpu().numpy()
     if values.shape[1] != len(DINO_COLUMNS):
         raise ValueError(f"expected 384 DINOv2 values, got {values.shape[1]}")
-    return values.astype(np.float32)
+    result[positions] = values
+    return result
 
 
 def _group_remote_jobs(jobs: list[tuple], max_range_bytes: int = 8 * 1024**2) -> list[list[tuple]]:
@@ -96,6 +105,7 @@ def _complete_cycle(
     device: torch.device,
     n_jobs: int,
     batch_size: int,
+    local_only: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
     cycle = str(rows["cycle_name"].iloc[0])
     missing = rows[DINO_COLUMNS].isna().all(axis=1)
@@ -104,14 +114,17 @@ def _complete_cycle(
         raise ValueError(f"partial DINOv2 vectors in cache: {cycle}")
     wanted = rows.loc[missing, "file_name"].astype(str).tolist()
     print(f"[features] {cycle}: {len(wanted)} missing of {len(rows)} frames", flush=True)
-    jobs, transferred, started = _plan_image_members(dataset, cycle, wanted, None, 0)
+    jobs, transferred, started = (
+        ([], [0], time.monotonic()) if local_only
+        else _plan_image_members(dataset, cycle, wanted, None, 0)
+    )
     remote_jobs = {Path(job[-1]).name: job for job in jobs}
     local_root = dataset / "images" / cycle / "front"
     result = rows.copy()
     generated = 0
     local_names = [name for name in wanted if (local_root / name).is_file()]
     unavailable = set(wanted).difference(local_names).difference(remote_jobs)
-    if unavailable:
+    if unavailable and not local_only:
         raise FileNotFoundError(
             f"{len(unavailable)} image(s) unavailable locally and in cloud ZIP for {cycle}"
         )
@@ -121,7 +134,11 @@ def _complete_cycle(
         values = _embed(payloads, model, device)
         indices = _row_indices(result.loc[missing], names)
         result.loc[indices, DINO_COLUMNS] = values
-        generated += len(values)
+        valid = np.isfinite(values).all(axis=1)
+        generated += int(valid.sum())
+        for name, ok in zip(names, valid):
+            if not ok:
+                print(f"[features] unreadable image left blank: {cycle}/{name}", flush=True)
 
     with ThreadPoolExecutor(max_workers=n_jobs) as pool:
         for start in range(0, len(local_names), batch_size):
@@ -162,7 +179,8 @@ def _complete_cycle(
         "cached_count": int((~missing).sum()),
         "generated_count": generated,
         "local_source_count": len(local_names),
-        "cloud_source_count": generated - len(local_names),
+        "cloud_source_count": len(remote_jobs),
+        "unavailable_count": int(result[DINO_COLUMNS].isna().any(axis=1).sum()),
         "range_read_count": len(groups),
         "range_bytes": range_bytes,
         "transferred_bytes": transferred[0],
@@ -176,6 +194,9 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--source-cache", type=Path, nargs="*", default=[])
     parser.add_argument("--cycles", nargs="*")
+    parser.add_argument("--image-list", type=Path, help="CSV of cycle_name, camera_role, file_name to extract")
+    parser.add_argument("--include-rb", action="store_true", help="include RB for state analysis, not CV training")
+    parser.add_argument("--local-only", action="store_true", help="never fetch cloud images; leave unavailable vectors blank")
     parser.add_argument("--device", choices=["cpu", "mps", "cuda"], default="cpu")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--n-jobs", type=int, default=6)
@@ -184,7 +205,13 @@ def main() -> int:
     torch.set_num_threads(1)
     loader = DatasetLoader(args.dataset)
     metadata = loader.load_image_metadata()
-    metadata = metadata.loc[metadata.camera_role.eq("front")].copy()
+    regular = loader.list_cycles(include_rb=args.include_rb).cycle_name
+    metadata = metadata.loc[
+        metadata.camera_role.eq("front") & metadata.cycle_name.isin(regular)
+    ].copy()
+    if args.image_list:
+        metadata = metadata.merge(pd.read_csv(args.image_list)[KEYS].drop_duplicates(), on=KEYS,
+                                  how="inner", validate="one_to_one")
     output = args.output
     (output / "cycles").mkdir(parents=True, exist_ok=True)
     metadata.to_parquet(output / "index.parquet", index=False)
@@ -198,6 +225,9 @@ def main() -> int:
         "metadata_mtime_ns": (args.dataset / "image_metadata.parquet").stat().st_mtime_ns,
         "image_count": len(metadata),
         "source_caches": list(map(str, args.source_cache)),
+        "local_only": args.local_only,
+        "include_rb": args.include_rb,
+        "image_list": str(args.image_list) if args.image_list else None,
         "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
     }
     (output / "config.json").write_text(json.dumps(config, indent=2) + "\n")
@@ -232,15 +262,16 @@ def main() -> int:
                 device=torch.device(args.device),
                 n_jobs=args.n_jobs,
                 batch_size=args.batch_size,
+                local_only=args.local_only,
             )
         else:
             audit = {"cycle_name": cycle, "frame_count": len(rows), "generated_count": 0}
-        generated_total += needed
+        generated_total += int(audit["generated_count"])
         temporary = destination.with_suffix(".tmp.parquet")
         rows[KEYS + DINO_COLUMNS].to_parquet(temporary, index=False)
         temporary.replace(destination)
         audit["indexed_count"] = len(index)
-        audit["complete"] = len(rows) == len(index)
+        audit["complete"] = len(rows) == len(index) and rows[DINO_COLUMNS].notna().all().all()
         progress = [p for p in progress if p["cycle_name"] != cycle] + [audit]
         pd.DataFrame(progress).to_csv(progress_path, index=False)
         print(

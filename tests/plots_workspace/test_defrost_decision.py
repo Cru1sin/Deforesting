@@ -160,18 +160,19 @@ def test_chen_cycle_figure_reuses_effective_cop_panel_and_keeps_missing_probabil
     assert "(a)" in {text.get_text() for text in effective_axis.texts}
     assert "(b)" in {text.get_text() for text in probability_axis.texts}
 
-def test_publish_effective_decision_preserves_history_and_manual_status(tmp_path):
+@pytest.mark.parametrize("folder", ["cycles", "cycles_RB"])
+def test_publish_effective_decision_preserves_history_and_manual_status(tmp_path, folder):
     from dataset_tools.dataset_maintenance import publish_effective_decision_assets
 
     dataset = tmp_path / "dataset"
-    (dataset / "cycles").mkdir(parents=True)
+    (dataset / folder).mkdir(parents=True)
     name = "frost_cycle_000001"
-    old = dataset / "cycles" / f"{name}_pareto_decision.png"
+    old = dataset / folder / f"{name}_pareto_decision.png"
     old.write_bytes(b"historical figure")
     record = {
         "cycle_name": name,
         "status": "valid",
-        "assets": {"pareto_decision": f"cycles/{old.name}"},
+        "assets": {"csv": f"{folder}/{name}.csv", "pareto_decision": f"{folder}/{old.name}"},
         "pareto_decision": {"status": "old"},
     }
     (dataset / "cycle_catalog.json").write_text(json.dumps({"cycles": [record]}))
@@ -190,6 +191,7 @@ def test_publish_effective_decision_preserves_history_and_manual_status(tmp_path
     assert "pareto_decision" not in current["assets"]
     assert current["effective_cop"]["preparation_heat"] == "zero"
     published = dataset / current["assets"]["effective_cop"]
+    assert published.parent.name == folder
     assert published.read_bytes() == b"effective figure"
     assert (figures / "previous_dataset_decisions" / old.name).read_bytes() == b"historical figure"
     assert not old.exists()
@@ -200,4 +202,37 @@ def test_publish_effective_decision_preserves_history_and_manual_status(tmp_path
     with pytest.raises(ValueError, match="zero preparation heat"):
         publish_effective_decision_assets(dataset, run, figures)
     assert published.name == f"{name}_effective_cop.png"
+    assert published.parent.name == folder
     assert published.read_bytes() == b"effective figure"
+
+
+def test_event_prediction_cycle_preserves_energy_step(tmp_path, monkeypatch):
+    from matplotlib.figure import Figure
+    from plots import publication
+
+    assert hasattr(publication, "render_event_prediction_cycle")
+    start = pd.Timestamp("2026-01-01")
+    times = pd.date_range(start, periods=4, freq="min")
+    frame = pd.DataFrame(dict(timestamp=times, cycle_stage="frost_development",
+                              heating_capacity=6.0, power_total=2.0))
+    curve = pd.DataFrame(dict(
+        candidate_defrost_time=times, cycle_cop=[2., 2.1, 2.5, 2.4],
+        cycle_cop_eligible=[True, True, True, False],
+        defrost_event_net_heat_kwh=0., defrost_event_electricity_kwh=[.3, .3, .2, .2],
+        defrost_event_electricity_in_training_domain=[True, True, True, False],
+        preparation_heat="zero", t_star=times[2], t_RB=times[1],
+    ))
+    original = curve.copy(deep=True)
+    captured = []
+    monkeypatch.setattr(Figure, "savefig", lambda fig, *_a, **_k: captured.append(fig))
+    publication.render_event_prediction_cycle(frame, {"cycle_name": "example"}, curve,
+                                              tmp_path / "predictions.png")
+    fig = captured[0]
+    q_axes = [ax for ax in fig.axes if ax.get_ylabel() == "Event effective heat [kWh]"]
+    e_axes = [ax for ax in fig.axes if ax.get_ylabel() == "Predicted event electricity [kWh]"]
+    assert not q_axes
+    assert len(e_axes) == 2
+    for ax in e_axes:
+        np.testing.assert_array_equal(ax.lines[0].get_ydata(), [.3, .3, .2, .2])
+        assert np.isnan(ax.lines[1].get_ydata()[-1])
+    pd.testing.assert_frame_equal(curve, original)

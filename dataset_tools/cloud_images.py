@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import binascii
+import filecmp
 import os
 import shutil
 import struct
@@ -16,6 +17,8 @@ from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
+
+from .cycle_metadata import image_root
 
 ZipMember = tuple[int, int, int, int, int, int]
 ImageJob = tuple[str, Path | str, str | None, int, ZipMember, Path]
@@ -281,7 +284,7 @@ def _plan_image_members(
 ) -> tuple[list[ImageJob], list[int], float]:
     if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
         raise ValueError(f"invalid cycle name: {cycle_name}")
-    images_root = Path(dataset_dir).resolve() / "images"
+    images_root = image_root(Path(dataset_dir))
     cycle_dir = images_root / cycle_name
     requested = sorted({PurePosixPath(str(name)) for name in file_names if str(name)}, key=str)
     if any(path.is_absolute() or ".." in path.parts or len(path.parts) > 2 for path in requested):
@@ -457,7 +460,7 @@ def materialize_cycle_image_members(
     """Retain selected camera JPEGs from a ZIP using range reads."""
     if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
         raise ValueError(f"invalid cycle name: {cycle_name}")
-    cycle_dir = Path(dataset_dir).resolve() / "images" / cycle_name
+    cycle_dir = image_root(Path(dataset_dir)) / cycle_name
     if not fetch_cloud:
         yield cycle_dir
         return
@@ -488,6 +491,8 @@ def materialize_cycle_images(  # noqa: C901
     cycle_name: str,
     *,
     fetch_cloud: bool = False,
+    complete_existing: bool = False,
+    download_streams: int = 8,
     cloud_root: Path | None = None,
     cleanup_downloaded: bool = False,
     minimum_free_gib: float = 50,
@@ -495,9 +500,10 @@ def materialize_cycle_images(  # noqa: C901
     """Materialize one cloud ZIP; optionally remove this call's copy after success."""
     if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
         raise ValueError(f"invalid cycle name: {cycle_name}")
-    images_root = Path(dataset_dir).resolve() / "images"
+    images_root = image_root(Path(dataset_dir))
     cycle_dir = images_root / cycle_name
-    if cycle_dir.is_dir() or not fetch_cloud:
+    existed = cycle_dir.is_dir()
+    if (existed and not complete_existing) or not fetch_cloud:
         yield cycle_dir
         return
 
@@ -556,7 +562,7 @@ def materialize_cycle_images(  # noqa: C901
                     "--stats",
                     "1s",
                     "--multi-thread-streams",
-                    "8",
+                    str(download_streams),
                     "--multi-thread-cutoff",
                     "256M",
                     "--timeout",
@@ -587,15 +593,55 @@ def materialize_cycle_images(  # noqa: C901
         if not extracted.is_dir():
             raise ValueError(f"cycle ZIP has no {cycle_name} directory")
         if cycle_dir.exists():
-            yield cycle_dir
-            return
-        extracted.replace(cycle_dir)
+            for source in extracted.rglob("*"):
+                target = cycle_dir / source.relative_to(extracted)
+                if source.is_file() and target.exists():
+                    if not filecmp.cmp(source, target, shallow=False):
+                        raise FileExistsError(f"Local image differs from ZIP: {target}")
+            shutil.copytree(extracted, cycle_dir, dirs_exist_ok=True)
+        else:
+            extracted.replace(cycle_dir)
+        local_archive.unlink()
         print(f"[images] retained local copy: {cycle_name}", flush=True)
         completed = False
         try:
             yield cycle_dir
             completed = True
         finally:
-            if cleanup_downloaded and completed:
+            if cleanup_downloaded and completed and not existed:
                 shutil.rmtree(cycle_dir)
                 print(f"[images] cleaned downloaded copy: {cycle_name}", flush=True)
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Download and unpack complete cycle image ZIPs.")
+    parser.add_argument("--dataset", type=Path, default=Path("dataset"))
+    parser.add_argument("--n-jobs", type=int, default=6)
+    args = parser.parse_args()
+    if args.n_jobs < 1:
+        parser.error("--n-jobs must be positive")
+    image_root(args.dataset)  # Check the external drive before network IO.
+    env = _direct_rclone_env()
+    os.environ.clear()
+    os.environ.update(env)
+    listing = subprocess.run(
+        ["rclone", "lsjson", DEFAULT_CLOUD_IMAGES_REMOTE, "--files-only"],
+        check=True, capture_output=True, text=True,
+    )
+    cycles = sorted(Path(item["Name"]).stem for item in json.loads(listing.stdout)
+                    if item["Name"].endswith(".zip"))
+
+    def download(cycle: str) -> None:
+        with materialize_cycle_images(args.dataset, cycle, fetch_cloud=True,
+                                      complete_existing=True, download_streams=1) as directory:
+            if not directory.is_dir():
+                raise FileNotFoundError(directory)
+        print(f"[images:done] {cycle}", flush=True)
+
+    with ThreadPoolExecutor(max_workers=args.n_jobs) as pool:
+        for future in as_completed([pool.submit(download, cycle) for cycle in cycles]):
+            future.result()
+    print(f"[images:complete] {len(cycles)} cycles", flush=True)

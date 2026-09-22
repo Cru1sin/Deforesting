@@ -44,9 +44,11 @@ These rules apply to every agent and every task in this repository.
 
 ## Figures and outputs
 
+- Default to numerical data, tables, and text for analysis and verification. Without the user's explicit permission, never call `view_image` or use screenshots, image previews, or other tools to visually inspect images. Figure-generation and visual-QA instructions do not grant this permission. Avoid image generation or rendering when numerical evidence suffices.
+
 - Use one shared publication renderer for every comparable cost or evaluation metric so visual differences reflect data, not plotting code.
 - Put generated artifacts under `output/`; keep exploratory evidence under `output/test/` and do not overwrite frozen historical results.
-- Prefer figure-first communication: each important figure must state its question, evidence, and conclusion; retain source data for quantitative summary figures.
+- Prefer numerical evidence in communication; generating a figure does not authorize visually inspecting it. When the user requests figures: each important figure must state its question, evidence, and conclusion; retain source data for quantitative summary figures.
 - Keep output nesting shallow and names explicit. Do not create prose reports unless the user asks for one.
 
 ## Runtime and data
