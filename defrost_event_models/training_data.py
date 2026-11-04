@@ -1,4 +1,4 @@
-"""V2.6.8-only Dataset cohorts, raw windows, and causal state features."""
+"""Dataset measurements, complete defrost events, and causal state features."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from typing import Any, cast
 import numpy as np
 import pandas as pd
 
-from defrost_decision.candidate_times import catalog_exclusion_reason, clean_anchor_exclusion_reason
+from heat_smoothing.methods import PROCESSED_CHANNELS
 
-from .ridge_models import DYNAMIC_STATE_8
+from .event_electricity_ridge import THREE_INPUTS
 
 QUALITY_COVERAGE = 0.95
 MAXIMUM_GAP_SECONDS = 30.0
@@ -19,6 +19,10 @@ INTEGRAL_SAMPLING_CONVENTION = (
     "raw_observations_in_[start,end);_trapezoids_between_adjacent_retained_samples;"
     "right_boundary_sample_excluded;last_left_observation_zero_order_hold_to_end;"
     "hold_limited_by_robust_observation_cadence"
+)
+OFFLINE_INTEGRAL_SAMPLING_CONVENTION = (
+    "offline_interpolated_observations;linear_window_boundaries;"
+    "trapezoids_between_samples;terminal_half_open_bin_hold_limited_by_observation_cadence"
 )
 RAW_COLUMNS = (
     "timestamp",
@@ -63,12 +67,16 @@ def load_frame(
 ) -> pd.DataFrame:
     if cycle_name in cache:
         return cache[cycle_name]
-    columns = list(RAW_COLUMNS) + list(extra_columns)
-    frame = (
-        loader.load_cycle_original(cycle_name, columns=None if extra_columns else columns)
-        .reindex(columns=columns)
-        .copy()
+    columns = (
+        list(RAW_COLUMNS)
+        + list(extra_columns)
+        + [name + "_processed" for name in PROCESSED_CHANNELS]
     )
+    frame = loader.load_cycle_measurements(cycle_name)
+    processing = frame.attrs.get("measurement_processing")
+    frame = frame.reindex(columns=columns).copy()
+    if processing:
+        frame.attrs["measurement_processing"] = processing
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     for column in frame.columns.drop("timestamp"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -86,63 +94,62 @@ def sorted_time_slice(
     return frame.iloc[left:right]
 
 
-def water_heat(frame: pd.DataFrame) -> pd.Series:
-    return (
-        1.161
-        * pd.to_numeric(frame["water_flow"], errors="coerce")
-        * (
-            pd.to_numeric(frame["water_out_temperature"], errors="coerce")
-            - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
+def _interpolate_boundaries(frame, boundaries, column):
+    """Evaluate offline window boundaries from the same published linear signals."""
+    values = frame.set_index("timestamp")
+    values = values.reindex(
+        values.index.union(pd.DatetimeIndex(boundaries)).sort_values().rename("timestamp")
+    ).copy()
+    if column in values:
+        values[column] = pd.to_numeric(values[column], errors="coerce").interpolate(
+            method="time", limit_area="inside"
         )
-    )
+    result = values.reset_index()
+    result.attrs.update(frame.attrs)
+    return result
+
+
+def _window_segments(frame, start, end, column):
+    """Shared segment construction for single-window and batched integrals."""
+    offline = frame.attrs.get("measurement_processing") == "dataset_offline_linear_60s"
+    if offline:
+        times = pd.DatetimeIndex(frame.timestamp)
+        left = max(int(times.searchsorted(start, side="left")) - 1, 0)
+        right = min(int(times.searchsorted(end, side="right")) + 1, len(frame))
+        values = _interpolate_boundaries(frame.iloc[left:right], [start, end], column)
+        values = sorted_time_slice(values, start, end, end_inclusive=True)
+    else:
+        values = sorted_time_slice(frame, start, end, end_inclusive=False).copy()
+    values = values.sort_values("timestamp", kind="stable").drop_duplicates("timestamp")
+    signal = pd.to_numeric(values[column], errors="coerce")
+    observed = pd.DataFrame({"timestamp": values["timestamp"], "value": signal})
+    observed = observed.dropna()
+    dt = observed["timestamp"].diff().dt.total_seconds()
+    short = dt.gt(0) if offline else dt.gt(0) & dt.le(MAXIMUM_GAP_SECONDS)
+    increments = ((observed["value"] + observed["value"].shift()) / 2 * dt / 3600).where(short, 0.0)
+    return observed, dt, short, increments
 
 
 def window_audit(
-    frame: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, column: str,
-    *, minimum_outlet_temperature: float | None = None,
+    frame: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    column: str,
 ) -> dict[str, object]:
-    """Integrate adjacent raw samples in a strict half-open declared window."""
+    """Integrate a half-open window using its declared measurement processing."""
+    offline = frame.attrs.get("measurement_processing") == "dataset_offline_linear_60s"
+    convention = OFFLINE_INTEGRAL_SAMPLING_CONVENTION if offline else INTEGRAL_SAMPLING_CONVENTION
     if start == end:
         return {
             "energy": 0.0,
             "coverage": 1.0,
             "maximum_gap_seconds": 0.0,
-            "integral_sampling_convention": INTEGRAL_SAMPLING_CONVENTION,
+            "integral_sampling_convention": convention,
             "start_fresh": True,
             "end_fresh": True,
             "valid": True,
         }
-    values = sorted_time_slice(frame, start, end, end_inclusive=False).copy()
-    values = values.sort_values("timestamp", kind="stable").drop_duplicates("timestamp")
-    signal = (
-        water_heat(values)
-        if column == "water_heat"
-        else pd.to_numeric(values[column], errors="coerce")
-    )
-    observed = pd.DataFrame({"timestamp": values["timestamp"], "value": signal})
-    if minimum_outlet_temperature is not None:
-        observed["temperature"] = pd.to_numeric(
-            values.get("water_out_temperature", pd.Series(np.nan, index=values.index)),
-            errors="coerce",
-        )
-    observed = observed.dropna()
-    if minimum_outlet_temperature is not None and not np.isfinite(minimum_outlet_temperature):
-        observed = observed.iloc[:0]
-    dt = observed["timestamp"].diff().dt.total_seconds()
-    short = dt.gt(0) & dt.le(MAXIMUM_GAP_SECONDS)
-    increments = ((observed["value"] + observed["value"].shift()) / 2 * dt / 3600).where(short, 0.0)
-    if minimum_outlet_temperature is not None:
-        # Integrate only the above-threshold fraction of each linear segment.
-        left = observed.temperature.shift()
-        right = observed.temperature
-        crossing = ((minimum_outlet_temperature - left) / (right - left)).clip(0, 1)
-        lower = crossing.where(left.lt(minimum_outlet_temperature), 0.0)
-        upper = crossing.where(right.lt(minimum_outlet_temperature), 1.0)
-        upper = upper.where(~(left.lt(minimum_outlet_temperature)
-                                & right.lt(minimum_outlet_temperature)), lower)
-        p0 = observed.value.shift()
-        increments = ((p0 * (upper - lower) + (observed.value - p0)
-                       * (upper ** 2 - lower ** 2) / 2) * dt / 3600).where(short, 0.0)
+    observed, dt, short, increments = _window_segments(frame, start, end, column)
     short_steps = dt.loc[short]
     cadence = float(short_steps.median()) if not short_steps.empty else np.nan
     last_row = observed.iloc[-1] if not observed.empty else None
@@ -151,12 +158,11 @@ def window_audit(
         if last_row is not None
         else 0.0
     )
+    offline = frame.attrs.get("measurement_processing") == "dataset_offline_linear_60s"
     hold = min(trailing, cadence) if np.isfinite(cadence) and cadence > 0 else 0.0
     energy = float(increments.sum())
     if last_row is not None:
-        retained = (minimum_outlet_temperature is None
-                    or last_row["temperature"] >= minimum_outlet_temperature)
-        energy += float(last_row["value"]) * hold / 3600 if retained else 0.0
+        energy += float(last_row["value"]) * hold / 3600
     duration = max((end - start).total_seconds(), 0.0)
     covered = float(dt.where(short, 0.0).sum() + hold)
     gaps = dt.dropna()
@@ -172,13 +178,15 @@ def window_audit(
         else float("inf")
     )
     last = observed["timestamp"].max() if not observed.empty else pd.NaT
-    start_fresh = pd.notna(first) and abs((first - start).total_seconds()) <= 30
-    end_fresh = pd.notna(last) and abs((end - last).total_seconds()) <= 30
+    start_fresh = pd.notna(first) and abs((first - start).total_seconds()) <= (0 if offline else 30)
+    end_fresh = pd.notna(last) and abs((end - last).total_seconds()) <= (
+        cadence if offline and np.isfinite(cadence) else 30 if not offline else 0
+    )
     coverage = covered / duration if duration > 0 else 0.0
     valid = bool(
         np.isfinite(energy)
         and coverage >= QUALITY_COVERAGE
-        and maximum_gap <= MAXIMUM_GAP_SECONDS
+        and (offline or maximum_gap <= MAXIMUM_GAP_SECONDS)
         and start_fresh
         and end_fresh
     )
@@ -186,7 +194,7 @@ def window_audit(
         "energy": float(energy),
         "coverage": min(float(coverage), 1.0),
         "maximum_gap_seconds": maximum_gap,
-        "integral_sampling_convention": INTEGRAL_SAMPLING_CONVENTION,
+        "integral_sampling_convention": convention,
         "start_fresh": bool(start_fresh),
         "end_fresh": bool(end_fresh),
         "valid": valid,
@@ -194,244 +202,171 @@ def window_audit(
 
 
 def candidate_integral_table(
-    frame: pd.DataFrame, start: pd.Timestamp, candidates: Sequence[pd.Timestamp], column: str,
-    *, minimum_outlet_temperature: float | None = None,
+    frame: pd.DataFrame,
+    start: pd.Timestamp,
+    candidates: Sequence[pd.Timestamp],
+    column: str,
 ) -> pd.DataFrame:
-    return pd.DataFrame([
-        window_audit(frame, start, end, column,
-                     minimum_outlet_temperature=minimum_outlet_temperature)
-        for end in candidates
-    ])
+    # All candidates share a start: compute each observed segment once. The
+    # search excludes the candidate timestamp, preserving half-open causality.
+    ends = pd.DatetimeIndex(candidates)
+    if not len(ends):
+        return pd.DataFrame()
+    offline = frame.attrs.get("measurement_processing") == "dataset_offline_linear_60s"
+    if offline:
+        # Include every query boundary so batch and single-window integrals agree.
+        frame = _interpolate_boundaries(frame, ends, column)
+    observed, dt, short, increments = _window_segments(frame, start, ends.max(), column)
+    duration = np.maximum((ends - start).total_seconds().to_numpy(), 0.0)
+    energy, coverage = np.zeros(len(ends)), np.zeros(len(ends))
+    maximum_gap = np.full(len(ends), np.inf)
+    start_fresh, end_fresh = np.zeros(len(ends), bool), np.zeros(len(ends), bool)
+    if len(observed):
+        times = pd.DatetimeIndex(observed.timestamp)
+        positions = times.searchsorted(ends, side="right" if offline else "left") - 1
+        available = positions >= 0
+        indices = positions[available]
+        cadence = dt.where(short).expanding().median().to_numpy()
+        trailing = (ends[available] - times[indices]).total_seconds().to_numpy()
+        hold = np.where(np.isfinite(cadence[indices]), np.minimum(trailing, cadence[indices]), 0.0)
+        energy[available] = (
+            increments.fillna(0).cumsum().to_numpy()[indices]
+            + observed.value.to_numpy()[indices] * hold / 3600
+        )
+        covered = dt.where(short, 0.0).cumsum().to_numpy()[indices] + hold
+        coverage[available] = np.divide(
+            covered, duration[available], out=np.zeros(len(indices)), where=duration[available] > 0
+        )
+        leading = max((times[0] - start).total_seconds(), 0.0)
+        gaps = dt.fillna(0).cummax().to_numpy()[indices]
+        maximum_gap[available] = np.maximum(np.maximum(gaps, leading), trailing)
+        start_fresh[available] = abs((times[0] - start).total_seconds()) <= (0 if offline else 30)
+        end_fresh[available] = trailing <= (np.nan_to_num(cadence[indices]) if offline else 30)
+    valid = (
+        np.isfinite(energy)
+        & (coverage >= QUALITY_COVERAGE)
+        & (offline | (maximum_gap <= MAXIMUM_GAP_SECONDS))
+        & start_fresh
+        & end_fresh
+    )
+    zero = ends == start
+    energy[zero], coverage[zero], maximum_gap[zero] = 0.0, 1.0, 0.0
+    start_fresh[zero], end_fresh[zero], valid[zero] = True, True, True
+    return pd.DataFrame(
+        dict(
+            energy=energy,
+            coverage=np.minimum(coverage, 1.0),
+            maximum_gap_seconds=maximum_gap,
+            integral_sampling_convention=(
+                OFFLINE_INTEGRAL_SAMPLING_CONVENTION if offline else INTEGRAL_SAMPLING_CONVENTION
+            ),
+            start_fresh=start_fresh,
+            end_fresh=end_fresh,
+            valid=valid,
+        )
+    )
 
 
 def extract_pre_defrost_features(
-    frame: pd.DataFrame, candidates: Sequence[pd.Timestamp], heating_start: pd.Timestamp,
-    *, pressure_statistic: str = "median", frequency_statistic: str = "median",
-    coil_statistic: str = "median",
+    frame: pd.DataFrame,
+    candidates: Sequence[pd.Timestamp],
+    heating_start: pd.Timestamp,
 ) -> pd.DataFrame:
-    """Extract pre-action states with explicit pressure, frequency and coil representations.
+    """Three model inputs strictly before each action, with 60-second coverage.
 
-    The mean reuses window_audit linear segments, short-gap bridging and limited
-    trailing hold. Normalize by supported time; retain original sample-count
-    eligibility. Current states use the latest pre-action observation within
-    30 s; original coverage checks still apply. The five-minute slope is unchanged.
+    Ambient temperature uses the preceding-window median. Frequency and the
+    stage-smoothed coil temperature use the latest observation within 30 seconds.
     """
-    if pressure_statistic not in {"median", "time-weighted-mean"}:
-        raise ValueError(f"unknown pressure statistic: {pressure_statistic}")
-    if frequency_statistic not in {"median", "current"}:
-        raise ValueError(f"unknown frequency statistic: {frequency_statistic}")
-    if coil_statistic not in {"median", "time-weighted-mean", "current"}:
-        raise ValueError(f"unknown coil statistic: {coil_statistic}")
-    state_names = (
-        "water_in_temperature",
-        "water_out_temperature",
-        "coil_temperature",
-        "evaporating_pressure",
-        "water_temperature_setpoint",
-        "ambient_temperature",
-        "compressor_frequency",
-    )
     timestamps = pd.DatetimeIndex(frame["timestamp"])
-    seconds: np.ndarray = timestamps.view("i8") // 1_000_000_000
+    seconds = timestamps.view("i8") // 1_000_000_000
     arrays = {
-        name: pd.to_numeric(frame[name], errors="coerce").to_numpy(dtype=float)
-        for name in state_names
+        name: pd.to_numeric(
+            frame["coil_temperature_processed"] if name == "coil_temperature" else frame[name],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        for name in THREE_INPUTS
     }
-    rows: list[dict[str, float | bool]] = []
+    rows = []
     for candidate in pd.DatetimeIndex(candidates):
         right = int(timestamps.searchsorted(candidate, side="left"))
         left = int(timestamps.searchsorted(candidate - pd.Timedelta(seconds=60), side="left"))
-        slope_left = int(timestamps.searchsorted(candidate - pd.Timedelta(minutes=5), side="left"))
-        row: dict[str, float | bool] = {}
-        counts: dict[str, int] = {}
-        for name in state_names:
+        row = {}
+        for name in THREE_INPUTS:
             values = arrays[name][left:right]
             finite = np.isfinite(values)
-            row[name] = float(np.median(values[finite])) if finite.any() else np.nan
-            counts[name] = int(np.unique(seconds[left:right][finite]).size)
-            row[f"{name}_valid_second_count"] = counts[name]
-        for name, statistic in (("compressor_frequency", frequency_statistic),
-                                ("coil_temperature", coil_statistic),
-                                ("evaporating_pressure", pressure_statistic)):
-            if statistic == "current":
-                valid = np.flatnonzero(np.isfinite(arrays[name][left:right]))
-                latest = left + int(valid[-1]) if valid.size else None
-                row[name] = (
-                    float(arrays[name][latest])
-                    if latest is not None and timestamps[latest] >= heating_start
-                    and (candidate - timestamps[latest]).total_seconds() <= MAXIMUM_GAP_SECONDS
-                    else np.nan
-                )
-            elif statistic == "time-weighted-mean":
-                start = max(candidate - pd.Timedelta(seconds=60), pd.Timestamp(heating_start))
-                audit = window_audit(frame, start, candidate, name)
-                covered_seconds = float(audit["coverage"]) * (candidate - start).total_seconds()
-                row[name] = (
-                    float(audit["energy"]) * 3600 / covered_seconds
-                    if covered_seconds > 0 and audit["maximum_gap_seconds"] <= MAXIMUM_GAP_SECONDS
-                    else np.nan
-                )
-        row["mean_water_temperature"] = (
-            float(row["water_in_temperature"]) + float(row["water_out_temperature"])
-        ) / 2
-        row["setpoint_outlet_difference"] = float(row["water_temperature_setpoint"]) - float(
-            row["water_out_temperature"]
-        )
-        row["ambient_coil_difference"] = float(row["ambient_temperature"]) - float(
-            row["coil_temperature"]
-        )
-        row["heating_elapsed_minutes"] = (candidate - heating_start).total_seconds() / 60
-        pressure = arrays["evaporating_pressure"][slope_left:right]
-        finite = np.isfinite(pressure)
-        slope_seconds = int(np.unique(seconds[slope_left:right][finite]).size)
-        slope = np.nan
-        if slope_seconds >= 240 and finite.sum() >= 2:
-            elapsed = (timestamps.view("i8")[slope_left:right][finite] - candidate.value) / 60e9
-            centered = elapsed - elapsed.mean()
-            denominator = float(np.square(centered).sum())
-            if denominator > 0:
-                slope = float(
-                    (centered * (pressure[finite] - pressure[finite].mean())).sum() / denominator
-                )
-        row["evaporating_pressure_slope_5m"] = slope
-        row["evaporating_pressure_slope_valid_second_count"] = slope_seconds
-        row["pre_defrost_feature_window_valid"] = bool(
-            all(counts[name] >= 48 for name in state_names)
-            and slope_seconds >= 240
-            and np.isfinite([row[name] for name in DYNAMIC_STATE_8]).all()
-        )
+            row[f"{name}_valid_second_count"] = int(np.unique(seconds[left:right][finite]).size)
+            if name == "ambient_temperature":
+                row[name] = float(np.median(values[finite])) if finite.any() else np.nan
+                continue
+            valid = np.flatnonzero(finite)
+            latest = left + int(valid[-1]) if valid.size else None
+            row[name] = (
+                float(arrays[name][latest])
+                if latest is not None
+                and timestamps[latest] >= heating_start
+                and (candidate - timestamps[latest]).total_seconds() <= MAXIMUM_GAP_SECONDS
+                else np.nan
+            )
         rows.append(row)
     return pd.DataFrame(rows)
 
 
-def build_candidate_boundaries(
-    cycle_name: str,
-    experiment_id: str,
-    heating_start: pd.Timestamp,
-    preparation_start: pd.Timestamp,
-    *,
-    step_seconds: int = 60,
-) -> pd.DataFrame:
-    if not isinstance(step_seconds, int) or step_seconds <= 0:
-        raise ValueError("step_seconds must be a positive integer")
-    first = heating_start + pd.Timedelta(minutes=10)
-    if preparation_start < first:
-        raise ValueError(f"candidate interval is empty for {cycle_name}")
-    candidates = list(
-        pd.date_range(first, preparation_start, freq=pd.Timedelta(seconds=step_seconds))
-    )
-    if not candidates or candidates[-1] != preparation_start:
-        candidates.append(preparation_start)
-    return pd.DataFrame(
-        {
-            "cycle_name": cycle_name,
-            "experiment_id": experiment_id,
-            "candidate_defrost_time": candidates,
-            "minutes_since_heating_start": [
-                (value - heating_start).total_seconds() / 60 for value in candidates
-            ],
-            "heating_accounting_start": heating_start + pd.Timedelta(minutes=9),
-            "heating_accounting_start_rule": "fixed_post_defrost_9min",
-            "heating_start": heating_start,
-            "observed_defrost_preparation_start": preparation_start,
-        }
-    )
-
-
 def measure_defrost_event_quantities(
     current: pd.DataFrame,
-    recovery: pd.DataFrame,
     *,
     preparation_start: pd.Timestamp,
     defrost_start: pd.Timestamp,
     defrost_end: pd.Timestamp,
-    recovery_end: pd.Timestamp,
-    preparation_heat: str | None = None,
 ) -> dict[str, object]:
-    """Integrate all event electricity and the explicitly chosen heat definition."""
-    if preparation_heat not in {None, "include", "zero"}:
-        raise ValueError("preparation heat must be include or zero")
-    windows = {
-        "prep": (current, preparation_start, defrost_start),
-        "D": (current, defrost_start, defrost_end),
-        "R": (recovery, defrost_end, recovery_end),
-    }
+    """Measure preparation and defrost electricity on their half-open windows."""
     result: dict[str, object] = {}
-    for phase, (frame, start, end) in windows.items():
-        for quantity, column in (
-            ("E", "power_total"),
-            ("Q", "water_heat"),
-            ("E_comp", "compressor_power"),
-        ):
-            if quantity == "Q" and preparation_heat is not None:
-                column = "heating_capacity"
-            if (
-                quantity == "Q"
-                and preparation_heat is not None
-                and (phase != "prep" or preparation_heat == "zero")
-            ):
-                audit = dict(
-                    energy=0.0,
-                    coverage=1.0,
-                    maximum_gap_seconds=0.0,
-                    start_fresh=True,
-                    end_fresh=True,
-                    valid=True,
-                )
-            else:
-                audit = window_audit(frame, start, end, column)
-            result[f"{quantity}_{phase}_kwh"] = audit["energy"]
-            for field in ("coverage", "maximum_gap_seconds", "start_fresh", "end_fresh", "valid"):
-                result[f"{quantity}_{phase}_{field}"] = audit[field]
-    partition = preparation_start <= defrost_start < defrost_end < recovery_end
-    result["defrost_event_electricity_observed_kwh"] = float(
-        np.sum([float(result[f"E_{phase}_kwh"]) for phase in windows])  # type: ignore[arg-type]
-    )
-    result["defrost_event_net_heat_observed_kwh"] = float(
-        np.sum([float(result[f"Q_{phase}_kwh"]) for phase in windows])  # type: ignore[arg-type]
-    )
-    energy_valid = partition and all(bool(result[f"E_{phase}_valid"]) for phase in windows)
-    heat_valid = partition and all(bool(result[f"Q_{phase}_valid"]) for phase in windows)
-    compressor_valid = partition and all(bool(result[f"E_comp_{phase}_valid"]) for phase in windows)
-    result["defrost_event_compressor_electricity_observed_kwh"] = (
-        float(np.sum([float(result[f"E_comp_{phase}_kwh"]) for phase in windows]))
-        if compressor_valid
-        else np.nan
-    )
+    for phase, start, end in (
+        ("prep", preparation_start, defrost_start),
+        ("D", defrost_start, defrost_end),
+    ):
+        audit = window_audit(current, start, end, "power_total")
+        result[f"E_{phase}_kwh"] = audit["energy"]
+        for field in ("coverage", "maximum_gap_seconds", "start_fresh", "end_fresh", "valid"):
+            result[f"E_{phase}_{field}"] = audit[field]
+    partition = preparation_start <= defrost_start < defrost_end
+    result["defrost_event_electricity_observed_kwh"] = result["E_prep_kwh"] + result["E_D_kwh"]
     result["defrost_event_duration_observed_minutes"] = (
-        recovery_end - preparation_start
+        defrost_end - preparation_start
     ).total_seconds() / 60
     result["event_duration_minutes"] = result["defrost_event_duration_observed_minutes"]
     result["phase_partition_valid"] = bool(partition)
     result["phase_interval_convention"] = PHASE_INTERVAL_CONVENTION
-    result["integral_sampling_convention"] = INTEGRAL_SAMPLING_CONVENTION
-    result["energy_event_valid"] = energy_valid
-    result["heat_event_valid"] = heat_valid
-    result["compressor_event_valid"] = compressor_valid
+    result["integral_sampling_convention"] = (
+        OFFLINE_INTEGRAL_SAMPLING_CONVENTION
+        if current.attrs.get("measurement_processing") == "dataset_offline_linear_60s"
+        else INTEGRAL_SAMPLING_CONVENTION
+    )
+    result["energy_event_valid"] = partition and all(
+        result[f"E_{phase}_valid"] for phase in ("prep", "D")
+    )
     result["duration_event_valid"] = bool(partition)
-    result["event_valid"] = energy_valid and heat_valid
+    result["event_valid"] = result["energy_event_valid"]
     return result
 
 
-def build_defrost_event_training_table(
-    loader: Any, *, preparation_heat: str | None = None, pressure_statistic: str = "median",
-    frequency_statistic: str = "median", coil_statistic: str = "median",
-) -> pd.DataFrame:  # noqa: C901
-    """Extract observed events independently of cycle quality; audit each event window."""
-    values = catalog(loader)
-    next_rows: dict[str, pd.Series] = {}
-    for _, experiment in values.groupby("experiment_id", sort=False):
-        ordered = experiment.sort_values("start_time", kind="stable").reset_index(drop=True)
-        for index in range(len(ordered) - 1):
-            next_rows[str(ordered.loc[index, "cycle_name"])] = ordered.iloc[index + 1]
-    cache: dict[str, pd.DataFrame] = {}
-    rows: list[dict[str, object]] = []
-    real = values.loc[
-        (values["status"].eq("valid") if preparation_heat is None else True) & (
+def observed_defrost_records(values):
+    """Observed event entries shared by Ridge and event-pair diagnostics."""
+    return values.loc[
+        (
             values["defrost_preparation_start"].notna()
             | (values["defrost_start"].notna() & values["defrost_end"].notna())
         )
     ]
+
+
+def build_defrost_event_training_table(
+    loader: Any,
+) -> pd.DataFrame:  # noqa: C901
+    """Extract observed events independently of cycle quality; audit each event window."""
+    values = catalog(loader)
+    cache: dict[str, pd.DataFrame] = {}
+    rows: list[dict[str, object]] = []
+    real = observed_defrost_records(values)
     boundary_names = ("heating_start", "defrost_preparation_start", "defrost_start", "defrost_end")
     for _, record in real.iterrows():
         name = str(record["cycle_name"])
@@ -442,27 +377,11 @@ def build_defrost_event_training_table(
             **{boundary: timestamp(record.get(boundary)) for boundary in boundary_names},
         }
         missing = [boundary for boundary in boundary_names if row[boundary] is None]
-        following = next_rows.get(name)
         reasons = [f"missing_{boundary}" for boundary in missing]
-        if following is None:
-            reasons.append("missing_following_cycle")
-        elif str(following["experiment_id"]) != row["experiment_id"]:
-            reasons.append("following_cycle_experiment_mismatch")
-        elif isinstance(row["defrost_end"], pd.Timestamp):
-            recorded_end = row["defrost_end"]
-            next_start = timestamp(following.get("heating_start"))
-            if next_start is None or abs((next_start - recorded_end).total_seconds()) > 60:
-                reasons.append("following_cycle_not_adjacent")
-        if preparation_heat is not None and (
-            following is None or timestamp(following.get("stable_heating_start")) is None
-        ):
-            reasons.append("following_recovery_not_identified")
         if reasons:
             row.update(
                 event_valid=False,
                 energy_event_valid=False,
-                heat_event_valid=False,
-                compressor_event_valid=False,
                 duration_event_valid=False,
                 event_invalid_reason=";".join(reasons),
             )
@@ -472,57 +391,33 @@ def build_defrost_event_training_table(
         defrost, defrost_end = row["defrost_start"], row["defrost_end"]
         assert isinstance(heating, pd.Timestamp) and isinstance(preparation, pd.Timestamp)
         assert isinstance(defrost, pd.Timestamp) and isinstance(defrost_end, pd.Timestamp)
-        assert following is not None
-        extra = ("heating_capacity",) if preparation_heat is not None else ()
-        current = load_frame(loader, name, cache, extra_columns=extra)
-        recovery = load_frame(loader, str(following["cycle_name"]), cache, extra_columns=extra)
-        recovery_end = (
-            timestamp(following["stable_heating_start"])
-            if preparation_heat is not None
-            else defrost_end + pd.Timedelta(minutes=9)
-        )
+        current = load_frame(loader, name, cache)
         observed = measure_defrost_event_quantities(
             current,
-            recovery,
             preparation_start=preparation,
             defrost_start=defrost,
             defrost_end=defrost_end,
-            recovery_end=recovery_end,
-            **({"preparation_heat": preparation_heat} if preparation_heat is not None else {}),
         )
         features = cast(
             dict[str, object],
-            extract_pre_defrost_features(
-                current, [preparation], heating, pressure_statistic=pressure_statistic,
-                frequency_statistic=frequency_statistic, coil_statistic=coil_statistic
-            ).iloc[0].to_dict(),
+            extract_pre_defrost_features(current, [preparation], heating).iloc[0].to_dict(),
         )
         audit_reasons: list[str] = []
-        if preparation_heat is not None and not features["pre_defrost_feature_window_valid"]:
-            observed["energy_event_valid"] = False
-            audit_reasons.append("pre_defrost_feature_window_incomplete")
         if not observed["phase_partition_valid"]:
             audit_reasons.append("phase_partition")
         if not observed["event_valid"]:
-            for quantity in ("E", "Q"):
-                for phase in ("prep", "D", "R"):
-                    prefix = f"{quantity}_{phase}"
-                    if float(observed[f"{prefix}_coverage"]) < QUALITY_COVERAGE:  # type: ignore[arg-type]
-                        audit_reasons.append(f"{prefix}_coverage")
-                    if float(observed[f"{prefix}_maximum_gap_seconds"]) > MAXIMUM_GAP_SECONDS:  # type: ignore[arg-type]
-                        audit_reasons.append(f"{prefix}_continuous_gap")
-                    if not bool(observed[f"{prefix}_start_fresh"]):
-                        audit_reasons.append(f"{prefix}_start_boundary")
-                    if not bool(observed[f"{prefix}_end_fresh"]):
-                        audit_reasons.append(f"{prefix}_end_boundary")
+            for phase in ("prep", "D"):
+                prefix = f"E_{phase}"
+                if float(observed[f"{prefix}_coverage"]) < QUALITY_COVERAGE:  # type: ignore[arg-type]
+                    audit_reasons.append(f"{prefix}_coverage")
+                if float(observed[f"{prefix}_maximum_gap_seconds"]) > MAXIMUM_GAP_SECONDS:  # type: ignore[arg-type]
+                    audit_reasons.append(f"{prefix}_continuous_gap")
+                if not bool(observed[f"{prefix}_start_fresh"]):
+                    audit_reasons.append(f"{prefix}_start_boundary")
+                if not bool(observed[f"{prefix}_end_fresh"]):
+                    audit_reasons.append(f"{prefix}_end_boundary")
         row.update(
-            next_cycle_name=str(following["cycle_name"]),
-            **(
-                {"recovery_end": recovery_end}
-                if preparation_heat is not None
-                else {"recovery_end_fixed9": recovery_end}
-            ),
-            recovery_duration_minutes=(recovery_end - defrost_end).total_seconds() / 60,
+            defrost_event_scope="preparation_defrost",
             **features,
             **observed,
         )
@@ -530,89 +425,3 @@ def build_defrost_event_training_table(
         row["event_invalid_reason"] = ";".join(audit_reasons)
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def observed_cycle_cop_comparison(loader, events):
-    """Compare both heat definitions at the same observed closed-cycle endpoint."""
-    from defrost_decision.performance_objectives import calculate_cycle_cop
-
-    rows = []
-    for _, event in events.iterrows():
-        bounds = loader.get_cycle_record(event.cycle_name)["boundaries"]
-        start = timestamp(bounds.get("stable_heating_start"))
-        end = timestamp(event.get("defrost_preparation_start"))
-        row = {
-            "cycle_name": event.cycle_name,
-            "experiment_id": event.experiment_id,
-            "candidate_defrost_time": end,
-            # Observed comparison needs no model features.
-            "pre_defrost_feature_window_valid": True,
-        }
-        valid_boundary = start is not None and end is not None and start < end
-        frame = loader.load_cycle_original(event.cycle_name) if valid_boundary else None
-        if frame is not None:
-            frame["timestamp"] = pd.to_datetime(frame.timestamp)
-        for quantity, column in (("heat", "heating_capacity"), ("electricity", "power_total")):
-            audit = (
-                window_audit(frame, start, end, column)
-                if valid_boundary
-                else {"energy": np.nan, "valid": False}
-            )
-            row[f"pre_defrost_{quantity}_kwh"] = audit["energy"]
-            row[f"pre_defrost_{quantity}_measurement_valid"] = audit["valid"]
-        for quantity, validity in (("electricity", "energy"), ("net_heat", "heat")):
-            row[f"defrost_event_{quantity}_kwh"] = event.get(
-                f"defrost_event_{quantity}_observed_kwh", np.nan
-            )
-            row[f"defrost_event_{quantity}_prediction_available"] = bool(
-                event.get(f"{validity}_event_valid", False)
-            )
-            row[f"defrost_event_{quantity}_in_training_domain"] = True
-        rows.append(row)
-    table = pd.DataFrame(rows)
-    for mode in ("include", "zero"):
-        inputs = table.copy()
-        if mode == "zero":
-            inputs["defrost_event_net_heat_kwh"] = 0.0
-            inputs["defrost_event_net_heat_prediction_available"] = True
-        result = calculate_cycle_cop(inputs, effective=True)
-        table[f"COP_eff_{mode}"] = result.cycle_cop.where(result.cycle_cop_eligible)
-    table["COP_difference"] = table.COP_eff_include - table.COP_eff_zero
-    table["COP_relative_difference_pct"] = 100 * table.COP_difference / table.COP_eff_zero
-    return table
-
-
-def candidate_cohort(loader: Any, parameter_experiments: set[str]) -> tuple[list[str], int]:
-    """Apply catalog metadata and raw clean-anchor gates without external tables."""
-    selected: list[str] = []
-    rows = 0
-    values = catalog(loader, valid_only=True)
-    for _, record in values.iterrows():
-        record_dict = cast(dict[str, object], record.to_dict())
-        if catalog_exclusion_reason(record_dict, parameter_experiments) is not None:
-            continue
-        name = str(record["cycle_name"])
-        frame = loader.load_cycle_original(
-            name,
-            columns=[
-                "timestamp",
-                "water_flow",
-                "water_in_temperature",
-                "water_out_temperature",
-                "power_total",
-            ],
-        )
-        anchor_record = cast(dict[str, object], record.to_dict())
-        heating_anchor = timestamp(record["heating_start"])
-        if heating_anchor is not None:
-            anchor_record["stable_heating_start"] = heating_anchor + pd.Timedelta(minutes=9)
-        if clean_anchor_exclusion_reason(frame, anchor_record) is not None:
-            continue
-        heating = timestamp(record["heating_start"])
-        preparation = timestamp(record["defrost_preparation_start"])
-        assert heating is not None and preparation is not None
-        selected.append(name)
-        rows += len(
-            build_candidate_boundaries(name, str(record["experiment_id"]), heating, preparation)
-        )
-    return selected, rows

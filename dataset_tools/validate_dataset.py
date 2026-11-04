@@ -10,7 +10,8 @@ from .cycle_metadata import image_root
 from .load_dataset import DatasetLoader
 
 
-def validate_dataset(dataset_dir: Path) -> None:
+def validate_dataset(dataset_dir: Path, *, check_images: bool = True) -> None:
+    """Validate measurements; dataset builders also check their image index."""
     loader = DatasetLoader(dataset_dir)
     cycles = loader.list_cycles()
     _validate_statuses(cycles)
@@ -19,15 +20,16 @@ def validate_dataset(dataset_dir: Path) -> None:
         raise ValueError("channel_registry columns are missing")
     expected = ["cycle_name", "cycle_uid", *map(str, columns)]
 
-    metadata = loader.load_image_metadata()
-    if not metadata.empty and not image_root(dataset_dir).is_dir():
-        raise ValueError("configured images_root does not exist")
-    keys = ["cycle_name", "camera_role", "file_name"]
-    missing = [name for name in keys if name not in metadata]
-    if missing:
-        raise ValueError(f"image metadata is missing connection keys: {missing}")
-    if metadata.duplicated(keys).any():
-        raise ValueError("image metadata contains duplicate connection keys")
+    if check_images:
+        metadata = loader.load_image_metadata()
+        if not metadata.empty and not image_root(dataset_dir).is_dir():
+            raise ValueError("configured images_root does not exist")
+        keys = ["cycle_name", "camera_role", "file_name"]
+        missing = [name for name in keys if name not in metadata]
+        if missing:
+            raise ValueError(f"image metadata is missing connection keys: {missing}")
+        if metadata.duplicated(keys).any():
+            raise ValueError("image metadata contains duplicate connection keys")
 
     for cycle_name in cycles["cycle_name"].astype(str):
         processed = loader.load_cycle(cycle_name)

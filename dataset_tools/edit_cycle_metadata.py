@@ -7,7 +7,12 @@ from typing import Any
 
 import pandas as pd
 
-from .builder.detect_cycles import find_defrost_preparation_start, resolve_stable_heating_start
+from .builder.detect_cycles import (
+    RECOVERY_RULES,
+    find_defrost_preparation_start,
+    recovery_control_trace,
+    resolve_stable_heating_start,
+)
 
 
 def apply_recovery(
@@ -21,7 +26,7 @@ def apply_recovery(
     seconds: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Apply a recovery rule to in-memory Dataset frames."""
-    if mode not in {"seconds", "ts-minus"}:
+    if mode not in {"seconds", "ts-minus", *RECOVERY_RULES}:
         raise ValueError(f"unsupported recovery edit mode: {mode}")
     if mode == "seconds" and (seconds is None or seconds < 0):
         raise ValueError("recovery seconds must be a nonnegative integer")
@@ -29,12 +34,8 @@ def apply_recovery(
     original_result = original.copy()
     processed_result = processed.copy()
     metadata_result = image_metadata.copy()
-    original_result["timestamp"] = pd.to_datetime(
-        original_result["timestamp"], errors="raise"
-    )
-    processed_result["timestamp"] = pd.to_datetime(
-        processed_result["timestamp"], errors="raise"
-    )
+    original_result["timestamp"] = pd.to_datetime(original_result["timestamp"], errors="raise")
+    processed_result["timestamp"] = pd.to_datetime(processed_result["timestamp"], errors="raise")
 
     boundaries = record.setdefault("boundaries", {})
     if not isinstance(boundaries, dict):
@@ -56,7 +57,7 @@ def apply_recovery(
             mode="seconds",
             seconds=int(seconds or 0),
         )
-    else:
+    elif mode == "ts-minus":
         fallback_seconds = (
             recovery_settings.get("fallback_seconds", 180)
             if isinstance(recovery_settings, Mapping)
@@ -67,19 +68,26 @@ def apply_recovery(
             heating_start,
             defrost_start,
             {"stable_heating_seconds": fallback_seconds},
+            mode="ts-minus",
+        )
+    else:
+        times = original_result.timestamp
+        heating = original_result.loc[times.ge(heating_start)]
+        end = preparation_start or defrost_start
+        if end is not None:
+            heating = heating.loc[heating.timestamp.lt(end)]
+        trace = recovery_control_trace(heating, {"recovery_rule": mode})
+        confirmed = trace.loc[trace.normal_heating, "timestamp"]
+        stable = confirmed.iloc[0] if len(confirmed) else None
+        record["recovery_status"] = (
+            trace.recovery_status.iloc[-1] if len(trace) else "no_heating_observations"
         )
 
     boundaries["heating_start"] = _iso(heating_start)
     boundaries["stable_heating_start"] = _iso(stable)
-    _rewrite_stage_column(
-        original_result, stable, preparation_start, defrost_start, defrost_end
-    )
-    _rewrite_stage_column(
-        processed_result, stable, preparation_start, defrost_start, defrost_end
-    )
-    processed_result = _recompute_stage_dependent_fields(
-        processed_result, record, registry
-    )
+    _rewrite_stage_column(original_result, stable, preparation_start, defrost_start, defrost_end)
+    _rewrite_stage_column(processed_result, stable, preparation_start, defrost_start, defrost_end)
+    processed_result = _recompute_stage_dependent_fields(processed_result, record, registry)
     metadata_result = _update_image_stages(metadata_result, record)
 
     registry["recovery_edit"] = {
@@ -127,15 +135,9 @@ def apply_defrost_preparation(
         },
     )
     boundaries["defrost_preparation_start"] = _iso(preparation_start)
-    _rewrite_stage_column(
-        original_result, stable, preparation_start, defrost_start, defrost_end
-    )
-    _rewrite_stage_column(
-        processed_result, stable, preparation_start, defrost_start, defrost_end
-    )
-    processed_result = _recompute_stage_dependent_fields(
-        processed_result, record, registry
-    )
+    _rewrite_stage_column(original_result, stable, preparation_start, defrost_start, defrost_end)
+    _rewrite_stage_column(processed_result, stable, preparation_start, defrost_start, defrost_end)
+    processed_result = _recompute_stage_dependent_fields(processed_result, record, registry)
     metadata_result = _update_image_stages(metadata_result, record)
     registry["defrost_preparation"] = {
         "setpoint_drop_hz": float(setpoint_drop_hz),
@@ -164,10 +166,7 @@ def apply_baseline(
         for name, settings in channels.items()
         if isinstance(settings, Mapping)
         and str(settings.get("kind")) in {"continuous", "step", "derived"}
-        and (
-            bool(settings.get("analysis_candidate"))
-            or settings.get("role") == "performance"
-        )
+        and (bool(settings.get("analysis_candidate")) or settings.get("role") == "performance")
     ]
 
     result = processed.copy()
@@ -226,9 +225,9 @@ def _rewrite_stage_column(
     elif defrost_start is not None:
         stages.loc[before_defrost] = "recovery"
     if preparation_start is not None and defrost_start is not None:
-        stages.loc[
-            timestamps.ge(preparation_start) & timestamps.lt(defrost_start)
-        ] = "defrost_preparation"
+        stages.loc[timestamps.ge(preparation_start) & timestamps.lt(defrost_start)] = (
+            "defrost_preparation"
+        )
     if defrost_start is not None:
         active = timestamps.ge(defrost_start)
         if defrost_end is not None:
@@ -252,9 +251,7 @@ def _recompute_stage_dependent_fields(
             {
                 "experiment_id": record.get("experiment_id"),
                 "cycle_id": record.get("cycle_id"),
-                "stable_heating_start": _timestamp(
-                    boundaries.get("stable_heating_start")
-                ),
+                "stable_heating_start": _timestamp(boundaries.get("stable_heating_start")),
                 "defrost_preparation_start": _timestamp(
                     boundaries.get("defrost_preparation_start")
                 ),
@@ -262,9 +259,11 @@ def _recompute_stage_dependent_fields(
             }
         ]
     )
-    return recompute_cycle_coordinates(processed, summary).sort_values(
-        ["experiment_id", "timestamp"], kind="stable"
-    ).reset_index(drop=True)
+    return (
+        recompute_cycle_coordinates(processed, summary)
+        .sort_values(["experiment_id", "timestamp"], kind="stable")
+        .reset_index(drop=True)
+    )
 
 
 def _update_image_stages(
@@ -308,9 +307,3 @@ def _timestamp(value: Any) -> pd.Timestamp | None:
 
 def _iso(value: pd.Timestamp | None) -> str | None:
     return None if value is None else pd.Timestamp(value).isoformat()
-
-
-def _within_data(value: pd.Timestamp | None, frame: pd.DataFrame) -> pd.Timestamp | None:
-    if value is None or frame.empty:
-        return None
-    return value if pd.Timestamp(frame["timestamp"].max()) >= value else None

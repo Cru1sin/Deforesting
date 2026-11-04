@@ -3,17 +3,19 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 
 def test_validate_dataset_help_exposes_only_read_only_validation(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
     result = subprocess.run(
-        ["uv", "run", "python", "validate_dataset.py", "--help"],
+        [sys.executable, "validate_dataset.py", "--help"],
         check=True,
         capture_output=True,
         env=environment,
@@ -42,7 +44,7 @@ def test_validate_dataset_defaults_to_validate_local_dataset() -> None:
 
     arguments = build_parser().parse_args([])
 
-    assert arguments.dataset == Path("dataset")
+    assert arguments.dataset == Path(__file__).resolve().parents[1] / "dataset"
 
 
 def test_quality_tools_target_new_workspace_entries() -> None:
@@ -71,12 +73,14 @@ def test_validate_dispatches_to_read_only_domain_functions(
         def load_image_metadata(self) -> pd.DataFrame:
             return pd.DataFrame(index=range(3))
 
-    monkeypatch.setattr(validate_dataset, "validate_dataset", validated.append)
+    monkeypatch.setattr(
+        validate_dataset, "validate_dataset", lambda path, **kw: validated.append((path, kw))
+    )
     monkeypatch.setattr(validate_dataset, "DatasetLoader", Loader)
 
     assert validate_dataset.main(["--dataset", str(tmp_path)]) == 0
-    assert validated == [tmp_path]
-    assert capsys.readouterr().out == "dataset valid: 2 cycles, 3 images\n"
+    assert validated == [(tmp_path, {"check_images": False})]
+    assert capsys.readouterr().out == "dataset valid: 2 cycles; images checked: False\n"
 
 
 def test_advanced_dataset_maintenance_keeps_edit_options(tmp_path: Path, monkeypatch) -> None:
@@ -111,6 +115,7 @@ def test_advanced_dataset_maintenance_keeps_edit_options(tmp_path: Path, monkeyp
                 "recovery_end_by": None,
                 "defrost_preparation": False,
                 "render_rgb_panels": False,
+                "render_figures": True,
             },
         )
     ]
@@ -156,7 +161,7 @@ def test_render_without_cycle_targets_all_default_dataset_panels(monkeypatch) ->
     assert manage_dataset.main(["render", "--panel", "--fetch-cloud-images"]) == 0
     assert calls == [
         (
-            Path("dataset"),
+            Path(__file__).resolve().parents[1] / "dataset",
             None,
             {
                 "publication": False,
@@ -170,8 +175,6 @@ def test_render_without_cycle_targets_all_default_dataset_panels(monkeypatch) ->
     ]
 
 
-
-
 def test_render_cleanup_is_explicit(monkeypatch) -> None:
     from dataset_tools import manage_dataset
 
@@ -179,7 +182,9 @@ def test_render_cleanup_is_explicit(monkeypatch) -> None:
     monkeypatch.setattr(
         manage_dataset,
         "render_dataset",
-        lambda _dataset, _cycle, **options: calls.append(options) or Path("dataset"),
+        lambda _dataset, _cycle, **options: (
+            calls.append(options) or Path(__file__).resolve().parents[1] / "dataset"
+        ),
     )
 
     assert (
@@ -201,86 +206,87 @@ def test_render_cleanup_is_explicit(monkeypatch) -> None:
 
 
 def test_upload_data_accepts_multiple_dates(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
+    from dataset_tools import cloud_upload
 
     calls: list[tuple[Path, list[str] | None]] = []
     monkeypatch.setattr(
-        manage_dataset,
+        cloud_upload,
         "upload_date_data",
         lambda data, dates: calls.append((data, dates)) or data,
         raising=False,
     )
 
-    assert manage_dataset.main(["upload-data", "0806", "0807"]) == 0
-    assert calls == [(Path("data"), ["0806", "0807"])]
+    assert cloud_upload.main(["upload-data", "0806", "0807"]) == 0
+    assert calls == [(Path(__file__).resolve().parents[1] / "data", ["0806", "0807"])]
 
 
 def test_upload_data_all_selects_every_date(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
+    from dataset_tools import cloud_upload
 
     calls: list[tuple[Path, list[str] | None]] = []
     monkeypatch.setattr(
-        manage_dataset,
+        cloud_upload,
         "upload_date_data",
         lambda data, dates: calls.append((data, dates)) or data,
         raising=False,
     )
 
-    assert manage_dataset.main(["upload-data", "all"]) == 0
-    assert calls == [(Path("data"), None)]
+    assert cloud_upload.main(["upload-data", "all"]) == 0
+    assert calls == [(Path(__file__).resolve().parents[1] / "data", None)]
 
 
 def test_upload_images_all_preserves_local_images_by_default(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
+    from dataset_tools import cloud_upload
 
     calls: list[tuple[Path, list[str] | None, bool]] = []
     monkeypatch.setattr(
-        manage_dataset,
+        cloud_upload,
         "upload_cycle_images",
         lambda dataset, cycles, cleanup: calls.append((dataset, cycles, cleanup)) or dataset,
         raising=False,
     )
 
-    assert manage_dataset.main(["upload-images", "all"]) == 0
-    assert calls == [(Path("dataset"), None, False)]
+    assert cloud_upload.main(["upload-images", "all"]) == 0
+    assert calls == [(Path(__file__).resolve().parents[1] / "dataset", None, False)]
 
 
 def test_upload_images_cleanup_is_explicit(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
+    from dataset_tools import cloud_upload
 
     calls: list[tuple[Path, list[str] | None, bool]] = []
     monkeypatch.setattr(
-        manage_dataset,
+        cloud_upload,
         "upload_cycle_images",
         lambda dataset, cycles, cleanup: calls.append((dataset, cycles, cleanup)) or dataset,
         raising=False,
     )
 
     assert (
-        manage_dataset.main(
-            ["upload-images", "frost_cycle_000001", "--cleanup-uploaded-images"]
-        )
-        == 0
+        cloud_upload.main(["upload-images", "frost_cycle_000001", "--cleanup-uploaded-images"]) == 0
     )
-    assert calls == [(Path("dataset"), ["frost_cycle_000001"], True)]
+    assert calls == [
+        (Path(__file__).resolve().parents[1] / "dataset", ["frost_cycle_000001"], True)
+    ]
 
 
 def test_dts_download_defaults_to_all_files_in_data(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
+    from dataset_tools import dts_downloader
 
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        manage_dataset,
+        dts_downloader,
         "download_shared_data",
-        lambda url, **options: calls.append({"url": url, **options}) or Path("data"),
+        lambda url, **options: (
+            calls.append({"url": url, **options}) or Path(__file__).resolve().parents[1] / "data"
+        ),
         raising=False,
     )
 
-    assert manage_dataset.main(["dts-download", "https://example.com/share"]) == 0
+    assert dts_downloader.main(["https://example.com/share"]) == 0
     assert calls == [
         {
             "url": "https://example.com/share",
-            "data_dir": Path("/Volumes/Proust/DefrostingSensor/data"),
+            "data_dir": Path(__file__).resolve().parents[1] / "data",
             "password": None,
             "start_no": 1,
             "end_no": None,
@@ -291,20 +297,21 @@ def test_dts_download_defaults_to_all_files_in_data(monkeypatch) -> None:
 
 
 def test_dts_download_keeps_optional_range_controls(monkeypatch) -> None:
-    from dataset_tools import manage_dataset
+    from dataset_tools import dts_downloader
 
     calls: list[dict[str, object]] = []
     monkeypatch.setattr(
-        manage_dataset,
+        dts_downloader,
         "download_shared_data",
-        lambda url, **options: calls.append({"url": url, **options}) or Path("data"),
+        lambda url, **options: (
+            calls.append({"url": url, **options}) or Path(__file__).resolve().parents[1] / "data"
+        ),
         raising=False,
     )
 
     assert (
-        manage_dataset.main(
+        dts_downloader.main(
             [
-                "dts-download",
                 "https://example.com/share",
                 "--password",
                 "secret",
@@ -323,7 +330,7 @@ def test_dts_download_keeps_optional_range_controls(monkeypatch) -> None:
     assert calls == [
         {
             "url": "https://example.com/share",
-            "data_dir": Path("/Volumes/Proust/DefrostingSensor/data"),
+            "data_dir": Path(__file__).resolve().parents[1] / "data",
             "password": "secret",
             "start_no": 13,
             "end_no": 30,
@@ -333,7 +340,7 @@ def test_dts_download_keeps_optional_range_controls(monkeypatch) -> None:
     ]
 
 
-def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) -> None:
+def test_edit_and_render_reach_domain_without_import_error(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["UV_CACHE_DIR"] = str(tmp_path / "uv-cache")
     environment["MPLCONFIGDIR"] = str(tmp_path / "matplotlib")
@@ -357,9 +364,7 @@ def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) ->
 
     commands = (
         [
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "dataset_tools.manage_dataset",
             "edit",
@@ -369,9 +374,7 @@ def test_uv_edit_and_render_reach_domain_without_import_error(tmp_path: Path) ->
             "60",
         ],
         [
-            "uv",
-            "run",
-            "python",
+            sys.executable,
             "-m",
             "dataset_tools.manage_dataset",
             "render",
@@ -409,8 +412,9 @@ def test_dataset_loader_reads_catalog_from_absolute_path_without_writing(tmp_pat
         json.dumps({"cycles": [], "catalog_note": "absolute-path"}), encoding="utf-8"
     )
     (dataset / "channel_registry.json").write_text(json.dumps({"columns": []}), encoding="utf-8")
+    (dataset / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=["cycle_name", "camera_role", "file_name"]).to_parquet(
-        dataset / "image_metadata.parquet", index=False
+        dataset / "images/image_metadata.parquet", index=False
     )
     before = {
         path.relative_to(dataset): path.read_bytes()
@@ -428,3 +432,29 @@ def test_dataset_loader_reads_catalog_from_absolute_path_without_writing(tmp_pat
         if path.is_file()
     }
     assert after == before
+
+
+def test_numeric_dataset_validation_does_not_access_images(tmp_path, monkeypatch):
+    from dataset_tools import validate_dataset as checks
+
+    frame = pd.DataFrame(dict(cycle_name=["a"], cycle_uid=["uid"], timestamp=["2026-01-01"]))
+
+    class Loader:
+        registry = {"columns": ["timestamp"]}
+
+        def list_cycles(self):
+            return pd.DataFrame(dict(cycle_name=["a"], status=["valid"]))
+
+        def load_cycle(self, name):
+            return frame
+
+        def load_cycle_original(self, name):
+            return frame
+
+        def load_image_metadata(self):
+            raise FileNotFoundError("No images in the feature package")
+
+    monkeypatch.setattr(checks, "DatasetLoader", lambda _: Loader())
+    checks.validate_dataset(tmp_path, check_images=False)
+    with pytest.raises(FileNotFoundError, match="No images"):
+        checks.validate_dataset(tmp_path, check_images=True)

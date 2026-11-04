@@ -27,6 +27,17 @@ def calculate_derived_features(
             continue
         formula = str(settings.get("formula", ""))
         dependencies = [str(value) for value in settings.get("dependencies", [])]
+        if formula in {
+            "causal_60s",
+            "offline_linear_60s",
+            "offline_linear",
+            "offline_forward_fill",
+            "any_continuous_channel_interpolated",
+        }:
+            # Process reconstructs these from raw rows, not from the resampled heating_capacity.
+            result[name] = np.nan
+            result[f"{name}__imputed"] = False
+            continue
         if formula not in _FORMULAS:
             raise ValueError(f"unsupported derived formula for {name}: {formula}")
         result[name] = _calculate_formula(result, formula, dependencies)

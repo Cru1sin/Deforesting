@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from zipfile import ZIP_STORED, ZipFile
 
+from output_layout import PROJECT
+
 from .cloud_images import _direct_rclone_env
 from .cycle_metadata import image_root
 from .dataset_paths import require_external_storage
@@ -176,3 +178,44 @@ def _remote_size(remote: str) -> int | None:
     )
     size = result.stdout.strip()
     return int(size) if result.returncode == 0 and size.isdigit() else None
+
+
+def build_parser():
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    actions = parser.add_subparsers(dest="action", required=True)
+    upload = actions.add_parser("upload-data", help="package raw dates and upload to OneDrive")
+    upload.add_argument("dates", nargs="+")
+    upload.add_argument("--data", type=Path, default=(PROJECT / "data"))
+
+    images = actions.add_parser("upload-images", help="package cycle images and upload to OneDrive")
+    images.add_argument("cycles", nargs="+")
+    images.add_argument("--dataset", type=Path, default=(PROJECT / "dataset"))
+    images.add_argument("--cleanup-uploaded-images", action="store_true")
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.action == "upload-data":
+        if "all" in args.dates and args.dates != ["all"]:
+            parser.error("'all' cannot be combined with explicit dates")
+        print(upload_date_data(args.data, None if args.dates == ["all"] else args.dates))
+    elif args.action == "upload-images":
+        if "all" in args.cycles and args.cycles != ["all"]:
+            parser.error("'all' cannot be combined with explicit cycles")
+        print(
+            upload_cycle_images(
+                args.dataset,
+                None if args.cycles == ["all"] else args.cycles,
+                args.cleanup_uploaded_images,
+            )
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

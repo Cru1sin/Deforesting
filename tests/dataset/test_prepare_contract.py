@@ -21,7 +21,7 @@ from dataset_tools.builder.detect_cycles import (
     _defrost_runs,
     _fill_short_state_gaps,
     _normalize_state,
-    find_stable_heating_start,
+    find_temperature_stable_heating_start,
     label_cycles,
 )
 from dataset_tools.builder.match_camera_images import match_images
@@ -73,6 +73,33 @@ def _write_edf(path: Path, rows: list[tuple[str, str, str, str, str, str]]) -> P
         encoding="utf-8",
     )
     return path
+
+
+def test_read_edf_environment_pairs_separate_sht4x_exports_like_combined_file(tmp_path: Path):
+    rows = [
+        ("0", "2026-07-20T09:00:00+08:00", "20", "60", "", ""),
+        ("1", "2026-07-20T09:00:00.2+08:00", "", "", "22", "64"),
+    ]
+    combined = _write_edf(tmp_path / "combined.edf", rows)
+    separate = []
+    for serial, row, temperature, humidity in [
+        ("111", rows[0], "20", "60"),
+        ("222", rows[1], "22", "64"),
+    ]:
+        path = tmp_path / f"{serial}.edf"
+        path.write_text(
+            f"Epoch_UTC\tLocal_Date_Time\tT_SHT4x_{serial}\tRH_SHT4x_{serial}\n"
+            f"{row[0]}\t{row[1]}\t{temperature}\t{humidity}\n"
+        )
+        separate.append(path)
+    bounds = (
+        pd.Timestamp("2026-07-20 09:00"),
+        pd.Timestamp("2026-07-20 09:01"),
+        pd.Timedelta(seconds=1),
+    )
+    expected = read_edf_environment([combined], *bounds)
+    actual = read_edf_environment(list(reversed(separate)), *bounds)
+    pd.testing.assert_frame_equal(actual, expected)
 
 
 def test_read_edf_environment_preserves_local_clock_pairs_once_and_clips(tmp_path: Path) -> None:
@@ -375,9 +402,9 @@ def test_label_cycles_separates_frequency_drop_as_defrost_preparation() -> None:
     assert labeled.loc[labeled["cycle_id"].eq("cycle_001"), "cycle_stage"].tolist() == [
         "recovery",
         "recovery",
-        "frost_development",
-        "frost_development",
-        "frost_development",
+        "recovery",
+        "recovery",
+        "recovery",
         "defrost_preparation",
         "defrost",
         "defrost",
@@ -575,7 +602,9 @@ def test_operating_mode_only_checks_heating_interval(
 
     cycle = summary.loc[summary["cycle_id"].eq("cycle_001")].iloc[0]
     assert cycle["cycle_status"] == status
-    assert cycle["cycle_status_reason"] == reason
+    assert cycle["cycle_status_reason"] == (
+        reason if status == "invalid" else "recovery_end_not_observed"
+    )
 
 
 def test_single_defrost_event_preserves_known_defrost_stage() -> None:
@@ -618,7 +647,7 @@ def test_leading_partial_keeps_observed_defrost_end_at_next_cycle_start() -> Non
     assert partial["cycle_status_reason"] == "outside_complete_cycle"
 
 
-def test_partial_cycle_uses_water_setpoint_and_defrost_to_label_known_stages() -> None:
+def test_partial_cycle_without_frequency_keeps_defrost_but_not_temperature_stages() -> None:
     timestamps = pd.date_range("2026-07-15 00:00:00", periods=5, freq="s")
     frame = pd.DataFrame(
         {
@@ -639,15 +668,15 @@ def test_partial_cycle_uses_water_setpoint_and_defrost_to_label_known_stages() -
 
     assert summary["cycle_id"].tolist() == ["partial_001"]
     assert labeled["cycle_stage"].tolist() == [
-        "recovery",
-        "recovery",
-        "frost_development",
+        "partial",
+        "partial",
+        "partial",
         "defrost",
         "defrost",
     ]
 
 
-def test_partial_cycle_without_defrost_is_frost_after_starting_at_setpoint() -> None:
+def test_partial_cycle_at_setpoint_does_not_invent_frequency_recovery() -> None:
     timestamps = pd.date_range("2026-07-15 00:00:00", periods=4, freq="s")
     frame = pd.DataFrame(
         {
@@ -666,7 +695,7 @@ def test_partial_cycle_without_defrost_is_frost_after_starting_at_setpoint() -> 
         experiment_date="2026-07-15",
     )
 
-    assert labeled["cycle_stage"].eq("frost_development").all()
+    assert labeled["cycle_stage"].eq("partial").all()
 
 
 def test_partial_cycle_without_setpoint_crossing_still_labels_defrost_boundary() -> None:
@@ -689,8 +718,8 @@ def test_partial_cycle_without_setpoint_crossing_still_labels_defrost_boundary()
     )
 
     assert labeled["cycle_stage"].tolist() == [
-        "recovery",
-        "recovery",
+        "partial",
+        "partial",
         "defrost",
         "defrost",
     ]
@@ -917,7 +946,9 @@ def test_stable_start_uses_ts_minus_two_before_looser_thresholds() -> None:
         }
     )
 
-    stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=5), {})
+    stable = find_temperature_stable_heating_start(
+        frame, start, start + pd.Timedelta(seconds=5), {}
+    )
 
     assert stable == start + pd.Timedelta(seconds=3)
 
@@ -932,7 +963,9 @@ def test_stable_start_does_not_fall_back_below_ts_minus_two() -> None:
         }
     )
 
-    stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=4), {})
+    stable = find_temperature_stable_heating_start(
+        frame, start, start + pd.Timedelta(seconds=4), {}
+    )
 
     assert stable is None
 
@@ -954,7 +987,7 @@ def test_stable_start_uses_earlier_slope_knee_or_ts_minus_two() -> None:
         }
     )
 
-    stable = find_stable_heating_start(
+    stable = find_temperature_stable_heating_start(
         frame,
         start,
         timestamps[-1] + pd.Timedelta(seconds=10),
@@ -986,7 +1019,7 @@ def test_stable_start_compares_threshold_with_knee_from_full_curve() -> None:
         }
     )
 
-    stable = find_stable_heating_start(
+    stable = find_temperature_stable_heating_start(
         frame,
         start,
         timestamps[-1] + pd.Timedelta(seconds=10),
@@ -1010,7 +1043,9 @@ def test_stable_start_is_missing_when_all_priority_thresholds_have_no_observatio
         }
     )
 
-    stable = find_stable_heating_start(frame, start, start + pd.Timedelta(seconds=3), {})
+    stable = find_temperature_stable_heating_start(
+        frame, start, start + pd.Timedelta(seconds=3), {}
+    )
 
     assert stable is None
 

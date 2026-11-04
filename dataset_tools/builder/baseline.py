@@ -68,9 +68,9 @@ def add_baseline_residuals(
         result[f"{name}__baseline_residual"] = np.nan
     summary = _initialise_summary(summary)
     for index, cycle in summary.iterrows():
-        cycle_mask = result["experiment_id"].eq(cycle["experiment_id"]) & result[
-            "cycle_id"
-        ].eq(cycle["cycle_id"])
+        cycle_mask = result["experiment_id"].eq(cycle["experiment_id"]) & result["cycle_id"].eq(
+            cycle["cycle_id"]
+        )
         window, reason = _find_common_window(result.loc[cycle_mask], cycle, settings)
         if window is None:
             summary.loc[index, "baseline_status"] = "unavailable"
@@ -102,8 +102,7 @@ def _eligible_channels(channels: Mapping[str, Mapping[str, Any]]) -> list[str]:
         for name, settings in channels.items()
         if str(settings.get("kind")) in {"continuous", "step", "derived"}
         and (
-            bool(settings.get("analysis_candidate", False))
-            or settings.get("role") == "performance"
+            bool(settings.get("analysis_candidate", False)) or settings.get("role") == "performance"
         )
     ]
 
@@ -155,9 +154,7 @@ def _find_common_window(
     return None, failure
 
 
-def _anchors_are_stable(
-    window: pd.DataFrame, settings: BaselineSettings
-) -> tuple[bool, str]:
+def _anchors_are_stable(window: pd.DataFrame, settings: BaselineSettings) -> tuple[bool, str]:
     if window.empty:
         return False, "no_candidate_window"
     for anchor in settings.required_anchor_channels:

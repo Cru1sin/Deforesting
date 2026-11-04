@@ -22,18 +22,18 @@ RAW_COLUMNS = (
 def controller_snapshots(frame: pd.DataFrame) -> pd.DataFrame:
     """Keep the last controller snapshot, not a padding row from another sheet."""
     present = frame[list(RAW_COLUMNS[-3:])].notna().any(axis=1)
-    return (frame.assign(_controller_present=present)
-            .sort_values("_controller_present", kind="stable")
-            .drop_duplicates("timestamp", keep="last")
-            .drop(columns="_controller_present")
-            .sort_values("timestamp", kind="stable"))
+    return (
+        frame.assign(_controller_present=present)
+        .sort_values("_controller_present", kind="stable")
+        .drop_duplicates("timestamp", keep="last")
+        .drop(columns="_controller_present")
+        .sort_values("timestamp", kind="stable")
+    )
 
 
-def _case(ambient_temperature_c: float, case_boundary: str = "warmer") -> int:
+def _case(ambient_temperature_c: float) -> int:
     for case, boundary in enumerate((-2, -5, -8, -10), start=1):
-        if ambient_temperature_c > boundary or (
-            case_boundary == "warmer" and ambient_temperature_c == boundary
-        ):
+        if ambient_temperature_c >= boundary:
             return case
     return 5
 
@@ -42,10 +42,9 @@ def limits(
     ambient_temperature_c: float,
     water_out_temperature_c: float,
     initial_coil_temperature_c: float,
-    *, case_boundary: str = "warmer",
 ) -> tuple[float, float]:
-    """Return the historical Case 1--5 T1 and coil-temperature limits."""
-    case = _case(ambient_temperature_c, case_boundary)
+    """Return the frozen Case 1--5 T1 and coil-temperature limits."""
+    case = _case(ambient_temperature_c)
     time_limits = {
         1: (40, 35, 30),
         2: (40, 38, 33),
@@ -68,22 +67,12 @@ def first_trigger(
     observation_end: pd.Timestamp,
     *,
     return_trace: bool = False,
-    condition1_drop_c: int = 1,
-    forced_timeout_min: int = 150,
-    sample_tolerance_seconds: int = 0,
-    confirmation_missing_seconds: int = 0,
-    condition1_tolerance_c: float = 0.0,
-    case_boundary: str = "warmer",
+    recipe: str = "frozen",
+    include_case8: bool = True,
 ) -> dict[str, object] | pd.DataFrame:
-    """Return the first causal RB trigger on the historical unfilled one-second grid."""
-    if case_boundary not in ("warmer", "colder"):
-        raise ValueError("case_boundary must be warmer or colder")
-    if forced_timeout_min < 0:
-        raise ValueError("forced_timeout_min must be nonnegative; zero excludes the unverified timeout")
-    if sample_tolerance_seconds not in (0, 1) or confirmation_missing_seconds not in range(4):
-        raise ValueError("sampling tolerance must be 0/1 s and missing allowance 0--3 s")
-    if condition1_tolerance_c not in (0, 0.1):
-        raise ValueError("Condition1 logging tolerance must be 0 or 0.1 C")
+    """Return the first causal RB trigger on the unfilled one-second grid."""
+    if recipe not in {"frozen", "ppt_strict", "ppt_sample_tolerant"}:
+        raise ValueError(f"Unknown RB recipe: {recipe}")
     columns = {
         "coil_temperature": "T3_C",
         "ambient_temperature": "T4_C",
@@ -109,9 +98,9 @@ def first_trigger(
     values["T3o_C"] /= 10
     values[["T1_min", "T2_min"]] /= 60
 
-    case = values["T4_C"].map(lambda value: _case(value, case_boundary) if pd.notna(value) else np.nan)
+    case = values["T4_C"].map(lambda value: _case(value) if pd.notna(value) else np.nan)
     thresholds = [
-        limits(t4, twout, t3o, case_boundary=case_boundary)
+        limits(t4, twout, t3o)
         if pd.notna(t4) and pd.notna(twout) and pd.notna(t3o)
         else (np.nan, np.nan)
         for t4, twout, t3o in values[["T4_C", "Twout_C", "T3o_C"]].itertuples(
@@ -122,16 +111,17 @@ def first_trigger(
     t3_limit = pd.Series([value[1] for value in thresholds], index=grid)
 
     # Sampling tolerances affect only replay predicates, never the saved observations.
-    t1 = values["T1_min"] + sample_tolerance_seconds / 60
-    t2 = values["T2_min"] + sample_tolerance_seconds / 60
+    tolerance = 0 if recipe == "ppt_strict" else 1 / 60
+    t1 = values["T1_min"] + tolerance
+    t2 = values["T2_min"] + tolerance
 
     def confirmed(passed, known):
+        if recipe == "ppt_strict":
+            return passed.rolling(20, min_periods=20).sum().eq(20)
         failures = (known & ~passed).rolling(20, min_periods=20).sum()
         missing = (~known).rolling(20, min_periods=20).sum()
-        result = failures.eq(0) & missing.le(confirmation_missing_seconds)
-        if sample_tolerance_seconds:
-            # Nineteen consecutive observations can be one controller tick short.
-            result |= passed.rolling(19, min_periods=19).sum().eq(19)
+        result = failures.eq(0) & missing.le(3)
+        result |= passed.rolling(19, min_periods=19).sum().eq(19)
         return passed & result
 
     historical_t3_max = values["T3_C"].shift(50).rolling(551, min_periods=1).max()
@@ -139,30 +129,33 @@ def first_trigger(
         t1.gt(35)
         & t2.ge(6)
         & values["T3_C"].le(-1)
-        & historical_t3_max.sub(values["T3_C"]).ge(condition1_drop_c - condition1_tolerance_c - 1e-9)
+        & historical_t3_max.sub(values["T3_C"]).ge(2 - 1e-9)
     )
     case_temperature = values["T3_C"].lt(t3_limit)
     case_confirmed = confirmed(case_temperature, values["T3_C"].notna() & t3_limit.notna())
     condition2 = t2.ge(6) & t1.ge(t1_limit - 1e-9) & case_confirmed
-    case7_temperature = values["T3_C"].le(-10) & values["T3_C"].le(
-        0.8 * values["T4_C"] - 12
+    case7_temperature = values["T3_C"].le(-10) & values["T3_C"].le(0.8 * values["T4_C"] - 12)
+    condition7 = t1.ge(30) & confirmed(
+        case7_temperature, values["T3_C"].notna() & values["T4_C"].notna()
     )
-    condition7 = (
-        t1.ge(30)
-        & confirmed(case7_temperature, values["T3_C"].notna() & values["T4_C"].notna())
+    # Case8 can be disabled explicitly for the no-timeout comparison recipe.
+    condition8 = (
+        t1.ge(150) if recipe != "frozen" and include_case8 else pd.Series(False, index=grid)
     )
-    # 150 min is the historical assumption, contradicted by recorded RB cycles.
-    # Zero excludes this unverified branch; it does not identify a firmware timeout.
-    condition8 = t1.ge(forced_timeout_min) & (forced_timeout_min > 0)
-
     triggered = condition1 | condition2 | condition7 | condition8
     if return_trace:
         return values.assign(
-            case=case, t1_limit_min=t1_limit, t3_limit_c=t3_limit,
+            case=case,
+            t1_limit_min=t1_limit,
+            t3_limit_c=t3_limit,
             historical_drop_c=historical_t3_max.sub(values["T3_C"]),
-            case_temperature=case_temperature, case_confirmed=case_confirmed,
-            condition1=condition1, condition2=condition2,
-            condition7=condition7, condition8=condition8, triggered=triggered,
+            case_temperature=case_temperature,
+            case_confirmed=case_confirmed,
+            condition1=condition1,
+            condition2=condition2,
+            condition7=condition7,
+            condition8=condition8,
+            triggered=triggered,
         )
     if not triggered.any():
         return {
@@ -194,17 +187,12 @@ def first_trigger(
         "rb_status": "triggered",
         "trigger_type": trigger_type,
         "case": int(case.loc[timestamp]) if pd.notna(case.loc[timestamp]) else np.nan,
-        **values.loc[
-            timestamp, ["T4_C", "Twout_C", "T1_min", "T2_min", "T3_C", "T3o_C"]
-        ].to_dict(),
+        **values.loc[timestamp, ["T4_C", "Twout_C", "T1_min", "T2_min", "T3_C", "T3o_C"]].to_dict(),
         "t_observation_end": observation_end,
     }
 
 
-def calculate_cycle(loader: Any, cycle_name: str, *, condition1_drop_c: int = 1,
-                    forced_timeout_min: int = 150, sample_tolerance_seconds: int = 0,
-                    confirmation_missing_seconds: int = 0, condition1_tolerance_c: float = 0.0,
-                    case_boundary: str = "warmer") -> dict[str, object]:
+def calculate_cycle(loader: Any, cycle_name: str, *, recipe: str = "frozen") -> dict[str, object]:
     """Replay RB for one Dataset cycle, including incomplete observed cycles."""
     record = loader.get_cycle_record(cycle_name)
     nested = record.get("boundaries")
@@ -216,9 +204,7 @@ def calculate_cycle(loader: Any, cycle_name: str, *, condition1_drop_c: int = 1,
     heating_start = pd.to_datetime(boundaries.get("heating_start"), errors="coerce")
     if pd.isna(heating_start):
         heating_start = timestamps.min()
-    observation_end = pd.to_datetime(
-        boundaries.get("defrost_preparation_start"), errors="coerce"
-    )
+    observation_end = pd.to_datetime(boundaries.get("defrost_preparation_start"), errors="coerce")
     observation_end_source = "actual_preparation"
     if pd.isna(observation_end):
         observation_end = timestamps.max().floor("s") + pd.Timedelta(seconds=1)
@@ -228,9 +214,7 @@ def calculate_cycle(loader: Any, cycle_name: str, *, condition1_drop_c: int = 1,
         "cycle_id": record.get("cycle_id"),
         "experiment_id": record.get("experiment_id"),
         "observation_end_source": observation_end_source,
-        **first_trigger(frame, pd.Timestamp(heating_start), pd.Timestamp(observation_end),
-                        condition1_drop_c=condition1_drop_c, forced_timeout_min=forced_timeout_min,
-                        sample_tolerance_seconds=sample_tolerance_seconds,
-                        confirmation_missing_seconds=confirmation_missing_seconds,
-                        condition1_tolerance_c=condition1_tolerance_c, case_boundary=case_boundary),
+        **first_trigger(
+            frame, pd.Timestamp(heating_start), pd.Timestamp(observation_end), recipe=recipe
+        ),
     }

@@ -50,7 +50,7 @@ def process(
     )
     coordinated = recompute_cycle_coordinates(resampled, initial_summary)
     raw_system_quantities = _calculate_unfilled_system_quantities(coordinated, channels)
-    filled = _fill_missing(coordinated, channels, config)
+    filled = coordinated
     derived = calculate_derived_features(filled, channels)
     for column in raw_system_quantities:
         name = str(column)
@@ -71,6 +71,15 @@ def process(
     derived = derived.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
+    from heat_smoothing.methods import process_measurements
+
+    print(
+        "[add] interpolate sensors, then smooth heat and pressure (offline + trailing 60 s)",
+        flush=True,
+    )
+    derived = process_measurements(
+        _mask_duplicate_values(prepared, channels), derived, channels=channels
+    )
     final_summary = _update_summary(
         initial_summary,
         derived,
@@ -79,6 +88,14 @@ def process(
         eligible_channel_buckets,
         processed_cycles,
     )
+    if "user_side_fan_setting" in channels:
+        from dataset_tools.cycle_metadata import user_side_fan_setting
+
+        # Campaign metadata also applies to buckets without sensor observations.
+        derived["user_side_fan_setting"] = user_side_fan_setting(
+            config.experiment_date, derived.get("water_temperature_setpoint")
+        )
+
     return derived, final_summary
 
 
@@ -141,70 +158,63 @@ def _resample(
     dict[tuple[str, str], int],
     set[tuple[str, str]],
 ]:
-    rows: list[dict[str, object]] = []
-    excluded_transition_buckets: dict[tuple[str, str], int] = {}
-    low_coverage_buckets: dict[tuple[str, str], int] = {}
-    eligible_channel_buckets: dict[tuple[str, str], int] = {}
-    processed_cycles: set[tuple[str, str]] = set()
+    parts = []
+    excluded_transition_buckets, low_coverage_buckets, eligible_channel_buckets = {}, {}, {}
+    processed_cycles = set()
     frequency = f"{interval_seconds}s"
     roles = image_roles(frame)
     summary_lookup = _summary_lookup(cycle_summary)
-    cycle_keys = ["experiment_id", "cycle_id"]
-    for group_values, group in frame.groupby(cycle_keys, sort=False, dropna=False):
+    for key, group in frame.groupby(["experiment_id", "cycle_id"], sort=False, dropna=False):
         ordered = group.sort_values("timestamp", kind="stable")
-        experiment_id, cycle_id = (str(value) for value in group_values)
-        summary = summary_lookup[(experiment_id, cycle_id)]
-        observed_end = ordered["timestamp"].max()
+        key = tuple(str(value) for value in key)
+        summary = summary_lookup[key]
         if not _has_complete_boundaries(summary):
             continue
-        grid = _cycle_grid(summary, frequency, observed_end=observed_end)
-        buckets = ordered["timestamp"].dt.floor(frequency)
-        processed_cycles.add((experiment_id, cycle_id))
-        intervals = _cycle_stage_intervals(summary, observed_end=observed_end, frequency=frequency)
-        image_records = {role: _image_records(ordered, role) for role in roles}
-        cycle_key = (experiment_id, cycle_id)
-        for timestamp in grid:
-            stage, transition = _stage_for_complete_bucket(timestamp, interval_seconds, intervals)
-            if transition:
-                excluded_transition_buckets[cycle_key] = (
-                    excluded_transition_buckets.get(cycle_key, 0) + 1
-                )
-                continue
-            if stage is None:
-                continue
-            bucket = ordered.loc[buckets.eq(timestamp) & ordered["cycle_stage"].eq(stage)]
-            row = _identity_row(ordered, (experiment_id, cycle_id, stage), timestamp)
-            low_names, low_count, eligible_count = _coverage_for_bucket(
-                bucket,
-                eligible_channels.get(experiment_id, ()),
-                expected_points_per_bucket,
-                minimum_coverage,
-            )
-            eligible_channel_buckets[cycle_key] = (
-                eligible_channel_buckets.get(cycle_key, 0) + eligible_count
-            )
-            low_coverage_buckets[cycle_key] = low_coverage_buckets.get(cycle_key, 0) + low_count
-            for name, settings in channels.items():
-                if str(settings.get("kind")) == "derived":
-                    continue
-                row[name] = (
-                    np.nan if name in low_names else _aggregate_channel(bucket, name, settings)
-                )
-            for role in roles:
-                _add_bucket_image(row, image_records[role], role, timestamp, interval_seconds)
-            rows.append(row)
-    if not rows:
-        empty = pd.DataFrame(columns=_processed_columns(channels, list(roles)))
-        return (
-            empty,
-            excluded_transition_buckets,
-            low_coverage_buckets,
-            eligible_channel_buckets,
-            processed_cycles,
+        grid = _cycle_grid(summary, frequency, observed_end=ordered.timestamp.max())
+        intervals = _cycle_stage_intervals(
+            summary, observed_end=ordered.timestamp.max(), frequency=frequency
         )
-    result = pd.DataFrame(rows).sort_values(["experiment_id", "timestamp"], kind="stable")
+        stages = pd.Series(pd.NA, index=grid, dtype="string")
+        transitions = np.zeros(len(grid), dtype=bool)
+        for stage, (start, end) in intervals.items():
+            stages.loc[(grid >= start) & (grid + pd.Timedelta(seconds=interval_seconds) <= end)] = (
+                stage
+            )
+            for boundary in (start, end):
+                transitions |= (grid < boundary) & (
+                    boundary < grid + pd.Timedelta(seconds=interval_seconds)
+                )
+        excluded_transition_buckets[key] = int(transitions.sum())
+        stages = stages.loc[stages.notna() & ~transitions]
+        source = ordered.assign(_process_bucket=ordered.timestamp.dt.floor(frequency))
+        matching = source._process_bucket.map(stages)
+        source = source.loc[source.cycle_stage.eq(matching)]
+        grouped = source.groupby("_process_bucket", sort=False)
+        result = _aggregate_buckets(grouped, channels).reindex(stages.index)
+        names = eligible_channels.get(key[0], ())
+        low_count = 0
+        for name in names:
+            counts = (
+                grouped[name].count().reindex(stages.index, fill_value=0)
+                if name in source
+                else pd.Series(0, index=stages.index)
+            )
+            low = counts / expected_points_per_bucket < minimum_coverage
+            result.loc[low, name] = np.nan
+            low_count += int(low.sum())
+        low_coverage_buckets[key] = low_count
+        eligible_channel_buckets[key] = len(stages) * len(names)
+        processed_cycles.add(key)
+        result["cycle_stage"] = stages
+        result = _complete_bucket_table(result, ordered, key, roles, interval_seconds)
+        parts.append(result)
+    result = (
+        pd.concat(parts, ignore_index=True)
+        if parts
+        else pd.DataFrame(columns=_processed_columns(channels, list(roles)))
+    )
     return (
-        result.reset_index(drop=True),
+        result.sort_values(["experiment_id", "timestamp"], kind="stable").reset_index(drop=True),
         excluded_transition_buckets,
         low_coverage_buckets,
         eligible_channel_buckets,
@@ -212,72 +222,81 @@ def _resample(
     )
 
 
-def _resample_fallback(
-    frame: pd.DataFrame,
-    channels: Mapping[str, Mapping[str, Any]],
-    interval_seconds: int,
-) -> pd.DataFrame:
+def _resample_fallback(frame, channels, interval_seconds):
     roles = image_roles(frame)
-    if frame.empty:
+    parts = []
+    for key, group in frame.groupby(["experiment_id", "cycle_id"], sort=False, dropna=False):
+        ordered = group.sort_values("timestamp", kind="stable")
+        origin = ordered.timestamp.min()
+        buckets = origin + pd.to_timedelta(
+            ((ordered.timestamp - origin).dt.total_seconds() // interval_seconds)
+            * interval_seconds,
+            unit="s",
+        )
+        grouped = ordered.assign(_process_bucket=buckets).groupby("_process_bucket", sort=False)
+        result = _aggregate_buckets(grouped, channels)
+        result["cycle_stage"] = grouped.cycle_stage.last()
+        result = _complete_bucket_table(result, ordered, key, roles, interval_seconds)
+        parts.append(result)
+    if not parts:
         return pd.DataFrame(columns=_processed_columns(channels, list(roles)))
-    source = frame.copy()
-    cycle_origins = source.groupby(["experiment_id", "cycle_id"], sort=False, dropna=False)[
-        "timestamp"
-    ].transform("min")
-    elapsed_seconds = (source["timestamp"] - cycle_origins).dt.total_seconds()
-    source["_process_bucket"] = cycle_origins + pd.to_timedelta(
-        (elapsed_seconds // interval_seconds) * interval_seconds,
-        unit="s",
-    )
-    rows: list[dict[str, object]] = []
-    keys = ["experiment_id", "cycle_id", "_process_bucket"]
-    for group_values, bucket in source.groupby(keys, sort=False, dropna=False):
-        ordered = bucket.sort_values("timestamp", kind="stable")
-        experiment_id, cycle_id = (str(value) for value in group_values[:2])
-        timestamp = pd.Timestamp(str(group_values[2]))
-        stage = str(ordered["cycle_stage"].iloc[-1])
-        row = _identity_row(ordered, (experiment_id, cycle_id, stage), timestamp)
-        for name, settings in channels.items():
-            if str(settings.get("kind")) != "derived":
-                row[name] = _aggregate_channel(ordered, name, settings)
-        for role in roles:
-            _add_bucket_image(
-                row,
-                _image_records(ordered, role),
-                role,
-                timestamp,
-                interval_seconds,
-            )
-        rows.append(row)
     result = (
-        pd.DataFrame(rows)
+        pd.concat(parts, ignore_index=True)
         .sort_values(["experiment_id", "timestamp"], kind="stable")
         .reset_index(drop=True)
     )
     raw_system_quantities = _calculate_unfilled_system_quantities(result, channels)
-    for column in raw_system_quantities:
-        name = str(column)
+    for name in raw_system_quantities:
         result[name] = raw_system_quantities[name].to_numpy()
         result[f"{name}__imputed"] = False
     return result
 
 
-def _identity_row(
-    ordered: pd.DataFrame, group_values: tuple[object, ...], timestamp: pd.Timestamp
-) -> dict[str, object]:
-    row = {key: value for key, value in zip(_PARTITION_KEYS, group_values, strict=True)}
-    for column in ("experiment_date", "cycle_status", "cycle_status_reason"):
-        if column in ordered:
-            row[column] = ordered[column].iloc[0]
-    row["timestamp"] = timestamp
-    return row
+def _aggregate_buckets(grouped, channels):
+    """The same channel reducers for every interval, evaluated in one groupby."""
+    reducers = {}
+    for name, settings in channels.items():
+        if str(settings.get("kind")) == "derived" or name not in grouped.obj:
+            continue
+        kind = str(settings.get("kind"))
+        last = (
+            kind in {"step", "event", "categorical"}
+            or (kind == "protected" and settings.get("resample", "last") != "mean")
+            or settings.get("resample", "mean") == "last"
+        )
+        reducers[name] = "last" if last else "mean"
+    result = grouped.agg(reducers)
+    for name, settings in channels.items():
+        if str(settings.get("kind")) != "derived" and name not in result:
+            result[name] = np.nan
+    return result
+
+
+def _complete_bucket_table(result, ordered, key, roles, interval_seconds):
+    result = result.copy()
+    result["experiment_id"], result["cycle_id"] = key
+    for name in ("experiment_date", "cycle_status", "cycle_status_reason"):
+        if name in ordered:
+            result[name] = ordered[name].iloc[0]
+    result.index.name = "timestamp"
+    if roles:
+        records = {role: _image_records(ordered, role) for role in roles}
+        rows = []
+        for timestamp in result.index:
+            row = {}
+            for role in roles:
+                _add_bucket_image(row, records[role], role, timestamp, interval_seconds)
+            rows.append(row)
+        images = pd.DataFrame(rows, index=result.index)
+        result = pd.concat([result, images], axis=1)
+    return result.reset_index()
 
 
 def _cycle_stage_intervals(
     summary: pd.Series,
     *,
     observed_end: pd.Timestamp | None = None,
-    frequency: str = "10s",
+    frequency: str = "1s",
 ) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
     heating = _as_timestamp(summary.get("heating_start"))
     stable = _as_timestamp(summary.get("stable_heating_start"))
@@ -299,56 +318,10 @@ def _cycle_stage_intervals(
     return intervals
 
 
-def _stage_for_complete_bucket(
-    timestamp: pd.Timestamp,
-    interval_seconds: int,
-    intervals: Mapping[str, tuple[pd.Timestamp, pd.Timestamp]],
-) -> tuple[str | None, bool]:
-    bucket_end = timestamp + pd.Timedelta(seconds=interval_seconds)
-    boundaries = {boundary for interval in intervals.values() for boundary in interval}
-    if any(timestamp < boundary < bucket_end for boundary in boundaries):
-        return None, True
-    for stage, (start, end) in intervals.items():
-        if start <= timestamp < end:
-            return stage, False
-    return None, False
-
-
 def _as_timestamp(value: Any) -> pd.Timestamp | None:
     if value is None or pd.isna(value):
         return None
     return pd.Timestamp(value)
-
-
-def _aggregate_channel(bucket: pd.DataFrame, name: str, settings: Mapping[str, Any]) -> object:
-    if name not in bucket:
-        return np.nan
-    values = bucket[name].dropna()
-    if values.empty:
-        return np.nan
-    kind = str(settings.get("kind"))
-    if kind in {"step", "event", "categorical"}:
-        return values.iloc[-1]
-    if kind == "protected" and str(settings.get("resample", "last")) != "mean":
-        return values.iloc[-1]
-    if str(settings.get("resample", "mean")) == "last":
-        return values.iloc[-1]
-    return pd.to_numeric(values, errors="coerce").mean()
-
-
-def _coverage_for_bucket(
-    bucket: pd.DataFrame,
-    channel_names: tuple[str, ...],
-    expected_points: int,
-    minimum_coverage: float,
-) -> tuple[set[str], int, int]:
-    low_names = {
-        name
-        for name in channel_names
-        if (int(bucket[name].notna().sum()) if name in bucket else 0) / expected_points
-        < minimum_coverage
-    }
-    return low_names, len(low_names), len(channel_names)
 
 
 def _add_bucket_image(
@@ -437,100 +410,6 @@ def _timestamp_or_none(value: Any) -> pd.Timestamp | None:
     if value is None or pd.isna(value):
         return None
     return pd.Timestamp(value)
-
-
-def _fill_missing(
-    frame: pd.DataFrame, channels: Mapping[str, Mapping[str, Any]], config: Config
-) -> pd.DataFrame:
-    result = frame.copy()
-    for name, settings in channels.items():
-        if name not in result or str(settings.get("kind")) == "derived":
-            continue
-        imputed_column = f"{name}__imputed"
-        result[imputed_column] = False
-        missing_method = str(settings.get("missing", "none"))
-        if missing_method not in {"interpolate", "linear", "forward_fill", "ffill"}:
-            continue
-        for _, group in result.groupby(_PARTITION_KEYS, sort=False, dropna=False):
-            indices = group.index
-            values = result.loc[indices, name].copy()
-            timestamps = pd.Series(
-                pd.to_datetime(result.loc[indices, "timestamp"].tolist(), errors="raise"),
-                index=indices,
-            )
-            if str(settings.get("kind")) == "continuous" and missing_method in {
-                "interpolate",
-                "linear",
-            }:
-                filled = _fill_continuous(
-                    values, timestamps, config.process.continuous_max_gap_seconds
-                )
-            elif str(settings.get("kind")) == "step" and missing_method in {
-                "forward_fill",
-                "ffill",
-            }:
-                filled = _fill_step(values, timestamps, config.process.control_max_gap_seconds)
-            else:
-                filled = values
-            result.loc[indices, name] = filled.to_numpy()
-            result.loc[indices, imputed_column] = (values.isna() & filled.notna()).to_numpy()
-    return result
-
-
-def _fill_continuous(
-    values: pd.Series, timestamps: pd.Series, maximum_gap_seconds: float
-) -> pd.Series:
-    result = pd.to_numeric(values, errors="coerce").copy()
-    observed_intervals = timestamps.diff().dt.total_seconds().dropna()
-    if observed_intervals.empty:
-        return result
-    if maximum_gap_seconds < float(observed_intervals.median()):
-        return result
-    missing = result.isna().to_numpy()
-    position = 0
-    while position < len(result):
-        if not missing[position]:
-            position += 1
-            continue
-        end = _missing_run_end(missing, position)
-        left = position - 1
-        right = end + 1
-        if left >= 0 and right < len(result):
-            gap = (timestamps.iloc[right] - timestamps.iloc[left]).total_seconds()
-            if gap <= maximum_gap_seconds:
-                left_value = float(result.iloc[left])
-                right_value = float(result.iloc[right])
-                for index in range(position, end + 1):
-                    fraction = (
-                        timestamps.iloc[index] - timestamps.iloc[left]
-                    ).total_seconds() / gap
-                    result.iloc[index] = left_value + fraction * (right_value - left_value)
-        position = end + 1
-    return result
-
-
-def _fill_step(values: pd.Series, timestamps: pd.Series, maximum_gap_seconds: float) -> pd.Series:
-    result = values.copy()
-    last_observed_time: pd.Timestamp | None = None
-    last_observed_value: object = np.nan
-    for position in range(len(result)):
-        value = result.iloc[position]
-        if pd.isna(value):
-            if last_observed_time is not None:
-                gap = (timestamps.iloc[position] - last_observed_time).total_seconds()
-                if gap <= maximum_gap_seconds:
-                    result.iloc[position] = last_observed_value
-            continue
-        last_observed_time = pd.Timestamp(timestamps.iloc[position])
-        last_observed_value = value
-    return result
-
-
-def _missing_run_end(missing: np.ndarray, start: int) -> int:
-    end = start
-    while end + 1 < len(missing) and missing[end + 1]:
-        end += 1
-    return end
 
 
 def _update_summary(

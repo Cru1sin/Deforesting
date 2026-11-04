@@ -1,299 +1,100 @@
-"""Build measured and predicted quantities for each candidate defrost time.
-
-Paper notation: E_H/Q_H are pre-defrost electricity/heat and E_T/Q_T are the
-complete defrost-event electricity/net heat, including preparation, defrost and recovery.
-"""
+"""Current-cycle COP: processed heating, measured electricity, predicted preparation/defrost."""
 
 from __future__ import annotations
-
-from collections.abc import Mapping
-from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from defrost_decision.baselines.electricity import MINIMUM_COVERAGE, integrate_heating_curve
-from defrost_event_models.ridge_models import (
-    load_defrost_event_models,
-    predict_independent_targets,
-)
+from defrost_decision.performance_objectives import select_cycle_optimum
 from defrost_event_models.training_data import (
-    RAW_COLUMNS,
-    build_candidate_boundaries,
     candidate_integral_table,
     extract_pre_defrost_features,
     timestamp,
 )
-
-DEFAULT_OUTCOME_MODEL = "ridge_dynamic_state_8"
-
-
-def build_measured_candidate_quantities(
-    loader: Any,
-    cycle_name: str,
-    candidate_times: pd.DataFrame | None = None,
-    *,
-    candidate_step_seconds: int = 60,
-    allow_measurement_reconstruction: bool = False,
-    heat_column: str = "water_heat",
-    pressure_statistic: str = "median",
-    frequency_statistic: str = "median",
-    coil_statistic: str = "median",
-) -> pd.DataFrame:
-    """Measure G-independent inputs at a grid or explicitly supplied timestamps."""
-    record = loader.get_cycle_record(cycle_name)
-    nested = record.get("boundaries")
-    boundaries = nested if isinstance(nested, Mapping) else record
-    heating_start = timestamp(boundaries.get("heating_start"))
-    preparation_start = timestamp(boundaries.get("defrost_preparation_start"))
-    if heating_start is None or preparation_start is None:
-        raise ValueError(f"defrost boundaries are incomplete for {cycle_name}")
-
-    candidate_times = (
-        build_candidate_boundaries(
-            cycle_name,
-            str(record["experiment_id"]),
-            heating_start,
-            preparation_start,
-            step_seconds=candidate_step_seconds,
-        )
-        if candidate_times is None
-        else candidate_times.reset_index(drop=True)
-    )
-    columns = list(RAW_COLUMNS) + ([heat_column] if heat_column != "water_heat" else [])
-    frame = loader.load_cycle_original(cycle_name, columns=columns).copy()
-    return measure_candidate_quantities(
-        frame,
-        candidate_times,
-        heating_start,
-        heat_column=heat_column,
-        pressure_statistic=pressure_statistic,
-        frequency_statistic=frequency_statistic, coil_statistic=coil_statistic,
-        allow_measurement_reconstruction=allow_measurement_reconstruction,
-    )
 
 
 def measure_candidate_quantities(
     frame,
     candidate_times,
     heating_start,
-    *,
-    heat_column="water_heat",
-    pressure_statistic="median",
-    frequency_statistic="median",
-    coil_statistic="median",
-    allow_measurement_reconstruction=False,
 ):
-    """One raw-frame calculation used by Dataset replay and a live cycle prefix."""
+    """One prepared-measurement calculation for Dataset replay and cycle prefixes."""
     frame = frame.copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
     frame = frame.sort_values("timestamp", kind="stable").drop_duplicates("timestamp", keep="last")
     candidates = [pd.Timestamp(value) for value in candidate_times["candidate_defrost_time"]]
     accounting_start = pd.Timestamp(candidate_times["heating_accounting_start"].iloc[0])
 
-    tref = None
-    if heat_column == "heating_capacity":
-        temperatures = frame.set_index("timestamp").get(
-            "water_out_temperature", pd.Series(dtype=float, index=pd.DatetimeIndex([]))
-        )
-        temperatures = pd.to_numeric(temperatures, errors="coerce").dropna()
-        before = temperatures.loc[temperatures.index <= accounting_start].tail(1)
-        after = temperatures.loc[temperatures.index >= accounting_start].head(1)
-        tref = float("nan")
-        if not before.empty and not after.empty:
-            gap = (after.index[0] - before.index[0]).total_seconds()
-            if gap <= 30:
-                fraction = ((accounting_start - before.index[0]).total_seconds() / gap
-                            if gap else 0.0)
-                tref = float(before.iloc[0] + fraction * (after.iloc[0] - before.iloc[0]))
-
     valid_times = [value for value in candidates if value >= accounting_start]
     positions = [index for index, value in enumerate(candidates) if value >= accounting_start]
 
-    def integral(column):
-        if not valid_times:
-            return pd.DataFrame(
-                {
-                    "energy": [float("nan")] * len(candidates),
-                    "valid": [False] * len(candidates),
-                    "uses_measurement_reconstruction": [False] * len(candidates),
-                }
-            )
-        table = candidate_integral_table(
-            frame, accounting_start, valid_times, column,
-            minimum_outlet_temperature=tref if column == "heating_capacity" else None,
+    if valid_times:
+        heat = candidate_integral_table(
+            frame, accounting_start, valid_times, "heating_capacity_processed"
         )
-        table["uses_measurement_reconstruction"] = False
-        if allow_measurement_reconstruction and column != "heating_capacity":
-            signal = (
-                1.161
-                * pd.to_numeric(frame["water_flow"], errors="coerce")
-                * (
-                    pd.to_numeric(frame["water_out_temperature"], errors="coerce")
-                    - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
-                )
-                if column == "water_heat"
-                else pd.to_numeric(frame[column], errors="coerce")
-            )
-            reconstructed = integrate_heating_curve(
-                frame["timestamp"],
-                signal,
-                pd.Series(valid_times),
-                accounting_start,
-                "historical_reconstruction",
-            )
-            table["energy"] = reconstructed["energy_kwh"].to_numpy()
-            table["valid"] = reconstructed["coverage"].ge(MINIMUM_COVERAGE).to_numpy()
-            table["uses_measurement_reconstruction"] = (
-                reconstructed["coverage"].gt(reconstructed["strict_coverage"]).to_numpy()
-            )
-        table.index = positions
-        table = table.reindex(range(len(candidates)))
-        if "energy" not in table:
-            table["energy"] = float("nan")
-            table["valid"] = False
-        table["valid"] = table["valid"].eq(True)
-        return table
-
-    def online_integral(column):
-        if not valid_times:
-            return pd.DataFrame({
-                "energy_kwh": [float("nan")] * len(candidates),
-                "coverage": [0.] * len(candidates),
-                "bridged_internal_gap": [False] * len(candidates),
-                "valid": [False] * len(candidates),
-            })
-        if column == "water_heat":
-            required = {"water_flow", "water_out_temperature", "water_in_temperature"}
-            signal = (
-                1.161
-                * pd.to_numeric(frame["water_flow"], errors="coerce")
-                * (
-                    pd.to_numeric(frame["water_out_temperature"], errors="coerce")
-                    - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
-                )
-                if required <= set(frame)
-                else pd.Series(float("nan"), index=frame.index)
-            )
-        else:
-            signal = (
-                pd.to_numeric(frame[column], errors="coerce")
-                if column in frame
-                else pd.Series(float("nan"), index=frame.index)
-            )
-        table = integrate_heating_curve(
-            frame["timestamp"], signal, pd.Series(valid_times), accounting_start,
-            "historical_reconstruction", causal_candidates=True,
+        heat.index = positions
+        heat = heat.reindex(range(len(candidates)))
+        heat["valid"] = heat["valid"].eq(True)
+    else:
+        heat = pd.DataFrame(
+            {"energy": [float("nan")] * len(candidates), "valid": [False] * len(candidates)}
         )
-        table.index = positions
-        table = table.reindex(range(len(candidates)))
-        table["valid"] = table["coverage"].ge(MINIMUM_COVERAGE)
-        return table
-
-    electricity = integral("power_total")
-    heat = integral(heat_column)
-    if heat_column == "heating_capacity":
-        result = candidate_times.copy()
-        result["effective_heat_rule"] = "outlet_at_least_recovery_temperature"
-        result["reference_outlet_temperature"] = tref
-        if not np.isfinite(tref):
-            heat["valid"] = False
-            heat["energy"] = np.nan
-        for name, table in (("electricity", electricity), ("heat", heat)):
-            result[f"pre_defrost_{name}_kwh"] = table["energy"].to_numpy()
-            result[f"pre_defrost_{name}_measurement_valid"] = table["valid"].to_numpy()
-        return pd.concat([result.reset_index(drop=True), extract_pre_defrost_features(
-            frame, candidates, heating_start, pressure_statistic=pressure_statistic,
-            frequency_statistic=frequency_statistic, coil_statistic=coil_statistic,
-        )], axis=1)
-    compressor = integral("compressor_power")
-    online_electricity = online_integral("power_total")
-    online_heat = online_integral("water_heat")
-    online_compressor = online_integral("compressor_power")
-    features = extract_pre_defrost_features(
-        frame, candidates, heating_start, pressure_statistic=pressure_statistic,
-        frequency_statistic=frequency_statistic, coil_statistic=coil_statistic,
-    )
-
-    result = pd.concat(
+    result = candidate_times.copy()
+    result["effective_heat_rule"] = "without_trunc"
+    result["reference_outlet_temperature"] = None
+    result["pre_defrost_heat_kwh"] = heat["energy"].to_numpy()
+    result["pre_defrost_heat_measurement_valid"] = heat["valid"].to_numpy()
+    return pd.concat(
         [
-            candidate_times,
-            pd.DataFrame(
-                {
-                    "pre_defrost_electricity_kwh": electricity["energy"],
-                    "pre_defrost_electricity_measurement_valid": electricity["valid"],
-                    "pre_defrost_electricity_uses_measurement_reconstruction": electricity[
-                        "uses_measurement_reconstruction"
-                    ],
-                    "pre_defrost_heat_kwh": heat["energy"],
-                    "pre_defrost_heat_measurement_valid": heat["valid"],
-                    "pre_defrost_heat_uses_measurement_reconstruction": heat[
-                        "uses_measurement_reconstruction"
-                    ],
-                    "pre_defrost_compressor_electricity_kwh": compressor["energy"],
-                    "pre_defrost_compressor_electricity_measurement_valid": compressor["valid"],
-                    "pre_defrost_compressor_uses_measurement_reconstruction": compressor[
-                        "uses_measurement_reconstruction"
-                    ],
-                    "online_pre_defrost_electricity_kwh": online_electricity["energy_kwh"],
-                    "online_pre_defrost_electricity_measurement_valid": online_electricity[
-                        "valid"
-                    ],
-                    "online_pre_defrost_electricity_uses_measurement_reconstruction": (
-                        online_electricity["bridged_internal_gap"].eq(True)
-                    ),
-                    "online_pre_defrost_heat_kwh": online_heat["energy_kwh"],
-                    "online_pre_defrost_heat_measurement_valid": online_heat["valid"],
-                    "online_pre_defrost_heat_uses_measurement_reconstruction": online_heat[
-                        "bridged_internal_gap"
-                    ].eq(True),
-                    "online_pre_defrost_compressor_electricity_kwh": online_compressor[
-                        "energy_kwh"
-                    ],
-                    "online_pre_defrost_compressor_measurement_valid": online_compressor["valid"],
-                }
+            result.reset_index(drop=True),
+            extract_pre_defrost_features(
+                frame,
+                candidates,
+                heating_start,
             ),
-            features,
         ],
         axis=1,
     )
-    result["defrost_event_scope"] = "preparation_defrost_recovery"
-    result["defrost_event_breakdown"] = "not_decomposed"
-    return result
 
 
-def build_candidate_quantities(
-    loader: Any,
-    cycle_name: str,
-    models: Mapping[str, Any] | None = None,
-    *,
-    candidate_step_seconds: int = 60,
-    defrost_event_electricity_model: str = DEFAULT_OUTCOME_MODEL,
-    defrost_event_heat_model: str = DEFAULT_OUTCOME_MODEL,
-    prediction_mode: str = "cross-fitted",
-) -> pd.DataFrame:
-    """Return neutral candidate quantities without selecting a defrost time."""
-    model_file = dict(load_defrost_event_models() if models is None else models)
-    measured = build_measured_candidate_quantities(
-        loader, cycle_name, candidate_step_seconds=candidate_step_seconds,
-        pressure_statistic=model_file.get("pressure_statistic", "median"),
-        frequency_statistic=model_file.get("frequency_statistic", "median"),
-        coil_statistic=model_file.get("coil_statistic", "median"),
+def apply_current_cycle_cost(result, frame, heating_start, phase_models):
+    """Measured current recovery/heating electricity plus predicted preparation/defrost."""
+    from defrost_event_models.event_electricity_ridge import predict_with_model_parameters
+
+    result = result.copy()
+    measured = candidate_integral_table(
+        frame, heating_start, result.candidate_defrost_time.tolist(), "power_total"
     )
-    predicted = predict_independent_targets(
-        model_file["models"][defrost_event_electricity_model]["event_electricity"],
-        model_file["models"][defrost_event_heat_model]["event_net_heat"],
-        measured,
-        str(loader.get_cycle_record(cycle_name)["experiment_id"]),
-        prediction_mode=prediction_mode,
+    result["pre_defrost_electricity_kwh"] = measured.energy.to_numpy()
+    result["pre_defrost_electricity_measurement_valid"] = measured.valid.to_numpy()
+    result["measured_cycle_start"] = heating_start
+    channels = sorted(
+        {feature for model in phase_models.values() for feature in model["feature_order"]}
     )
-    result = pd.concat([measured, predicted], axis=1)
-    result["prediction_mode"] = prediction_mode
-    result["model_training_scope"] = (
-        "held_out_experiment_excluded"
-        if prediction_mode == "cross-fitted"
-        else "all_available_training_experiments"
+    result["pre_defrost_feature_window_valid"] = result[channels].notna().all(axis=1) & result[
+        [c + "_valid_second_count" for c in channels]
+    ].ge(48).all(axis=1)
+    result["defrost_event_electricity_kwh"] = 0.0
+    result["defrost_event_electricity_in_training_domain"] = True
+    nonnegative = pd.Series(True, index=result.index)
+    for target, parameters in phase_models.items():
+        predicted = predict_with_model_parameters(parameters, result)
+        result["predicted_" + target] = predicted.prediction.to_numpy()
+        result["defrost_event_electricity_kwh"] += predicted.prediction.to_numpy()
+        result["defrost_event_electricity_in_training_domain"] &= predicted.support_distance.le(
+            predicted.support_threshold
+        ).to_numpy()
+        nonnegative &= predicted.prediction.ge(0).to_numpy()
+    result["defrost_event_electricity_prediction_available"] = (
+        np.isfinite(result.defrost_event_electricity_kwh)
+        & result.pre_defrost_feature_window_valid
+        & nonnegative
     )
+    result["defrost_event_scope"] = "preparation_defrost"
+    result["defrost_event_breakdown"] = (
+        "joint_preparation_defrost_ridge" if len(phase_models) == 1 else "two_phase_ridge"
+    )
+    result["electricity_accounting"] = "measured_current_recovery_plus_heating"
     return result
 
 
@@ -305,67 +106,71 @@ def effective_candidate_cop(
     models,
     experiment_id,
     *,
-    preparation_heat="zero",
     prediction_mode="cross-fitted",
 ):
     """Estimate an action from strictly pre-action observations, without selecting it."""
-    import numpy as np
-
-    from defrost_event_models.ridge_models import predict_with_event_model
 
     from .performance_objectives import calculate_cycle_cop
 
-    if preparation_heat not in {"include", "zero"}:
-        raise ValueError("preparation heat must be include or zero")
     if models.get("cop_definition") != "refrigerant_effective_heat":
         raise ValueError("effective COP requires refitted effective-heat event models")
+    processing = frame.attrs.get("measurement_processing", "dataset_causal_60s")
+    if models.get("measurement_processing") != processing:
+        raise ValueError(
+            "Refit the event model using the same Dataset measurement processing as the inputs"
+        )
+    if models.get("coil_statistic") != "processed":
+        raise ValueError(
+            "Refit with Dataset coil_temperature_processed; historical coil features differ"
+        )
     candidates = pd.DatetimeIndex(candidates)
     times = pd.DataFrame(
         {"candidate_defrost_time": candidates, "heating_accounting_start": recovery_start}
     )
     result = measure_candidate_quantities(
-        frame, times, heating_start, heat_column="heating_capacity",
-        pressure_statistic=models.get("pressure_statistic", "median"),
-        frequency_statistic=models.get("frequency_statistic", "median"),
-        coil_statistic=models.get("coil_statistic", "median"),
+        frame,
+        times,
+        heating_start,
     )
-    targets = models["models"][DEFAULT_OUTCOME_MODEL]
-    for quantity, outcome in (("electricity", "event_electricity"), ("net_heat", "event_net_heat")):
-        prefix = f"defrost_event_{quantity}"
-        if quantity == "net_heat" and preparation_heat == "zero":
-            result[prefix + "_kwh"] = 0.0
-            result[prefix + "_prediction_available"] = True
-            result[prefix + "_in_training_domain"] = True
-        else:
-            model = targets[outcome]
-            if prediction_mode == "cross-fitted" and experiment_id not in model["folds"]:
-                result[prefix + "_kwh"] = np.nan
-                result[prefix + "_prediction_available"] = False
-                result[prefix + "_in_training_domain"] = False
-                continue
-            predicted = predict_with_event_model(
-                model, result, experiment_id, prediction_mode=prediction_mode
-            )
-            result[prefix + "_kwh"] = predicted.prediction.to_numpy()
-            result[prefix + "_prediction_available"] = np.isfinite(predicted.prediction).to_numpy()
-            result[prefix + "_in_training_domain"] = predicted.support_distance.le(
-                predicted.support_threshold
-            ).to_numpy()
-    result["pressure_statistic"] = models.get("pressure_statistic", "median")
-    result["frequency_statistic"] = models.get("frequency_statistic", "median")
-    result["coil_statistic"] = models.get("coil_statistic", "median")
-    result["preparation_heat"] = preparation_heat
+    if models.get("electricity_accounting") != "measured_current_recovery_plus_heating":
+        raise ValueError(
+            "Current COP requires the preparation/defrost model; use the historical comparison entry for complete-event models"
+        )
+    phases = models["phase_models"]
+    if prediction_mode == "cross-fitted":
+        parameters = phases["folds"][experiment_id]
+    elif prediction_mode == "full-model":
+        parameters = phases["full_data_model"]
+    else:
+        raise ValueError(f"Unknown prediction mode: {prediction_mode}")
+    result = apply_current_cycle_cost(result, frame, heating_start, parameters)
+    result["defrost_event_net_heat_kwh"] = 0.0
+    result["defrost_event_net_heat_prediction_available"] = True
+    result["defrost_event_net_heat_in_training_domain"] = True
+    result["measurement_processing"] = processing
+    result["heat_column"] = "heating_capacity_processed"
+    result["pressure_statistic"] = "processed"
+    result["frequency_statistic"] = "current"
+    result["coil_statistic"] = "processed"
+    result["preparation_heat"] = "zero"
     result["prediction_mode"] = prediction_mode
     result["model_training_scope"] = (
-        "held_out_experiment_excluded" if prediction_mode == "cross-fitted"
+        "held_out_experiment_excluded"
+        if prediction_mode == "cross-fitted"
         else "all_available_training_experiments"
     )
     result["stable_heating_start"] = recovery_start
     return calculate_cycle_cop(result, effective=True)
 
 
-def current_effective_cop(frame, models, experiment_id, *, preparation_heat="zero", now=None):
-    """Evaluate 'defrost now' on a new heating-cycle prefix using full-data Ridge.
+def current_effective_cop(
+    frame,
+    models,
+    experiment_id,
+    *,
+    now=None,
+):
+    """Evaluate a prepared heating-cycle prefix using full-data Ridge.
 
     The caller supplies observations beginning at heating restart. No future
     defrost time, next cycle, Dataset catalog, or offline optimum is required.
@@ -385,8 +190,8 @@ def current_effective_cop(frame, models, experiment_id, *, preparation_heat="zer
             "cycle_cop": float("nan"),
             "status": "no_observations",
         }
-    required = set(RAW_COLUMNS) - {"water_flow", "compressor_power"}
-    required.add("heating_capacity")
+    required = {"timestamp", "power_total", "compressor_frequency", "ambient_temperature"}
+    required.update({"heating_capacity_processed", "coil_temperature_processed"})
     missing = required - set(frame)
     if missing:
         return {
@@ -401,13 +206,24 @@ def current_effective_cop(frame, models, experiment_id, *, preparation_heat="zer
             "cycle_cop": float("nan"),
             "status": "defrost_active",
         }
-    trace = recovery_control_trace(frame, models["recovery_settings"])
-    confirmed = trace.loc[trace.normal_heating, "timestamp"]
+    if models["recovery_settings"].get("recovery_rule") == "dataset":
+        if "cycle_stage" not in frame:
+            return {
+                "candidate_defrost_time": now,
+                "cycle_cop": float("nan"),
+                "status": "missing_dataset_stage_boundary",
+            }
+        confirmed = frame.loc[frame.cycle_stage.eq("frost_development"), "timestamp"]
+        recovery_status = "stable_heating_not_observed"
+    else:
+        trace = recovery_control_trace(frame, models["recovery_settings"])
+        confirmed = trace.loc[trace.normal_heating, "timestamp"]
+        recovery_status = trace.recovery_status.iloc[-1]
     if confirmed.empty:
         return {
             "candidate_defrost_time": now,
             "cycle_cop": float("nan"),
-            "status": trace.recovery_status.iloc[-1],
+            "status": recovery_status,
         }
     row = (
         effective_candidate_cop(
@@ -417,7 +233,6 @@ def current_effective_cop(frame, models, experiment_id, *, preparation_heat="zer
             frame.timestamp.min(),
             models,
             experiment_id,
-            preparation_heat=preparation_heat,
             prediction_mode="full-model",
         )
         .iloc[0]
@@ -427,3 +242,136 @@ def current_effective_cop(frame, models, experiment_id, *, preparation_heat="zer
     if not row["cycle_cop_eligible"]:
         row["cycle_cop"] = float("nan")
     return row
+
+
+def calculate_cycle(
+    loader,
+    cycle_name,
+    models,
+    *,
+    rb,
+    candidate_step_seconds=10,
+    action_step_seconds=None,
+    prediction_mode="cross-fitted",
+    missing_preparation="exclude",
+    initial_heating_start="recovery",
+):
+    """Calculate one COP curve using an explicitly supplied, frozen RB record."""
+    record = loader.get_cycle_record(cycle_name)
+    bounds = record["boundaries"]
+    heating = timestamp(bounds.get("heating_start"))
+    recovery = timestamp(bounds.get("stable_heating_start"))
+    end = timestamp(bounds.get("defrost_preparation_start"))
+    frame = loader.load_cycle_measurements(cycle_name)
+    frame["timestamp"] = pd.to_datetime(frame.timestamp)
+    observation_end = min(
+        timestamp(bounds.get("end_time")) or frame.timestamp.max(), frame.timestamp.max()
+    )
+    open_heating = end is None and timestamp(bounds.get("defrost_start")) is None
+    if open_heating:
+        end = observation_end
+    end_source = "recording_end" if open_heating else "actual_preparation"
+    if end is None and missing_preparation == "defrost-start":
+        # A missing unload command does not invalidate earlier heating observations.
+        observed = frame.loc[
+            frame.timestamp.lt(timestamp(bounds.get("defrost_start"))), "timestamp"
+        ]
+        if len(observed):
+            end = min(observation_end, observed.max())
+            end_source = "last_observation_before_defrost"
+    accounting_source = "identified_recovery"
+    if (
+        recovery is None
+        and initial_heating_start == "observed"
+        and bounds.get("heating_origin") in {"initial_recording", "cold_start"}
+    ):
+        experiment = loader.list_cycles()
+        experiment = experiment.loc[experiment.experiment_id.eq(record["experiment_id"])]
+        if experiment.cycle_name.iloc[0] == cycle_name and heating is not None and end is not None:
+            running = frame.loc[
+                frame.timestamp.ge(heating)
+                & frame.timestamp.lt(end)
+                & frame.compressor_frequency_setpoint.gt(0),
+                "timestamp",
+            ]
+            if len(running):
+                recovery = running.min()
+                accounting_source = "first_observed_running_first_cycle"
+    # Cohort/whole-event exclusions do not determine pre-action data validity.
+    reason = (
+        str(record.get("recovery_status", "recovery_not_identified"))
+        if recovery is None
+        else "missing_preparation_boundary"
+        if end is None
+        else ""
+    )
+    if not reason:
+        first = max(recovery + pd.Timedelta(seconds=1), heating + pd.Timedelta(minutes=5))
+        times = list(pd.date_range(first, end, freq=pd.Timedelta(seconds=candidate_step_seconds)))
+        if end >= first:
+            times.append(end)
+        rb_time = timestamp(rb.get("t_RB"))
+        if rb_time is not None and first <= rb_time <= end:
+            times.append(rb_time)
+        times = sorted(set(times))
+        if not times:
+            reason = "insufficient_heating_history"
+    if reason:
+        result = pd.DataFrame(
+            {
+                "candidate_defrost_time": [end or frame.timestamp.max()],
+                "cycle_cop": [np.nan],
+                "cycle_cop_eligible": [False],
+            }
+        )
+    else:
+        result = effective_candidate_cop(
+            frame,
+            times,
+            recovery,
+            heating,
+            models,
+            str(record["experiment_id"]),
+            prediction_mode=prediction_mode,
+        )
+    result["on_action_grid"] = (
+        True
+        if action_step_seconds is None
+        else (
+            (result.candidate_defrost_time - result.candidate_defrost_time.min())
+            .dt.total_seconds()
+            .mod(action_step_seconds)
+            .eq(0)
+        )
+    )
+    result = select_cycle_optimum(result)
+    result["cycle_status"] = (
+        "identified_curve" if result.is_selected.any() else reason or "no_supported_candidate"
+    )
+    result["cycle_name"] = cycle_name
+    result["experiment_id"] = record["experiment_id"]
+    result["cycle_start"] = (
+        heating
+        if bounds.get("heating_origin") == "cold_start"
+        else timestamp(bounds.get("start_time")) or heating
+    )
+    result["observation_end"] = observation_end
+    result["candidate_end_source"] = end_source
+    result["catalog_status"] = record["status"]
+    result["catalog_status_reason"] = record.get("status_reason")
+    result["pipeline_status"] = record.get("pipeline_status", record["status"])
+    result["pipeline_status_reason"] = record.get("pipeline_status_reason")
+    result["stable_heating_start"] = recovery
+    result["heating_accounting_start_source"] = (
+        accounting_source if recovery is not None else "unavailable"
+    )
+    result["t_RB"] = rb.get("t_RB")
+    result["rb_status"] = rb["rb_status"]
+    result["algorithm"] = "effective_cop_without_trunc"
+    result["measurement_processing"] = frame.attrs.get(
+        "measurement_processing", "dataset_causal_60s"
+    )
+    result["heat_column"] = "heating_capacity_processed"
+    result["effective_heat_rule"] = "without_trunc"
+    result["preparation_heat"] = "zero"
+    return result

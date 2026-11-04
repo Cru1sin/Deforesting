@@ -246,12 +246,33 @@ def resolve_stable_heating_start(
         if valid.empty or valid.max() < candidate:
             return None
         return candidate
+    if mode == "ts-minus":
+        return find_temperature_stable_heating_start(frame, heating_start, defrost_start, settings)
     if mode != "criterion":
         raise ValueError(f"unsupported recovery mode: {mode}")
     return find_stable_heating_start(frame, heating_start, defrost_start, settings)
 
 
-def find_stable_heating_start(
+def find_stable_heating_start(frame, heating_start, defrost_start, settings):
+    """Use the shared frequency detector once; missing evidence has no fallback."""
+    if not isinstance(heating_start, pd.Timestamp):
+        return None
+    times = pd.to_datetime(frame.timestamp)
+    heating = frame.loc[times.ge(heating_start)]
+    if isinstance(defrost_start, pd.Timestamp):
+        preparation = find_defrost_preparation_start(frame, heating_start, defrost_start, settings)
+        heating = heating.loc[pd.to_datetime(heating.timestamp).lt(preparation or defrost_start)]
+    recipe = (
+        {key: value for key, value in settings.items() if key in RECOVERY_DEFAULTS}
+        if isinstance(settings, Mapping)
+        else {}
+    )
+    trace = recovery_control_trace(heating, recipe)
+    confirmed = trace.loc[trace.normal_heating, "timestamp"]
+    return confirmed.iloc[0] if len(confirmed) else None
+
+
+def find_temperature_stable_heating_start(
     frame: pd.DataFrame,
     heating_start: Any,
     defrost_start: Any,
@@ -592,11 +613,14 @@ def _stage_for_times(
     defrost_end: object,
 ) -> pd.Series:
     stage = pd.Series("partial", index=times.index, dtype="string")
-    if not isinstance(stable_start, pd.Timestamp) or not isinstance(defrost_start, pd.Timestamp):
+    if not isinstance(defrost_start, pd.Timestamp):
         return stage
-    stage.loc[times.lt(stable_start)] = "recovery"
-    frost_end = preparation_start if isinstance(preparation_start, pd.Timestamp) else defrost_start
-    stage.loc[times.ge(stable_start) & times.lt(frost_end)] = "frost_development"
+    stage.loc[times.lt(defrost_start)] = "recovery"
+    if isinstance(stable_start, pd.Timestamp):
+        frost_end = (
+            preparation_start if isinstance(preparation_start, pd.Timestamp) else defrost_start
+        )
+        stage.loc[times.ge(stable_start) & times.lt(frost_end)] = "frost_development"
     if isinstance(preparation_start, pd.Timestamp):
         stage.loc[times.ge(preparation_start) & times.lt(defrost_start)] = "defrost_preparation"
     if isinstance(defrost_end, pd.Timestamp):
@@ -732,42 +756,28 @@ def _partial_stage_context(  # noqa: C901
             defrost_end = pd.Timestamp(inactive_after_start.iloc[0])
 
     stable_start: pd.Timestamp | None = None
-    required = {"timestamp", "water_out_temperature", "water_temperature_setpoint"}
-    if required <= set(segment.columns):
-        water_out = pd.to_numeric(segment["water_out_temperature"], errors="coerce")
-        setpoint = pd.to_numeric(segment["water_temperature_setpoint"], errors="coerce")
-        observed = times.notna() & water_out.notna() & setpoint.notna()
-        has_temperature_evidence = bool(observed.any())
-        if has_temperature_evidence:
-            stable_start = resolve_stable_heating_start(
-                segment,
-                heating_start,
-                defrost_start,
-                settings,
-            )
-    else:
-        has_temperature_evidence = False
-
-    if not has_temperature_evidence:
-        # Temperature evidence is required for recovery/frost labels, but a
-        # directly observed defrost state is an independent, useful boundary.
-        # Keep the pre-defrost rows neutral and preserve the known defrost
-        # interval instead of discarding it with the missing temperature data.
+    stable_start = resolve_stable_heating_start(segment, heating_start, defrost_start, settings)
+    if (
+        not pd.to_numeric(
+            segment.get("compressor_frequency_setpoint", pd.Series(dtype=float)), errors="coerce"
+        )
+        .notna()
+        .any()
+    ):
         stages = stages_for_partial(segment.index)
         if defrost_start is not None:
-            active_interval = times.ge(defrost_start)
+            active = times.ge(defrost_start)
             if defrost_end is not None:
-                active_interval &= times.lt(defrost_end)
-            stages.loc[active_interval] = "defrost"
+                active &= times.lt(defrost_end)
+            stages.loc[active] = "defrost"
         return stages, heating_start, None, defrost_start, defrost_end
-
     stages = pd.Series("partial", index=segment.index, dtype="string")
     before_defrost = times.lt(defrost_start) if defrost_start is not None else times.notna()
     if stable_start is not None:
         stages.loc[before_defrost & times.lt(stable_start)] = "recovery"
         stages.loc[before_defrost & times.ge(stable_start)] = "frost_development"
     elif defrost_start is not None:
-        # No temperature crossing means no evidence for frost development;
+        # No frequency transition means no evidence for frost development;
         # retain the known pre-defrost interval as recovery rather than hiding it.
         stages.loc[before_defrost] = "recovery"
 
@@ -782,7 +792,7 @@ def _partial_stage_context(  # noqa: C901
 
 
 def stages_for_partial(index: pd.Index) -> pd.Series:
-    """Return the neutral label used when an open segment has no temperature evidence."""
+    """Return the neutral label used when an open segment has no frequency evidence."""
     return pd.Series("partial", index=index, dtype="string")
 
 
@@ -860,9 +870,11 @@ RECOVERY_DEFAULTS = {
 }
 
 
-def add_recovery_arguments(parser):
+def add_recovery_arguments(parser, *, dataset=False):
     parser.add_argument(
-        "--recovery-rule", choices=RECOVERY_RULES, default=RECOVERY_DEFAULTS["recovery_rule"]
+        "--recovery-rule",
+        choices=(("dataset", *RECOVERY_RULES) if dataset else RECOVERY_RULES),
+        default="dataset" if dataset else RECOVERY_DEFAULTS["recovery_rule"],
     )
     for name, default in RECOVERY_DEFAULTS.items():
         if name != "recovery_rule":
@@ -874,6 +886,8 @@ def add_recovery_arguments(parser):
 
 
 def recovery_settings(args):
+    if args.recovery_rule == "dataset":
+        return {"recovery_rule": "dataset"}
     return {name: getattr(args, name) for name in RECOVERY_DEFAULTS}
 
 
@@ -1172,7 +1186,7 @@ def audit_recovery_cycle(loader, cycle_name, settings, output=None, *, figures=F
             )
     if output is not None:
         if figures:
-            from plots.publication import render_recovery_audit
+            from plots.cycle import render_recovery_audit
 
             render_recovery_audit(frame, record, traces, output / f"{cycle_name}.png")
         tables = []

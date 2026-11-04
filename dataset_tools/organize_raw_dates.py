@@ -1,15 +1,17 @@
-"""Unpack raw date ZIPs, rename camera folders, and flatten the xxxxS folder."""
+"""Unpack raw date ZIP/7z files, rename cameras, and flatten the xxxxS folder."""
 
 from __future__ import annotations
 
 import argparse
 import filecmp
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
 from dataset_tools.dataset_paths import require_external_storage
+from output_layout import PROJECT
 
 CAMERAS = {
     "192.168.1.1_1": "top",
@@ -38,17 +40,45 @@ def _merge_verified(source: Path, target: Path) -> None:
         raise FileExistsError(target)
 
 
-def organize_date(date_dir: Path, apply: bool = False) -> None:
-    """Extract all, flatten, rename, verify every file, then remove source ZIPs."""
+def organize_date(date_dir: Path, apply: bool = False, *, keep_archives: bool = False) -> None:
+    """Extract, flatten, rename and verify; optionally retain source archives."""
     require_external_storage(date_dir)
-    archives = sorted(p for p in date_dir.glob("*.zip")
-                      if p.stem in CAMERAS or p.stem == date_dir.name + "S")
-    print(f"{date_dir}: {len(archives)} ZIPs; extract -> flatten -> rename -> verify -> delete")
+    archives = sorted(
+        p
+        for p in date_dir.iterdir()
+        if p.suffix.lower() in {".zip", ".7z"}
+        and (p.stem in CAMERAS or p.stem == date_dir.name + "S")
+    )
+    print(
+        f"{date_dir}: {len(archives)} archives; extract -> flatten -> rename -> verify"
+        f" -> {'retain' if keep_archives else 'delete'}",
+        flush=True,
+    )
     if not apply:
         return
     with tempfile.TemporaryDirectory(prefix=".unpack-", dir=date_dir) as temporary:
         staging = Path(temporary)
         for archive in archives:
+            print(f"[extract] {archive.name}", flush=True)
+            if archive.suffix.lower() == ".7z":
+                members = subprocess.run(
+                    ["/usr/bin/tar", "-tf", str(archive)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+                if not members:
+                    raise ValueError(f"Empty archive: {archive}")
+                for member in members:
+                    target = (staging / member).resolve()
+                    if not target.is_relative_to(staging):
+                        raise ValueError(f"Unsafe 7z member: {member}")
+                    if target.exists() and not member.endswith("/"):
+                        raise FileExistsError(target)
+                subprocess.run(
+                    ["/usr/bin/tar", "-xf", str(archive), "-C", str(staging)], check=True
+                )
+                continue
             with zipfile.ZipFile(archive, metadata_encoding="gbk") as bundle:
                 if not any(not m.is_dir() for m in bundle.infolist()):
                     raise ValueError(f"Empty archive: {archive}")
@@ -99,15 +129,18 @@ def organize_date(date_dir: Path, apply: bool = False) -> None:
                 shutil.copy2(source, target)
             if not filecmp.cmp(source, target, shallow=False):
                 raise ValueError(f"Extracted data differs: {target}")
-        for archive in archives:
-            archive.unlink()
+        if not keep_archives:
+            for archive in archives:
+                archive.unlink()
+        print(f"[done] {date_dir.name}: {len(files)} verified files", flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=Path("/Volumes/Proust/DefrostingSensor/data"))
+    parser.add_argument("--data", type=Path, default=PROJECT / "data")
     parser.add_argument("--date", action="append", help="date folder name; repeatable")
     parser.add_argument("--apply", action="store_true", help="modify files; default: preview")
+    parser.add_argument("--keep-archives", action="store_true", help="retain ZIP/7z sources")
     args = parser.parse_args()
     require_external_storage(args.data)
     dates = (
@@ -116,7 +149,7 @@ def main() -> None:
         else sorted(p for p in args.data.iterdir() if p.is_dir() and p.name.isdigit())
     )
     for date_dir in dates:
-        organize_date(date_dir, args.apply)
+        organize_date(date_dir, args.apply, keep_archives=args.keep_archives)
 
 
 if __name__ == "__main__":

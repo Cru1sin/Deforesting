@@ -12,8 +12,8 @@ import pandas as pd
 
 from .alignment import match_nearest_one_to_one
 
-_TEMPERATURE_PATTERN = re.compile(r"^T_SHT40_(?P<serial>.+)$")
-_HUMIDITY_PATTERN = re.compile(r"^RH_SHT40_(?P<serial>.+)$")
+_TEMPERATURE_PATTERN = re.compile(r"^T_SHT4[0x]_(?P<serial>.+)$")
+_HUMIDITY_PATTERN = re.compile(r"^RH_SHT4[0x]_(?P<serial>.+)$")
 _SIGNAL_COLUMNS = (
     "sensor_1_temperature",
     "sensor_1_humidity",
@@ -36,15 +36,18 @@ def read_edf_environment(
     if not edf_paths:
         return _empty_environment_frame()
 
-    tables: list[pd.DataFrame] = []
-    serials: tuple[str, str] | None = None
-    for path in edf_paths:
-        table, file_serials = _read_edf_file(path)
-        if serials is None:
-            serials = file_serials
-        elif serials != file_serials:
-            raise ValueError(f"EDF sensor serials do not match across files: {path}")
-        tables.append(table)
+    loaded = [_read_edf_file(path) for path in edf_paths]
+    serials = sorted({serial for _, file_serials in loaded for serial in file_serials})
+    if len(serials) != 2:
+        raise ValueError("EDF date must contain exactly two complete SHT4x sensors")
+    tables = []
+    for table, file_serials in loaded:
+        normalized = table[["timestamp"]].copy()
+        for index, serial in enumerate(file_serials, 1):
+            slot = serials.index(serial) + 1
+            for signal in ("temperature", "humidity"):
+                normalized[f"sensor_{slot}_{signal}"] = table[f"sensor_{index}_{signal}"]
+        tables.append(normalized.reindex(columns=["timestamp", *_SIGNAL_COLUMNS]))
 
     combined = pd.concat(tables, ignore_index=True)
     deduplication_columns = ["timestamp", *_SIGNAL_COLUMNS]
@@ -57,7 +60,7 @@ def read_edf_environment(
     ].reset_index(drop=True)
 
 
-def _read_edf_file(path: Path) -> tuple[pd.DataFrame, tuple[str, str]]:
+def _read_edf_file(path: Path) -> tuple[pd.DataFrame, tuple[str, ...]]:
     header_row: int | None = None
     with path.open("r", encoding="utf-8") as handle:
         for row_number, line in enumerate(handle):
@@ -91,26 +94,17 @@ def _read_edf_file(path: Path) -> tuple[pd.DataFrame, tuple[str, str]]:
         if (match := _HUMIDITY_PATTERN.match(str(column))) is not None
     }
     serials = tuple(sorted(set(temperatures) & set(humidities)))
-    if len(serials) != 2:
-        raise ValueError(f"EDF must contain exactly two complete SHT40 sensors: {path}")
+    if len(serials) not in {1, 2}:
+        raise ValueError(f"EDF must contain one or two complete SHT4x sensors: {path}")
 
-    normalized = pd.DataFrame(
-        {
-            "timestamp": _local_wall_time(table["Local_Date_Time"]),
-            "sensor_1_temperature": pd.to_numeric(
-                table[temperatures[serials[0]]], errors="coerce"
-            ),
-            "sensor_1_humidity": pd.to_numeric(
-                table[humidities[serials[0]]], errors="coerce"
-            ),
-            "sensor_2_temperature": pd.to_numeric(
-                table[temperatures[serials[1]]], errors="coerce"
-            ),
-            "sensor_2_humidity": pd.to_numeric(
-                table[humidities[serials[1]]], errors="coerce"
-            ),
-        }
-    )
+    normalized = pd.DataFrame({"timestamp": _local_wall_time(table["Local_Date_Time"])})
+    for index, serial in enumerate(serials, 1):
+        normalized[f"sensor_{index}_temperature"] = pd.to_numeric(
+            table[temperatures[serial]], errors="coerce"
+        )
+        normalized[f"sensor_{index}_humidity"] = pd.to_numeric(
+            table[humidities[serial]], errors="coerce"
+        )
     return normalized, serials
 
 
@@ -154,9 +148,7 @@ def _pair_sensor_records(
     tolerance: pd.Timedelta,
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    pairs = match_nearest_one_to_one(
-        sensor_1["timestamp"], sensor_2["timestamp"], tolerance
-    )
+    pairs = match_nearest_one_to_one(sensor_1["timestamp"], sensor_2["timestamp"], tolerance)
     for left, right in pairs:
         left_time = pd.Timestamp(sensor_1.iloc[left]["timestamp"])
         right_time = pd.Timestamp(sensor_2.iloc[right]["timestamp"])
@@ -169,8 +161,7 @@ def _pair_sensor_records(
                 )
                 / 2,
                 "environment_relative_humidity": (
-                    float(sensor_1.iloc[left]["humidity"])
-                    + float(sensor_2.iloc[right]["humidity"])
+                    float(sensor_1.iloc[left]["humidity"]) + float(sensor_2.iloc[right]["humidity"])
                 )
                 / 2,
                 "sensor_1_temperature": float(sensor_1.iloc[left]["temperature"]),

@@ -1,172 +1,70 @@
-# Cycle Dataset v3 数据格式
+# Dataset 数据格式
 
-Cycle Dataset 是包含人工科研 review 的增量维护发布层。`dataset add` 从日期原始目录执行
-`prepare → validate_prepared → process → validate_processed → Dataset`；其余 Dataset
-操作只维护当前 Dataset。
+Dataset 保存循环测量、科学边界、人工质量标记和已发布模型输入。主模型通过 `DatasetLoader` 读取这些内容，不在训练时重新生成 COP、标签或 DINO 特征。
 
-## 目录
+## 交付目录
 
 ```text
 dataset/
-├── dataset_manifest.json
-├── cycle_catalog.json
-├── image_metadata.parquet
-├── channel_registry.json
-├── README.md
-├── cycles/
-│   ├── frost_cycle_000001.parquet
-│   ├── frost_cycle_000001.csv
-│   ├── frost_cycle_000001.png
-│   └── frost_cycle_000001_rgb_panel.png
-├── cycles_original/
-│   └── frost_cycle_000001.csv
-└── images/
-    └── frost_cycle_000001/
-        └── <camera_role>/
-            └── <original-basename>
+  dataset_manifest.json         数据集身份及实验列表
+  cycle_catalog.json            循环身份、阶段边界、质量和资产位置
+  channel_registry.json         通道、单位及测量处理定义
+  cycles/                       常规定时除霜循环的处理表
+  cycles_RB/                    RB 控制循环的处理表
+  cycles_original/              各循环原始观测表
+  training_data/                动作、标签、参考曲线、完整候选及筛选证据
+  image_DINO_feature/            按循环保存的冻结 DINO 特征
+  priors/rb_reference.csv        冻结 RB 触发时刻
+  除霜预测模型/<模型名称>/         Ridge 参数与验证结果
 ```
 
-`cycles/` 保存经过正式 channel 规范筛选的 10 秒 Processed 科学数据；
-`cycles_original/` 保存按 cycle 切分的原始传感器点位全集。Original CSV 是 Prepared
-标准通道、identity、构建状态和 cycle stage 的超集，并额外保留全部带参数组前缀的
-原始控制器列（例如 `p1__TL(28.1)'2_31'`）。重复 timestamp 观测不会被折叠。
-双 SHT40 的四个原始观测另存为 `edf__sensor_1/2_temperature/humidity`。
-Original 不保存逐通道质量审计列、图片字段、baseline、residual 或 10 秒聚合列。
-追加日期发现新原始点位时，历史 Original CSV 会补充该列并写入空值，保持跨日期
-schema 一致。
+`training_data/` 和 `image_DINO_feature/` 都保持平铺。结霜图像交付只需 DINO 特征，无需原图、照片索引或图片软链接。特征中的 `file_name` 用作关联键，不要求存在对应照片。
 
-超过连续信号插值上限的传感器缺口，只有在缺口两侧同时观察到运行模式从制热变为
-停机时才切分；缺口前片段保留为 `invalid`，缺口后片段保留为 `valid`。断联前后仍是
-制热模式时不切分，只保留缺口质量事实。
+`cycles/` 和 `cycles_RB/` 中 CSV 与 Parquet 表达相同的处理测量；研究端还可保留循环图。循环具体位置由 Catalog 的 `assets` 给出，读取时不要根据循环编号自行猜路径。RB 分类及继承规则见 [Dataset 使用说明](dataset/README.md)。
 
-## Manifest 与 Catalog
+## 测量与阶段
 
-`dataset_manifest.json` 记录 Dataset 身份、唯一图片根目录和实验来源：
+原始数据先根据运行状态识别循环，划分恢复、稳定制热、准备与除霜阶段；随后构建 **1 s 时间网格，按通道聚合**。
 
-```json
-{
-  "dataset_schema_version": 3,
-  "dataset_id": "frost_cycle_dataset",
-  "images_root": "images",
-  "experiments": [
-    {
-      "experiment_id": "exp_20260714",
-      "experiment_date": "2026-07-14"
-    }
-  ]
-}
-```
+- 连续传感器保留原始值，对内部缺口线性插值，保存 `_interpolated` 列；两端缺失不外推。
+- `is_interpolated` 记录该行是否有任一连续传感器经过插值；它不是数据有效性的替代字段。
+- 供热功率、蒸发压力 Pe 和盘管温度 T3 再按过去 60 s 时间加权平滑，保存 `_processed` 列。窗口在循环和阶段边界重置，不足 60 s 时按已有时长归一化。
+- 离散控制量以前值保持生成 `_filled` 列。
 
-`cycle_catalog.json` 保存每个 cycle 的身份、构建状态、当前人工状态、边界、数据摘要、
-图片摘要和固定资产路径。`pipeline_status` 是上游事实；
-`status` 是 Dataset 的人工使用状态，只能通过 `review-cycle` 修改。完整科研循环使用
-`valid` / `invalid`；`partial` 标记不完整上下文片段，
-`reference` 标记仅作参照而不进入正式循环。`review-cycle` 只把记录改为 `valid` 或
-`invalid`。Pareto-boundary CV 另有两个与 `status` 平行的状态：
-`pareto_knee_status` 表示该循环是否存在由留出该实验的 teacher 得到的有效 Pareto knee，
-`rgb_knee_coverage_status` 表示原生 front RGB 时间范围是否前后覆盖该 knee。只有这两个字段
-与 `status` 同时为 `valid` 的循环才进入 Pareto CV 训练和比较统计；缺失字段按 `invalid`
-处理。该限制不移除全循环审计图，也不改变 teacher 的选择定义。
+离线插值使用后续观测，不能把整个处理链称为在线因果处理。具体算法见 [测量处理说明](heat_smoothing/README.md)。Ridge 直接读取盘管温度处理值，不重复平滑。
 
-允许历史测量重建和 outcome-model 外推的新定义使用独立字段
-`pareto_extrapolated_knee_status` 与 `rgb_extrapolated_knee_coverage_status`，避免覆盖或
-静默重命名上述严格定义；该版本的 CV 只读取 `status` 和这两个 extrapolated 状态。
+`cycles_original/` 保留标准通道、循环身份和阶段，以及带参数组前缀的设备原始列；重复时间戳观测不折叠。新增通道可能为已有循环补充空列，使各实验表结构一致。
 
-`images_root` 可以是相对 Dataset 的 `images`，也可以在图片整体移动后直接改成
-OneDrive `images` 文件夹的绝对路径。目录内部仍固定为
-`<cycle_name>/<camera_role>/<original_basename>`；此时本地 `dataset/images/` 可以不存在，
-也无需改 `image_metadata.parquet`。
+循环停机缺口识别使用 `shutdown_gap_seconds`：足够长的传感器缺口且两侧运行模式满足停机条件时才划分片段。这个设置不限制连续测量的内部线性插值。
 
-## 图片与 availability
+当前恢复边界使用共享 `recovery_control_trace` 的 `frequency-setpoint` 算法。未观察到可靠控制转变时保留空边界，不自动回退到温度规则。已保存的 Original、Processed 与阶段记录使用同一边界；历史模型保留其原定义。
 
-图片文件名保持原始 basename，不按 cycle 重新编号；父文件夹名就是唯一 camera role：
+## 身份、质量与训练资格
 
-```text
-unverified_camera_05 → front_center
-```
+Manifest 记录 schema 版本、数据集身份和实验列表。研究端可另外配置 `images_root`，默认是 Dataset 内的 `images/`；模型读取不访问该位置。
 
-图片只按 `start_time <= image_time < end_time` 归属 cycle，不以 Sensor 时间戳匹配作为
-准入条件。`image_metadata.parquet` 只保存 `cycle_name`、`camera_role`、`file_name`、
-`frame_index`、`image_time` 和 `cycle_stage`；不提前保存 Sensor–RGB 对齐结果。
-Loader 和 refresh 从 `images_root` 扫描当前父目录；不做图片内容哈希。
+Catalog 中 `pipeline_status` 表示构建事实，`status` 表示当前人工使用状态：`valid`、`invalid`、`partial` 或 `reference`。人工复核通过 `review-cycle` 修改。历史 Pareto 状态字段仅用于相应历史方法，不是当前视觉主模型的训练入口。
 
-RGB availability 先按 `max_image_gap_seconds` 合并时间区间，再取当前实验全部 camera
-roles 的交集。Publication 的 stage ribbon 下固定绘制 Sensor/RGB 两行 availability；
-不再生成独立 coverage PNG。
+当前循环筛选以完整 `training_data/candidate_decisions.parquet` 和 Catalog 为输入，先调用 `screen_cv_cycles`，再检查已发布的 RGB/DINO 覆盖和插值质量。不能拿历史循环名单代替重新筛选。
 
-## CLI
+`training_data/cohort.csv` 按 `(cycle_name, camera_role)` 标记成员及 `evaluation_eligible`。前机位文件为 `<cycle_name>.parquet`，其他机位为 `<cycle_name>__<camera_role>.parquet`。DINO 特征每循环一个 Parquet，包含机位、时间和文件关联字段。原始质量证据随 `training_data/` 一起保留，因此没有原图也可以重做已发布证据上的筛选。
+
+COP 的近优区间是峰值所在的连续 99% 区间。冻结视觉模型沿用其已发布近优标签，以首末近优点生成 CDF 训练目标；两者用途不同，不重新解释或修改冻结标签。训练、验证与测试按实验隔离，由 `DatasetLoader` 分配。
+
+## 使用与维护
+
+四个主入口默认读取项目根目录的 `dataset/`。显式相对路径按当前工作目录解释。首次导入使用独立 Dataset：
 
 ```bash
-uv run python -m dataset_tools.manage_dataset add data/0714
-uv run python -m dataset_tools.manage_dataset add data/0715
-uv run python -m dataset_tools.manage_dataset aggregate-original --seconds 10
-uv run python -m dataset_tools.manage_dataset aggregate-original --seconds 30
-uv run python -m dataset_tools.manage_dataset edit --defrost-preparation
-uv run python -m dataset_tools.manage_dataset remove 0722 --dataset dataset
+uv run python -m dataset_tools.manage_dataset add data/0714 --dataset temp/test/import_demo/dataset
 uv run python validate_dataset.py --dataset dataset
-uv run python -m dataset_tools.manage_dataset refresh roles --dataset dataset
-uv run python -m dataset_tools.manage_dataset refresh images --dataset dataset
-uv run python -m dataset_tools.manage_dataset refresh figures --dataset dataset
-uv run python -m dataset_tools.manage_dataset review-cycle frost_cycle_000001 \
-  --status valid --reason manual_review_confirmed
-uv run python -m dataset_tools.manage_dataset edit --dataset dataset --baseline-seconds 60
-uv run python -m dataset_tools.manage_dataset edit --dataset dataset --recovery-seconds 180
-uv run python -m dataset_tools.manage_dataset render --dataset dataset frost_cycle_000001 \
-  --publication --panel
-uv run python -m dataset_tools.manage_dataset render frost_cycle_000020 \
-  --panel --fetch-cloud-images
+uv run python -m dataset_tools.manage_dataset aggregate-original --dataset dataset --n-jobs 6
+uv run python -m dataset_tools.manage_dataset smooth --dataset dataset
+uv run python -m dataset_tools.manage_dataset review-cycle frost_cycle_000001 --status valid --reason manual_review_confirmed
 ```
 
-`python -m dataset_tools.manage_dataset render` 默认只使用本地 `dataset/images/<cycle_name>`，不会访问云端。只有显式
-增加 `--fetch-cloud-images` 时，RGB panel 才检查 rclone 远端中精确命名的
-`<cycle_name>.zip`。存在时使用 `rclone` 直接下载到 `dataset/images` 下的独立临时
-目录，校验 ZIP 路径、解压并绘图，然后在 `finally` 中删除临时 ZIP 和解压目录；云端
-对象从不被删除或修改。云端没有相应 ZIP 时，该 cycle 按无 RGB 图片处理。
+`validate_dataset.py` 只读检查循环测量、列结构、时间和身份；`--check-images` 才额外检查照片索引。`aggregate-original` 从 Original 重建正式 1 s 测量表；`smooth` 更新插值和平滑列。两者都会修改指定 Dataset，执行前打印目标。
 
-远端位置不写入代码，使用前显式设置：
+导入、替换、删除和科学边界修改属于研究端维护，不是冻结模型演示的必要步骤。照片重新索引、照片质量复核、DINO 重提取和含照片出图需要原图；云端照片获取须显式请求。下载照片默认保留，只有显式清理参数才删除本次下载内容。完整维护选项以 `python -m dataset_tools.manage_dataset <子命令> --help` 为准。
 
-```bash
-export HEAT_PUMP_DEFROST_IMAGE_REMOTE='remote:path/to/dataset/images'
-```
-
-Python 图像训练代码可复用 `dataset_tools.cloud_images.materialize_cycle_images(...)` 上下文；用
-`contextlib.ExitStack` 同时保持多个 cycle 上下文，即可在一批训练结束时统一清理。
-
-`aggregate-original` 不读取 Data 或图片。Dataset 当前间隔（默认 10 秒）写回
-`cycles/`；其他间隔写入 `cycles_<seconds>s/`。
-
-`python -m dataset_tools.manage_dataset add` 对相同实验 identity 直接 no-op，新日期必须晚于 Dataset 最后日期。
-实验日期自动取自 XLS 参数文件名；EDF 日期不参与判断，多个 XLS 日期会直接报错。
-`remove` 只删除匹配日期/experiment 的循环且不重编号其他循环；后续 `add` 从现有最大
-cycle 编号加一。`refresh roles/images/all` 自动更新所有图片派生结果并保留人工状态；
-`refresh figures` 只重画 publication 和 RGB panel。没有日常 rebuild 入口。
-
-某日切分逻辑修正后，用原日期目录重新发布；循环增减和后续编号顺延自动完成：
-
-```bash
-uv run python -m dataset_tools.manage_dataset replace data/0729 --dataset dataset
-```
-
-科学 edit 的当前规则保存在 `channel_registry.json`。后续 `add` 会对新 cycle 应用同一
-baseline/recovery 规则，避免一个 Dataset 混用不同的管理设定。`--recovery-seconds` 与
-`--recovery-end-by ts-minus` 互斥。Recovery edit 会同步更新 Original、Processed、
-cycle coordinates、图片 metadata stage 和相关图形。
-
-## 写入与校验
-
-Dataset 直接写入目标目录，不持久化 staging、hardlink、rollback 或事务状态。`add`、
-`remove`、`edit` 和 `refresh` 失败后，按当前文件状态修正问题并重新运行相应操作。
-真的需要从零恢复时，明确删除或另建 Dataset 目录，再逐日期执行 `add`。
-
-科学构建阶段由 `validate_prepared()` 和 `validate_processed()` 检查 Prepared/Processed
-数据。显式 `validate_dataset.py` 才读取已发布 Dataset，检查非空数据、schema、时间顺序、
-cycle identity、row count 和 Original 的质量列规范。Dataset 不保存或核对资产 SHA，
-图片也不做内容哈希、闭包或 orphan 校验。
-
-Dataset 下游统一使用：
-
-```python
-loader.load_cycle("frost_cycle_000001")
-loader.load_cycle_original("frost_cycle_000001")
-loader.load_cycle_images("frost_cycle_000001")
-```
+数据构建直接写入指定 Dataset；操作失败时按当前文件状态修正后重新运行。冻结历史模型与结果不因数据维护自动更新。输入发布和 RB 先验维护见 [Dataset 使用说明](dataset/README.md)，四阶段命令及输出目录见 [项目入口](README.md)。

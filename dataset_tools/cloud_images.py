@@ -18,6 +18,8 @@ from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
+from output_layout import PROJECT
+
 from .cycle_metadata import image_root
 
 ZipMember = tuple[int, int, int, int, int, int]
@@ -33,6 +35,21 @@ def _cloud_file(name: str) -> str:
     if not DEFAULT_CLOUD_IMAGES_REMOTE:
         raise ValueError("cloud image access requires HEAT_PUMP_DEFROST_IMAGE_REMOTE or cloud_root")
     return f"{DEFAULT_CLOUD_IMAGES_REMOTE}/{name}"
+
+
+def available_image_archives() -> set[str]:
+    """Inventory readable pixel sources before sampling figure panels."""
+    result = subprocess.run(
+        ["rclone", "lsf", DEFAULT_CLOUD_IMAGES_REMOTE, "--files-only"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        Path(name).stem
+        for name in result.stdout.splitlines()
+        if name.startswith("frost_cycle_") and name.endswith(".zip")
+    }
 
 
 def _direct_rclone_env() -> dict[str, str]:
@@ -234,15 +251,19 @@ def _read_zip_member(
         filename_size,
         extra_size,
     ) = member
-    payload = payload if payload is not None else _read_zip_range(
-        archive,
-        local_offset,
-        min(
-            30 + filename_size + 65_535 + compressed_size,
-            archive_size - local_offset,
-        ),
-        remote=remote,
-        transferred=transferred,
+    payload = (
+        payload
+        if payload is not None
+        else _read_zip_range(
+            archive,
+            local_offset,
+            min(
+                30 + filename_size + 65_535 + compressed_size,
+                archive_size - local_offset,
+            ),
+            remote=remote,
+            transferred=transferred,
+        )
     )
     header = payload[:30]
     if header[:4] != b"PK\x03\x04":
@@ -281,10 +302,11 @@ def _plan_image_members(
     file_names: Iterator[str] | list[str] | tuple[str, ...],
     cloud_root: Path | None,
     minimum_free_gib: float,
+    images_dir: Path | None = None,
 ) -> tuple[list[ImageJob], list[int], float]:
     if not cycle_name.startswith("frost_cycle_") or not cycle_name[12:].isdigit():
         raise ValueError(f"invalid cycle name: {cycle_name}")
-    images_root = image_root(Path(dataset_dir))
+    images_root = image_root(Path(dataset_dir)) if images_dir is None else Path(images_dir)
     cycle_dir = images_root / cycle_name
     requested = sorted({PurePosixPath(str(name)) for name in file_names if str(name)}, key=str)
     if any(path.is_absolute() or ".." in path.parts or len(path.parts) > 2 for path in requested):
@@ -394,6 +416,7 @@ def materialize_image_members(
     cleanup_downloaded: bool = False,
     minimum_free_gib: float = 50,
     n_jobs: int = 10,
+    images_dir: Path | None = None,
 ) -> Iterator[Iterator[str]]:
     """Download all requested OneDrive ZIP members through one bounded pool."""
     if n_jobs < 1:
@@ -411,6 +434,7 @@ def materialize_image_members(
                 requests[cycle],
                 cloud_root,
                 minimum_free_gib,
+                images_dir,
             ): cycle
             for cycle in cycles
         }
@@ -577,7 +601,12 @@ def materialize_cycle_images(  # noqa: C901
         else:
             shutil.copyfile(archive, local_archive)
         with ZipFile(local_archive) as bundle:
-            members = bundle.infolist()
+            # Finder metadata can change whenever a folder is opened; it is not RGB data.
+            members = [
+                member
+                for member in bundle.infolist()
+                if PurePosixPath(member.filename).name != ".DS_Store"
+            ]
             for member in members:
                 path = PurePosixPath(member.filename)
                 if path.is_absolute() or ".." in path.parts or path.parts[:1] != (cycle_name,):
@@ -587,7 +616,7 @@ def materialize_cycle_images(  # noqa: C901
                 images_root, required, f"extracting {archive.name}", minimum_free_gib
             )
             print(f"[images] extracting local copy: {cycle_name}", flush=True)
-            bundle.extractall(work)
+            bundle.extractall(work, members=members)
 
         extracted = work / cycle_name
         if not extracted.is_dir():
@@ -613,35 +642,102 @@ def materialize_cycle_images(  # noqa: C901
                 print(f"[images] cleaned downloaded copy: {cycle_name}", flush=True)
 
 
+def missing_indexed_images(dataset_dir: Path) -> dict[str, list[str]]:
+    """Compare indexed camera/file identities with nonempty local files."""
+    import pandas as pd
+
+    root = image_root(dataset_dir)
+    metadata = pd.read_parquet(root / "image_metadata.parquet")
+    missing: dict[str, list[str]] = {}
+    for cycle, group in metadata.groupby("cycle_name", sort=True):
+        present = set()
+        directory = root / str(cycle)
+        if directory.is_dir():
+            for camera in directory.iterdir():
+                if camera.is_dir():
+                    present.update(
+                        f"{camera.name}/{path.name}"
+                        for path in camera.iterdir()
+                        if path.is_file() and path.stat().st_size > 0
+                    )
+        absent = sorted(
+            {f"{row.camera_role}/{row.file_name}" for row in group.itertuples()} - present
+        )
+        if absent:
+            missing[str(cycle)] = absent
+    return missing
+
+
 if __name__ == "__main__":
     import argparse
     import json
 
     parser = argparse.ArgumentParser(description="Download and unpack complete cycle image ZIPs.")
-    parser.add_argument("--dataset", type=Path, default=Path("dataset"))
+    parser.add_argument("--dataset", type=Path, default=(PROJECT / "dataset"))
     parser.add_argument("--n-jobs", type=int, default=6)
+    parser.add_argument(
+        "--repair-missing",
+        action="store_true",
+        help="complete only cycles with missing indexed photos, then verify all indexed files",
+    )
+    parser.add_argument(
+        "--check-only", action="store_true", help="audit indexed photos without downloading"
+    )
     args = parser.parse_args()
     if args.n_jobs < 1:
         parser.error("--n-jobs must be positive")
     image_root(args.dataset)  # Check the external drive before network IO.
+    missing = missing_indexed_images(args.dataset) if args.repair_missing or args.check_only else {}
+    for cycle, names in missing.items():
+        print(f"[images:missing] {cycle}: {len(names)}", flush=True)
+    if args.check_only:
+        print(
+            f"[images:audit] {len(missing)} incomplete cycles, {sum(map(len, missing.values()))} missing photos",
+            flush=True,
+        )
+        raise SystemExit(bool(missing))
     env = _direct_rclone_env()
     os.environ.clear()
     os.environ.update(env)
     listing = subprocess.run(
         ["rclone", "lsjson", DEFAULT_CLOUD_IMAGES_REMOTE, "--files-only"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    cycles = sorted(Path(item["Name"]).stem for item in json.loads(listing.stdout)
-                    if item["Name"].endswith(".zip"))
+    cycles = sorted(
+        Path(item["Name"]).stem
+        for item in json.loads(listing.stdout)
+        if item["Name"].endswith(".zip")
+    )
+    if args.repair_missing:
+        unavailable = set(missing) - set(cycles)
+        if unavailable:
+            raise FileNotFoundError(f"Missing cloud archives: {sorted(unavailable)}")
+        cycles = sorted(missing)
 
     def download(cycle: str) -> None:
-        with materialize_cycle_images(args.dataset, cycle, fetch_cloud=True,
-                                      complete_existing=True, download_streams=1) as directory:
+        with materialize_cycle_images(
+            args.dataset, cycle, fetch_cloud=True, complete_existing=True, download_streams=1
+        ) as directory:
             if not directory.is_dir():
                 raise FileNotFoundError(directory)
         print(f"[images:done] {cycle}", flush=True)
 
     with ThreadPoolExecutor(max_workers=args.n_jobs) as pool:
+        errors = []
         for future in as_completed([pool.submit(download, cycle) for cycle in cycles]):
-            future.result()
+            try:
+                future.result()
+            except Exception as error:
+                errors.append(str(error))
+                print(f"[images:error] {error}", flush=True)
+    if args.repair_missing:
+        remaining = missing_indexed_images(args.dataset)
+        if remaining:
+            errors.append(
+                f"Still missing indexed photos: { {cycle: len(names) for cycle, names in remaining.items()} }"
+            )
+    if errors:
+        raise RuntimeError(f"Incomplete: {errors}")
     print(f"[images:complete] {len(cycles)} cycles", flush=True)

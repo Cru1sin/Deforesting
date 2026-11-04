@@ -15,6 +15,7 @@ import pytest
 
 from dataset_tools.builder.dataset_settings import Config, ProcessSettings
 from dataset_tools.dataset_maintenance import assign_final_cycle_names_by_time
+from plots import dataset as dataset_figures
 
 
 def _allow_image_download(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,8 +635,9 @@ def _write_renderable_dataset(dataset_dir: Path) -> tuple[str, dict[str, str]]:
         "image_time",
         "cycle_stage",
     ]
+    (dataset_dir / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=metadata_columns).to_parquet(
-        dataset_dir / "image_metadata.parquet", index=False
+        dataset_dir / "images/image_metadata.parquet", index=False
     )
     write_json(
         {
@@ -790,7 +792,10 @@ def test_materialize_cycle_builds_one_catalog_record(
     }
     assert manifest["images_root"] == "images"
     assert set(manifest["experiments"][0]) == {"experiment_id", "experiment_date"}
-    processed = pd.read_parquet(dataset_dir / "cycles/frost_cycle_000001.parquet")
+    catalog = json.loads((dataset_dir / "cycle_catalog.json").read_text())
+    record = catalog["cycles"][0]
+    assert record["defrost_control"]["mode"] == "unknown"
+    processed = pd.read_parquet(dataset_dir / record["assets"]["parquet"])
     assert not {
         "dataset_id",
         "dataset_schema_version",
@@ -798,7 +803,7 @@ def test_materialize_cycle_builds_one_catalog_record(
     } & set(processed)
     original = pd.read_csv(dataset_dir / "cycles_original/frost_cycle_000001.csv")
     assert original["p1__undeclared_point"].tolist() == ["raw-a", "raw-b"]
-    metadata = pd.read_parquet(dataset_dir / "image_metadata.parquet")
+    metadata = pd.read_parquet(dataset_dir / "images/image_metadata.parquet")
     assert metadata.columns.tolist() == [
         "cycle_name",
         "camera_role",
@@ -949,7 +954,7 @@ def test_review_cycle_does_not_scan_images_or_update_manifest(
 ) -> None:
     import dataset_tools.local_images as dataset_images
     from dataset_tools.dataset_maintenance import review_cycle
-    from plots import publication as visualization
+    from plots import cycle as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     manifest_before = (tmp_path / "dataset_manifest.json").read_bytes()
@@ -1045,8 +1050,8 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataset_tools.dataset_paths as dataset_io
-    from dataset_tools.dataset_maintenance import render_dataset
-    from plots import publication as visualization
+    from plots import cycle as visualization
+    from plots.dataset import render_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     catalog_before = (tmp_path / "cycle_catalog.json").read_bytes()
@@ -1080,14 +1085,12 @@ def test_render_only_draws_without_writing_catalog_or_manifest(
     assert (tmp_path / "dataset_manifest.json").read_bytes() == manifest_before
 
 
-
-
 def test_rgb_panel_coverage_uses_full_metadata_not_materialized_cells(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataset_tools.dataset_maintenance import _render_rgb_panel
     from dataset_tools.dataset_paths import read_json
-    from plots import publication
+    from plots import cycle as publication
+    from plots.dataset import _render_rgb_panel
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     frame = pd.read_parquet(tmp_path / "cycles" / f"{cycle_name}.parquet")
@@ -1129,8 +1132,8 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
     from zipfile import ZipFile
 
     from dataset_tools import cloud_images
-    from dataset_tools.dataset_maintenance import render_dataset
-    from plots import publication as visualization
+    from plots import cycle as visualization
+    from plots.dataset import render_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     shutil.rmtree(tmp_path / "images" / cycle_name)
@@ -1147,7 +1150,8 @@ def test_render_can_explicitly_fetch_cloud_cycle_images(
             }
         ]
     )
-    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
+    metadata.to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
     cloud = tmp_path / "OneDrive" / "images"
     cloud.mkdir(parents=True)
     archive = cloud / f"{cycle_name}.zip"
@@ -1200,8 +1204,8 @@ def test_render_fetches_only_missing_rgb_panel_members(
     from contextlib import contextmanager
 
     from dataset_tools import cloud_images
-    from dataset_tools.dataset_maintenance import render_dataset
-    from plots import publication
+    from plots import cycle as publication
+    from plots.dataset import render_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     shutil.rmtree(tmp_path / "images" / cycle_name)
@@ -1218,7 +1222,8 @@ def test_render_fetches_only_missing_rgb_panel_members(
             for role in ("front_center", "left_center")
         ]
     )
-    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
+    metadata.to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
     requested: list[tuple[tuple[str, ...], dict[str, object]]] = []
     whole_cycle_downloads: list[str] = []
 
@@ -1257,8 +1262,8 @@ def test_render_fetches_only_missing_rgb_panel_members(
 def test_render_without_cycle_renders_all_catalog_panels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from dataset_tools.dataset_maintenance import render_dataset
-    from plots import publication
+    from plots import cycle as publication
+    from plots.dataset import render_dataset
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     rendered: list[str] = []
@@ -1279,9 +1284,9 @@ def test_cloud_render_flattens_all_cycles_into_one_image_queue(
     from contextlib import contextmanager
 
     from dataset_tools import cloud_images
-    from dataset_tools.dataset_maintenance import render_dataset
     from dataset_tools.dataset_paths import read_json, write_json
-    from plots import publication
+    from plots import cycle as publication
+    from plots.dataset import render_dataset
 
     first, _ = _write_renderable_dataset(tmp_path)
     second = "frost_cycle_000002"
@@ -1290,9 +1295,10 @@ def test_cloud_render_flattens_all_cycles_into_one_image_queue(
     second_record["cycle_name"] = second
     catalog["cycles"].append(second_record)
     write_json(catalog, tmp_path / "cycle_catalog.json")
-    metadata = pd.read_parquet(tmp_path / "image_metadata.parquet")
+    metadata = pd.read_parquet(tmp_path / "images/image_metadata.parquet")
     metadata = pd.concat([metadata, metadata.assign(cycle_name=second)], ignore_index=True)
-    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
+    metadata.to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
     queued: list[tuple[dict[str, list[str]], dict[str, object]]] = []
     rendered: list[str] = []
 
@@ -1325,14 +1331,11 @@ def test_cloud_render_flattens_all_cycles_into_one_image_queue(
 
 
 def test_render_cycle_job_reports_start(tmp_path: Path, monkeypatch, capsys) -> None:
-    from dataset_tools import dataset_maintenance
 
-    monkeypatch.setattr(dataset_maintenance, "render_dataset", lambda *_args, **_kwargs: tmp_path)
+    monkeypatch.setattr(dataset_figures, "render_dataset", lambda *_args, **_kwargs: tmp_path)
 
     assert (
-        dataset_maintenance._render_cycle_job(
-            tmp_path, "frost_cycle_000001", False, True, True, False
-        )
+        dataset_figures._render_cycle_job(tmp_path, "frost_cycle_000001", False, True, True, False)
         == "frost_cycle_000001"
     )
     assert capsys.readouterr().out == "[render:start] frost_cycle_000001\n"
@@ -1384,8 +1387,9 @@ def test_validate_scientific_schema_ignores_catalog_counts(
         "image_time",
         "cycle_stage",
     ]
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(columns=metadata_columns).to_parquet(
-        tmp_path / "image_metadata.parquet", index=False
+        tmp_path / "images/image_metadata.parquet", index=False
     )
     write_json(
         {
@@ -1495,7 +1499,7 @@ def test_cli_default_dataset_path_is_local(monkeypatch: object) -> None:
     )
 
     assert manage_dataset.main(["edit", "--baseline-seconds", "60"]) == 0
-    assert calls == [("edit", Path("dataset"))]
+    assert calls == [("edit", Path(__file__).resolve().parents[2] / "dataset")]
 
 
 def test_cli_edit_can_skip_rgb_panel_rendering(monkeypatch: object, tmp_path: Path) -> None:
@@ -1612,6 +1616,7 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
         timestamps[0],
         timestamps[-1] + pd.Timedelta(seconds=10),
         {"stable_heating_seconds": 20},
+        mode="ts-minus",
     )
     seconds_start = resolve_stable_heating_start(
         frame,
@@ -1702,7 +1707,7 @@ def test_refresh_dataset_does_not_modify_manifest(
     import dataset_tools.validate_dataset as validation
     from dataset_tools.dataset_maintenance import refresh_dataset
     from dataset_tools.dataset_paths import write_json
-    from plots import publication as visualization
+    from plots import cycle as visualization
 
     (tmp_path / "cycles").mkdir()
     (tmp_path / "cycles_original").mkdir()
@@ -1755,6 +1760,7 @@ def test_refresh_dataset_does_not_modify_manifest(
         tmp_path / "cycle_catalog.json",
     )
     write_json({"fields": [], "channels": []}, tmp_path / "channel_registry.json")
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         columns=[
             "cycle_name",
@@ -1764,7 +1770,7 @@ def test_refresh_dataset_does_not_modify_manifest(
             "image_time",
             "cycle_stage",
         ]
-    ).to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    ).to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
 
     monkeypatch.setattr(
         visualization,
@@ -1812,6 +1818,8 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
             "timestamp": timestamps,
             "cycle_stage": stages,
             "signal": [float(value) for value in range(len(timestamps))],
+            "heating_capacity_processed": [float("nan")] * len(timestamps),
+            "evaporating_pressure_processed": [float("nan")] * len(timestamps),
             "cycle_elapsed_seconds": [
                 None,
                 None,
@@ -1914,7 +1922,9 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
 
     def counting_read_parquet(path: object, *args: object, **kwargs: object) -> pd.DataFrame:
         nonlocal processed_reads
-        if "/cycles/" in str(path) and str(path).endswith(".parquet"):
+        if Path(str(path)).parent.name in {"cycles", "cycles_RB"} and str(path).endswith(
+            ".parquet"
+        ):
             processed_reads += 1
         return read_parquet(path, *args, **kwargs)
 
@@ -2036,7 +2046,7 @@ def test_dataset_remove_deletes_only_selected_experiment(
     image_dir = tmp_path / "images" / second_name / "front"
     image_dir.mkdir(parents=True)
     (image_dir / "20260722100000000.jpg").write_bytes(b"image")
-    metadata = pd.read_parquet(tmp_path / "image_metadata.parquet")
+    metadata = pd.read_parquet(tmp_path / "images/image_metadata.parquet")
     metadata.loc[len(metadata)] = {
         "cycle_name": second_name,
         "camera_role": "front",
@@ -2045,7 +2055,8 @@ def test_dataset_remove_deletes_only_selected_experiment(
         "image_time": pd.Timestamp("2026-07-22 10:00:00"),
         "cycle_stage": "frost_development",
     }
-    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
+    metadata.to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
     validated: list[Path] = []
     monkeypatch.setattr(validation, "validate_dataset", lambda path: validated.append(path))
 
@@ -2057,7 +2068,7 @@ def test_dataset_remove_deletes_only_selected_experiment(
     assert result["cycles"][0]["status_reason"] == "manual_review"
     assert not (tmp_path / "images" / second_name).exists()
     assert all(not (tmp_path / relative).exists() for relative in second["assets"].values())
-    assert pd.read_parquet(tmp_path / "image_metadata.parquet").empty
+    assert pd.read_parquet(tmp_path / "images/image_metadata.parquet").empty
     assert validated == [tmp_path]
     assert "[remove] done" in capsys.readouterr().out
 
@@ -2069,7 +2080,7 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
 ) -> None:
     import dataset_tools.validate_dataset as validation
     from dataset_tools.dataset_maintenance import refresh_dataset
-    from plots import publication as visualization
+    from plots import cycle as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "front_center"
@@ -2088,7 +2099,8 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
             }
         ]
     )
-    metadata.to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
+    metadata.to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
     catalog = json.loads((tmp_path / "cycle_catalog.json").read_text())
     catalog["cycles"][0].update(
         {
@@ -2106,7 +2118,7 @@ def test_refresh_roles_uses_folder_names_and_preserves_human_review(
 
     refresh_dataset(tmp_path, "roles")
 
-    refreshed = pd.read_parquet(tmp_path / "image_metadata.parquet")
+    refreshed = pd.read_parquet(tmp_path / "images/image_metadata.parquet")
     assert refreshed.loc[0, "camera_role"] == "front_center"
     result = json.loads((tmp_path / "cycle_catalog.json").read_text())["cycles"][0]
     assert (result["status"], result["status_reason"]) == ("valid", "manual_review")
@@ -2124,7 +2136,7 @@ def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
 ) -> None:
     import dataset_tools.validate_dataset as validation
     from dataset_tools.dataset_maintenance import refresh_dataset
-    from plots import publication as visualization
+    from plots import cycle as visualization
 
     cycle_name, _ = _write_renderable_dataset(tmp_path)
     image_dir = tmp_path / "images" / cycle_name / "top_center"
@@ -2137,7 +2149,7 @@ def test_refresh_images_rebuilds_metadata_from_current_cycle_files(
 
     refresh_dataset(tmp_path, "images")
 
-    metadata = pd.read_parquet(tmp_path / "image_metadata.parquet")
+    metadata = pd.read_parquet(tmp_path / "images/image_metadata.parquet")
     assert metadata[["cycle_name", "camera_role", "file_name"]].to_dict("records") == [
         {
             "cycle_name": cycle_name,
@@ -2159,13 +2171,13 @@ def test_refresh_images_refuses_file_outside_its_cycle(
     image_dir = tmp_path / "images" / cycle_name / "front"
     image_dir.mkdir()
     (image_dir / "20260714110000000.jpg").write_bytes(b"image")
-    before = (tmp_path / "image_metadata.parquet").read_bytes()
+    before = (tmp_path / "images/image_metadata.parquet").read_bytes()
     monkeypatch.setattr(validation, "validate_dataset", lambda _path: None)
 
     with pytest.raises(ValueError, match="1 images fall outside their cycle"):
         refresh_dataset(tmp_path, "images")
 
-    assert (tmp_path / "image_metadata.parquet").read_bytes() == before
+    assert (tmp_path / "images/image_metadata.parquet").read_bytes() == before
 
 
 def test_refresh_figures_does_not_rewrite_image_metadata(
@@ -2173,10 +2185,10 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
 ) -> None:
     import dataset_tools.validate_dataset as validation
     from dataset_tools.dataset_maintenance import refresh_dataset
-    from plots import publication as visualization
+    from plots import cycle as visualization
 
     _write_renderable_dataset(tmp_path)
-    before = (tmp_path / "image_metadata.parquet").read_bytes()
+    before = (tmp_path / "images/image_metadata.parquet").read_bytes()
     calls: list[str] = []
     monkeypatch.setattr(
         visualization,
@@ -2188,7 +2200,7 @@ def test_refresh_figures_does_not_rewrite_image_metadata(
 
     refresh_dataset(tmp_path, "figures")
 
-    assert (tmp_path / "image_metadata.parquet").read_bytes() == before
+    assert (tmp_path / "images/image_metadata.parquet").read_bytes() == before
     assert calls == ["publication", "panel"]
 
 
@@ -2214,7 +2226,7 @@ def test_loader_uses_manifest_images_root_without_metadata_rewrite(tmp_path: Pat
             }
         ]
     )
-    metadata.to_parquet(dataset_dir / "image_metadata.parquet", index=False)
+    metadata.to_parquet(external_root / "image_metadata.parquet", index=False)
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
     manifest["images_root"] = str(external_root)
     (dataset_dir / "dataset_manifest.json").write_text(json.dumps(manifest))
@@ -2279,7 +2291,7 @@ def test_baseline_edit_does_not_require_original_or_image_metadata(
         tmp_path / "channel_registry.json",
     )
     monkeypatch.setattr(
-        "plots.publication.render_cycle_publication",
+        "plots.cycle.render_cycle_publication",
         lambda *_args, **_kwargs: None,
     )
 
@@ -2354,6 +2366,7 @@ def test_loader_uses_camera_directory_as_role(
         },
         tmp_path / "channel_registry.json",
     )
+    (tmp_path / "images/image_metadata.parquet").parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(
         [
             {
@@ -2365,7 +2378,7 @@ def test_loader_uses_camera_directory_as_role(
                 "cycle_stage": "frost_development",
             }
         ]
-    ).to_parquet(tmp_path / "image_metadata.parquet", index=False)
+    ).to_parquet(tmp_path / "images/image_metadata.parquet", index=False)
 
     images = DatasetLoader(tmp_path).load_cycle_images(cycle_name)
 
@@ -2417,14 +2430,23 @@ def test_rgb_stage_metrics_mark_missing_expected_role_invalid() -> None:
 def test_update_cycle_columns_writes_parquet_and_csv_by_timestamp(
     tmp_path: Path, directory: str
 ) -> None:
-    from dataset_tools.dataset_maintenance import update_cycle_columns
+    from dataset_tools.measurements import update_cycle_columns
 
     cycle_name = "frost_cycle_000001"
     cycles = tmp_path / directory
     cycles.mkdir()
-    (tmp_path / "cycle_catalog.json").write_text(json.dumps({"cycles": [{
-        "cycle_name": cycle_name, "assets": {"parquet": f"{directory}/{cycle_name}.parquet"}
-    }]}))
+    (tmp_path / "cycle_catalog.json").write_text(
+        json.dumps(
+            {
+                "cycles": [
+                    {
+                        "cycle_name": cycle_name,
+                        "assets": {"parquet": f"{directory}/{cycle_name}.parquet"},
+                    }
+                ]
+            }
+        )
+    )
     timestamps = pd.date_range("2026-07-14 10:00:00", periods=2, freq="10s")
     frame = pd.DataFrame({"timestamp": timestamps, "heating_capacity": [10.0, 12.0]})
     frame.to_parquet(cycles / f"{cycle_name}.parquet", index=False)
@@ -2500,14 +2522,14 @@ def test_dataset_add_same_experiment_identity_is_a_noop_without_source_scan(
     assert add_dataset(input_dir, dataset_dir) == dataset_dir.resolve()
 
 
-def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
+def test_aggregate_original_rebuilds_1s_with_new_channel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import dataset_tools.builder.channel_mapping as channels_module
     import dataset_tools.builder.dataset_settings as config_module
     import dataset_tools.dataset_maintenance as dataset_module
-    from dataset_tools.dataset_maintenance import aggregate_original
     from dataset_tools.dataset_paths import write_json
+    from dataset_tools.measurements import aggregate_original
 
     dataset = tmp_path / "dataset"
     (dataset / "cycles").mkdir(parents=True)
@@ -2523,7 +2545,7 @@ def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
         expected_sensor_interval_seconds=1,
         image_match_tolerance_seconds=2,
         edf_pair_tolerance_seconds=1,
-        process=ProcessSettings(resample_interval_seconds=10),
+        process=ProcessSettings(resample_interval_seconds=1),
     )
     monkeypatch.setattr(dataset_module, "_resolve_project_root", lambda: tmp_path)
     monkeypatch.setattr(config_module, "load_config", lambda **_kwargs: config)
@@ -2582,21 +2604,18 @@ def test_aggregate_original_restores_10s_and_builds_30s_with_new_channel(
         dataset / "cycle_catalog.json",
     )
     write_json(
-        {"resample_interval_seconds": 10, "channels": {}, "columns": []},
+        {"resample_interval_seconds": 1, "channels": {}, "columns": []},
         dataset / "channel_registry.json",
     )
 
-    aggregate_original(dataset, seconds=10)
-    aggregate_original(dataset, seconds=30)
+    aggregate_original(dataset, n_jobs=1)
 
     restored = pd.read_csv(dataset / "cycles" / f"{cycle_name}.csv")
-    aggregated = pd.read_csv(dataset / "cycles_30s" / f"{cycle_name}.csv")
-    assert restored["added_temperature"].tolist() == [4.5, 14.5, 24.5, 34.5, 44.5, 54.5]
-    assert aggregated["added_temperature"].tolist() == [14.5, 44.5]
+    assert restored["added_temperature"].tolist() == list(range(60))
     assert not config.input_dir.exists()
 
 
-def test_cli_aggregates_original_at_requested_interval(
+def test_cli_rebuilds_formal_1s_measurements(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dataset_tools import manage_dataset
@@ -2605,7 +2624,7 @@ def test_cli_aggregates_original_at_requested_interval(
     monkeypatch.setattr(
         manage_dataset,
         "aggregate_original",
-        lambda dataset, *, seconds: calls.append((dataset, seconds)) or dataset,
+        lambda dataset, *, seconds, **kwargs: calls.append((dataset, seconds)) or dataset,
         raising=False,
     )
 
@@ -2615,13 +2634,11 @@ def test_cli_aggregates_original_at_requested_interval(
                 "aggregate-original",
                 "--dataset",
                 str(tmp_path),
-                "--seconds",
-                "30",
             ]
         )
         == 0
     )
-    assert calls == [(tmp_path, 30)]
+    assert calls == [(tmp_path, 1)]
 
 
 def test_cli_add_needs_no_date_argument(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2643,7 +2660,7 @@ def test_cli_add_needs_no_date_argument(tmp_path: Path, monkeypatch: pytest.Monk
         )
         == 0
     )
-    assert calls == [(tmp_path, Path("dataset"))]
+    assert calls == [(tmp_path, Path(__file__).resolve().parents[2] / "dataset")]
 
 
 def test_cli_render_cloud_fetch_is_explicit(
@@ -2712,8 +2729,6 @@ def test_image_member_range_read_reports_remote_error(monkeypatch):
         )
 
 
-
-
 @pytest.mark.parametrize("returncode", [1, 3])
 def test_selected_image_network_failure_is_not_reported_as_missing(
     tmp_path, monkeypatch, returncode
@@ -2722,8 +2737,13 @@ def test_selected_image_network_failure_is_not_reported_as_missing(
 
     from dataset_tools import cloud_images
 
-    monkeypatch.setattr(cloud_images.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
-        returncode=returncode, stdout="", stderr="network unavailable"))
+    monkeypatch.setattr(
+        cloud_images.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=returncode, stdout="", stderr="network unavailable"
+        ),
+    )
     args = (tmp_path, "frost_cycle_000001", ["front/test.jpg"], None, 0)
     if returncode == 1:
         with pytest.raises(RuntimeError, match="network unavailable"):
@@ -2769,9 +2789,7 @@ def test_valid_cycle_queue_requires_pre_cop_quality_and_optionally_rgb():
         "physical_and_rgb",
         "physical_only",
     ]
-    assert loader.list_valid_cycles(require_rgb=True).cycle_name.tolist() == [
-        "physical_and_rgb"
-    ]
+    assert loader.list_valid_cycles(require_rgb=True).cycle_name.tolist() == ["physical_and_rgb"]
 
     loader._catalog = {
         "cycles": [{"cycle_name": "missing_pre_cop", "status": "valid", "rgb_valid": True}]
@@ -2779,32 +2797,61 @@ def test_valid_cycle_queue_requires_pre_cop_quality_and_optionally_rgb():
     assert loader.list_valid_cycles().empty
 
     loader._catalog = {
-        "cycles": [{
-            "cycle_name": "missing_rgb",
-            "status": "valid",
-            "pre_cop_status": {"status": "valid"},
-        }]
+        "cycles": [
+            {
+                "cycle_name": "missing_rgb",
+                "status": "valid",
+                "pre_cop_status": {"status": "valid"},
+            }
+        ]
     }
     assert loader.list_valid_cycles(require_rgb=True).empty
 
 
 def test_full_cycle_download_completes_partial_directory(tmp_path, monkeypatch):
     from zipfile import ZipFile
+
     from dataset_tools.cloud_images import materialize_cycle_images
 
     _allow_image_download(monkeypatch)
-    dataset = tmp_path / 'dataset'
-    cycle = 'frost_cycle_000001'
-    local = dataset / 'images' / cycle
+    dataset = tmp_path / "dataset"
+    cycle = "frost_cycle_000001"
+    local = dataset / "images" / cycle
     local.mkdir(parents=True)
-    (local / 'a.jpg').write_bytes(b'a')
-    cloud = tmp_path / 'cloud'
+    (local / "a.jpg").write_bytes(b"a")
+    (local / ".DS_Store").write_bytes(b"current Finder metadata")
+    cloud = tmp_path / "cloud"
     cloud.mkdir()
-    with ZipFile(cloud / (cycle + '.zip'), 'w') as z:
-        z.writestr(cycle + '/a.jpg', b'a')
-        z.writestr(cycle + '/b.jpg', b'b')
-    with materialize_cycle_images(dataset, cycle, fetch_cloud=True, cloud_root=cloud,
-                                  complete_existing=True) as result:
-        assert (result / 'b.jpg').read_bytes() == b'b'
-        assert not list((dataset / 'images').rglob('*.zip'))
-    assert (local / 'a.jpg').read_bytes() == b'a'
+    with ZipFile(cloud / (cycle + ".zip"), "w") as z:
+        z.writestr(cycle + "/a.jpg", b"a")
+        z.writestr(cycle + "/b.jpg", b"b")
+        z.writestr(cycle + "/.DS_Store", b"old Finder metadata")
+    with materialize_cycle_images(
+        dataset, cycle, fetch_cloud=True, cloud_root=cloud, complete_existing=True
+    ) as result:
+        assert (result / "b.jpg").read_bytes() == b"b"
+        assert not list((dataset / "images").rglob("*.zip"))
+    assert (local / "a.jpg").read_bytes() == b"a"
+    assert (local / ".DS_Store").read_bytes() == b"current Finder metadata"
+
+
+def test_missing_indexed_images_checks_files_inside_existing_directory(tmp_path, monkeypatch):
+    from dataset_tools.cloud_images import missing_indexed_images
+
+    _allow_image_download(monkeypatch)
+    dataset = tmp_path / "dataset"
+    root = dataset / "images"
+    camera = root / "frost_cycle_000001" / "front"
+    camera.mkdir(parents=True)
+    (camera / "a.jpg").write_bytes(b"rgb")
+    (camera / "b.jpg").touch()
+    pd.DataFrame(
+        {
+            "cycle_name": ["frost_cycle_000001"] * 3,
+            "camera_role": ["front"] * 3,
+            "file_name": ["a.jpg", "b.jpg", "c.jpg"],
+        }
+    ).to_parquet(root / "image_metadata.parquet")
+    assert missing_indexed_images(dataset) == {
+        "frost_cycle_000001": ["front/b.jpg", "front/c.jpg"],
+    }

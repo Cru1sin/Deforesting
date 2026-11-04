@@ -69,11 +69,16 @@ def registry_from_frame(
     frame: pd.DataFrame,
     channels: Mapping[str, Mapping[str, Any]],
     *,
-    resample_interval_seconds: int = 10,
+    resample_interval_seconds: int = 1,
 ) -> dict[str, Any]:
     scientific = drop_image_columns(frame)
     return {
         "resample_interval_seconds": int(resample_interval_seconds),
+        **(
+            {"measurement_processing": "dataset_offline_linear_60s"}
+            if "is_interpolated" in frame
+            else {}
+        ),
         "channels": {
             str(name): {field: settings.get(field) for field in SCIENTIFIC_CHANNEL_FIELDS}
             for name, settings in channels.items()
@@ -95,6 +100,15 @@ def merge_registries(existing: Mapping[str, Any], candidate: Mapping[str, Any]) 
     columns = list(dict.fromkeys([*existing.get("columns", []), *candidate.get("columns", [])]))
     return {
         "resample_interval_seconds": int(existing.get("resample_interval_seconds", 10)),
+        **(
+            {
+                "measurement_processing": candidate.get(
+                    "measurement_processing", existing.get("measurement_processing")
+                )
+            }
+            if "measurement_processing" in candidate or "measurement_processing" in existing
+            else {}
+        ),
         "channels": {**old_channels, **new_channels},
         "columns": columns,
     }
@@ -118,7 +132,7 @@ def build_registry(builds: Sequence[Any]) -> dict[str, Any]:
             "baseline_seconds": int(getattr(baseline, "baseline_seconds", 60)),
             "baseline_managed": False,
             "recovery_edit": {
-                "mode": "ts-minus",
+                "mode": "frequency-setpoint",
                 "seconds": None,
                 "fallback_seconds": float(
                     getattr(builds[0].config.cycles, "stable_heating_seconds", 180)

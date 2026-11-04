@@ -70,8 +70,7 @@ def collect_cycle_images(  # noqa: C901
                     "cycle_stage": stage,
                     "source_path": source_path,
                     "image_path": (
-                        f"images/{cycle['cycle_name']}/{source_path.parent.name}/"
-                        f"{source_path.name}"
+                        f"images/{cycle['cycle_name']}/{source_path.parent.name}/{source_path.name}"
                     ),
                 }
             )
@@ -94,9 +93,7 @@ def collect_cycle_images(  # noqa: C901
             str(record["file_name"]),
         )
         if key in seen:
-            raise ValueError(
-                "duplicate source basename within camera: " + "/".join(key)
-            )
+            raise ValueError("duplicate source basename within camera: " + "/".join(key))
         seen.add(key)
         group = key[:2]
         counts[group] = counts.get(group, 0) + 1
@@ -238,9 +235,7 @@ def rgb_stage_metrics(
 ) -> dict[str, object]:
     """Compute cycle-level RGB coverage from the intersection of all roles."""
     timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    stages = frame.get("cycle_stage", pd.Series(index=frame.index, dtype="string")).astype(
-        "string"
-    )
+    stages = frame.get("cycle_stage", pd.Series(index=frame.index, dtype="string")).astype("string")
     result: dict[str, object] = {}
     for output_name, stage_name in (
         ("frost", "frost_development"),
@@ -395,19 +390,6 @@ def build_rgb_coverage_intervals(
     if cursor < end:
         missing.append((cursor, end))
     return {"available": available, "missing": _merge_intervals(missing)}
-
-
-def summarize_rgb_coverage(
-    cycle_start: pd.Timestamp,
-    cycle_end: pd.Timestamp,
-    intervals: Mapping[str, list[tuple[pd.Timestamp, pd.Timestamp]]],
-) -> float:
-    """Return the ratio represented by the exact intervals used for drawing."""
-    total = (pd.Timestamp(cycle_end) - pd.Timestamp(cycle_start)).total_seconds()
-    available = sum(
-        max(0.0, (end - start).total_seconds()) for start, end in intervals.get("available", [])
-    )
-    return 0.0 if total <= 0 else min(1.0, max(0.0, available / total))
 
 
 def _merge_intervals(
