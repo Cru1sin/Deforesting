@@ -2,7 +2,13 @@
 \documentclass[UTF8,11pt,a4paper,fontset=fandol]{ctexart}
 \usepackage[margin=24mm]{geometry}
 \usepackage{amsmath,amssymb,booktabs,tabularx,longtable,array}
-\usepackage{fvextra,xcolor,xurl,hyperref}
+\usepackage{fvextra,xcolor,xurl,hyperref,enumitem,float,needspace}
+\setlist{beginpenalty=10000,midpenalty=1000}
+\setlist[itemize]{leftmargin=2em,itemsep=3pt,topsep=5pt}
+\setlist[enumerate]{leftmargin=2em,itemsep=4pt,topsep=5pt}
+\clubpenalty=10000
+\widowpenalty=10000
+\raggedbottom
 \hypersetup{colorlinks=true,linkcolor=blue!45!black,urlcolor=blue!45!black,citecolor=blue!45!black}
 \setlength{\emergencystretch}{2em}
 \setlength{\parskip}{0.25em}
@@ -16,27 +22,59 @@
 \begin{document}
 \maketitle
 \begin{abstract}
-本原型建立了从运行数据处理、除霜电耗预测、循环有效 COP 计算到视觉决策的完整流程，用于根据运行条件选择热泵除霜时机。首先按机组运行状态识别循环与阶段，将测量整理到 1 s 时间网格，并进行线性插值和阶段内平滑；随后使用压缩机频率、环境温度与盘管温度拟合 Ridge 模型，预测准备及除霜电耗。在此基础上计算候选时刻的循环有效 COP，确定最优时刻及峰值所在的连续 1\% 近优区间。视觉模型融合 384 维冻结 DINOv2 特征和 7 项运行特征，通过 LSTM 与 FiLM 预测累计停止概率，首次达到 0.5 时触发除霜。四个阶段分别提供独立入口，可使用已有输入直接验证。本文说明各阶段的物理定义、模型训练、评价方法与代码用法，并给出冻结模型的可复现演示结果。
+本原型以循环有效 COP 为能效目标，融合视觉与运行条件预测除霜时机。流程分为数据预处理、除霜电耗模型、COP 与最优时机、视觉决策模型四个阶段，均可独立验收。本文先说明方法与验证结果，再给出输入、命令、输出及代码索引。冻结演示使用已保存特征和权重，无需原图。
 \end{abstract}
-\noindent\textbf{关键词：}空气源热泵；除霜时机；循环有效 COP；Ridge；视觉与运行条件；LSTM
 
-\subsection*{先运行一次演示}
-本仓库地址为 \url{https://github.com/Cru1sin/Deforesting}，\code{main} 为演示原型。GitHub 仅提供源码、测试和说明。将另行交付的数值 Dataset、DINO 特征与冻结权重放到第\ref{sec:files}节的预设位置后，在项目根目录执行：
+\subsection*{按需要阅读}
+\noindent
+\begin{tabularx}{\textwidth}{p{32mm}Y}
+\toprule
+你想做什么 & 从哪里开始 \\
+\midrule
+先看到结果 & 本页“快速演示”；四阶段操作见第\ref{sec:usage}节，第\pageref{sec:usage}页 \\
+理解研究方法 & 第\ref{sec:overview}--\ref{sec:model}节；验证结果见第\ref{sec:results}节 \\
+定位代码与字段 & 第\ref{sec:code}节，第\pageref{sec:code}页 \\
+\bottomrule
+\end{tabularx}
+
+\subsection*{快速演示}
+\begin{enumerate}
+\item \textbf{放好文件。}按第\ref{sec:files}节放置数值 Dataset、DINO 特征和正面冻结权重。GitHub 仅提供源码、测试和说明。
+\item \textbf{运行。}在项目根目录执行；已有环境可跳过第一行。
+\end{enumerate}
 \begin{Code}
 uv sync --extra ml --extra dev
 uv run --no-sync python main_defrosting_model.py
 \end{Code}
-默认评价 \code{exp_20260920}，不重新训练。终端应显示循环 \code{frost_cycle_000327} 在 16:46:14 触发，策略 COP 为 1.794667，RB COP 为 1.781829。结果保存在终端打印的 \texttt{temp/test/frozen\_model\_<时间>/}。先看其中的 \path{cycle_metrics.csv}；四阶段的完整操作见第\ref{sec:usage}节。
+\begin{enumerate}[start=3]
+\item \textbf{核对结果。}默认回放实验 \code{exp_20260920}，不重新训练。
+\end{enumerate}
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+循环 & 触发时刻 & 策略 COP／RB COP \\
+\midrule
+\code{frost_cycle_000327} & 16:46:14 & 1.794667／1.781829 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\textbf{结果位置：}终端打印的\texttt{temp/test/frozen\_model\_<时间>/}。先看 \path{cycle_metrics.csv}。
 
-\tableofcontents
+\noindent 源码：\url{https://github.com/Cru1sin/Deforesting}，\code{main} 为演示原型。
 \newpage
 \section{研究问题与总体方法}
 \label{sec:overview}
-热泵结霜会改变换热和运行状态，除霜又需要消耗电能。较早除霜时，单次除霜电耗由较少的有效供热分摊；持续制热可以摊薄这部分电耗，但结霜和运行调节也可能降低后续供热效率。因此，本研究关注的问题是：\textbf{何时触发除霜，才能使完整循环的有效 COP 最大。}
+\textbf{研究问题：何时触发除霜，才能使完整循环的有效 COP 最大。}
+\begin{itemize}
+\item \textbf{较早除霜：}单次除霜电耗由较少的有效供热分摊。
+\item \textbf{持续制热：}可以摊薄这部分电耗，但结霜和运行调节也可能降低后续供热效率。
+\end{itemize}
 
-实验平台由空气源热泵、隔热环境舱、模拟用户侧散热的风机盘管、RGB 相机及运行数据采集系统组成。RGB 相机记录蒸发器进风面的霜层变化，运行记录提供频率、温度、功率及除霜状态。PPT 第 3--7 页由这一问题引出循环能效评价，第 16--17 页给出视觉与运行条件融合的决策方法\cite{slides}。本原型沿用其术语和主线，按表\ref{tab:stages}组织实现。
+实验在隔热环境舱内进行：空气源热泵供热，风机盘管模拟用户侧散热，RGB 相机记录蒸发器进风面的霜层，采集系统同步记录频率、温度、功率和除霜状态。
 
-\begin{table}[htbp]
+方法沿用 PPT 的研究主线\cite{slides}，分为表\ref{tab:stages}中的四个阶段。
+
+\begin{table}[H]
 \centering\caption{演示原型的四个阶段}\label{tab:stages}
 \begin{tabularx}{\textwidth}{p{28mm}YY}
 \toprule
@@ -50,44 +88,102 @@ COP 与最优时机 & 循环测量、Ridge、RB 时刻先验 & 候选 COP、最�
 \end{tabularx}
 \end{table}
 
-前三个阶段建立能效参考，第四个阶段学习如何由视觉与运行条件作出停止判断。视觉训练读取已经发布的输入，不在训练中重新计算 Ridge、COP 或 RB 规则。这样既能完整运行研究流程，也能从已有输入直接验收任一阶段。
+\begin{itemize}
+\item \textbf{阶段一至三：}建立能效参考。
+\item \textbf{阶段四：}由视觉与运行条件学习停止判断，读取已发布输入。
+\item \textbf{独立验收：}各阶段均可从已有输入开始；训练不重算 Ridge、COP 或 RB 规则。
+\end{itemize}
+文件、函数和字段统一列在第\ref{sec:code}节；以下先说明研究方法。
 
 \section{数据预处理与阶段划分}
 \label{sec:data}
 \subsection{循环识别与边界定义}
-一个循环依次包括恢复、稳定制热、除霜准备和除霜阶段。本文将循环制热起点记为 $t_0$，稳定制热起点记为 $t_r$，实际准备起点记为 $t_p$，正式除霜开始与结束记为 $t_d$、$t_e$。候选除霜时刻 $t$ 表示假定从该时刻开始准备除霜；在已有记录上搜索时，$t$ 不超过实际准备起点。
+一个循环依次包括\textbf{恢复、稳定制热、除霜准备、除霜}。各阶段的边界决定供热和电耗从哪里累计。
+\begin{table}[H]
+\centering\caption{循环边界与符号}
+\begin{tabularx}{\textwidth}{p{20mm}Y}
+\toprule
+符号 & 含义 \\
+\midrule
+$t_0$ & 当前循环的制热起点 \\
+$t_r$ & 恢复结束，即稳定制热起点 \\
+$t_p$ & 实际除霜准备起点 \\
+$t_d$、$t_e$ & 正式除霜开始、结束 \\
+$t$ & 候选准备时刻：假定此刻开始准备除霜；在已有记录中搜索时 $t\leq t_p$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-循环识别先使用原始时间戳与控制状态，再生成统一测量表，避免平滑改变阶段边界。\path{dataset_tools/builder/detect_cycles.py} 的 \code{label_cycles} 根据除霜开关识别事件：默认用 20 s 去抖抑制短暂状态变化；状态缺失只有在两端一致、间隔不超过 5 s 时才补齐。停机片段还要结合运行模式识别，不能把未知状态直接作为关闭状态。
+\textbf{先识别边界，再平滑测量。}识别使用原始时间戳和控制状态，分三步进行：
+\begin{enumerate}
+\item \textbf{识别除霜事件。}除霜开关采用 20 s 去抖；缺失状态仅在两端一致、间隔不超过 5 s 时补齐。停机还需结合运行模式判断，未知状态不作为关闭状态。
+\item \textbf{识别恢复结束。}根据设定频率由持续升频转入正常调节的过程确认，判据见表\ref{tab:recovery}。记录不足时保留缺失边界。
+\item \textbf{识别除霜准备。}在正式除霜前 120 s 内，寻找设定频率首次下降至少 10 Hz 的卸载指令。
+\end{enumerate}
+\begin{table}[H]
+\centering\caption{恢复结束的默认判据}\label{tab:recovery}
+\begin{tabularx}{\textwidth}{p{30mm}Y}
+\toprule
+观察内容 & 判据 \\
+\midrule
+启动状态 & 先观察不高于 42 Hz 的频率 \\
+稳定指令状态 & 每个状态至少有 3 个观测 \\
+升频参考 & 至少 3 个控制间隔；参考速率不低于 1 Hz/min \\
+正常调节 & 当前及后续调频速率降至既有参考的约四分之一，并考虑采样间隔不确定性 \\
+证据连续性 & 确认记录中的缺口超过 30 s 时，不确认边界 \\
+边界位置 & 定位在转变开始；后续记录用于确认 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+这里识别的是控制状态转变。恢复确认与后续插值均使用完整记录，属于离线处理；模型按时间递推不改变上游处理的这一性质。
 
-恢复结束由 \code{recovery_control_trace} 根据设定频率从持续升频转入正常调节的过程识别。算法比较前后调频幅度及间隔，并利用后续控制记录确认转变。记录不足以确认时保留缺失边界。除霜准备起点由 \code{find_defrost_preparation_start} 识别：默认在正式除霜前 120 s 内，寻找设定频率首次下降至少 10 Hz 的卸载指令。阶段名称和边界保存于 Catalog；数值表使用 \code{cycle_stage} 标记各行。
-
-恢复判据默认先观察不高于 42 Hz 的启动状态，每个后续稳定指令状态至少有 3 个观测；用至少 3 个控制间隔建立升频参考，参考速率不低于 1 Hz/min。当当前及后续指令的调频速率降至既有升频参考的约四分之一，并满足采样间隔不确定性与观测覆盖要求时，确认转入正常调节。确认所需记录中出现超过 30 s 的缺口时不确认边界。边界定位在转变开始，后续记录用于提供确认依据；这里识别的是控制状态转变。
-
-这一步解决的是供热和电耗应从哪里累计。恢复边界的确认和下一步的插值均使用完整记录，属于离线数据处理。时序模型按时间递推的性质，与其上游测量是否经过离线处理，应分别理解。
-
+\Needspace{12\baselineskip}
 \subsection{通道匹配、线性插值与平滑}
-处理顺序与 PPT 第 5 页一致：\textbf{构建 1 s 时间网格，按通道聚合；对连续缺失量进行线性插值；平滑供热功率、Pe 和 T3。}通道名称、单位、缩放与聚合规则集中在 \path{dataset_tools/builder/channel_mapping.py}。设备记录按标准通道归一，环境传感器按时间匹配；连续量与离散控制量分别处理。
+处理顺序与 PPT 第 5 页一致：
+\begin{enumerate}
+\item \textbf{通道匹配。}统一设备通道名称、单位和缩放；环境传感器按时间匹配。
+\item \textbf{对齐与补值。}构建 1 s 网格，按通道聚合；连续量在内部缺口线性插值，离散控制量前值保持。
+\item \textbf{平滑。}供热功率、蒸发压力 Pe、盘管温度 T3 采用过去 60 s 时间加权均值。
+\end{enumerate}
 
 对于循环内部两个有效观测 $(t_a,x_a)$ 和 $(t_b,x_b)$，连续通道在两者之间按时间插值：
 \begin{equation}
 \hat x(t)=x_a+\frac{t-t_a}{t_b-t_a}(x_b-x_a),\qquad t_a<t<t_b.
 \end{equation}
-两端缺失不外推，离散控制量采用前值保持。供热功率、蒸发压力 Pe 和盘管温度 T3 再计算过去 60 s 的时间加权均值：
+平滑采用时间加权均值：
 \begin{equation}
 \bar x(t)=\frac{1}{t-a(t)}\int_{a(t)}^t\hat x(\tau)\,\mathrm d\tau,
 \qquad a(t)=\max(t-60\ \mathrm{s},t_{\mathrm{stage}}).
 \label{eq:smooth}
 \end{equation}
-其中 $t_{\mathrm{stage}}$ 是当前阶段起点；窗口在循环和阶段边界重置，不满 60 s 时按已有时长归一化，首个观测保留自身值。插值和平滑共用 \path{heat_smoothing/methods.py} 的 \code{process_measurements} 与 \code{smooth_heat}。
+其中 $t_{\mathrm{stage}}$ 为当前阶段起点。边界处理如下：
+\begin{itemize}
+\item 窗口在循环和阶段边界重置。
+\item 不满 60 s 时按已有时长归一化，首个观测保留自身值。
+\item 连续量两端缺失不外推。
+\end{itemize}
 
-处理表同时保存原始列、\code{_interpolated} 插值列、\code{_processed} 平滑列及离散量的 \code{_filled} 列。\code{is_interpolated} 标记该行是否有连续通道补值；它便于核验插值比例，但不替代测量有效性检查。原始观测另存于 \path{dataset/cycles_original/}，便于核对通道与边界。
+原始值、插值值、平滑值和补值标记分别保存，便于对照核验；标记不能替代测量有效性检查。字段见第\ref{sec:data-use}节。
 
 \section{除霜电耗联合预测}
 \label{sec:ridge}
 \subsection{输入、监督量与 Ridge 模型}
-在候选时刻执行除霜的电耗随运行状态变化。本原型预测准备与正式除霜两阶段的总电耗，恢复电耗则从当前循环实测记录累计。三项输入为压缩机实际频率、环境温度和盘管温度，分别以 Hz、$^\circ$C、$^\circ$C 表示。
+\textbf{预测对象：准备＋正式除霜的总电耗，单位 kWh。}恢复电耗从当前循环实测记录累计。
 
-训练事件使用实际准备起点之前的状态。环境温度取前 60 s 的中位数；频率与已平滑盘管温度取动作前最近有效观测，距动作不超过 30 s。三项输入在前 60 s 内各需至少 48 个有效秒。Ridge 直接读取已处理的盘管温度，不重复平滑。
+三项输入均取自准备起点之前的状态：
+\begin{table}[H]
+\centering\caption{Ridge 的三项输入}
+\begin{tabularx}{\textwidth}{p{30mm}p{16mm}Y}
+\toprule
+输入 & 单位 & 取值方式 \\
+\midrule
+压缩机实际频率 & Hz & 动作前最近有效观测，距动作不超过 30 s \\
+环境温度 & $^\circ$C & 前 60 s 的中位数 \\
+盘管温度 & $^\circ$C & 最近已平滑值，距动作不超过 30 s；不重复平滑 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+三项输入在前 60 s 内\textbf{各需至少 48 个有效秒}。
 
 设 $P_{\mathrm{total}}$ 为机组总电功率，单位 kW。事件监督量为
 \begin{equation}
@@ -96,7 +192,12 @@ E_{\mathrm{prep+D}}=\frac{1}{3600}\left[
 \int_{t_d}^{t_e}P_{\mathrm{total}}(\tau)\,\mathrm d\tau\right],
 \label{eq:event}
 \end{equation}
-单位为 kWh。积分按已发布测量计算，相邻阶段采用左闭右开边界，避免重复计入同一段电耗。事件准入要求两阶段电耗积分有效且三项输入满足上述覆盖要求；该准入规则独立于视觉循环筛选。
+事件准入要求：
+\begin{itemize}
+\item 准备、除霜两阶段的电耗积分均有效。
+\item 三项输入满足上述覆盖要求。
+\end{itemize}
+积分单位为 kWh，使用已发布测量；相邻阶段采用左闭右开边界。事件准入独立于视觉循环筛选。
 
 三项输入用训练集的均值和标准差标准化为 $\boldsymbol z\in\mathbb R^3$，模型为
 \begin{equation}
@@ -112,11 +213,39 @@ E_{\mathrm{prep+D}}=\frac{1}{3600}\left[
 每个实验的总权重相同，避免事件较多的实验主导拟合。标准化使用相同实验权重；截距不受正则项惩罚。
 
 \subsection{按实验隔离的验证与模型保存}
-外层逐实验留一评价，内层仅在剩余实验中选择 $\alpha\in\{0.1,1,10,100\}$，依据各验证实验均方误差的平均值选取正则强度。输入标准化与拟合均限定在相应训练折。最终同时保存各实验的留出模型和全量模型。
+按实验隔离训练和评价：
+\begin{enumerate}
+\item \textbf{外层逐一留出每个实验，}用于评价。
+\item \textbf{内层选择正则强度，}仅在剩余实验中比较 $\alpha\in\{0.1,1,10,100\}$，选择验证实验平均均方误差最低的值。
+\item \textbf{拟合并保存，}标准化只使用相应训练折；保存各留出模型及全量模型。
+\end{enumerate}
 
-已有训练实验的回顾性 COP 使用 \code{cross-fitted}，读取排除了该实验的模型；未参与 Ridge 拟合的新实验使用 \code{full-model}。两者共用预测函数，但适用数据不同。参数保存在 \path{candidate_model_parameters.json}，下一阶段直接读取。
+\begin{table}[H]
+\centering\caption{两种预测用途}
+\begin{tabularx}{\textwidth}{YY}
+\toprule
+待评价数据 & 使用哪个模型 \\
+\midrule
+参与过 Ridge 拟合的实验 & 排除了该实验的留出模型 \\
+未参与拟合的新实验 & 全量模型 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+参数保存后由 COP 阶段直接读取；对应命令选项见第\ref{sec:cop-use}节。
 
-当前冻结模型包含 47 个实验的 287 个有效事件。\path{validation_summary.csv} 给出的留出预测 MAE 为 0.003415 kWh，RMSE 为 0.004155 kWh，平均偏差为 0.000177 kWh。换算为 Wh，MAE 与 RMSE 分别约为 3.42 和 4.16，与 PPT 第 22 页的结果一致。\path{model_validation.csv} 保留实测和预测电耗，用于逐事件核验。
+当前冻结模型使用 \textbf{47 个实验、287 个有效事件}，留出预测误差如下，与 PPT 第 22 页一致。
+\begin{table}[H]
+\centering\caption{除霜电耗预测误差}
+\begin{tabular}{lll}
+\toprule
+指标 & 数值（kWh） & 判读 \\
+\midrule
+平均绝对误差 MAE & 0.003415 & 约 3.42 Wh \\
+均方根误差 RMSE & 0.004155 & 约 4.16 Wh \\
+平均偏差 & 0.000177 & 预测减实测的平均值 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{循环有效 COP 与最优除霜时机}
 \label{sec:cop}
@@ -128,69 +257,155 @@ E_{\mathrm{meas}}(t)&=\frac{1}{3600}\int_{t_0}^{t}P_{\mathrm{total}}(\tau)\,\mat
 C(t)=COP_{\mathrm{eff}}(t)&=\frac{Q_{\mathrm{use}}(t)}{E_{\mathrm{meas}}(t)+\widehat E_{\mathrm{prep+D}}(t)}.
 \label{eq:cop}
 \end{align}
-分子、分母均为 kWh，COP 无量纲。供热读取 Dataset 的 \code{heating_capacity_processed}；默认方法 \code{without_trunc} 不再按出水温度作截断。恢复阶段不累计有效供热，准备及除霜的有效供热按零计，这是当前能效指标的定义。当前恢复电耗已经包含在 $E_{\mathrm{meas}}$ 中，不再另加一次预测恢复电耗。
+\begin{table}[H]
+\centering\caption{COP 的计量范围}
+\begin{tabularx}{\textwidth}{p{31mm}Y}
+\toprule
+项目 & 当前定义 \\
+\midrule
+有效供热 & 稳定制热阶段的已平滑供热；不按出水温度截断 \\
+实测电耗 & 当前恢复阶段＋制热阶段 \\
+预测电耗 & 候选状态对应的准备＋除霜电耗 \\
+零供热约定 & 恢复阶段不累计有效供热；准备及除霜按零计 \\
+单位 & 分子、分母均为 kWh；COP 无量纲 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+当前恢复电耗已计入实测项，不再另加一次预测恢复电耗。
 
-式\eqref{eq:cop}解释了 PPT 第 6 页的典型变化：初期随着有效供热增加，单次准备及除霜电耗被摊薄；中期摊薄收益与运行性能变化相抵；后期若新增供热效率下降，循环 COP 随之下降。Ridge 的预测电耗也随候选状态变化，计算时始终使用该时刻的预测值。提前除霜的电耗已经进入分母，因此无需再加入人为的除霜次数惩罚。
+式\eqref{eq:cop}对应 PPT 第 6 页的典型变化：
+\begin{enumerate}
+\item \textbf{初期上升：}有效供热增加，单次准备及除霜电耗被摊薄。
+\item \textbf{中期平缓：}摊薄收益与运行性能变化相抵。
+\item \textbf{后期下降：}若新增供热效率下降，循环 COP 随之下降。
+\end{enumerate}
+计算始终使用当前候选状态的 Ridge 预测。除霜电耗已进入分母，无需另加人为的除霜次数惩罚。
 
-在同一条已有制热记录中，更早候选的累计测量是已观测量，候选之后的准备及除霜电耗由模型估计。由此得到的最优时刻是当前测量、事件模型和可选范围下的离线参考；它为训练与回放提供统一能效尺度。实际控制的节能效果由改变除霜时刻后的运行实验检验。
+\textbf{评价范围：}候选之前的累计量来自观测，之后的准备及除霜电耗来自预测。因此最优时刻是给定测量、模型与可选范围下的离线参考；实际控制节能效果需由改变触发时刻的运行实验检验。
 
 \subsection{候选时刻、峰值与连续近优区间}
-默认候选从 $\max(t_r+1\ \mathrm{s},t_0+5\ \mathrm{min})$ 开始，到实际准备起点结束。实际准备起点和范围内的 RB 时刻额外加入候选表。默认每 10 s 计算一个候选，未指定动作间隔时，全部有效候选可选；视觉发布输入沿用 30 s 动作网格。\textbf{1 s 测量、10 s 候选计算和 30 s 视觉动作是不同层次的间隔。}
+候选范围从 $\max(t_r+1\ \mathrm{s},t_0+5\ \mathrm{min})$ 到实际准备起点。准备起点和范围内的 RB 时刻额外加入候选表。
+\begin{table}[H]
+\centering\caption{三种时间间隔的用途}
+\begin{tabularx}{\textwidth}{p{22mm}Y}
+\toprule
+间隔 & 用途 \\
+\midrule
+1 s & Dataset 测量网格 \\
+10 s & 默认 COP 候选计算；未指定动作间隔时，全部有效候选可选 \\
+30 s & 已发布视觉输入的动作网格 \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
-候选有效性要求累计测量有效、状态特征覆盖充分、预测电耗可用，并且总电耗大于零、累计有效供热大于 0.01 kWh、预测事件电耗大于零。超出 Ridge 训练域的候选保留外推标记，不仅因外推而被删除。
+\textbf{可选候选须同时满足：}
+\begin{itemize}
+\item 累计测量有效，状态特征覆盖充分，预测电耗可用。
+\item 总电耗大于零，累计有效供热大于 0.01 kWh，预测事件电耗大于零。
+\end{itemize}
+超出 Ridge 训练域只保留外推标记，不因此单独删除候选。
 
 设有效且允许选择的动作集合为 $\mathcal T$，最优时刻与参考 COP 为
 \begin{equation}
 t^*=\arg\max_{t\in\mathcal T}C(t),\qquad C^*=C(t^*).
 \end{equation}
-并列峰值取最早时刻。从 $t^*$ 向候选表两侧延伸，保留相邻、有效且满足 $C(t)\geq0.99C^*$ 的点，得到\textbf{峰值所在的连续 1\% 近优区间}。低于阈值或无效的点结束延伸，其他分离的高值时段不并入该区间。区间边界取已计算的候选点，不在两点之间另求阈值交点。
+\textbf{连续近优区间的确定：}
+\begin{enumerate}
+\item 选择有效动作上的 COP 峰值；并列时取最早时刻。
+\item 从峰值向两侧延伸，保留相邻、有效且 $C(t)\geq0.99C^*$ 的点。
+\item 遇到低于阈值或无效点即停止，得到峰值所在的连续 1\% 近优区间。
+\end{enumerate}
+边界取已计算候选点；不另求两点间的阈值交点，也不并入其他分离高值时段。
 
 例如，某循环在 20--30 min 和 40--45 min 均达到 99\% 阈值，而峰值位于 25 min，则本阶段输出 20--30 min。这个定义用于解释 COP 峰值附近可以选择的时间范围。
 
 \subsection{RB 基准与可追溯结果}
-RB 为基于运行状态和计时条件的规则除霜策略。当前计算直接读取 \path{dataset/priors/rb_reference.csv} 的首次触发时刻 $t_{\mathrm{RB}}$，避免每次计算候选都重新执行规则。RB 时刻的 COP 使用本次相同的电耗模型计算，从而保持比较一致。观测结束前未触发时保留空值和右删失标记，不补造触发时刻。规则见根目录 \path{RB_RULES_FROZEN.md}。
+RB 是基于运行状态和计时条件的规则除霜策略。
+\begin{itemize}
+\item \textbf{时刻：}直接读取预先保存的首次触发时刻 $t_{\mathrm{RB}}$，不重复回放规则。
+\item \textbf{COP：}使用本次相同的电耗模型计算，保持比较一致。
+\item \textbf{未触发：}观测结束前未触发则留空，并标记右删失，不补造时刻。
+\end{itemize}
 
-逐循环结果 \path{cycle_comparison.csv} 给出最优与 RB 比较；\path{candidate_decisions.csv} 给出每个候选的累计量、预测、有效性和选点标记。两者通过 \code{cycle_name} 对应。\code{run_settings.json} 保存本次模型、时间间隔及计算设置。
+输出分为逐循环比较、逐候选明细与本次设置；具体文件和阅读顺序见第\ref{sec:cop-use}节。
 
 \section{基于图像与运行状态序列的除霜时机预测}
 \label{sec:model}
 \subsection{循环筛选与实验划分}
-筛选从完整 \path{training_data/candidate_decisions.parquet} 和 Dataset Catalog 开始，统一调用 \path{image_models/cycle_selection.py} 的 \code{screen_cv_cycles}，然后应用发布的图像、特征与插值质量证据。当前规则要求 RGB 和 DINO 覆盖率均不低于 70\%，整循环插值比例不高于 30\%，有效终点 COP 低于循环峰值的 99\%。这使入选循环具有可观察的峰后下降，能够评价停止过早或过晚。所有工况及 RB 循环使用相同规则。
-
-当前正面机位开发期包含 29 个实验的 101 个循环，后期包含 6 个实验的 12 个循环。数量由实际筛选结果产生，代码不保存固定的 101 循环名单。按实验划分由 \code{DatasetLoader} 负责，同一实验不会拆入训练和测试两侧。默认截至 \code{exp_20260910} 为开发期，之后为测试期；主入口使用预先确定的 60 轮训练，不用后期测试选择模型、训练轮数或触发阈值。
-
-\subsection{视觉与运行特征}
-视觉输入为冻结 DINOv2 的 384 维特征 $\boldsymbol v_k$，决策模型不更新 DINOv2。研究端提取时将图像缩放、中心裁剪为 $224\times224$ 并按 ImageNet 均值与标准差归一化；演示直接读取已保存特征，无需原图和特征提取网络。
-
-七项运行特征组成 $\boldsymbol c_k\in\mathbb R^7$，见表\ref{tab:inputs}。实际频率余量以固定 100 Hz 为参照，不按循环未来最高频率归一化。短时和长时调频使用设定频率差，不能与实际频率差混淆。
-\begin{table}[htbp]
-\centering\caption{七项运行特征与代码字段}\label{tab:inputs}
-\begin{tabularx}{\textwidth}{p{24mm}Yp{65mm}}
+从完整候选曲线和循环目录开始筛选，再检查已发布的图像、特征与插值质量。所有工况及 RB 循环使用同一规则。
+\begin{table}[H]
+\centering\caption{视觉循环准入条件}
+\begin{tabularx}{\textwidth}{p{44mm}Y}
 \toprule
-特征 & 定义 & 字段 \\
+检查项 & 要求 \\
 \midrule
-实际频率余量 & $m_k=\max(100-f_{\mathrm{actual},k},0)/100$ & \path{frequency_headroom_fraction} \\
-短时调频 & $f_{\mathrm{set}}(t_k)-f_{\mathrm{set}}(t_k-60\mathrm{s})$ & \path{frequency_change_60s_hz} \\
-长时调频 & $f_{\mathrm{set}}(t_k)-f_{\mathrm{set}}(t_k-300\mathrm{s})$ & \path{frequency_change_300s_hz} \\
-设定温度 & 当前设定水温，$^\circ$C & \path{control_setpoint_c} \\
-实际出水温度 & 当前出水温度，$^\circ$C & \path{control_outlet_c} \\
-循环时长 & $(t_k-t_0)/60$，min & \path{elapsed_cycle_minutes} \\
-余量变化 & $\max_{j\leq k}m_j-m_k$，在有效输入上计算 & \path{frequency_used_margin_fraction} \\
+RGB 覆盖率 & 不低于 70\% \\
+DINO 特征覆盖率 & 不低于 70\% \\
+整循环插值比例 & 不高于 30\% \\
+有效终点 COP & 低于循环峰值的 99\%，使峰后下降可观察 \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-特征标准化参数只从训练数据拟合，随权重保存，评价直接复用。当前网络按“运行特征在前、视觉特征在后”拼接为 391 维输入；次序固定在实现中。运行特征见 \path{image_models/inputs.py} 的 \code{NUMERIC_INPUTS}，控制记录对齐见 \path{image_models/control_context.py}。
+\begin{table}[H]
+\centering\caption{当前正面机位的数据划分}
+\begin{tabularx}{\textwidth}{p{24mm}rrY}
+\toprule
+范围 & 实验数 & 循环数 & 用途 \\
+\midrule
+开发期 & 29 & 101 & 截至 2026-09-10 的实验，用于模型开发与训练 \\
+后期 & 6 & 12 & 之后的实验，只用于测试 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\begin{itemize}
+\item 数量由实际筛选产生，不使用固定循环名单。
+\item 按实验划分，同一实验不跨训练与测试。
+\item 主模型预先固定训练 60 轮，后期测试不参与选模型、选轮或选阈值。
+\end{itemize}
+
+\subsection{视觉与运行特征}
+\begin{itemize}
+\item \textbf{视觉输入：}冻结 DINOv2 提取的 384 维特征 $\boldsymbol v_k$，训练决策模型时不更新 DINOv2。
+\item \textbf{研究端提取：}图像缩放、中心裁剪为 $224\times224$，按 ImageNet 均值与标准差归一化。
+\item \textbf{演示端读取：}直接使用已保存特征，无需原图或重新提取。
+\end{itemize}
+
+七项运行特征组成 $\boldsymbol c_k\in\mathbb R^7$，见表\ref{tab:inputs}。实际频率余量以固定 100 Hz 为参照，不按循环未来最高频率归一化。短时和长时调频使用设定频率差，不能与实际频率差混淆。
+\begin{table}[H]
+\centering\caption{七项运行特征}\label{tab:inputs}
+\begin{tabularx}{\textwidth}{p{31mm}Y}
+\toprule
+特征 & 定义 \\
+\midrule
+实际频率余量 & $m_k=\max(100-f_{\mathrm{actual},k},0)/100$ \\
+短时调频 & $f_{\mathrm{set}}(t_k)-f_{\mathrm{set}}(t_k-60\mathrm{s})$ \\
+长时调频 & $f_{\mathrm{set}}(t_k)-f_{\mathrm{set}}(t_k-300\mathrm{s})$ \\
+设定温度 & 当前设定水温，$^\circ$C \\
+实际出水温度 & 当前出水温度，$^\circ$C \\
+循环时长 & $(t_k-t_0)/60$，min \\
+余量变化 & $\max_{j\leq k}m_j-m_k$，在有效输入上计算 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+标准化参数只从训练数据拟合，随权重保存，评价直接复用。输入按\textbf{7 维运行特征＋384 维视觉特征}拼接为 391 维；对应字段集中在第\ref{sec:feature-fields}节。
 
 \subsection{LSTM、FiLM 与累计停止概率}
-单层单向 LSTM 的隐藏宽度为 25。令 $\bar{\boldsymbol c}_k$、$\bar{\boldsymbol v}_k$ 为训练参数标准化后的输入，$\boldsymbol x_k=[\bar{\boldsymbol c}_k;\bar{\boldsymbol v}_k]\in\mathbb R^{391}$，则
+网络按三个步骤作出判断：
+\begin{enumerate}
+\item \textbf{LSTM 编码历史：}沿时间处理视觉与运行序列，隐藏宽度为 25。
+\item \textbf{FiLM 调节特征：}当前运行条件生成缩放和偏移，调节隐藏特征。
+\item \textbf{输出停止概率：}线性层与 Sigmoid 给出当前动作的条件停止概率。
+\end{enumerate}
+单层、单向 LSTM 的计算如下。$\bar{\boldsymbol c}_k$、$\bar{\boldsymbol v}_k$ 为标准化输入，$\boldsymbol x_k=[\bar{\boldsymbol c}_k;\bar{\boldsymbol v}_k]\in\mathbb R^{391}$。
 \begin{align}
 (\boldsymbol h_k,\boldsymbol s_k)&=\operatorname{LSTM}(\boldsymbol x_k,\boldsymbol h_{k-1},\boldsymbol s_{k-1}),\\
 [\boldsymbol\gamma_k;\boldsymbol\beta_k]&=W_F\bar{\boldsymbol c}_k+\boldsymbol b_F,\\
 \tilde{\boldsymbol h}_k&=(1+\boldsymbol\gamma_k)\odot\boldsymbol h_k+\boldsymbol\beta_k,\\
 p_k&=\sigma(\boldsymbol w^\top\tilde{\boldsymbol h}_k+b).
 \end{align}
-$\boldsymbol h_k,\boldsymbol s_k,\boldsymbol\gamma_k,\boldsymbol\beta_k\in\mathbb R^{25}$，$W_F\in\mathbb R^{50\times7}$；$\odot$ 为逐元素相乘，$\sigma$ 为 Sigmoid。LSTM 保留过去的视觉与运行变化，FiLM 用当前运行条件对隐藏特征作缩放与偏移。模型定义集中在 \path{image_models/model.py} 的 \code{StoppingModel}。
+式中 $\boldsymbol h_k$、$\boldsymbol s_k$ 是隐藏状态和细胞状态，$\boldsymbol\gamma_k$、$\boldsymbol\beta_k$ 是缩放和偏移，均为 25 维；$W_F\in\mathbb R^{50\times7}$。$\odot$ 表示逐元素相乘，$\sigma$ 为 Sigmoid。
 
 $p_k$ 表示此前尚未停止时、在当前有效动作停止的条件概率。累计停止概率为
 \begin{equation}
@@ -198,7 +413,11 @@ F_k=1-\prod_{j=1}^{k}(1-p_j),\qquad
 \hat t=\min\{t_k:F_k\geq0.5\}.
 \label{eq:trigger}
 \end{equation}
-因此 $p_k$ 与 $F_k$ 含义不同，触发比较的是 $F_k$。无效输入不产生新的停止概率；当整个可用序列未触发时，离线评价回退到保存的实际准备时刻，并记录回退标记。
+\begin{itemize}
+\item \textbf{触发看累计概率 $F_k$，}不是单步条件概率 $p_k$。
+\item 无效输入不产生新的停止概率。
+\item 全序列未触发时，离线评价回退到实际准备时刻，并保存回退标记。
+\end{itemize}
 
 \subsection{近优集合与 CDF 训练目标}
 当前冻结视觉输入保留其发布时的逐动作 COP 与近优标签。对循环 $i$，令近优动作集合为
@@ -215,9 +434,21 @@ Y_i(t)=\begin{cases}
 \end{cases}
 \label{eq:target}
 \end{equation}
-只有一个近优时刻时，目标在该点由 0 跃迁为 1。对应实现是 \path{image_models/labels.py} 的 \code{stopping_cdf_targets}。
+只有一个近优时刻时，目标在该点由 0 跃迁为 1。
 
-这里的 $\mathcal A_i$ 可包含分离的近优时段，CDF 仍在首末点间连续过渡。沿用第\ref{sec:cop}节的例子，若近优点覆盖 20--30 min 和 40--45 min，则 $Y(20)=0$、$Y(45)=1$，$Y(32.5)=0.5$；这并不把 32.5 min 的 COP 判定为近优。COP 阶段输出峰值所在的连续区间，视觉阶段使用首末近优点的 CDF 目标，二者分别用于解释参考曲线和训练停止预测。
+\textbf{同一例子，区分两个用途：}近优点位于 20--30 min 和 40--45 min，峰值在 25 min。
+\begin{table}[H]
+\centering\caption{连续近优区间与 CDF 目标}
+\begin{tabularx}{\textwidth}{p{31mm}YY}
+\toprule
+用途 & 结果 & 含义 \\
+\midrule
+COP 参考 & 20--30 min & 峰值所在的连续近优部分 \\
+CDF 训练 & $Y(20)=0$，$Y(45)=1$ & 在首末近优点之间过渡，允许跨越中间空隙 \\
+中间时刻 & $Y(32.5)=0.5$ & 这是训练目标值，不代表该时刻 COP 近优 \\
+\bottomrule
+\end{tabularx}
+\end{table}
 
 设训练循环数为 $N$，循环 $i$ 的有效训练动作数为 $K_i$，损失为循环等权二元交叉熵：
 \begin{equation}
@@ -226,7 +457,7 @@ Y_i(t)=\begin{cases}
 \end{equation}
 先对循环内动作取平均，再对循环取平均，避免长循环因动作更多而获得更大权重。该目标学习停止时间的分布，触发规则固定为式\eqref{eq:trigger}。
 
-\begin{table}[htbp]
+\begin{table}[H]
 \centering\caption{主入口默认训练设置}
 \begin{tabularx}{\textwidth}{YY}
 \toprule
@@ -250,20 +481,28 @@ Dropout & 视觉输入与输出各 0.2；循环内共享掩码 \\
 \begin{equation}
 g_i=100\frac{C_i^{\mathrm{model}}-C_i^{\mathrm{RB}}}{C_i^{\mathrm{RB}}}\ \%,
 \end{equation}
-近优命中定义为 $C_i^{\mathrm{model}}\geq0.99C_i^*$。缺少可评价 COP 时，逐循环 \code{near_optimal_hit} 留空，另用 \code{evaluable}、\code{unsupported_trigger} 等字段说明。
+近优命中定义为 $C_i^{\mathrm{model}}\geq0.99C_i^*$；缺少可评价 COP 时留空，另存有效性标记。
 
 总体改善及理想提升空间捕获率，先在模型、RB、参考最优均可评价的配对循环集合 $S$ 上求平均 COP，再计算：
 \begin{align}
 G&=100\frac{\bar C_S^{\mathrm{model}}-\bar C_S^{\mathrm{RB}}}{\bar C_S^{\mathrm{RB}}}\ \%,\\
 H_{\mathrm{RB}}&=100\frac{\bar C_S^{\mathrm{model}}-\bar C_S^{\mathrm{RB}}}{\bar C_S^*-\bar C_S^{\mathrm{RB}}}\ \%.
 \end{align}
-总体 $G$ 不等于逐循环 $g_i$ 的算术平均。捕获率的分母为可改善空间，分母为零时留空。\code{rb_paired_cycles} 给出配对数量；\code{hit_rate_all_pct} 以全部准入循环为分母，\code{hit_rate_evaluable_pct} 以可评价循环为分母。比较结果时应同时查看分母。
+比较结果时注意三个口径：
+\begin{itemize}
+\item 总体 $G$ 先平均 COP，再计算改善率；不是逐循环改善率的平均。
+\item 捕获率的分母为可改善空间；分母为零时留空。
+\item 近优命中率分别报告全部准入循环和可评价循环两种分母，配对数量同时保留。
+\end{itemize}
 
-PPT 第 23--28 页讨论开发期跨实验验证及消融，当前主入口负责固定设置训练和后期实验评价。二者服务于不同验证问题：开发期比较帮助选择模型结构，后期评价检验冻结模型在未参与训练的实验上的表现。
+\begin{itemize}
+\item \textbf{开发期比较：}帮助选择模型结构，对应 PPT 第 23--28 页。
+\item \textbf{后期评价：}检查冻结模型在未参与训练实验上的表现，由当前主入口执行。
+\end{itemize}
 
 \subsection{开发期模型比较}
-表\ref{tab:models}整理已保存的跨实验比较结果，包含 29 个实验、101 个循环及 3 个随机种子。各模型的 COP 改善按上式 $G$ 计算，表中为种子均值；捕获率同时报告种子间标准差，单位为百分点。LSTM25＋FiLM 捕获约 82.17\% 的理想提升空间，三种子波动约为 0.51 个百分点，说明其在该开发期比较中兼顾收益与稳定性。GRU 的平均结果接近，MLP 的平均捕获率较低、种子间波动较大。
-\begin{table}[htbp]
+\textbf{比较范围：29 个实验、101 个循环、3 个随机种子。}表\ref{tab:models}的 COP 改善为种子均值，捕获率为均值±种子间标准差；标准差单位为百分点。
+\begin{table}[H]
 \centering\caption{开发期跨实验模型比较}\label{tab:models}
 \begin{tabularx}{\textwidth}{Yrr}
 \toprule
@@ -276,14 +515,24 @@ MLP64--64＋FiLM & 1.1341 & $78.22\pm3.42$ \\
 \end{tabularx}
 \end{table}
 
-结果来自\texttt{output/02\_模型与消融/网络模型比较\_三种子/}下的\texttt{典型模型性能比较.csv}。本文统一采用配对平均 COP 的定义，表内数值均取自该保存表。
+\begin{itemize}
+\item \textbf{LSTM25＋FiLM：}捕获约 82.17\% 的理想提升空间，波动约 0.51 个百分点，兼顾收益与稳定性。
+\item \textbf{GRU：}平均结果接近 LSTM。
+\item \textbf{MLP：}平均捕获率较低，种子间波动较大。
+\end{itemize}
+数值取自已保存的模型比较表，使用配对平均 COP 汇总；来源位置见第\ref{sec:sources}节。
 
-PPT 第 27 页还讨论视觉、运行条件、FiLM 与历史记忆的作用。已保存的清零记忆对照捕获率为 $83.08\pm1.03$\%，与完整模型接近；这说明网络虽可编码历史，在该比较中长期递归记忆的额外收益有限。其他组件对照的循环数量和训练配置不同，用于补充观察组件作用，本文不据此给出同协议的定量贡献排名。主流程保留视觉与运行条件融合、FiLM 调节和统一停止评价，具体替代结构通过已有参数进入共享训练路径。
+\textbf{组件对照的判读：}
+\begin{itemize}
+\item 清零记忆的捕获率为 $83.08\pm1.03$\%，与完整模型接近：该比较中，长期递归记忆的额外收益有限。
+\item 其他组件对照的循环数和训练配置不同，用于补充观察，不作为同协议的定量贡献排名。
+\end{itemize}
+这与 PPT 第 27 页的记忆对照结论一致；替代结构均通过共享训练路径进入评价。
 
 \subsection{冻结演示的可复现结果}
 \label{sec:demo}
 2026 年 11 月 8 日使用当前入口重新运行正面冻结权重，结果见表\ref{tab:demo}。输入实验为 \code{exp_20260920}，循环为 \code{frost_cycle_000327}。
-\begin{table}[htbp]
+\begin{table}[H]
 \centering\caption{默认冻结演示结果}\label{tab:demo}
 \begin{tabularx}{\textwidth}{YY}
 \toprule
@@ -300,139 +549,290 @@ RB 时刻与 COP & 17:27:41；1.781829 \\
 \end{tabularx}
 \end{table}
 
-第三阶段以当前冻结 Ridge、默认候选设置重新计算同一循环时，最优时刻为 16:36:04，COP 为 1.800238，连续近优区间为 16:24:24--17:16:54，较 RB 改善约 1.0331\%。这个值是候选搜索的参考最优，表\ref{tab:demo}则是模型预测。视觉评价使用已发布参考曲线，重新计算 COP 使用本次候选设置；应分别与各自结果表核对，不把两条参考曲线混为一次计算。重新拟合 Ridge 也不会自动改变冻结视觉标签。
+\begin{table}[H]
+\centering\caption{同一循环重新计算 COP 的结果}
+\begin{tabularx}{\textwidth}{YY}
+\toprule
+阶段三：候选搜索 & 结果 \\
+\midrule
+最优时刻／COP & 16:36:04／1.800238 \\
+连续近优区间 & 16:24:24--17:16:54 \\
+相对 RB 改善 & 1.0331\% \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\begin{itemize}
+\item \textbf{阶段三}给出本次候选设置下的参考最优。
+\item \textbf{阶段四}给出模型预测，使用已发布参考曲线。
+\item 重拟合 Ridge 或重算 COP，不会自动改写冻结视觉标签。
+\end{itemize}
 
 \subsection{霜态与最优时机的补充分析}
-PPT 的路线一将图像映射到共同霜态坐标，检验是否存在跨工况通用的除霜阈值。第 11--13 页展示了不同工况下近优霜态的差异，由此引出视觉与运行条件联合决策。这个分析解释了为何需要运行条件，不是四阶段主流程的前置步骤。
+PPT 第 11--13 页用共同霜态坐标检验跨工况统一阈值：不同工况的近优霜态存在差异，因此进一步采用视觉与运行条件联合决策。该分析属于补充，不是主流程的前置步骤。
 
-对应补充入口为 \path{image_models/slingshot.py} 与 \path{image_models/frost_progression.py}。霜态轨迹使用原生 Harmony 校正和 Slingshot 全局轨迹，并在结果中注明方法。主模型直接读取 DINO 与运行特征，不将霜态等级作为输入。补充分析与模型评价共用循环身份和能效定义，不能用霜态阈值改写 COP 的最优点。
+\begin{itemize}
+\item 霜态轨迹使用原生 Harmony 校正与 Slingshot 全局轨迹，结果注明方法。
+\item 主模型直接读取视觉与运行特征，不使用霜态等级。
+\item 补充分析共用循环身份和能效定义，不用霜态阈值改写 COP 最优点。
+\end{itemize}
 
 \section{代码使用说明}
 \label{sec:usage}
 \subsection{环境与交付文件}
 \label{sec:files}
-项目使用 Python 3.11 与 uv 管理环境；\path{pyproject.toml} 定义依赖，\path{uv.lock} 固定解析版本。先安装 uv，再在项目根目录运行本文命令；已有环境可跳过 \code{uv sync}。冻结演示和再训练都可直接使用已保存 DINO，无需 GPU 特征提取。
+\begin{itemize}
+\item \textbf{环境：}Python 3.11、uv；依赖由 \path{pyproject.toml} 和 \path{uv.lock} 管理。
+\item \textbf{运行位置：}以下命令均在项目根目录执行；先安装 uv。
+\item \textbf{路径：}默认路径以项目根目录为准，显式相对路径按当前工作目录解释。
+\item \textbf{交付范围：}GitHub 提供源码与说明；Dataset、DINO 和权重另附。冻结评价与再训练使用已有特征，无需 GPU 特征提取。
+\end{itemize}
 
-交付包保持如下相对位置：
+\textbf{文件按预设位置放置：}
 \begin{Code}
 dataset/
   dataset_manifest.json
   cycle_catalog.json
   channel_registry.json
-  cycles/                         处理后的定时除霜循环
-  cycles_RB/                      处理后的 RB 循环
-  cycles_original/                原始数值观测
-  priors/rb_reference.csv          RB 时刻先验
+  cycles/
+  cycles_RB/
+  cycles_original/
+  priors/rb_reference.csv
   除霜预测模型/三输入Ridge-两阶段-287-1-统一平滑/
     candidate_model_parameters.json
     validation_summary.csv
     model_validation.csv
-  training_data/                  完整已发布输入与质量证据
-  image_DINO_feature/              按循环保存的冻结特征
+  training_data/
+  image_DINO_feature/
 output/02_模型与消融/部署模型_六机位/正面_部署模型.pkl
 \end{Code}
-前三个 JSON 分别记录实验身份、循环边界和资产位置、通道与单位。\path{training_data/} 包含 \path{cohort.csv}、逐循环动作 Parquet、\path{reference.parquet}、\path{candidate_decisions.parquet}、\path{quality_metrics.csv}、\path{action_validity.parquet} 及发布设置。\path{image_DINO_feature/} 保存逐循环特征 Parquet。两目录均平铺，不需要原始照片、照片索引或外接盘软链接。
+\begin{table}[H]
+\centering\caption{交付文件的用途}
+\begin{tabularx}{\textwidth}{p{60mm}Y}
+\toprule
+位置 & 内容 \\
+\midrule
+三个根级 JSON & 实验身份；循环边界与资产位置；通道与单位 \\
+\path{cycles/}、\path{cycles_RB/} & 定时除霜、RB 循环的处理测量 \\
+\path{cycles_original/} & 原始数值观测 \\
+\path{training_data/} & 动作、标签、完整候选、参考曲线、资格与质量证据 \\
+\path{image_DINO_feature/} & 按循环保存的冻结 DINO 特征 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\begin{itemize}
+\item 最后两个数据目录保持平铺，交付目标机位的\textbf{完整输入}，不能只复制演示循环。
+\item 不需要原图、照片索引或外接盘软链接。特征文件名只作为关联键。
+\item 完整文件说明见 \path{DATASET_FORMAT.md} 和 \path{dataset/README.md}。
+\end{itemize}
 
-模型读取目标机位的完整发布输入，因此应交付完整机位数据，不能只复制一个演示循环。数据、特征和权重另行提供，GitHub 不包含这些文件。没有数据时，可以阅读源码或执行不依赖真实数据的入口测试：
+\Needspace{7\baselineskip}
+\textbf{只有源码、尚无数据：}先运行入口测试。
 \begin{Code}
 uv sync --extra ml --extra dev
 uv run --no-sync python -m pytest tests/test_public_entrypoints.py -q
 \end{Code}
+完整测试的附加依赖见 \path{tests/README.md}。
 
-默认路径相对于项目根目录确定；显式传入的相对路径按当前工作目录解释。为便于复制命令，以下均在项目根目录执行。每个入口会打印实际输入或输出目标。
-
-\subsection{阶段一：验收数据预处理}
-已有交付数据时先运行只读检查：
+\subsection{阶段一：数据预处理}
+\label{sec:data-use}
+\textbf{输入：}已有交付 Dataset。\quad\textbf{操作：}只读检查。
 \begin{Code}
 uv run --no-sync python validate_dataset.py
 \end{Code}
-终端显示 \code{dataset valid} 表示循环测量的结构检查通过。随后打开 \path{dataset/cycles_RB/frost_cycle_000327.csv}：检查 \code{timestamp} 是否为 1 s 网格；\code{cycle_stage} 是否与 Catalog 边界相符；对比原始、插值与平滑列；查看 \code{is_interpolated}。结构通过后，阶段边界仍应按控制记录理解。
+\textbf{先看：}终端是否显示 \code{dataset valid}，表示数值结构检查通过。
 
-若要验收从原始实验开始的导入，将测量表放到 \path{data/0819/}，目录名或输入设置应与实际实验日期一致；使用项目约定的设备表格格式和通道名。首次尝试写入独立 Dataset：
+\textbf{再看：}\path{dataset/cycles_RB/frost_cycle_000327.csv}。
+\begin{table}[H]
+\centering\caption{测量表的核验顺序}
+\begin{tabularx}{\textwidth}{p{56mm}Y}
+\toprule
+字段 & 怎么判断 \\
+\midrule
+\code{timestamp} & 1 s 时间网格 \\
+\code{cycle_stage} & 阶段与 Catalog 边界、控制记录对应 \\
+原列、\code{_interpolated} & 对比原始值与插值值 \\
+\code{_processed}、\code{_filled} & 分别为平滑值、离散量前值保持 \\
+\code{is_interpolated} & 该行是否有连续通道补值；不替代有效性检查 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\textbf{需要从原始实验导入时：}
+\begin{enumerate}
+\item 将实际实验的设备表格、环境记录放到相应日期目录；下例用 \path{data/0819/}。
+\item 保持项目约定的表格格式和通道名。设备文件为 \code{.xls/.xlsx}，环境文件为 \code{.edf}。
+\item 写入独立测试 Dataset，再检查结果。
+\end{enumerate}
 \begin{Code}
 uv run --no-sync python -m dataset_tools.manage_dataset add data/0819 \
   --dataset temp/test/import_demo/dataset
 uv run --no-sync python validate_dataset.py \
   --dataset temp/test/import_demo/dataset
 \end{Code}
-导入发现设备 \code{.xls/.xlsx} 与环境 \code{.edf} 文件，按既定格式读取；照片可随原始实验保留。输出包括循环测量、阶段记录与元数据，导入还会复制可用照片并生成循环图；同名实验跳过。它是独立阶段验收，不会自动生成视觉训练标签与 DINO。原始格式及维护操作见 \path{dataset_tools/README.md} 和 \path{dataset/README.md}。
+\begin{itemize}
+\item \textbf{输出：}指定 Dataset 下的循环测量、阶段记录、元数据及循环图；可用照片也会复制。
+\item \textbf{重复导入：}同名实验跳过。
+\item \textbf{后续步骤：}导入不生成视觉标签或 DINO；发布方法见第\ref{sec:publish}节。
+\end{itemize}
+格式与维护操作见 \path{dataset_tools/README.md}。
 
-\subsection{阶段二：验收除霜电耗模型}
-最快的验收方式是读取预设 Ridge 目录中的 \path{validation_summary.csv}，核对事件数、实验数及 MAE、RMSE，再用 \path{model_validation.csv} 比较 \code{E_prep_D_kwh} 与 \code{predicted_E_prep_D_kwh}。需要重新拟合时执行：
+\subsection{阶段二：除霜电耗模型}
+\textbf{最快验收：}直接查看预设 Ridge 目录中的验证结果，核对 287 事件、47 实验及第\ref{sec:ridge}节的误差。
+
+\textbf{需要重拟合：}输入为默认 Dataset，执行：
 \begin{Code}
 uv run --no-sync python defrosting_electricity_model.py \
   --output temp/test/ridge_acceptance
 \end{Code}
-输入为默认 Dataset；输出直接位于 \path{temp/test/ridge_acceptance/}。\path{event_admission.csv} 说明事件是否入模，\path{defrost_events.csv} 保存实际入模事件，\path{candidate_model_parameters.json} 用于 COP 预测。默认按实验并行，\code{--n-jobs} 为 6。
+\textbf{输出目录：}\path{temp/test/ridge_acceptance/}。
+\begin{table}[H]
+\centering\caption{Ridge 结果的阅读顺序}
+\begin{tabularx}{\textwidth}{p{69mm}Y}
+\toprule
+文件 & 怎么判断 \\
+\midrule
+\path{validation_summary.csv} & 事件数、实验数、MAE、RMSE、平均偏差；误差单位 kWh \\
+\path{model_validation.csv} & 对比 \code{E_prep_D_kwh} 与 \code{predicted_E_prep_D_kwh} \\
+\path{event_admission.csv}、\path{defrost_events.csv} & 是否准入、实际入模事件 \\
+\path{candidate_model_parameters.json} & 下一阶段读取的模型参数 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\begin{itemize}
+\item 默认按实验并行，\code{--n-jobs} 为 6；同名输出文件直接更新。
+\item 省略输出目录时，保存到 Dataset 的除霜预测模型目录，按实际数量命名：\texttt{三输入Ridge-两阶段-<事件数>-<采样秒数>/}。
+\item 新模型不会自动替换 COP 的默认冻结模型，需显式接入。
+\end{itemize}
 
-同名输出文件直接更新。省略 \code{--output} 时，结果进入 Dataset 专用模型目录，按实际事件数和采样秒数命名为 \texttt{三输入Ridge-两阶段-<事件数>-<采样秒数>/}。新模型不会自动替换第三阶段的默认冻结模型。
-
-\subsection{阶段三：验收 COP 与最优时机}
-读取默认 Dataset、冻结 Ridge 和 RB 先验，对一个循环计算：
+\subsection{阶段三：COP 与最优时机}
+\label{sec:cop-use}
+\textbf{输入：}默认 Dataset、冻结 Ridge、\path{dataset/priors/rb_reference.csv}。RB 规则见 \path{RB_RULES_FROZEN.md}。
 \begin{Code}
 uv run --no-sync python optimal_defrost_time.py \
   --cycles frost_cycle_000327 \
   --output temp/test/cop_acceptance --overwrite
 \end{Code}
-输出直接位于 \path{temp/test/cop_acceptance/}。重复执行会更新该测试目录；省略 \code{--overwrite} 时，已有结果目录会被保护。默认普通计算只写结果目录，不更新 Dataset。
+\textbf{输出目录：}\path{temp/test/cop_acceptance/}。
 
-\begin{table}[htbp]
-\centering\caption{阶段三结果的阅读顺序}
-\begin{tabularx}{\textwidth}{p{40mm}Y}
+\textbf{先看 \path{cycle_comparison.csv}：}
+\begin{table}[H]
+\centering\caption{逐循环 COP 比较字段}
+\begin{tabularx}{\textwidth}{p{79mm}Y}
 \toprule
-文件 & 先看字段及含义 \\
+字段 & 含义 \\
 \midrule
-\path{cycle_comparison.csv} & \code{t_star}、\code{COP_eff_selected}：参考最优；\code{t_RB}、\code{COP_eff_RB}：RB；\code{COP_relative_change_pct}：改善；\code{cycle_cop_basin_1pct_start/end}：连续近优区间 \\
-\path{candidate_decisions.csv} & \code{candidate_defrost_time}、\code{cycle_cop}：候选曲线；\code{cycle_cop_eligible}、\code{on_action_grid}：能否选择；\code{is_selected}：最终选点 \\
-\path{run_settings.json} & 本次 Dataset、模型、候选间隔及预测模式 \\
+\code{t_star}、\code{COP_eff_selected} & 最优时刻及 COP \\
+\code{t_RB}、\code{COP_eff_RB} & RB 时刻及 COP \\
+\code{COP_relative_change_pct} & 相对 RB 改善（\%） \\
+\code{cycle_cop_basin_1pct_start} & 连续近优区间起点 \\
+\code{cycle_cop_basin_1pct_end} & 连续近优区间终点 \\
 \bottomrule
 \end{tabularx}
 \end{table}
+\textbf{再看 \path{candidate_decisions.csv}：}
+\begin{enumerate}
+\item 用 \code{candidate_defrost_time} 与 \code{cycle_cop} 读取候选曲线。
+\item 用 \code{cycle_cop_eligible} 与 \code{on_action_grid} 判断可选点。
+\item 用 \code{is_selected} 核对最终选点。
+\end{enumerate}
+两张表按 \code{cycle_name} 对应；本次设置位于 \path{run_settings.json}。
 
-接入阶段二新拟合的模型时，在上述命令后加：
-\begin{Code}
---model-file temp/test/ridge_acceptance/candidate_model_parameters.json
-\end{Code}
-新实验使用 \code{--prediction-mode full-model}；既有训练实验保持默认 \code{cross-fitted}。执行前可加 \code{--dry-run} 检查实际输入路径、模型折及输出目标，不计算、不写文件。普通验收不需要绘图或发布参数。
+\Needspace{12\baselineskip}
+\textbf{仅在需要时增加参数：}
+\begin{table}[H]
+\centering\caption{COP 的常用可选参数}
+\begin{tabularx}{\textwidth}{p{43mm}Y}
+\toprule
+用途 & 设置 \\
+\midrule
+接入阶段二新模型 & \code{--model-file} 后接\path{temp/test/ridge_acceptance/candidate_model_parameters.json} \\
+评价已有拟合实验 & 默认 \code{--prediction-mode cross-fitted} \\
+预测未参与拟合的新实验 & \code{--prediction-mode full-model} \\
+执行前检查 & \code{--dry-run}：检查实际路径和模型折，不计算、不写文件 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\code{--overwrite} 允许更新本次测试目录；省略时保护已有结果。普通计算只写结果目录，不更新 Dataset，无需绘图或发布参数。
 
-\subsection{阶段四：验收或训练视觉决策模型}
-最快的冻结评价为文首无参数命令。需要明确指定输出目录时：
+\subsection{阶段四：视觉决策模型}
+\textbf{输入：}完整已发布动作与标签、DINO 与运行特征、正面冻结权重。
+
+\Needspace{7\baselineskip}
+\textbf{默认验收：}运行文首无参数命令；程序每次创建新的时间目录。需要固定本次输出位置时执行：
 \begin{Code}
 uv run --no-sync python main_defrosting_model.py evaluate \
   --experiments exp_20260920 --output temp/test/visual_acceptance
 \end{Code}
-评价要求新的输出目录；再次运行可省略 \code{--output}，由程序生成时间目录。权重机位自动读取；显式指定机位时会检查一致性，评价实验与训练实验重叠时拒绝执行。
-
-\begin{table}[htbp]
-\centering\caption{阶段四的结果与判读}
-\begin{tabularx}{\textwidth}{p{43mm}Y}
+\textbf{先看 \path{cycle_metrics.csv}：}
+\begin{table}[H]
+\centering\caption{视觉评价字段}
+\begin{tabularx}{\textwidth}{p{78mm}Y}
 \toprule
-文件 & 判读方法 \\
+字段 & 怎么判断 \\
 \midrule
-\path{cycle_metrics.csv} & \code{selected_time} 是模型时刻；比较 \code{selected_cop} 和 \code{rb_cop}，查看 \code{gain_vs_rb_pct}、\code{near_optimal_hit}；再看 \code{fallback_terminal} 与 \code{input_missing} \\
-\path{checkpoint_summary.csv} & 当前权重的总体和分工况指标，结合 \code{cohort_cycles}、\code{rb_paired_cycles} 解读 \\
-\path{cycle_screening.csv} & 请求实验中的循环准入情况及原因 \\
+\code{selected_time} & 模型触发时刻 \\
+\code{selected_cop}、\code{rb_cop} & 策略与 RB 的 COP \\
+\code{gain_vs_rb_pct} & 相对 RB 改善（\%） \\
+\code{near_optimal_hit} & 是否达到参考最优 COP 的 99\% \\
+\code{fallback_terminal}、\code{input_missing} & 是否回退、是否缺少输入 \\
+\code{evaluable}、\code{unsupported_trigger} & COP 能否评价、触发是否缺少支持 \\
 \bottomrule
 \end{tabularx}
 \end{table}
+\textbf{再看两个汇总文件：}
+\begin{itemize}
+\item \path{checkpoint_summary.csv}：总体与分工况指标，同时查看准入数量 \code{cohort_cycles}、配对数量 \code{rb_paired_cycles}。
+\item \path{cycle_screening.csv}：请求实验中各循环的准入情况及原因。
+\end{itemize}
+命中率字段 \code{hit_rate_all_pct} 和 \code{hit_rate_evaluable_pct} 分别使用全部准入循环、可评价循环作分母。
 
-重新训练才执行：
+\textbf{运行约定：}
+\begin{itemize}
+\item 评价需使用新目录；重复运行时可省略 \code{--output}。
+\item 机位从权重自动读取；显式指定时检查一致性。
+\item 评价实验与训练实验重叠时拒绝执行。
+\end{itemize}
+
+\Needspace{8\baselineskip}
+\textbf{重新训练才执行：}
 \begin{Code}
 uv run --no-sync python main_defrosting_model.py train
 \end{Code}
-输入为已发布的标签、DINO 和运行特征。默认输出根目录为 \texttt{output/90\_复现材料/01\_视觉模型训练/主模型/}，其中 \path{training/} 保存设置与筛选信息，\path{checkpoints/LSTM_seed42/} 保存权重和训练记录，\path{evaluation/external/} 保存后期实验评价。已完成且配置相同的检查点复用；改变模型或训练设置时指定新的输出目录。
+默认输出根目录：\texttt{output/90\_复现材料/01\_视觉模型训练/主模型/}。
+\begin{table}[H]
+\centering\caption{训练结果的位置}
+\begin{tabularx}{\textwidth}{p{74mm}Y}
+\toprule
+子目录 & 内容 \\
+\midrule
+\path{training/} & 设置与筛选信息 \\
+\path{checkpoints/LSTM_seed42/} & 权重和训练记录 \\
+\path{evaluation/external/} & 后期实验评价 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+已完成且配置相同的检查点会复用；改变配置时指定新目录。模型、机位通过 \code{--model}、\code{--camera-role} 等参数选择。
 
-需要先验证训练路径时，可执行一次独立的一轮运行：
+\textbf{只检查训练流程：}在独立目录跑一轮。
 \begin{Code}
 uv run --no-sync python main_defrosting_model.py train \
   --epochs 1 --output temp/test/training_acceptance
 \end{Code}
-该命令只验证训练与保存流程，正式模型使用默认 60 轮。不同网络或机位通过 \code{--model}、\code{--camera-role} 等现有参数表达，不复制一套主流程。
+一轮用于检查训练与保存，正式模型仍使用默认 60 轮。
 
-\subsection{从新数据到可训练输入}
-若已有完整交付包，可跳过本节。新增数据的顺序为：导入测量与阶段，准备 RB 时刻和 DINO，计算完整候选，核验图像与输入质量，筛选循环，最后发布 \path{training_data/}。照片质量核验及 DINO 重提取需要研究端原图；这些操作不属于特征交付包的验收。
+\subsection{新数据发布}
+\label{sec:publish}
+已有完整交付包可跳过。新增数据按以下顺序准备：
+\begin{enumerate}
+\item 导入测量，识别循环与阶段。
+\item 准备 RB 时刻先验与 DINO 特征。
+\item 计算完整候选 COP。
+\item 核验图像与输入质量，按统一规则筛选循环。
+\item 发布动作、标签、参考曲线和质量证据到 \path{training_data/}。
+\end{enumerate}
+照片质量核验及 DINO 重提取需要研究端原图。发布必须包含完整候选和质量证据，不能只保存名单。
 
-相关入口分别为 \path{calculate_rb_reference.py}、\path{image_models/dinov2_features.py}、\path{optimal_defrost_time.py}、\path{image_models/cycle_selection.py} 和 \path{dataset_tools/training_data.py}。完整可复制的发布顺序集中在 \path{dataset/README.md} 的“新数据发布”，避免在训练入口重复准备数据。新发布输入必须包含完整候选和质量证据，不能仅保存筛选名单。
+完整命令集中在 \path{dataset/README.md} 的“新数据发布”。训练入口只读发布结果，不重复准备。
 
 \subsection{常见运行问题}
 \begin{longtable}{p{43mm}p{105mm}}
@@ -451,7 +851,8 @@ uv run --no-sync python main_defrosting_model.py train \
 
 \section{代码组织与阅读顺序}
 \label{sec:code}
-四个入口负责组织流程，计算职责留在对应模块。表\ref{tab:code}将研究步骤与关键实现对应起来；各代码目录的 README 再说明局部数据流。
+\textbf{先看入口，再跟随函数调用。}各目录 README 说明局部数据流；下表仅用于定位，不必逐行通读。
+\begingroup\small
 \begin{longtable}{p{31mm}p{68mm}p{49mm}}
 \caption{从主入口逐层阅读代码}\label{tab:code}\\
 \toprule
@@ -461,8 +862,9 @@ uv run --no-sync python main_defrosting_model.py train \
 \midrule\endhead
 数据入口 & \path{dataset_tools/manage_dataset.py} & \code{main}：导入与有限维护 \\
 实验构建 & \path{dataset_tools/builder/build_experiment.py} & \code{build_experiment}：读数据、识别、处理、保存 \\
-循环与阶段 & \path{dataset_tools/builder/detect_cycles.py} & \code{label_cycles}、\code{recovery_control_trace} \\
-共享测量处理 & \path{heat_smoothing/methods.py} & \code{process_measurements}：插值与平滑 \\
+循环与阶段 & \path{dataset_tools/builder/detect_cycles.py} & \code{label_cycles}、\code{recovery_control_trace}、\code{find_defrost_preparation_start} \\
+通道定义 & \path{dataset_tools/builder/channel_mapping.py} & 单位、缩放与聚合规则 \\
+共享测量处理 & \path{heat_smoothing/methods.py} & \code{process_measurements}、\code{smooth_heat} \\
 电耗入口 & \path{defrosting_electricity_model.py} & 事件输入、拟合、保存 \\
 事件监督 & \path{defrost_event_models/training_data.py} & \code{build_defrost_event_training_table} \\
 Ridge & \path{defrost_event_models/event_electricity_ridge.py} & \code{fit_preparation_defrost_model} \\
@@ -471,6 +873,7 @@ COP 入口 & \path{optimal_defrost_time.py} & 读取模型与 RB、计算、保�
 目标与选点 & \path{defrost_decision/performance_objectives.py} & \code{calculate_cycle_cop}、\code{select_cycle_optimum} \\
 视觉入口 & \path{main_defrosting_model.py} & 评价或训练的显式流程 \\
 数据与划分 & \path{dataset_tools/load_dataset.py} & \code{DatasetLoader} \\
+循环准入 & \path{image_models/cycle_selection.py} & \code{screen_cv_cycles}：先筛完整候选，再检查质量 \\
 输入与标签 & \path{image_models/inputs.py}、\path{image_models/labels.py} & \code{load_data}、\code{stopping_cdf_targets} \\
 网络 & \path{image_models/model.py} & \code{StoppingModel} \\
 训练 & \path{image_models/training.py}、\path{image_models/policy.py} & \code{fit_model}、\code{fit_policy} \\
@@ -478,8 +881,56 @@ COP 入口 & \path{optimal_defrost_time.py} & 读取模型与 RB、计算、保�
 输出位置 & \path{output_layout.py} & 统一训练、评价与临时结果路径 \\
 \bottomrule
 \end{longtable}
+\endgroup
 
-消融、机位比较和霜态分析是次级入口，共享已有数据读取、模型、评价及出图函数。消融只改变明确的输入或网络设置，不改变比较时的 COP 定义。正式模型实验统一位于 \texttt{output/90\_复现材料/01\_视觉模型训练/}，临时验证位于 \path{temp/test/}。默认冻结演示读取已交付权重，保留其固定相对位置。
+\subsection{输入字段速查}
+\label{sec:feature-fields}
+\begin{table}[H]
+\centering\caption{运行特征与代码字段的对应}
+\begin{tabularx}{\textwidth}{p{33mm}Y}
+\toprule
+特征 & 字段 \\
+\midrule
+实际频率余量 & \path{frequency_headroom_fraction} \\
+短时调频 & \path{frequency_change_60s_hz} \\
+长时调频 & \path{frequency_change_300s_hz} \\
+设定温度 & \path{control_setpoint_c} \\
+实际出水温度 & \path{control_outlet_c} \\
+循环时长 & \path{elapsed_cycle_minutes} \\
+余量变化 & \path{frequency_used_margin_fraction} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\begin{itemize}
+\item 特征列表：\path{image_models/inputs.py} 的 \code{NUMERIC_INPUTS}；控制记录对齐：\path{image_models/control_context.py}。
+\item COP 使用 \code{heating_capacity_processed}，当前供热规则为 \code{without_trunc}。
+\item 完整发布输入包括 \path{cohort.csv}、逐循环 Parquet、\path{reference.parquet}、\path{candidate_decisions.parquet}、\path{quality_metrics.csv}、\path{action_validity.parquet} 和发布设置。
+\end{itemize}
+
+\subsection{次级入口与结果来源}
+\label{sec:sources}
+\begin{table}[H]
+\centering\caption{按需要进入的次级功能}
+\begin{tabularx}{\textwidth}{p{32mm}Y}
+\toprule
+用途 & 入口 \\
+\midrule
+更新 RB 先验 & \path{calculate_rb_reference.py} \\
+提取 DINO & \path{image_models/dinov2_features.py} \\
+筛选与发布 & \path{image_models/cycle_selection.py}、\path{dataset_tools/training_data.py} \\
+消融与机位比较 & \path{image_models/ablation.py}、\path{image_models/camera_comparison.py} \\
+霜态补充分析 & \path{image_models/slingshot.py}、\path{image_models/frost_progression.py} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+这些入口共享数据读取、模型、评价与出图函数；消融改变输入或网络设置，保持 COP 定义一致。
+
+\begin{itemize}
+\item \textbf{正式模型实验：}\texttt{output/90\_复现材料/01\_视觉模型训练/}。
+\item \textbf{临时验证：}\path{temp/test/}。
+\item \textbf{开发期模型比较表：}\texttt{output/02\_模型与消融/网络模型比较\_三种子/典型模型性能比较.csv}。
+\item \textbf{冻结权重：}保留第\ref{sec:files}节的固定相对位置。
+\end{itemize}
 
 \section{结论}
 本原型用循环有效 COP 将除霜电耗与有效供热统一到同一评价尺度，并以视觉和运行条件预测近优停止时机。四阶段之间通过明确的数据文件衔接，使数据处理、电耗预测、候选搜索和冻结模型评价可以分别验收。默认演示已复现模型触发、RB 比较及近优命中；进一步使用时，可沿相同入口扩展到完整后期测试集或新增实验，保持测量定义、标签来源和实验划分一致。
