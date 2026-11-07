@@ -92,9 +92,7 @@ def _cycle_key_set(frame: pd.DataFrame) -> set[tuple[object, object]]:
     columns = ["experiment_id", "cycle_id"]
     if frame[columns].isna().any().any():
         raise ValueError("cycle keys must not be null")
-    return set(
-        frame[columns].drop_duplicates().itertuples(index=False, name=None)
-    )
+    return set(frame[columns].drop_duplicates().itertuples(index=False, name=None))
 
 
 def _require(frame: pd.DataFrame, columns: list[str]) -> None:

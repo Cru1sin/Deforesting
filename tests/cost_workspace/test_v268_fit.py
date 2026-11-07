@@ -24,46 +24,8 @@ def _events() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def test_outcome_targets_are_the_single_explicit_four_target_contract() -> None:
-    from defrost_event_models.ridge_models import OUTCOME_TARGETS, OUTCOME_VALIDITY
-
-    assert OUTCOME_TARGETS == {
-        "event_electricity": "defrost_event_electricity_observed_kwh",
-        "event_net_heat": "defrost_event_net_heat_observed_kwh",
-        "event_compressor_electricity": "defrost_event_compressor_electricity_observed_kwh",
-        "event_duration": "defrost_event_duration_observed_minutes",
-    }
-    assert OUTCOME_VALIDITY == {
-        "event_electricity": "energy_event_valid",
-        "event_net_heat": "heat_event_valid",
-        "event_compressor_electricity": "compressor_event_valid",
-        "event_duration": "duration_event_valid",
-    }
-
-
-def test_each_outcome_selects_its_own_valid_events() -> None:
-    from defrost_event_models.ridge_models import select_valid_events_for_quantity
-
-    events = pd.DataFrame(
-        {
-            "event_id": ["energy_only", "heat_only"],
-            "energy_event_valid": [True, False],
-            "heat_event_valid": [False, True],
-            "defrost_event_electricity_observed_kwh": [1.0, np.nan],
-            "defrost_event_net_heat_observed_kwh": [np.nan, 2.0],
-        }
-    )
-
-    assert select_valid_events_for_quantity(events, "event_electricity")["event_id"].tolist() == [
-        "energy_only"
-    ]
-    assert select_valid_events_for_quantity(events, "event_net_heat")["event_id"].tolist() == [
-        "heat_only"
-    ]
-
-
 def test_experiment_weights_equalize_group_mass() -> None:
-    from defrost_event_models.ridge_models import experiment_weights
+    from defrost_event_models.event_electricity_ridge import experiment_weights
 
     groups = pd.Series(["a", "a", "a", "b", "c", "c"])
     weights = experiment_weights(groups)
@@ -72,7 +34,7 @@ def test_experiment_weights_equalize_group_mass() -> None:
 
 
 def test_heldout_targets_cannot_change_fold_model_or_alpha() -> None:
-    from defrost_event_models.ridge_models import fit_model_for_heldout_experiment
+    from defrost_event_models.event_electricity_ridge import fit_model_for_heldout_experiment
 
     events = _events()
     before = fit_model_for_heldout_experiment(
@@ -91,7 +53,7 @@ def test_heldout_targets_cannot_change_fold_model_or_alpha() -> None:
 
 
 def test_nested_loeo_fails_closed_when_three_experiments_leave_no_inner_fold() -> None:
-    from defrost_event_models.ridge_models import fit_model_for_heldout_experiment
+    from defrost_event_models.event_electricity_ridge import fit_model_for_heldout_experiment
 
     events = _events().loc[lambda frame: frame["experiment_id"].isin(["a", "b", "c"])]
 
@@ -101,24 +63,12 @@ def test_nested_loeo_fails_closed_when_three_experiments_leave_no_inner_fold() -
         )
 
 
-def test_experiment_balanced_mean_api_builds_one_target_model_without_outer_folds() -> None:
-    from defrost_event_models.ridge_models import mean_outcome_model
-
-    training = _events().loc[lambda frame: ~frame["experiment_id"].eq("heldout")]
-    artifact = mean_outcome_model(training, "defrost_event_electricity_observed_kwh")
-
-    assert "folds" not in artifact
-    assert artifact["target"] == "defrost_event_electricity_observed_kwh"
-    assert artifact["training_experiment_count"] == 3
-    assert artifact["intercept"] == pytest.approx(6.0)
-
-
 def test_artifact_round_trip_and_missing_fold_fail_closed() -> None:
-    from defrost_event_models.ridge_models import (
+    from defrost_event_models.event_electricity_ridge import (
         assemble_target_model,
         fit_model_for_heldout_experiment,
         fit_model_on_all_experiments,
-        predict_with_heldout_event_model,
+        predict_with_event_model,
     )
 
     events = _events()
@@ -136,14 +86,16 @@ def test_artifact_round_trip_and_missing_fold_fail_closed() -> None:
     )
     candidates = pd.DataFrame({"x": [1.5, 3.5]})
     memory = folds["heldout"].predict(candidates)
-    replay = predict_with_heldout_event_model(artifact, candidates, "heldout")
+    replay = predict_with_event_model(
+        artifact, candidates, "heldout", prediction_mode="cross-fitted"
+    )
     np.testing.assert_allclose(replay["prediction"], memory, rtol=1e-12, atol=1e-12)
     with pytest.raises(ValueError, match="no retrospective fold"):
-        predict_with_heldout_event_model(artifact, candidates, "unknown")
+        predict_with_event_model(artifact, candidates, "unknown", prediction_mode="cross-fitted")
 
 
 def test_full_model_predicts_an_unseen_experiment() -> None:
-    from defrost_event_models.ridge_models import predict_with_event_model
+    from defrost_event_models.event_electricity_ridge import predict_with_event_model
 
     parameters = {
         "feature_order": ["x"],
@@ -168,135 +120,43 @@ def test_full_model_predicts_an_unseen_experiment() -> None:
     assert result.loc[0, "support_threshold"] == pytest.approx(3.0)
 
 
-def test_independent_support_is_intersection() -> None:
-    from defrost_event_models.ridge_models import predict_independent_targets
+def test_joint_event_training_saves_only_admitted_events_and_disjoint_folds(tmp_path):
+    import json
+    from types import SimpleNamespace
 
-    fold = {
-        "feature_order": ["x"],
-        "imputer_median": [0.0],
-        "scaler_mean": [0.0],
-        "scaler_scale": [1.0],
-        "coefficients": [1.0],
-        "intercept": 0.0,
-        "training_standardized_references": [[0.0]],
-    }
-    e_artifact = {
-        "folds": {"a": {**fold, "support_threshold": 1.0}},
-    }
-    q_artifact = {
-        "folds": {"a": {**fold, "support_threshold": 0.5}},
-    }
-    result = predict_independent_targets(
-        e_artifact, q_artifact, pd.DataFrame({"x": [0.2, 0.8]}), "a"
-    )
-    assert result["defrost_event_electricity_in_training_domain"].tolist() == [True, True]
-    assert result["defrost_event_net_heat_in_training_domain"].tolist() == [True, False]
-
-
-def test_validation_replays_only_targets_present_in_each_model(monkeypatch) -> None:
-    from defrost_event_models import validation as validate_v2_6_8
-
-    events = pd.DataFrame(
-        {
-            "event_id": ["new", "excluded"],
-            "cycle_name": ["cycle_new", "cycle_excluded"],
-            "experiment_id": ["a", "a"],
-            "event_valid": [True, False],
-            "event_invalid_reason": ["", "bad_boundary"],
-            "defrost_event_electricity_observed_kwh": [1.0, np.nan],
-            "defrost_event_net_heat_observed_kwh": [2.0, np.nan],
-            "defrost_event_compressor_electricity_observed_kwh": [3.0, np.nan],
-            "defrost_event_duration_observed_minutes": [4.0, np.nan],
-        }
-    )
-    models = {
-        "models": {
-            "legacy": {
-                "event_electricity": {"name": "event_electricity"},
-                "event_net_heat": {"name": "event_net_heat"},
-            },
-            "current": {
-                name: {"name": name}
-                for name in (
-                    "event_electricity",
-                    "event_net_heat",
-                    "event_compressor_electricity",
-                    "event_duration",
-                )
-            },
-        }
-    }
-    values = {
-        "event_electricity": 10.0,
-        "event_net_heat": 20.0,
-        "event_compressor_electricity": 30.0,
-        "event_duration": 40.0,
-    }
-
-    monkeypatch.setattr(
-        validate_v2_6_8,
-        "predict_with_heldout_event_model",
-        lambda artifact, *_: pd.DataFrame(
-            {
-                "prediction": [values[artifact["name"]]],
-                "support_distance": [0.25],
-                "support_threshold": [1.0],
-            }
-        ),
+    from defrost_event_models.event_electricity_ridge import (
+        THREE_INPUTS,
+        fit_preparation_defrost_model,
+        prepare_training_events,
     )
 
-    result = validate_v2_6_8.build_validation_table(events, models)
-
-    assert len(result) == 3
-    legacy = result.loc[result["model_name"].eq("legacy")].iloc[0]
-    assert legacy["defrost_event_electricity_prediction_kwh"] == 10
-    assert legacy["defrost_event_net_heat_prediction_kwh"] == 20
-    assert pd.isna(legacy["defrost_event_compressor_electricity_prediction_kwh"])
-    current = result.loc[result["model_name"].eq("current")].iloc[0]
-    assert current["defrost_event_compressor_electricity_prediction_kwh"] == 30
-    assert current["defrost_event_duration_prediction_minutes"] == 40
-    assert current["defrost_event_compressor_electricity_training_distance"] == 0.25
-    assert current["defrost_event_duration_training_distance"] == 0.25
-    assert result.loc[result["model_name"].eq("excluded_event"), "event_id"].tolist() == [
-        "excluded"
-    ]
-
-
-def test_validation_keeps_an_event_valid_for_only_one_outcome(monkeypatch) -> None:
-    from defrost_event_models import validation as validate_v2_6_8
-
-    events = pd.DataFrame(
-        {
-            "event_id": ["energy_only"],
-            "cycle_name": ["cycle"],
-            "experiment_id": ["a"],
-            "event_valid": [False],
-            "energy_event_valid": [True],
-            "heat_event_valid": [False],
-            "defrost_event_electricity_observed_kwh": [1.0],
-            "defrost_event_net_heat_observed_kwh": [np.nan],
-            "event_invalid_reason": ["Q_R_coverage"],
-        }
+    events = _events().assign(E_prep_valid=True, E_D_valid=True, E_prep_kwh=0.1)
+    events["E_D_kwh"] = 0.5 + events.x / 10
+    for index, feature in enumerate(THREE_INPUTS):
+        events[feature] = events.x + index
+        events[feature + "_valid_second_count"] = 60
+    events.loc[0, "E_prep_valid"] = False
+    loader = SimpleNamespace(
+        registry={"resample_interval_seconds": 1, "recovery_edit": {"mode": "dataset"}},
+        list_cycles=lambda: events[["experiment_id"]],
     )
-    models = {"models": {"model": {"event_electricity": {"name": "event_electricity"}}}}
-    monkeypatch.setattr(
-        validate_v2_6_8,
-        "predict_with_heldout_event_model",
-        lambda *_: pd.DataFrame(
-            {"prediction": [1.1], "support_distance": [0.2], "support_threshold": [1.0]}
-        ),
+    fit_preparation_defrost_model(
+        loader, prepare_training_events(events), tmp_path, workers=1, figures=False
     )
-
-    result = validate_v2_6_8.build_validation_table(events, models)
-
-    assert result.loc[0, "model_name"] == "model"
-    assert result.loc[0, "defrost_event_electricity_prediction_kwh"] == 1.1
-    assert result.loc[0, "energy_event_valid"]
-    assert not result.loc[0, "heat_event_valid"]
+    saved = json.loads((tmp_path / "candidate_model_parameters.json").read_text())
+    assert saved["training_events"] == 15
+    for experiment, phase in saved["phase_models"]["folds"].items():
+        model = phase["E_prep_D_kwh"]
+        assert experiment not in model["training_experiment_ids"]
+        assert events.event_id.iloc[0] not in model["training_event_ids"]
+    validation = pd.read_csv(tmp_path / "model_validation.csv")
+    assert len(validation) == 15
+    np.testing.assert_allclose(validation.E_prep_D_kwh, validation.E_prep_kwh + validation.E_D_kwh)
+    assert np.isfinite(validation.predicted_E_prep_D_kwh).all()
 
 
 def test_selection_uses_only_supported_cop_and_earliest_tie(monkeypatch):
-    import select_defrost_time as command
+    from defrost_decision import candidate_quantities as command
 
     start = pd.Timestamp("2026-01-01")
 
@@ -312,14 +172,8 @@ def test_selection_uses_only_supported_cop_and_earliest_tie(monkeypatch):
                 },
             }
 
-        def load_cycle_original(self, _):
-            return pd.DataFrame({"timestamp": [start]})
-
-    monkeypatch.setattr(
-        command.rule_based,
-        "calculate_cycle",
-        lambda *_, **kwargs: {"t_RB": start + pd.Timedelta(minutes=6), "rb_status": "triggered"},
-    )
+        def load_cycle_measurements(self, _):
+            return pd.DataFrame({"timestamp": [start, start + pd.Timedelta(minutes=6)]})
 
     def candidates(frame, times, *args, **kwargs):
         return pd.DataFrame(
@@ -332,9 +186,14 @@ def test_selection_uses_only_supported_cop_and_earliest_tie(monkeypatch):
         )
 
     monkeypatch.setattr(command, "effective_candidate_cop", candidates)
-    result = command.calculate_cycle(Loader(), "cycle", {})
+    result = command.calculate_cycle(
+        Loader(),
+        "cycle",
+        {},
+        rb={"t_RB": start + pd.Timedelta(minutes=6), "rb_status": "triggered"},
+    )
     assert result.is_selected.sum() == 1
     assert result.loc[result.is_selected, "candidate_defrost_time"].iloc[0] == start + pd.Timedelta(
         minutes=5
     )
-    assert result.algorithm.eq("effective_cop").all()
+    assert result.algorithm.eq("effective_cop_without_trunc").all()

@@ -32,7 +32,7 @@ class CycleSettings:
     minimum_heating_seconds: float = 1800.0
     maximum_heating_seconds: float = 21600.0
 
-    # “stable”是固定阶段划分假设，不代表代码通过数据检测到系统已经稳定。
+    # 仅用于显式历史温度规则缺少通道时的回退；当前频率规则不使用。
     stable_heating_seconds: float = 180.0
 
     # 除霜信号前，压机频率出现该幅度的单步下降即视为除霜准备开始。
@@ -60,15 +60,9 @@ class CycleSettings:
         )
         _validate_nonnegative("stable_heating_seconds", self.stable_heating_seconds)
         if self.minimum_defrost_seconds > self.maximum_defrost_seconds:
-            raise ValueError(
-                "minimum_defrost_seconds must not exceed "
-                "maximum_defrost_seconds"
-            )
+            raise ValueError("minimum_defrost_seconds must not exceed maximum_defrost_seconds")
         if self.minimum_heating_seconds > self.maximum_heating_seconds:
-            raise ValueError(
-                "minimum_heating_seconds must not exceed "
-                "maximum_heating_seconds"
-            )
+            raise ValueError("minimum_heating_seconds must not exceed maximum_heating_seconds")
 
 
 @dataclass(frozen=True)
@@ -115,27 +109,18 @@ class BaselineSettings:
 class ProcessSettings:
     """定义 Prepared → Processed 阶段的处理规则。
 
-    顺序为公共时间网格、bounded 缺失处理、派生量、Baseline/残差。
+    1 s 时间网格、循环内部线性插值、派生量与阶段内平滑。
     """
 
-    resample_interval_seconds: int = 10
+    resample_interval_seconds: int = 1
 
-    # continuous 通道在一个重采样 bucket 中的最低观测覆盖率。
-    # 低于该比例时，该 bucket 的聚合值先置为 NaN，
-    # 再由后续 bounded 缺失策略判断能否重建。
+    # 连续通道采样区间的最低观测覆盖率；缺失值随后按循环内部插值。
     minimum_continuous_bucket_coverage: float = 0.8
 
-    # continuous 通道允许线性插值的最大实际缺失间隔（秒）。
-    # 只有完整缺失段两端都有 observed 值，且两端时间差不超过该阈值时才插值。
-    continuous_max_gap_seconds: float = 60.0
+    # 识别运行观测之间的停机缺口；不限制传感器插值长度。
+    shutdown_gap_seconds: float = 60.0
 
-    # step/control 通道允许向前保持最后观测值的最长时间（秒）。
-    # 每个缺失 bucket 都按其距最后 observed 值的真实时间差独立判断。
-    control_max_gap_seconds: float = 30.0
-
-    baseline: BaselineSettings = field(
-        default_factory=BaselineSettings
-    )
+    baseline: BaselineSettings = field(default_factory=BaselineSettings)
 
     def __post_init__(self) -> None:
         if self.resample_interval_seconds <= 0:
@@ -144,8 +129,7 @@ class ProcessSettings:
             "minimum_continuous_bucket_coverage",
             self.minimum_continuous_bucket_coverage,
         )
-        _validate_nonnegative("continuous_max_gap_seconds", self.continuous_max_gap_seconds)
-        _validate_nonnegative("control_max_gap_seconds", self.control_max_gap_seconds)
+        _validate_nonnegative("shutdown_gap_seconds", self.shutdown_gap_seconds)
 
 
 @dataclass(frozen=True)
@@ -172,7 +156,7 @@ class Config:
     # 循环切分规则。
     cycles: CycleSettings = field(default_factory=CycleSettings)
 
-    # 重采样、bounded 缺失处理、派生量和 Baseline 规则。
+    # 时间网格、停机缺口识别、派生量和 Baseline 规则。
     process: ProcessSettings = field(default_factory=ProcessSettings)
 
     def __post_init__(self) -> None:
@@ -181,13 +165,10 @@ class Config:
         _validate_positive(
             "expected_sensor_interval_seconds", self.expected_sensor_interval_seconds
         )
-        _validate_nonnegative(
-            "image_match_tolerance_seconds", self.image_match_tolerance_seconds
-        )
+        _validate_nonnegative("image_match_tolerance_seconds", self.image_match_tolerance_seconds)
         if self.process.resample_interval_seconds % self.expected_sensor_interval_seconds != 0:
             raise ValueError(
-                "resample_interval_seconds must be divisible by "
-                "expected_sensor_interval_seconds"
+                "resample_interval_seconds must be divisible by expected_sensor_interval_seconds"
             )
         _validate_positive("edf_pair_tolerance_seconds", self.edf_pair_tolerance_seconds)
 
@@ -240,9 +221,7 @@ def _validate_positive(
     """要求数值严格大于 0。"""
 
     if not math.isfinite(value) or value <= 0:
-        raise ValueError(
-            f"{name} must be positive"
-        )
+        raise ValueError(f"{name} must be positive")
 
 
 def _validate_nonnegative(
@@ -252,9 +231,7 @@ def _validate_nonnegative(
     """要求数值大于或等于 0。"""
 
     if value < 0:
-        raise ValueError(
-            f"{name} must be nonnegative"
-        )
+        raise ValueError(f"{name} must be nonnegative")
 
 
 def _validate_fraction(
@@ -264,6 +241,4 @@ def _validate_fraction(
     """要求比例值位于闭区间 [0, 1]。"""
 
     if not 0 <= value <= 1:
-        raise ValueError(
-            f"{name} must be within [0, 1]"
-        )
+        raise ValueError(f"{name} must be within [0, 1]")

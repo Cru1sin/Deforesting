@@ -213,7 +213,7 @@ def test_old_online_settings_cannot_silently_change_boundary_definition():
 def test_publication_uses_exact_offline_boundary_and_observed_pressure(monkeypatch, tmp_path):
     from matplotlib.figure import Figure
 
-    from plots import publication
+    from plots import cycle as publication
 
     frame = startup().iloc[::10].copy()
     boundary = frame.timestamp.iloc[60] + pd.Timedelta(seconds=3)
@@ -309,6 +309,35 @@ def test_only_observed_initial_standby_is_excluded():
 
 
 def test_preparation_command_at_defrost_timestamp_is_not_missing():
-    times = pd.date_range('2026-01-01', periods=5, freq='s')
-    frame = pd.DataFrame(dict(timestamp=times, compressor_frequency_setpoint=[70,70,70,70,52]))
-    assert detect_cycles.find_defrost_preparation_start(frame,times[0],times[-1],{}) == times[-1]
+    times = pd.date_range("2026-01-01", periods=5, freq="s")
+    frame = pd.DataFrame(dict(timestamp=times, compressor_frequency_setpoint=[70, 70, 70, 70, 52]))
+    assert detect_cycles.find_defrost_preparation_start(frame, times[0], times[-1], {}) == times[-1]
+
+
+def test_dataset_recovery_uses_frequency_without_temperature_fallback():
+    from dataset_tools.edit_cycle_metadata import apply_recovery
+
+    frame = startup().assign(experiment_id="a", cycle_id="one", cycle_stage="recovery")
+    frame["water_out_temperature"] = 50.0
+    frame["water_temperature_setpoint"] = 50.0
+    record = {
+        "experiment_id": "a",
+        "cycle_id": "one",
+        "boundaries": {"heating_start": frame.timestamp.iloc[0].isoformat()},
+    }
+    registry = {}
+    original, processed, _ = apply_recovery(
+        frame, frame, pd.DataFrame(), record, registry, mode="frequency-setpoint"
+    )
+    expected = frame.timestamp.iloc[600]
+    assert pd.Timestamp(record["boundaries"]["stable_heating_start"]) == expected
+    assert (
+        detect_cycles.resolve_stable_heating_start(frame, frame.timestamp.iloc[0], None, {})
+        == expected
+    )
+    assert original.cycle_stage.iloc[599] == "recovery"
+    assert processed.cycle_stage.iloc[600] == "frost_development"
+    frame["compressor_frequency_setpoint"] = np.nan
+    apply_recovery(frame, frame, pd.DataFrame(), record, registry, mode="frequency-setpoint")
+    assert record["boundaries"]["stable_heating_start"] is None
+    assert record["recovery_status"] == "missing_signal"

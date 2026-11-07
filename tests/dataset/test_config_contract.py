@@ -28,13 +28,15 @@ def test_python_defaults_match_the_frozen_raw_dataset_contract(tmp_path: Path) -
     assert config.cycles.operating_mode_channel == "operating_mode"
     assert config.cycles.defrost_preparation_setpoint_drop_hz == 10
     assert config.cycles.defrost_preparation_lookback_seconds == 120
-    assert config.process.resample_interval_seconds == 10
+    assert config.process.resample_interval_seconds == 1
 
 
 def test_python_channel_table_preserves_active_sensor_contract() -> None:
     channels = load_channels()
 
-    assert len(channels) == 36
+    for name in ("heating_capacity", "evaporating_pressure"):
+        assert channels[name + "_processed"]["unit"] == channels[name]["unit"]
+        assert channels[name + "_processed"]["formula"] == "offline_linear_60s"
     assert channels["compressor_frequency_setpoint"]["source_names"] == ["p1__设定频率<1_00>"]
     assert channels["plate_heat_exchanger_outlet_temperature"]["source_names"] == [
         "p1__T2(18.1)'2_20"
@@ -71,7 +73,9 @@ def test_sensor_coverage_and_analysis_candidates_remain_explicit() -> None:
         if settings.get("role") == "sensor" and settings.get("kind") != "derived"
     } - {"fin_temperature"}
     assert channels["fin_temperature"]["coverage_required"] is False
-    assert {name for name, settings in channels.items() if settings["analysis_candidate"]} == {
+    assert {
+        name for name, settings in channels.items() if settings.get("analysis_candidate", False)
+    } == {
         "evaporating_pressure",
         "evaporating_temperature",
         "coil_temperature",
@@ -97,5 +101,5 @@ def test_external_storage_requires_mounted_drive(monkeypatch):
 
     monkeypatch.setattr(Path, "is_mount", lambda self: False)
     with pytest.raises(FileNotFoundError, match="Proust"):
-        require_external_storage(Path('/Volumes/Proust/DefrostingSensor/data/0831'))
-    require_external_storage(Path('/tmp/local-test'))
+        require_external_storage(Path("/Volumes/Proust/DefrostingSensor/data/0831"))
+    require_external_storage(Path("/tmp/local-test"))

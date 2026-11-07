@@ -15,11 +15,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+slingshot = [
+    "pyslingshot==0.2.0",
+    "harmonypy==0.0.10",
+    "optuna>=4,<5",
+]
 dev = [
     "pytest>=7.4",
     "ruff>=0.5",
 ]
 ml = [
+    "optuna>=4,<5",
     "torch>=2.6,<3",
     "torchvision>=0.21,<1",
 ]
@@ -29,6 +35,8 @@ tracking = [
 
 [tool.uv]
 package = false
+# pyslingshot caps NumPy at 1.x; our synthetic curve test checks NumPy 2 compatibility.
+override-dependencies = ["numpy>=2,<3"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

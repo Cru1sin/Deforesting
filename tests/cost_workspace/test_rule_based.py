@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import select_defrost_time
 from defrost_decision.baselines import rule_based
 
 
@@ -66,12 +65,10 @@ def test_rb_case_boundaries_and_limits(
 @pytest.mark.parametrize(
     ("delta_seconds", "triggered"), [(49, False), (50, True), (600, True), (601, False)]
 )
-def test_condition1_uses_only_50_to_600_second_history(
-    delta_seconds: int, triggered: bool
-) -> None:
+def test_condition1_uses_only_50_to_600_second_history(delta_seconds: int, triggered: bool) -> None:
     t3 = [np.nan] * (delta_seconds + 1)
     t3[0] = 0
-    t3[-1] = -1
+    t3[-1] = -2
     result = _trigger(_frame(len(t3), t1_seconds=36 * 60, t3=t3, t3o_raw=-100))
     assert result["rb_status"] == ("triggered" if triggered else "right_censored")
 
@@ -85,30 +82,6 @@ def test_case_temperature_requires_20_seconds_but_timer_is_checked_at_trigger() 
     assert result["t_RB"] == frame.loc[19, "timestamp"]
 
 
-def test_missing_second_breaks_temperature_confirmation() -> None:
-    frame = _frame(20, t1_seconds=40 * 60, t3=0, t3o_raw=50).drop(index=10)
-    assert _trigger(frame)["rb_status"] == "right_censored"
-
-
-def test_case7_wins_same_second_priority_and_case8_needs_no_temperatures() -> None:
-    frame = _frame(20, t1_seconds=29 * 60, t2_seconds=0, t3=-20, t4=-5)
-    frame.loc[19, "p1__DefTim1'2_20"] = 150 * 60
-    assert _trigger(frame)["trigger_type"] == "Case7"
-
-    forced = _frame(
-        1,
-        t1_seconds=150 * 60,
-        t2_seconds=0,
-        t3=np.nan,
-        t4=np.nan,
-        twout=np.nan,
-        t3o_raw=np.nan,
-    )
-    result = _trigger(forced)
-    assert result["trigger_type"] == "Case8"
-    assert pd.isna(result["case"])
-
-
 def test_first_trigger_does_not_depend_on_future_data() -> None:
     frame = _frame(80, t1_seconds=36 * 60, t3o_raw=-100)
     frame.loc[50:, "coil_temperature"] = -1
@@ -118,6 +91,28 @@ def test_first_trigger_does_not_depend_on_future_data() -> None:
     assert (actual["t_RB"], actual["trigger_type"]) == (
         expected["t_RB"],
         expected["trigger_type"],
+    )
+
+
+def test_ppt_recipe_keeps_frozen_timeout_and_confirmation_separate():
+    frame = _frame(20, t1_seconds=150 * 60, t3=10)
+    start, end = frame.timestamp.iloc[0], frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
+    assert rule_based.first_trigger(frame, start, end)["rb_status"] == "right_censored"
+    assert (
+        rule_based.first_trigger(frame, start, end, recipe="ppt_strict")["trigger_type"] == "Case8"
+    )
+    assert (
+        rule_based.first_trigger(
+            frame, start, end, recipe="ppt_sample_tolerant", include_case8=False
+        )["rb_status"]
+        == "right_censored"
+    )
+    frame = _frame(19, t1_seconds=35 * 60, t3=0)
+    end = frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
+    assert rule_based.first_trigger(frame, start, end)["trigger_type"] == "Case1"
+    assert (
+        rule_based.first_trigger(frame, start, end, recipe="ppt_strict")["rb_status"]
+        == "right_censored"
     )
 
 
@@ -145,7 +140,7 @@ class _Loader:
 
 def test_calculate_cycle_excludes_preparation_start() -> None:
     frame = _frame(20, t1_seconds=40 * 60, t3=0, t3o_raw=50)
-    result = rule_based.calculate_cycle(_Loader(frame, frame.loc[19, "timestamp"]), "cycle")
+    result = rule_based.calculate_cycle(_Loader(frame, frame.loc[18, "timestamp"]), "cycle")
     assert result["rb_status"] == "right_censored"
     assert result["observation_end_source"] == "actual_preparation"
 
@@ -154,39 +149,26 @@ def test_incomplete_cycle_uses_raw_cycle_end() -> None:
     frame = _frame(20, t1_seconds=40 * 60, t3=0, t3o_raw=50)
     result = rule_based.calculate_cycle(_Loader(frame, None), "cycle")
     assert result["trigger_type"] == "Case1"
-    assert result["t_RB"] == frame.loc[19, "timestamp"]
+    assert result["t_RB"] == frame.loc[18, "timestamp"]
     assert result["observation_end_source"] == "raw_cycle_end"
-
-
-def test_condition1_integer_drop_parameter_preserves_historical_default():
-    frame = _frame(51, t1_seconds=36*60, t3=[0]*50+[-1.5], t3o_raw=-100)
-    start=frame.timestamp.iloc[0]; end=frame.timestamp.iloc[-1]+pd.Timedelta(seconds=1)
-    assert rule_based.first_trigger(frame,start,end)['rb_status']=='triggered'
-    assert rule_based.first_trigger(frame,start,end,condition1_drop_c=2)['rb_status']=='right_censored'
-
-
-def test_last_snapshot_matches_prepared_xlsx_and_does_not_use_future():
-    frame = _frame(1, t1_seconds=0)
-    latest = frame.copy()
-    latest["p1__DefTim1'2_20"] = 150 * 60
-    frame = pd.concat([frame, latest], ignore_index=True)
-    assert _trigger(frame)["trigger_type"] == "Case8"
 
 
 def test_timeout_can_be_excluded_without_disabling_temperature_cases():
     frame = _frame(20, t1_seconds=161 * 60, t2_seconds=0, t3=0)
     start = frame.timestamp.iloc[0]
     end = frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
-    assert rule_based.first_trigger(frame, start, end, forced_timeout_min=0)["rb_status"] == "right_censored"
+    assert rule_based.first_trigger(frame, start, end)["rb_status"] == "right_censored"
     frame["coil_temperature"] = -20
-    assert rule_based.first_trigger(frame, start, end, forced_timeout_min=0)["trigger_type"] == "Case7"
+    assert rule_based.first_trigger(frame, start, end)["trigger_type"] == "Case7"
 
 
 def test_other_parameter_sheet_row_does_not_erase_controller_snapshot():
     frame = _frame(20, t1_seconds=40 * 60, t3=0, t3o_raw=50)
     other_sheet = frame.iloc[[10]].copy()
     other_sheet[["p1__T3o'2_20", "p1__DefTim1'2_20", "p1__DefTim2'2_20"]] = np.nan
-    frame = pd.concat([frame, other_sheet], ignore_index=True).sort_values("timestamp", kind="stable")
+    frame = pd.concat([frame, other_sheet], ignore_index=True).sort_values(
+        "timestamp", kind="stable"
+    )
     assert _trigger(frame)["trigger_type"] == "Case1"
 
 
@@ -194,21 +176,22 @@ def test_one_second_sampling_tolerance_recovers_pre_reset_boundary():
     frame = _frame(19, t1_seconds=2399, t3=0, t3o_raw=50)
     start = frame.timestamp.iloc[0]
     end = frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
-    assert rule_based.first_trigger(frame, start, end)["rb_status"] == "right_censored"
-    result = rule_based.first_trigger(frame, start, end, sample_tolerance_seconds=1)
+    result = rule_based.first_trigger(frame, start, end)
     assert result["trigger_type"] == "Case1"
     assert result["t_RB"] < end
 
 
-@pytest.mark.parametrize("missing, violation, expected", [(3, False, True), (4, False, False), (3, True, False)])
+@pytest.mark.parametrize(
+    "missing, violation, expected", [(3, False, True), (4, False, False), (3, True, False)]
+)
 def test_confirmation_gap_tolerance_never_ignores_observed_failure(missing, violation, expected):
     frame = _frame(20, t1_seconds=2400, t3=0, t3o_raw=50)
-    frame.loc[5:4 + missing, "p1__T3o'2_20"] = np.nan
+    frame.loc[5 : 4 + missing, "p1__T3o'2_20"] = np.nan
     if violation:
         frame.loc[12, "coil_temperature"] = 3
-    result = rule_based.first_trigger(frame, frame.timestamp.iloc[0],
-                                     frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1),
-                                     confirmation_missing_seconds=3)
+    result = rule_based.first_trigger(
+        frame, frame.timestamp.iloc[0], frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
+    )
     assert (result["rb_status"] == "triggered") == expected
 
 
@@ -216,20 +199,24 @@ def test_gap_tolerance_requires_full_window_and_current_observation():
     frame = _frame(17, t1_seconds=2400, t3=0, t3o_raw=50)
     start = frame.timestamp.iloc[0]
     end = frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
-    assert rule_based.first_trigger(frame, start, end, confirmation_missing_seconds=3)["rb_status"] == "right_censored"
+    assert rule_based.first_trigger(frame, start, end)["rb_status"] == "right_censored"
     frame = _frame(20, t1_seconds=2400, t3=0, t3o_raw=50)
-    frame.loc[19, "coil_temperature"] = np.nan
-    assert rule_based.first_trigger(frame, start, frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1),
-                                    confirmation_missing_seconds=3)["rb_status"] == "right_censored"
+    frame.loc[18:19, "coil_temperature"] = np.nan
+    assert (
+        rule_based.first_trigger(frame, start, frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1))[
+            "rb_status"
+        ]
+        == "right_censored"
+    )
 
 
-def test_condition1_logging_resolution_tolerance_is_explicit():
+def test_condition1_requires_the_full_temperature_drop():
     frame = _frame(51, t1_seconds=2160, t3=[0] * 50 + [-1.9], t3o_raw=-100)
     start = frame.timestamp.iloc[0]
     end = frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
-    assert rule_based.first_trigger(frame, start, end, condition1_drop_c=2)["rb_status"] == "right_censored"
-    assert rule_based.first_trigger(frame, start, end, condition1_drop_c=2,
-                                     condition1_tolerance_c=0.1)["trigger_type"] == "Condition1"
+    assert rule_based.first_trigger(frame, start, end)["rb_status"] == "right_censored"
+    frame.loc[50, "coil_temperature"] = -2
+    assert rule_based.first_trigger(frame, start, end)["trigger_type"] == "Condition1"
 
 
 def test_replay_tolerances_remain_causal():
@@ -237,22 +224,14 @@ def test_replay_tolerances_remain_causal():
     frame.loc[5:7, "p1__T3o'2_20"] = np.nan
     start = frame.timestamp.iloc[0]
     end = frame.timestamp.iloc[-1] + pd.Timedelta(seconds=1)
-    settings = dict(sample_tolerance_seconds=1, confirmation_missing_seconds=3,
-                    condition1_drop_c=2, forced_timeout_min=0)
-    expected = rule_based.first_trigger(frame, start, end, **settings)
+    expected = rule_based.first_trigger(frame, start, end)
     frame.loc[frame.timestamp.gt(expected["t_RB"]), "coil_temperature"] = 999
-    actual = rule_based.first_trigger(frame, start, end, **settings)
+    actual = rule_based.first_trigger(frame, start, end)
     assert (actual["t_RB"], actual["trigger_type"]) == (expected["t_RB"], expected["trigger_type"])
 
 
-def test_environment_boundary_can_be_assigned_to_colder_case():
-    assert rule_based.limits(-2, 35, -2.6, case_boundary="colder") == (40, -7.6)
-    assert rule_based.limits(-5, 35, -3.7, case_boundary="colder") == (80, -8.7)
-    assert rule_based.limits(-1.9, 35, -2.6, case_boundary="colder") == (40, -5.6)
-
-
 def test_post_trigger_temperature_confirmation_is_audit_only():
-    from calculate_rb_reference import audit_actual
+    from defrost_decision.baselines.audit import audit_actual
 
     frame = _frame(55, t1_seconds=4000, t3=[0] * 50 + [-1.9, -1.9, -2, -2, -2], t3o_raw=-100)
     frame["p1__化霜条件'1_00"] = 0
@@ -267,7 +246,7 @@ def test_post_trigger_temperature_confirmation_is_audit_only():
             return record
 
     loader = Loader(frame, frame.timestamp.iloc[50])
-    replay = rule_based.calculate_cycle(loader, "frost_cycle_000999", condition1_drop_c=2)
-    result = audit_actual(loader, pd.DataFrame([replay]), condition1_drop_c=2)
+    replay = rule_based.calculate_cycle(loader, "frost_cycle_000999")
+    result = audit_actual(loader, pd.DataFrame([replay]))
     assert pd.isna(result.t_RB.iloc[0])
     assert result.condition1_post_trigger_drop_delay_seconds.iloc[0] == 2

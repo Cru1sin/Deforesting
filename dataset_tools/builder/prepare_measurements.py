@@ -55,9 +55,14 @@ def prepare(
         for suffix in ("__missing", "__invalid", "__duplicate", "__conflict"):
             channel_columns[f"{name}{suffix}"] = values[suffix]
 
-    prepared = pd.concat(
-        [prepared, pd.DataFrame(channel_columns, index=prepared.index)], axis=1
-    )
+    prepared = pd.concat([prepared, pd.DataFrame(channel_columns, index=prepared.index)], axis=1)
+    if "user_side_fan_setting" in channels:
+        from dataset_tools.cycle_metadata import user_side_fan_setting
+
+        prepared["user_side_fan_setting"] = user_side_fan_setting(
+            config.experiment_date, prepared.get("water_temperature_setpoint")
+        )
+        prepared["user_side_fan_setting__missing"] = False
 
     defrost_channel = config.cycles.defrost_channel
 
@@ -72,7 +77,7 @@ def prepare(
         config.cycles,
         experiment_id=config.experiment_id,
         experiment_date=config.experiment_date,
-        shutdown_gap_seconds=config.process.continuous_max_gap_seconds,
+        shutdown_gap_seconds=config.process.shutdown_gap_seconds,
     )
 
     # 使用相对路径可避免 Prepared 表依赖某台机器的绝对目录。
@@ -109,7 +114,9 @@ def prepare_original(config: Config, prepared: pd.DataFrame) -> pd.DataFrame:
     grouped_tables: dict[str, list[pd.DataFrame]] = defaultdict(list)
     main_paths = tuple(path for path in inputs.sensor_files if path.suffix.lower() != ".edf")
     for path in main_paths:
-        for group, table in _read_sensor_tables((path,), config.timestamp_column, preserve_raw=True):
+        for group, table in _read_sensor_tables(
+            (path,), config.timestamp_column, preserve_raw=True
+        ):
             grouped_tables[group or path.stem].append(table)
 
     occurrence = "__raw_timestamp_occurrence"
@@ -137,8 +144,10 @@ def prepare_original(config: Config, prepared: pd.DataFrame) -> pd.DataFrame:
         )
 
     original = export_original_frame(prepared)
-    result = original if raw is None else original.merge(
-        raw, on="timestamp", how="outer", sort=False, validate="one_to_many"
+    result = (
+        original
+        if raw is None
+        else original.merge(raw, on="timestamp", how="outer", sort=False, validate="one_to_many")
     )
     edf_paths = tuple(path for path in inputs.sensor_files if path.suffix.lower() == ".edf")
     if edf_paths:
@@ -160,9 +169,11 @@ def prepare_original(config: Config, prepared: pd.DataFrame) -> pd.DataFrame:
             how="left",
             validate="many_to_one",
         )
-    return result.sort_values(["timestamp", occurrence], kind="stable").drop(
-        columns=occurrence
-    ).reset_index(drop=True)
+    return (
+        result.sort_values(["timestamp", occurrence], kind="stable")
+        .drop(columns=occurrence)
+        .reset_index(drop=True)
+    )
 
 
 def _load_prepare_channel_frames(
@@ -196,9 +207,7 @@ def _load_prepare_channel_frames(
         pd.to_timedelta(config.expected_sensor_interval_seconds / 2, unit="s"),
     )
     for name in ("environment_temperature", "environment_relative_humidity"):
-        channel_frames[name] = [
-            environment[["timestamp", name]].rename(columns={name: "raw"})
-        ]
+        channel_frames[name] = [environment[["timestamp", name]].rename(columns={name: "raw"})]
     return channel_frames
 
 
@@ -245,7 +254,6 @@ def _load_channel_frames(
 
     frames: dict[str, list[pd.DataFrame]] = defaultdict(list)
     for group, table in _read_sensor_tables(paths, timestamp_column):
-
         if table.empty:
             continue
 
@@ -271,19 +279,29 @@ def _read_sensor_tables(
     """Normalize text exports and workbook parameter pages at the input boundary."""
     for path in paths:
         if path.suffix.lower() != ".xlsx":
-            yield _parameter_group(path), _read_sensor_table(
-                path, timestamp_column, infer_types=preserve_raw
+            yield (
+                _parameter_group(path),
+                _read_sensor_table(path, timestamp_column, infer_types=preserve_raw),
             )
             continue
 
         # 中间变量是合并视图，不作为第四份观测重复读入。
         # 按字段名映射，参数页0中的开关列顺序与文本参数1不同。
         with pd.ExcelFile(path, engine="openpyxl") as workbook:
-            for sheet, group in (("参数页0", "1"), ("参数页1", "2"), ("参数页4", "5")):
+            pages = [("参数页0", "1"), ("参数页1", "2"), ("参数页4", "5")]
+            if "参数页5" in workbook.sheet_names:
+                pages.append(("参数页5", "6"))
+            for sheet, group in pages:
                 table = pd.read_excel(
-                    workbook, sheet_name=sheet,
+                    workbook,
+                    sheet_name=sheet,
+                    usecols=(lambda name: name in {"DateTime", "Def_EntrTm"})
+                    if sheet == "参数页5"
+                    else None,
                     **({} if preserve_raw else {"dtype": str, "keep_default_na": False}),
                 )
+                if sheet == "参数页5" and "Def_EntrTm" not in table:
+                    continue
                 table = _normalize_sensor_table(table, "DateTime", path)
                 if not preserve_raw:
                     # Workbook rows are successive controller refreshes within one clock second.
@@ -335,9 +353,7 @@ def _read_sensor_table(
     return _normalize_sensor_table(table, timestamp_column, path)
 
 
-def _normalize_sensor_table(
-    table: pd.DataFrame, timestamp_column: str, path: Path
-) -> pd.DataFrame:
+def _normalize_sensor_table(table: pd.DataFrame, timestamp_column: str, path: Path) -> pd.DataFrame:
     table.columns = [str(column).strip() for column in table.columns]
 
     if timestamp_column not in table.columns:
@@ -528,9 +544,7 @@ def _add_cycle_summary_metrics(
         expected = _expected_row_count(row, expected_interval_seconds)
 
         # 计算“实际存在来源的原始通道”在该循环中的平均非空单元格比例。
-        observed_fraction = _observed_fraction(
-            group, raw_channels, available_source_channels
-        )
+        observed_fraction = _observed_fraction(group, raw_channels, available_source_channels)
 
         # Prepared 原始时间轴中相邻时间戳的最大间隔。
         maximum_gap = _maximum_gap(group["timestamp"])
@@ -572,31 +586,22 @@ def _add_cycle_summary_metrics(
             {
                 # Prepared 中该循环实际存在的原始时间戳行数。
                 "raw_row_count": raw_count,
-
                 # 按理论采样间隔估算的循环期望行数。
                 "expected_row_count": expected,
-
                 # 可用来源通道的平均观测单元格比例。
                 "sensor_observed_fraction": observed_fraction,
-
                 # 原始时间轴最大断点。
                 "maximum_timeline_gap_seconds": maximum_gap,
-
                 # 出现任一通道重复记录的时间戳行数。
                 "duplicate_observation_count": duplicate_count,
-
                 # 出现任一通道冲突记录的时间戳行数。
                 "conflict_observation_count": conflict_count,
-
                 # 循环中匹配到的唯一 RGB 图片数量。
                 "rgb_image_count": image_count,
-
                 # 循环中至少出现一张图的相机角色数量。
                 "rgb_role_count": role_count,
-
                 # 配置相机角色的循环级出现比例。
                 "rgb_role_presence_fraction": complete_fraction,
-
                 # 所有角色中最大的相邻图片时间间隔。
                 "maximum_rgb_gap_seconds": image_gap,
             }
@@ -633,9 +638,7 @@ def _observed_fraction(
     # 2. 当前 Prepared 表中确实存在的非 derived 通道。
     #
     # 完全 unavailable 的通道不进入分母，否则大量未部署传感器会系统性压低覆盖率。
-    available = [
-        name for name in channels if name in available_source_channels and name in group
-    ]
+    available = [name for name in channels if name in available_source_channels and name in group]
 
     # 没有循环数据或没有任何可用来源通道时，定义为 0。
     if group.empty or not available:

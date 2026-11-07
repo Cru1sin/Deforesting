@@ -5,9 +5,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 
-def test_upload_date_data_packs_uploads_and_preserves_sources(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_upload_date_data_packs_uploads_and_preserves_sources(tmp_path: Path, monkeypatch) -> None:
     from dataset_tools import cloud_upload
 
     data = tmp_path / "data"
@@ -25,9 +23,7 @@ def test_upload_date_data_packs_uploads_and_preserves_sources(
                     uploaded_members["0806"] = archive.namelist()
             return subprocess.CompletedProcess(command, 0)
         assert command[1] == "lsf"
-        return subprocess.CompletedProcess(
-            command, 0, stdout=f"{remote_sizes[command[2]]}\n"
-        )
+        return subprocess.CompletedProcess(command, 0, stdout=f"{remote_sizes[command[2]]}\n")
 
     monkeypatch.setattr(cloud_upload.subprocess, "run", rclone)
     cloud_upload.upload_date_data(data, None, minimum_free_gib=0)

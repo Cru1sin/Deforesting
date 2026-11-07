@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from heat_smoothing.methods import PROCESSED_CHANNELS
+
 CHANNELS: dict[str, dict[str, Any]] = {
     "ambient_temperature": {
         "source_names": ["p1__T4(22.1)'2_31'"],
@@ -340,6 +342,25 @@ CHANNELS: dict[str, dict[str, Any]] = {
             "FALSE": False,
         },
     },
+    "user_side_fan_setting": {
+        "source_names": ["user_side_fan_setting"],
+        "unit": "setting",
+        "kind": "categorical",
+        "role": "context",
+        "resample": "last",
+        "missing": "none",
+        "analysis_candidate": False,
+        "allowed_values": ["medium", "low"],
+    },
+    "Def_EntrTm": {
+        "source_names": ["p5__Def_EntrTm", "p6__Def_EntrTm"],
+        "unit": "s",
+        "kind": "step",
+        "role": "control",
+        "resample": "last",
+        "missing": "none",
+        "analysis_candidate": False,
+    },
     "cop": {
         "unit": "dimensionless",
         "kind": "derived",
@@ -393,6 +414,48 @@ CHANNELS: dict[str, dict[str, Any]] = {
 }
 
 
+# Dataset owns the same stage-reset trailing mean for every processed channel.
+for _source in PROCESSED_CHANNELS:
+    CHANNELS[_source + "_processed"] = {
+        "unit": CHANNELS[_source]["unit"],
+        "kind": "derived",
+        "role": CHANNELS[_source]["role"],
+        "resample": "last",
+        "missing": "none",
+        "analysis_candidate": False,
+        "formula": "offline_linear_60s",
+        "dependencies": [_source],
+    }
+
+
 def load_channels() -> dict[str, dict[str, Any]]:
     """Return an independent copy of the channel table."""
-    return copy.deepcopy(CHANNELS)
+    channels = copy.deepcopy(CHANNELS)
+    for name, definition in list(channels.items()):
+        if definition["kind"] in {"continuous", "derived"} and definition.get("formula") not in {
+            "offline_linear_60s",
+        }:
+            channels[name + "_interpolated"] = {
+                "unit": definition.get("unit"),
+                "kind": "derived",
+                "role": definition.get("role"),
+                "resample": "last",
+                "formula": "offline_linear",
+                "dependencies": [name],
+            }
+        elif definition["kind"] in {"step", "event", "categorical"}:
+            channels[name + "_filled"] = {
+                "unit": definition.get("unit"),
+                "kind": "derived",
+                "role": definition.get("role"),
+                "resample": "last",
+                "formula": "offline_forward_fill",
+                "dependencies": [name],
+            }
+    channels["is_interpolated"] = {
+        "unit": None,
+        "kind": "derived",
+        "role": "quality",
+        "formula": "any_continuous_channel_interpolated",
+    }
+    return channels

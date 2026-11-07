@@ -1,9 +1,11 @@
 """Measured heating electricity integration with explicit gap handling."""
+
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 MINIMUM_COVERAGE = 0.95
+
 
 def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
     """Return raw water-side heating capacity in kW."""
@@ -15,6 +17,7 @@ def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
             - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
         )
     )
+
 
 def integrate_energy_kwh(
     timestamps: pd.Series | pd.DatetimeIndex,
@@ -42,6 +45,7 @@ def integrate_energy_kwh(
     )
     coverage = float(dt.where(valid, 0.0).sum() / span) if span > 0 else 0.0
     return float(energy), coverage
+
 
 def integrate_energy_curve_kwh(
     timestamps: pd.Series | pd.DatetimeIndex,
@@ -190,6 +194,7 @@ def integrate_energy_curve_kwh(
         }
     )
 
+
 def integrate_heating_curve(
     timestamps: pd.Series,
     power_kw: pd.Series,
@@ -237,6 +242,7 @@ def integrate_heating_curve(
         strict_energy_kwh=strict_curve["energy_kwh"].to_numpy(),
         strict_coverage=strict_curve["coverage"].to_numpy(),
     )
+
 
 def _strict_heating_curve(
     timestamps: pd.Series,

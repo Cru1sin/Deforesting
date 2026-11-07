@@ -13,7 +13,6 @@ from dataset_tools.builder.dataset_settings import BaselineSettings, Config, Pro
 def _config(
     root: Path,
     *,
-    continuous_gap: float = 60.0,
     interval: int = 10,
     expected_interval: int = 1,
 ) -> Config:
@@ -30,7 +29,6 @@ def _config(
         edf_pair_tolerance_seconds=1.0,
         process=ProcessSettings(
             resample_interval_seconds=interval,
-            continuous_max_gap_seconds=continuous_gap,
             baseline=BaselineSettings(
                 required_anchor_channels=("anchor",),
                 anchor_maximum_std={"anchor": 1.0},
@@ -189,7 +187,7 @@ def test_process_excludes_partial_and_recomputes_coordinates(tmp_path: Path) -> 
     assert "baseline_status" not in final_summary
 
 
-def test_process_aggregates_environment_channels_and_keeps_rh_over_100(tmp_path: Path) -> None:
+def test_process_preserves_environment_observations_and_keeps_rh_over_100(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=6, freq="2s")
     frame = _frame(timestamps, temperature=[10.0] * len(timestamps))
     frame["environment_temperature"] = [10.0, 11.0, 12.0, 13.0, 14.0, 15.0]
@@ -222,8 +220,8 @@ def test_process_aggregates_environment_channels_and_keeps_rh_over_100(tmp_path:
     )
 
     first_bucket = processed.loc[processed["timestamp"].eq(pd.Timestamp("2026-07-15"))].iloc[0]
-    assert first_bucket["environment_temperature"] == pytest.approx(12.0)
-    assert first_bucket["environment_relative_humidity"] == pytest.approx(103.0)
+    assert first_bucket["environment_temperature"] == pytest.approx(10.0)
+    assert first_bucket["environment_relative_humidity"] == pytest.approx(101.0)
 
 
 def test_valid_open_cycle_with_observed_defrost_onset_keeps_observed_processed_grid(
@@ -447,7 +445,9 @@ def test_cycle_boundary_bucket_is_excluded_instead_of_duplicated(tmp_path: Path)
     assert final_summary["excluded_transition_bucket_count"].sum() >= 1
 
 
-def test_long_continuous_gap_is_kept_entirely_nan(tmp_path: Path) -> None:
+def test_long_continuous_gap_preserves_raw_and_publishes_offline_interpolation(
+    tmp_path: Path,
+) -> None:
     timestamps = pd.to_datetime(["2026-07-15 00:00:00", "2026-07-15 00:01:10"])
     frame = _frame(timestamps, temperature=[1.0, 3.0])
     summary = _summary(defrost="2026-07-15 00:05:00")
@@ -458,7 +458,10 @@ def test_long_continuous_gap_is_kept_entirely_nan(tmp_path: Path) -> None:
         pd.Timestamp("2026-07-15 00:00:10"), pd.Timestamp("2026-07-15 00:01:00")
     )
     assert processed.loc[gap, "temperature"].isna().all()
-    assert not processed.loc[gap, "temperature__imputed"].any()
+    np.testing.assert_allclose(
+        processed.loc[gap, "temperature_interpolated"], 1 + 2 * np.arange(10, 70, 10) / 70
+    )
+    assert processed.loc[gap, "is_interpolated"].all()
 
 
 def test_gap_threshold_below_grid_interval_does_not_impute(tmp_path: Path) -> None:
@@ -466,7 +469,7 @@ def test_gap_threshold_below_grid_interval_does_not_impute(tmp_path: Path) -> No
     frame = _frame(timestamps, temperature=[1.0, 3.0])
     summary = _summary(defrost="2026-07-15 00:05:00")
 
-    processed, _ = process(frame, summary, _config(tmp_path, continuous_gap=5.0), _channels())
+    processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
     middle = processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:10"))
     assert processed.loc[middle, "temperature"].isna().all()
@@ -488,7 +491,7 @@ def test_step_fill_is_bounded_and_other_kinds_are_not_filled(tmp_path: Path) -> 
     assert processed.loc[late, "categorical_signal"].isna().all()
 
 
-def test_step_fill_is_bounded_per_timestamp(tmp_path: Path) -> None:
+def test_step_fill_is_published_separately_from_raw_observations(tmp_path: Path) -> None:
     timestamps = pd.to_datetime(
         [
             "2026-07-15 00:00:00",
@@ -503,7 +506,12 @@ def test_step_fill_is_bounded_per_timestamp(tmp_path: Path) -> None:
 
     processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
-    assert processed.loc[processed["timestamp"].eq(timestamps[1]), "step_signal"].iloc[0] == 1
+    assert processed.loc[processed["timestamp"].eq(timestamps[1]), "step_signal"].isna().all()
+    assert (
+        processed.loc[processed["timestamp"].isin(timestamps[1:3]), "step_signal_filled"]
+        .eq(1)
+        .all()
+    )
     assert processed.loc[processed["timestamp"].eq(timestamps[2]), "step_signal"].isna().all()
 
 
@@ -544,8 +552,9 @@ def test_continuous_coverage_counts_before_fill_and_excludes_unavailable_channel
     assert final_summary.loc[0, "eligible_continuous_channel_bucket_count"] == 72
     assert final_summary.loc[0, "low_coverage_channel_bucket_count"] == 70
     low_bucket = processed["timestamp"].eq(pd.Timestamp("2026-07-15 00:00:10"))
-    assert processed.loc[low_bucket, "temperature__imputed"].all()
-    assert processed.loc[low_bucket, "temperature"].notna().all()
+    assert processed.loc[low_bucket, "is_interpolated"].all()
+    assert processed.loc[low_bucket, "temperature"].isna().all()
+    assert processed.loc[low_bucket, "temperature_interpolated"].eq(1).all()
 
 
 def test_complete_cycle_grid_uses_summary_boundaries_for_unobserved_edges(
@@ -610,18 +619,17 @@ def test_valid_open_cycle_without_boundaries_uses_observed_ten_second_fallback(
 
     expected_timestamps = list(pd.date_range(timestamps[0], periods=2, freq="10s"))
     assert processed["timestamp"].tolist() == expected_timestamps
-    assert processed["temperature"].tolist() == [2.0, 6.0]
+    assert processed["temperature"].tolist() == [1.0, 5.0]
     assert processed["cycle_stage"].eq("frost_development").all()
     assert processed["cycle_status"].eq("valid").all()
     assert processed["cycle_progress"].isna().all()
     assert processed["cycle_elapsed_seconds"].isna().all()
     assert processed["cop"].notna().all()
     assert processed["cop"].tolist() == [5.0, 5.0]
-    assert processed["cop__imputed"].eq(False).all()
+    assert processed["cop_interpolated"].eq(5.0).all()
     assert not any("__baseline" in name for name in processed)
     imputed_columns = [column for column in processed if column.endswith("__imputed")]
-    assert imputed_columns
-    assert not processed[imputed_columns].any(axis=None)
+    assert not imputed_columns
     assert not any(
         column.endswith(("__missing", "__invalid", "__duplicate", "__conflict"))
         for column in processed
@@ -677,7 +685,7 @@ def test_summary_cycle_without_prepared_rows_is_a_process_contract_error(tmp_pat
         process(frame, summary, _config(tmp_path), _channels())
 
 
-def test_cop_does_not_mark_an_unfilled_dependency_as_imputed(tmp_path: Path) -> None:
+def test_cop_preserves_raw_gap_and_publishes_interpolated_value(tmp_path: Path) -> None:
     timestamps = pd.date_range("2026-07-15", periods=3, freq="10s")
     frame = _frame(timestamps, temperature=[1.0, 2.0, 3.0])
     frame.loc[1, "heating_capacity"] = np.nan
@@ -686,8 +694,9 @@ def test_cop_does_not_mark_an_unfilled_dependency_as_imputed(tmp_path: Path) -> 
     processed, _ = process(frame, summary, _config(tmp_path), _channels())
 
     assert processed["cop"].isna().iloc[1]
-    assert processed["cop__imputed"].dtype == bool
-    assert not processed["cop__imputed"].any()
+    assert processed["cop_interpolated"].iloc[1] == 5.0
+    assert processed["is_interpolated"].iloc[1]
+    assert not any(name.endswith("__imputed") for name in processed)
 
 
 def test_machine_status_does_not_change_complete_cycle_processing(tmp_path: Path) -> None:

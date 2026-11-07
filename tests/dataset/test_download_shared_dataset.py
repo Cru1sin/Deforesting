@@ -63,8 +63,8 @@ def test_download_resumes_part_file(monkeypatch, tmp_path: Path) -> None:
 
     responses = iter(
         [
-            Response([b"abc", IncompleteRead(b"", 3)], 200),
-            Response([b"def", b""], 206),
+            Response([b"abc", IncompleteRead(b"d", 2)], 200),
+            Response([b"ef", b""], 206),
         ]
     )
 
@@ -84,8 +84,21 @@ def test_download_resumes_part_file(monkeypatch, tmp_path: Path) -> None:
 
     assert destination.read_bytes() == b"abcdef"
     assert not destination.with_suffix(".zip.part").exists()
-    assert ranges == [None, "bytes=3-"]
+    assert ranges == [None, "bytes=4-"]
 
 
 def test_two_downloads_is_the_default() -> None:
     assert downloader.DEFAULT_WORKERS == 2
+
+
+def test_7z_batches_use_trailing_sensor_date_before_range_selection(tmp_path: Path) -> None:
+    files = [
+        {"filename": name, "filesize": 1}
+        for name in ["camera.7z", "0922S.7z", "camera.7z", "0923S.7z"]
+    ]
+    jobs = downloader.plan_downloads(files, tmp_path, start_no=1, end_no=3)
+    assert [job["destination"] for job in jobs] == [
+        tmp_path / "0922" / "camera.7z",
+        tmp_path / "0922" / "0922S.7z",
+        tmp_path / "0923" / "camera.7z",
+    ]
