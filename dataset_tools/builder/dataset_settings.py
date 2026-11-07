@@ -10,15 +10,15 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class CycleSettings:
-    """保存 cycles.py 切分制热—结霜—除霜循环时使用的阈值。
+    """保存 detect_cycles.py 切分制热—结霜—除霜循环时使用的阈值。
 
-    本类只保存阈值；状态去抖、事件识别和循环切分由 cycles.py 完成。
+    本类只保存阈值；状态去抖、事件识别和循环切分由 detect_cycles.py 完成。
     """
 
     defrost_channel: str = "defrost_active"
 
     # 允许自动桥接的除霜状态缺失区间上限（秒）。
-    # 只有缺失段两端状态一致且总间隔不超过该值时，cycles.py 才允许补齐状态。
+    # 只有缺失段两端状态一致且总间隔不超过该值时，detect_cycles.py 才允许补齐状态。
     # 0.0 表示任何除霜状态缺失均不自动推断。
     maximum_state_gap_seconds: float = 5.0
 
@@ -31,9 +31,6 @@ class CycleSettings:
 
     minimum_heating_seconds: float = 1800.0
     maximum_heating_seconds: float = 21600.0
-
-    # 仅用于显式历史温度规则缺少通道时的回退；当前频率规则不使用。
-    stable_heating_seconds: float = 180.0
 
     # 除霜信号前，压机频率出现该幅度的单步下降即视为除霜准备开始。
     defrost_preparation_setpoint_drop_hz: float = 10.0
@@ -58,7 +55,6 @@ class CycleSettings:
             "defrost_preparation_lookback_seconds",
             self.defrost_preparation_lookback_seconds,
         )
-        _validate_nonnegative("stable_heating_seconds", self.stable_heating_seconds)
         if self.minimum_defrost_seconds > self.maximum_defrost_seconds:
             raise ValueError("minimum_defrost_seconds must not exceed maximum_defrost_seconds")
         if self.minimum_heating_seconds > self.maximum_heating_seconds:

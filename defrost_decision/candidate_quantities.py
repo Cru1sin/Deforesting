@@ -108,7 +108,7 @@ def effective_candidate_cop(
     *,
     prediction_mode="cross-fitted",
 ):
-    """Estimate an action from strictly pre-action observations, without selecting it."""
+    """Evaluate an action from the prepared offline measurements, without selecting it."""
 
     from .performance_objectives import calculate_cycle_cop
 
@@ -134,7 +134,7 @@ def effective_candidate_cop(
     )
     if models.get("electricity_accounting") != "measured_current_recovery_plus_heating":
         raise ValueError(
-            "Current COP requires the preparation/defrost model; use the historical comparison entry for complete-event models"
+            "Current COP requires a preparation/defrost model with measured current recovery electricity"
         )
     phases = models["phase_models"]
     if prediction_mode == "cross-fitted":

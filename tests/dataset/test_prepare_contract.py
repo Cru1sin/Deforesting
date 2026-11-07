@@ -21,7 +21,6 @@ from dataset_tools.builder.detect_cycles import (
     _defrost_runs,
     _fill_short_state_gaps,
     _normalize_state,
-    find_temperature_stable_heating_start,
     label_cycles,
 )
 from dataset_tools.builder.match_camera_images import match_images
@@ -54,7 +53,6 @@ def _config(root: Path, raw: Path, *, sensor_globs: tuple[str, ...] = ("*.xls",)
             maximum_defrost_seconds=100,
             minimum_heating_seconds=1,
             maximum_heating_seconds=100,
-            stable_heating_seconds=2,
         ),
         process=ProcessSettings(resample_interval_seconds=10),
     )
@@ -349,7 +347,6 @@ def test_label_cycles_defines_progress_only_during_frost_development() -> None:
             "maximum_defrost_seconds": 100,
             "minimum_heating_seconds": 1,
             "maximum_heating_seconds": 100,
-            "stable_heating_seconds": 2,
         },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
@@ -511,7 +508,6 @@ def _short_cycle_settings() -> dict[str, object]:
         "maximum_defrost_seconds": 100,
         "minimum_heating_seconds": 1,
         "maximum_heating_seconds": 100,
-        "stable_heating_seconds": 2,
         "operating_mode_channel": "operating_mode",
         "required_operating_mode": "3",
     }
@@ -748,7 +744,6 @@ def test_long_defrost_state_gap_is_not_filled_but_open_segment_remains_valid() -
             "maximum_defrost_seconds": 100,
             "minimum_heating_seconds": 1,
             "maximum_heating_seconds": 100,
-            "stable_heating_seconds": 1,
         },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
@@ -799,7 +794,6 @@ def test_long_gap_does_not_invalidate_cycles_with_recovered_boundaries() -> None
             "maximum_defrost_seconds": 100,
             "minimum_heating_seconds": 1,
             "maximum_heating_seconds": 100,
-            "stable_heating_seconds": 1,
         },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
@@ -934,120 +928,6 @@ def test_data_ending_on_keeps_only_a_valid_open_cycle_with_data() -> None:
     assert formal["cycle_status_reason"] == "defrost_end_not_observed"
     assert labeled.loc[labeled["cycle_id"].eq("cycle_001")].shape[0] > 0
     assert not summary["cycle_id"].eq("cycle_002").any()
-
-
-def test_stable_start_uses_ts_minus_two_before_looser_thresholds() -> None:
-    start = pd.Timestamp("2026-07-15 00:00:00")
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range(start, periods=5, freq="s"),
-            "water_out_temperature": [45.0, 47.5, 47.8, 48.2, 48.5],
-            "water_temperature_setpoint": [50.0] * 5,
-        }
-    )
-
-    stable = find_temperature_stable_heating_start(
-        frame, start, start + pd.Timedelta(seconds=5), {}
-    )
-
-    assert stable == start + pd.Timedelta(seconds=3)
-
-
-def test_stable_start_does_not_fall_back_below_ts_minus_two() -> None:
-    start = pd.Timestamp("2026-07-15 00:00:00")
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range(start, periods=4, freq="s"),
-            "water_out_temperature": [45.0, 46.5, 47.1, 47.2],
-            "water_temperature_setpoint": [50.0] * 4,
-        }
-    )
-
-    stable = find_temperature_stable_heating_start(
-        frame, start, start + pd.Timedelta(seconds=4), {}
-    )
-
-    assert stable is None
-
-
-def test_stable_start_uses_earlier_slope_knee_or_ts_minus_two() -> None:
-    start = pd.Timestamp("2026-07-15 00:00:00")
-    timestamps = pd.date_range(start, periods=181, freq="10s")
-    minutes = np.arange(len(timestamps)) / 6.0
-    water_out = np.where(
-        minutes <= 5.0,
-        25.0 + 3.0 * minutes,
-        40.0 + 0.2 * (minutes - 5.0),
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": timestamps,
-            "water_out_temperature": water_out,
-            "water_temperature_setpoint": [70.0] * len(timestamps),
-        }
-    )
-
-    stable = find_temperature_stable_heating_start(
-        frame,
-        start,
-        timestamps[-1] + pd.Timedelta(seconds=10),
-        {},
-    )
-
-    assert stable is not None
-    assert abs((stable - (start + pd.Timedelta(minutes=5))).total_seconds()) <= 60
-
-
-def test_stable_start_compares_threshold_with_knee_from_full_curve() -> None:
-    start = pd.Timestamp("2026-07-15 00:00:00")
-    timestamps = pd.date_range(start, periods=181, freq="10s")
-    minutes = np.arange(len(timestamps)) / 6.0
-    water_out = np.piecewise(
-        minutes,
-        [minutes <= 5.0, (minutes > 5.0) & (minutes <= 13.0), minutes > 13.0],
-        [
-            lambda value: 25.0 + 2.0 * value,
-            lambda value: 35.0 + 1.5 * (value - 5.0),
-            lambda value: 47.0 + 0.08 * (value - 13.0),
-        ],
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": timestamps,
-            "water_out_temperature": water_out,
-            "water_temperature_setpoint": [44.5] * len(timestamps),
-        }
-    )
-
-    stable = find_temperature_stable_heating_start(
-        frame,
-        start,
-        timestamps[-1] + pd.Timedelta(seconds=10),
-        {},
-    )
-
-    threshold = frame.loc[
-        frame["water_out_temperature"].ge(frame["water_temperature_setpoint"] - 2.0),
-        "timestamp",
-    ].iloc[0]
-    assert stable == threshold
-
-
-def test_stable_start_is_missing_when_all_priority_thresholds_have_no_observation() -> None:
-    start = pd.Timestamp("2026-07-15 00:00:00")
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range(start, periods=3, freq="s"),
-            "water_out_temperature": [40.0, 44.0, 45.0],
-            "water_temperature_setpoint": [50.0] * 3,
-        }
-    )
-
-    stable = find_temperature_stable_heating_start(
-        frame, start, start + pd.Timedelta(seconds=3), {}
-    )
-
-    assert stable is None
 
 
 def test_short_state_gap_with_irregular_timestamps_does_not_split_defrost_event() -> None:
@@ -1262,7 +1142,6 @@ def test_partial_regions_receive_separate_cycle_ids() -> None:
             "maximum_defrost_seconds": 10,
             "minimum_heating_seconds": 1,
             "maximum_heating_seconds": 10,
-            "stable_heating_seconds": 0,
         },
         experiment_id="exp_test",
         experiment_date="2026-07-15",
@@ -1292,7 +1171,6 @@ def test_shutdown_gap_splits_cycle_but_sensor_disconnect_does_not() -> None:
         "maximum_defrost_seconds": 10,
         "minimum_heating_seconds": 1,
         "maximum_heating_seconds": 1000,
-        "stable_heating_seconds": 0,
         "operating_mode_channel": "operating_mode",
         "required_operating_mode": "3",
     }
@@ -1367,7 +1245,6 @@ def test_shutdown_gap_breaks_cycle_between_two_defrost_events() -> None:
             "maximum_defrost_seconds": 10,
             "minimum_heating_seconds": 1,
             "maximum_heating_seconds": 1000,
-            "stable_heating_seconds": 0,
             "operating_mode_channel": "operating_mode",
             "required_operating_mode": "3",
         },

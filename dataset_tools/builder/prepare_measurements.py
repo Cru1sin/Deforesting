@@ -523,7 +523,7 @@ def _add_cycle_summary_metrics(
     # 对应构造每个角色的图片实际拍摄时间列名。
     role_time_columns = [f"image_{role}_time" for role in roles]
 
-    # 不原地修改 cycles.py 返回的 summary。
+    # 不原地修改 detect_cycles.py 返回的 summary。
     result = summary.copy()
 
     # 每个循环生成一个指标字典，最后一次性转 DataFrame。
@@ -607,7 +607,7 @@ def _add_cycle_summary_metrics(
             }
         )
 
-    # 保持 cycles.py 原有摘要列在前，Prepare 质量指标追加在后。
+    # 保持 detect_cycles.py 原有摘要列在前，Prepare 质量指标追加在后。
     return pd.concat([result.reset_index(drop=True), pd.DataFrame(records)], axis=1)
 
 

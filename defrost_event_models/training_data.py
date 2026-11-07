@@ -1,4 +1,4 @@
-"""Dataset measurements, complete defrost events, and causal state features."""
+"""Prepared Dataset measurements, complete defrost events, and pre-action features."""
 
 from __future__ import annotations
 

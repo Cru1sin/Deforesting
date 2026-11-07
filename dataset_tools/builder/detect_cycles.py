@@ -8,8 +8,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .find_recovery_temperature_knee import find_global_knee
-
 _STAGES = {
     "recovery",
     "frost_development",
@@ -246,8 +244,6 @@ def resolve_stable_heating_start(
         if valid.empty or valid.max() < candidate:
             return None
         return candidate
-    if mode == "ts-minus":
-        return find_temperature_stable_heating_start(frame, heating_start, defrost_start, settings)
     if mode != "criterion":
         raise ValueError(f"unsupported recovery mode: {mode}")
     return find_stable_heating_start(frame, heating_start, defrost_start, settings)
@@ -270,53 +266,6 @@ def find_stable_heating_start(frame, heating_start, defrost_start, settings):
     trace = recovery_control_trace(heating, recipe)
     confirmed = trace.loc[trace.normal_heating, "timestamp"]
     return confirmed.iloc[0] if len(confirmed) else None
-
-
-def find_temperature_stable_heating_start(
-    frame: pd.DataFrame,
-    heating_start: Any,
-    defrost_start: Any,
-    settings: Mapping[str, Any] | Any,
-) -> pd.Timestamp | None:
-    if not isinstance(heating_start, pd.Timestamp):
-        return None
-    required = {"timestamp", "water_out_temperature", "water_temperature_setpoint"}
-    if not required <= set(frame.columns):
-        return heating_start + pd.Timedelta(
-            seconds=_setting(settings, "stable_heating_seconds", 180)
-        )
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    water_out = pd.to_numeric(frame["water_out_temperature"], errors="coerce")
-    setpoint = pd.to_numeric(frame["water_temperature_setpoint"], errors="coerce")
-    mask = timestamps.ge(heating_start) & timestamps.notna() & water_out.notna() & setpoint.notna()
-    if isinstance(defrost_start, pd.Timestamp):
-        mask &= timestamps.lt(defrost_start)
-    if not mask.any():
-        return None
-    observations = pd.DataFrame(
-        {
-            "timestamp": timestamps.loc[mask],
-            "water_out": water_out.loc[mask],
-            "setpoint": setpoint.loc[mask],
-        }
-    ).sort_values("timestamp", kind="stable")
-    threshold = observations.loc[
-        observations["water_out"].ge(observations["setpoint"] - 2.0),
-        "timestamp",
-    ]
-    elapsed = (observations["timestamp"] - pd.Timestamp(heating_start)).dt.total_seconds().to_numpy(
-        dtype=float
-    ) / 60.0
-    knee = find_global_knee(
-        elapsed,
-        observations["water_out"].to_numpy(dtype=float),
-    )
-    candidates = []
-    if not threshold.empty:
-        candidates.append(pd.Timestamp(threshold.iloc[0]))
-    if knee is not None:
-        candidates.append(pd.Timestamp(heating_start) + pd.Timedelta(minutes=knee))
-    return min(candidates) if candidates else None
 
 
 def find_defrost_preparation_start(

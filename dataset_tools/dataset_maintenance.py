@@ -613,7 +613,7 @@ def _materialize_cycle(
     recovery = registry.get("recovery_edit")
     if isinstance(recovery, Mapping) and bool(recovery.get("managed", False)):
         mode = str(recovery.get("mode", ""))
-        if mode in {"seconds", "ts-minus", "frequency-setpoint", "frequency-actual"}:
+        if mode in {"seconds", "frequency-setpoint", "frequency-actual"}:
             raw_seconds = recovery.get("seconds")
             original, canonical, metadata_result = apply_recovery(
                 original,

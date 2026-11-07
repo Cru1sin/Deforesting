@@ -26,7 +26,7 @@ def apply_recovery(
     seconds: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Apply a recovery rule to in-memory Dataset frames."""
-    if mode not in {"seconds", "ts-minus", *RECOVERY_RULES}:
+    if mode not in {"seconds", *RECOVERY_RULES}:
         raise ValueError(f"unsupported recovery edit mode: {mode}")
     if mode == "seconds" and (seconds is None or seconds < 0):
         raise ValueError("recovery seconds must be a nonnegative integer")
@@ -57,19 +57,6 @@ def apply_recovery(
             mode="seconds",
             seconds=int(seconds or 0),
         )
-    elif mode == "ts-minus":
-        fallback_seconds = (
-            recovery_settings.get("fallback_seconds", 180)
-            if isinstance(recovery_settings, Mapping)
-            else 180
-        )
-        stable = resolve_stable_heating_start(
-            original_result,
-            heating_start,
-            defrost_start,
-            {"stable_heating_seconds": fallback_seconds},
-            mode="ts-minus",
-        )
     else:
         times = original_result.timestamp
         heating = original_result.loc[times.ge(heating_start)]
@@ -93,11 +80,6 @@ def apply_recovery(
     registry["recovery_edit"] = {
         "mode": mode,
         "seconds": int(seconds) if mode == "seconds" and seconds is not None else None,
-        "fallback_seconds": (
-            float(recovery_settings.get("fallback_seconds", 180))
-            if isinstance(recovery_settings, Mapping)
-            else 180.0
-        ),
         "managed": True,
     }
     return original_result, processed_result, metadata_result

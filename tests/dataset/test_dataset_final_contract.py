@@ -742,7 +742,7 @@ def test_materialize_cycle_builds_one_catalog_record(
             input_dir=input_dir,
             sensor_globs=("*.xls",),
             image_extensions=(".jpg",),
-            cycles=SimpleNamespace(stable_heating_seconds=180),
+            cycles=SimpleNamespace(),
             process=SimpleNamespace(
                 resample_interval_seconds=10,
                 baseline=SimpleNamespace(baseline_seconds=60),
@@ -1517,7 +1517,7 @@ def test_cli_edit_can_skip_rgb_panel_rendering(monkeypatch: object, tmp_path: Pa
                 "--dataset",
                 str(tmp_path),
                 "--recovery-end-by",
-                "ts-minus",
+                "frequency-setpoint",
                 "--skip-rgb-panels",
             ]
         )
@@ -1611,18 +1611,11 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
         }
     )
 
-    criterion_start = resolve_stable_heating_start(
-        frame,
-        timestamps[0],
-        timestamps[-1] + pd.Timedelta(seconds=10),
-        {"stable_heating_seconds": 20},
-        mode="ts-minus",
-    )
     seconds_start = resolve_stable_heating_start(
         frame,
         timestamps[0],
         timestamps[-1] + pd.Timedelta(seconds=10),
-        {"stable_heating_seconds": 20},
+        {},
         mode="seconds",
         seconds=20,
     )
@@ -1630,7 +1623,7 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
         frame,
         timestamps[0],
         timestamps[2],
-        {"stable_heating_seconds": 20},
+        {},
         mode="seconds",
         seconds=20,
     )
@@ -1643,7 +1636,6 @@ def test_recovery_and_baseline_share_single_scientific_entrypoints() -> None:
         stage="frost_development",
     )
 
-    assert criterion_start == timestamps[3]
     assert seconds_start == timestamps[2]
     assert seconds_at_defrost == timestamps[2]
     assert unavailable == []
@@ -1864,7 +1856,7 @@ def test_dataset_add_append_edit_refresh_loader_validate_end_to_end(
             input_dir=input_dir,
             sensor_globs=("*.xls",),
             image_extensions=(".jpg",),
-            cycles=SimpleNamespace(stable_heating_seconds=20),
+            cycles=SimpleNamespace(),
             process=SimpleNamespace(
                 resample_interval_seconds=10,
                 baseline=SimpleNamespace(baseline_seconds=60),

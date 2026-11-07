@@ -7,14 +7,15 @@ import pandas as pd
 def stopping_cdf_targets(rows):
     """Uniform-time CDF between full teacher bounds, before input masking.
 
-    Training fills interior holes; exact near_optimal remains the COP metric.
+    The CDF spans the first and last saved near-optimal actions, including gaps.
+    Saved per-action labels remain unchanged.
     """
     rows = rows.copy()
     rows["stopping_cdf_target"] = np.nan
     for _, g in rows.groupby("cycle_name", sort=False):
         near = g.loc[g.near_optimal, "candidate_defrost_time"]
         if near.empty:
-            raise ValueError("No exact near-optimal candidate for CDF target")
+            raise ValueError("No saved near-optimal candidate for CDF target")
         left, right = near.min(), near.max()
         duration = (right - left).total_seconds()
         target = (

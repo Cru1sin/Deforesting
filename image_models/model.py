@@ -201,4 +201,4 @@ def build_model(
         raise ValueError("Configured dropout requires a recurrent or MLP network")
     if name == "logistic":
         return nn.Sequential(nn.Linear(width, 1), nn.Flatten(0))
-    raise ValueError(f"Unknown RGB classifier: {name}")
+    raise ValueError(f"Unknown stopping model: {name}")

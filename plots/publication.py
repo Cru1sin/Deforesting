@@ -14,7 +14,6 @@ import pandas as pd
 from matplotlib import font_manager
 from matplotlib.patches import Rectangle
 
-from defrost_decision.baselines.electricity import water_side_heating_kw
 from plots.cop import (
     COP_COLOR,
     _plot_supported_curve,
@@ -94,6 +93,18 @@ _RGB_PANEL_FONT = next(
     ),
     "DejaVu Sans",
 )
+
+
+def water_side_heating_kw(frame: pd.DataFrame) -> pd.Series:
+    """Return raw water-side heating capacity in kW."""
+    return (
+        1.161
+        * pd.to_numeric(frame["water_flow"], errors="coerce")
+        * (
+            pd.to_numeric(frame["water_out_temperature"], errors="coerce")
+            - pd.to_numeric(frame["water_in_temperature"], errors="coerce")
+        )
+    )
 
 
 def save_publication(

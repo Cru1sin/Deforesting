@@ -134,9 +134,6 @@ def build_registry(builds: Sequence[Any]) -> dict[str, Any]:
             "recovery_edit": {
                 "mode": "frequency-setpoint",
                 "seconds": None,
-                "fallback_seconds": float(
-                    getattr(builds[0].config.cycles, "stable_heating_seconds", 180)
-                ),
                 "managed": False,
             },
             "image_coverage": {"max_image_gap_seconds": 40.0},

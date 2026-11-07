@@ -17,4 +17,11 @@ uv run --no-sync python -m pytest tests/test_public_entrypoints.py -q
 
 `test_*.py` 是自动测试；其他脚本是研究核验程序，可能写出分析结果，先看其参数。根级测试覆盖入口及跨模块研究检查。
 
-`uv run --no-sync python -m pytest -q` 运行默认套件，默认排除 `slow`。完整 Dataset 测试需显式 `-m slow` 及对应本地数据；通过小型测试不等于全量模型性能验证。
+全部测试还覆盖霜态支线，需要其可选依赖：
+
+```bash
+uv sync --extra ml --extra dev --extra slingshot
+uv run --no-sync python -m pytest -q
+```
+
+默认排除 `slow`。完整 Dataset 测试需显式 `-m slow` 及对应本地数据；通过小型测试不等于全量模型性能验证。

@@ -98,9 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     edit.add_argument("--baseline-seconds", type=int)
     recovery = edit.add_mutually_exclusive_group()
     recovery.add_argument("--recovery-seconds", type=int)
-    recovery.add_argument(
-        "--recovery-end-by", choices=["ts-minus", "frequency-setpoint", "frequency-actual"]
-    )
+    recovery.add_argument("--recovery-end-by", choices=["frequency-setpoint", "frequency-actual"])
     edit.add_argument("--defrost-preparation", action="store_true")
     edit.add_argument("--skip-rgb-panels", action="store_true")
     edit.add_argument("--skip-figures", action="store_true")
