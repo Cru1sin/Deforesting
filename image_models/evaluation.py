@@ -47,9 +47,8 @@ def _score_external_checkpoint(path, rows, reference, conditions):
     torch.set_num_threads(1)
     saved = pickle.load(path.open("rb"))
     model = saved["checkpoint"]
-    if set(rows.experiment_id) & set(model["training_experiments"]) or set(rows.cycle_name) & set(
-        model["training_cycles"]
-    ):
+    # Cycle numbers restart in a new Dataset; experiment IDs define the split.
+    if set(rows.experiment_id) & set(model["training_experiments"]):
         raise ValueError("External evaluation overlaps model training data")
     if model["threshold"] != 0.5:
         raise ValueError("The shared stopping scorer uses the frozen 0.5 threshold")

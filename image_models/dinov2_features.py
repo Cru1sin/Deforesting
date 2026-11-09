@@ -244,7 +244,7 @@ def main() -> int:
         "--image-list", type=Path, help="CSV of cycle_name, camera_role, file_name to extract"
     )
     parser.add_argument(
-        "--include-rb", action="store_true", help="include RB for state analysis, not CV training"
+        "--include-rb", action="store_true", help="同时提取 RB 循环；准备主模型输入时启用"
     )
     parser.add_argument(
         "--local-only",

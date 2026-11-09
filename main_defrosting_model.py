@@ -76,7 +76,7 @@ def get_args(argv=None):
     network.add_argument(
         "--standard-through",
         default="exp_20260910",
-        help="数据集的最后一个实验；之后的实验仅用于独立测试",
+        help="训练截止实验；Dataset 需同时包含不晚于它的训练实验及更晚的独立测试实验",
     )
     evaluate.add_argument(
         "--checkpoint",
@@ -136,12 +136,17 @@ def main(argv=None):
         return
 
     # 1. 完整候选先按 screen_cv_cycles 筛选，再检查 RGB/DINO≥70%、插值≤30%。
-    # 当前正面开发期得到 101 循环；数量由数据决定，不复用固定名单。
+    # 当前正面数据集得到 101 循环；数量由数据决定，不复用固定名单。
     rows, reference, screening = load_data(args.dataset, args.camera_role)
 
     # 2. Keep every later experiment out of fitting and parameter selection.
     standard = set(rows.loc[rows.experiment_id.le(args.standard_through), "cycle_name"])
     external = set(rows.loc[rows.experiment_id.gt(args.standard_through), "cycle_name"])
+    if not standard or not external:
+        raise ValueError(
+            "训练需同时包含训练实验和独立测试实验。请调整 --standard-through；"
+            "只评价新实验时使用 evaluate。"
+        )
     split = DatasetLoader.split_deployment_data(rows, standard, external)
 
     # 3. State the actual network and inputs directly; names never encode width.

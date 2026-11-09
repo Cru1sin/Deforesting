@@ -2,7 +2,7 @@
 
 数据预处理 → 除霜电耗模型 → COP 与最优时机 → 视觉决策模型。四个阶段可使用已有输入独立验收。
 
-[论文（LaTeX）](docs/paper.tex) 说明研究方法与实验结果；[技术报告（LaTeX）](docs/technical_report.tex) 提供快速演示、四阶段操作与结果判读。[编译方法](docs/README.md)。
+[论文（LaTeX）](docs/paper.tex) 说明研究方法与实验结果；[代码使用手册（LaTeX）](docs/technical_report.tex) 提供快速演示、四阶段操作与结果判读。[编译方法](docs/README.md)。
 
 **GitHub 仓库仅含源码、测试与说明，不含 Dataset、DINO 特征或模型权重。** 下述演示需要另行放好交付数据；只有源码时可先阅读各阶段或运行不依赖真实数据的测试。
 
@@ -49,7 +49,7 @@ uv run --no-sync python validate_dataset.py
 
 输入：压缩机频率、环境温度、盘管温度。三输入 Ridge 输出**准备＋除霜电耗（kWh）**。
 
-先看[验证汇总](dataset/除霜预测模型/三输入Ridge-两阶段-287-1-统一平滑/validation_summary.csv)和[逐事件预测](dataset/除霜预测模型/三输入Ridge-两阶段-287-1-统一平滑/model_validation.csv)。当前 **287 事件、47 实验**，按实验留出预测 RMSE 约 **0.004155 kWh**。
+先看[验证汇总](dataset/除霜预测模型/三输入Ridge-两阶段-287-1-统一平滑/validation_summary.csv)和[逐事件预测](dataset/除霜预测模型/三输入Ridge-两阶段-287-1-统一平滑/model_validation.csv)。冻结模型为 **287 事件、47 实验**，按实验留出预测 RMSE 约 **0.004155 kWh**。
 
 需要重新拟合时：
 
@@ -67,7 +67,7 @@ uv run --no-sync python defrosting_electricity_model.py --output temp/test/ridge
 
 ### 3. COP 与最优时机
 
-输入：循环测量、冻结 Ridge 和 [RB 时刻先验](dataset/priors/rb_reference.csv)。先算各候选 COP，再选峰值及其所在的连续 **1% 近优区间**。
+输入：循环测量、冻结 Ridge 和 [RB 时刻先验](dataset/priors/rb_reference.csv)。先计算候选 COP，再输出最优时刻与连续 **1% 近优区间**。
 
 ```bash
 uv run --no-sync python optimal_defrost_time.py --cycles frost_cycle_000327 \
@@ -86,6 +86,8 @@ uv run --no-sync python optimal_defrost_time.py --cycles frost_cycle_000327 \
 再看同目录 `candidate_decisions.csv`：每行一个候选时刻。用 `cycle_cop_eligible` 与 `on_action_grid` 判断可选点，`is_selected` 标记最终选点。
 
 默认使用已冻结 Ridge。要接入阶段 2 的新模型，增加 `--model-file temp/test/ridge_acceptance/candidate_model_parameters.json`；新模型结果不要求等于上表。[COP 公式与选点实现](defrost_decision/README.md)。
+
+第三阶段只写本次 COP 结果，不会更新视觉模型输入。新增实验还需完成[训练输入准备](dataset/README.md#新增实验准备训练输入)，已有交付包可跳过。
 
 ### 4. 视觉决策模型
 

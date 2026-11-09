@@ -43,40 +43,25 @@ Catalog 区分构建事实 `pipeline_status` 与人工状态 `status`。本次�
 
 模型只读这里的已发布内容，不打开配置中记录的历史来源路径。当前标签保留其原模型来源；重新拟合 Ridge 或计算 COP 不会自动更新标签。[筛选及模型定义](../image_models/README.md)。
 
-## 新数据发布：研究端操作
+## 新增实验：准备训练输入
 
-顺序：完整候选 → 输入质量核验 → 权威筛选 → 发布。例子使用独立 `temp/test/new_data/dataset`，假定已导入数值数据、提取 DINO、准备 RB 先验，并放好冻结 Ridge 参数。质量核验还需照片索引和原图，不是特征交付包的验收步骤。
+操作顺序：导入并检查 → 准备 RB 先验和完整候选 COP → 提取 DINO 并核验质量 → 筛选循环 → 保存训练输入。完整命令见[代码使用手册附录 A](../docs/technical_report.tex)。这一步用于新增数据，已有交付包可直接训练或评价。
 
-下面的实验应未参与 Ridge 拟合，因此使用 `full-model`；已有拟合实验的留出评价使用 `cross-fitted`。
+以下接续已生成的完整候选和质量记录；示例使用独立 `temp/test/new_data/dataset`，主模型筛选设置已内置，无需选择历史规则。
 
 ```bash
-# 全量候选；冻结 Ridge 位于该 Dataset 的默认模型目录
-uv run --no-sync python optimal_defrost_time.py \
-  --dataset temp/test/new_data/dataset --prediction-mode full-model \
-  --output temp/test/new_data/cop
-
-# 默认使用该 Dataset 的 image_DINO_feature
-uv run --no-sync python -m image_models.cycle_selection \
-  --dataset temp/test/new_data/dataset \
-  --decisions temp/test/new_data/cop/candidate_decisions.csv \
-  --audit-inputs --output temp/test/new_data/quality
-
-# 当前正面配方；由完整候选重新筛选
 uv run --no-sync python -m image_models.cycle_selection \
   --dataset temp/test/new_data/dataset \
   --decisions temp/test/new_data/cop/candidate_decisions.csv \
   --quality temp/test/new_data/quality/quality_metrics.csv \
-  --include-rb --input-rule rgb70 --cohort-rule observed --near-set-rule exact \
   --output temp/test/new_data/screening
-
-# 首次发布时，目标 training_data 尚不存在
 uv run --no-sync python -m dataset_tools.training_data training-data \
   --dataset temp/test/new_data/dataset --admission-run temp/test/new_data/screening
 ```
 
-已有发布不能直接覆盖：先保留旧 Dataset 快照，再发布新版本；`--append` 仅用于追加符合条件的新循环。绘图不改变标签规则。`connected` 是桥接首末近优点空隙的历史方法，当前配方保持 `exact`。
+筛选结果见 `cycle_screening.csv`，准入循环见 `cohort.csv`。最后一个命令写入 Dataset 的 `training_data/`；视觉训练从这里读取，不直接读取 COP 输出目录。
 
-旧 Dataset 缺少质量证据时，可在原来源仍可访问的情况下运行 `python -m dataset_tools.training_data screening-inputs --camera-role front`；其他机位分别指定。它只补齐证据，不改标签定义。
+质量核验及 DINO 重提取需要原图；只拿到特征交付包时，使用已有质量记录即可。筛选命令要求新输出目录，已有训练输入不能直接覆盖；`--append` 仅用于保留旧循环并追加新循环。重新拟合 Ridge 或计算 COP 不会自动改写标签和权重。
 
 ## 维护边界
 

@@ -139,19 +139,45 @@ def test_zero_argument_acceptance_uses_frozen_recipe_and_new_output(tmp_path, mo
     assert not calls[0][0][3].exists()
 
 
-def test_plot_flags_do_not_choose_training_labels():
-    from image_models.cycle_selection import build_parser
+def test_screening_cli_uses_full_candidates_and_main_model_settings(tmp_path, monkeypatch):
+    import json
 
-    parser = build_parser()
-    for flags in ([], ["--figures"], ["--dataset-figures"]):
-        args = parser.parse_args(["--decisions", "candidates.csv", *flags])
-        assert args.near_set_rule == "exact"
-    assert (
-        parser.parse_args(
-            ["--decisions", "candidates.csv", "--dataset-figures", "--near-set-rule", "connected"]
-        ).near_set_rule
-        == "connected"
+    import pandas as pd
+
+    from image_models import cycle_selection
+
+    candidates = tmp_path / "candidates.csv"
+    pd.DataFrame({"cycle_name": ["a", "a", "b"]}).to_csv(candidates, index=False)
+    quality = tmp_path / "quality_metrics.csv"
+    pd.DataFrame({"cycle_name": ["a", "b"]}).to_csv(quality, index=False)
+
+    class Loader:
+        def list_cycles(self):
+            return pd.DataFrame({"cycle_name": ["a", "b"]})
+
+    monkeypatch.setattr(cycle_selection, "DatasetLoader", lambda path: Loader())
+    monkeypatch.setattr("output_layout.prepare_output", lambda *a, **kw: None)
+
+    def screen(rows, catalog, **settings):
+        assert rows.cycle_name.tolist() == ["a", "a", "b"]
+        assert catalog.cycle_name.tolist() == ["a", "b"]
+        assert settings["input_rule"] == "rgb70"
+        assert settings["cohort_rule"] == "observed"
+        assert settings["exclude_rb"] is False
+        return pd.DataFrame(
+            {"cycle_name": ["a", "b"], "experiment_id": ["x", "y"], "selected": [True, False]}
+        )
+
+    monkeypatch.setattr(cycle_selection, "screen_cv_cycles", screen)
+    output = tmp_path / "screening"
+    cycle_selection.main(
+        ["--decisions", str(candidates), "--quality", str(quality), "--output", str(output)]
     )
+    saved = json.loads((output / "admission_settings.json").read_text())
+    assert saved["near_set_rule"] == "exact"
+    assert saved["limits"]["maximum_interpolated_fraction"] == 0.30
+    assert pd.read_csv(output / "cohort.csv").cycle_name.tolist() == ["a"]
+    assert pd.read_csv(output / "cycle_screening.csv").cycle_name.tolist() == ["a", "b"]
 
 
 def test_loeo_ablation_rejects_fixed_train_test_before_writing(tmp_path, monkeypatch):

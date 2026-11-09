@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--decisions",
         type=Path,
-        help="Full saved without_trunc candidates for authoritative cohort screening",
+        help="完整候选 COP 表，用于重新筛选循环",
     )
     parser.add_argument("--figures", action="store_true")
     parser.add_argument(

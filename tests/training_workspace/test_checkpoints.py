@@ -63,7 +63,7 @@ def test_external_checkpoint_masks_missing_inputs_and_rejects_training_overlap(
     )
     model = dict(
         training_experiments=["old_exp"],
-        training_cycles=["old"],
+        training_cycles=["new"],  # A different Dataset may reuse the same cycle number.
         threshold=0.5,
         seed=42,
         trigger_rule="cdf",

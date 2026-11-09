@@ -17,6 +17,8 @@
 
 辅助职责：[labels.py](labels.py) 定义监督目标；[control_context.py](control_context.py) 读取过去运行状态；[experiments.py](experiments.py) 保存配置；[checkpoints.py](checkpoints.py) 定位权重及机位；[comparisons.py](comparisons.py) 汇总对比。
 
+准备新增数据时，`cycle_selection` 命令默认采用下述主模型筛选设置：先用 `--audit-inputs` 核验质量，再用 `--quality` 筛选；结果目录必须是新目录。具体操作见 [Dataset 说明](../dataset/README.md)。
+
 ## 固定主模型
 
 | 设置 | 默认值 |

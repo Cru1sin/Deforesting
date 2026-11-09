@@ -113,7 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Publish missing COP figures for all saved candidate cycles",
     )
     render.add_argument(
-        "--decisions", type=Path, help="Full saved without_trunc candidate CSV for COP rendering"
+        "--decisions", type=Path, help="完整候选 COP 表，用于绘制循环结果"
     )
     render.add_argument("--recovery-boundaries", type=Path)
     render.add_argument("--panel", action="store_true")

@@ -1,9 +1,7 @@
-"""Authoritative CV cohort: historical performance screen or independent quality gates.
+"""循环筛选与输入质量核验。
 
-Default calls preserve the historical COP-based screen. Supplying measured quality
-uses Gates A/B instead, retaining historical selections only as comparison columns.
-An explicit terminal-decline requirement adds observation-length eligibility after
-the independent quality gates; it never changes their definitions.
+命令行使用主模型的固定筛选设置，输出质量记录或准入循环与发布设置。
+screen_cv_cycles 是共享筛选函数；已保存的研究结果按其原设置读取。
 """
 
 import argparse
@@ -172,7 +170,8 @@ def screen_cv_cycles(
         raise ValueError("Post-near observation minutes must be nonnegative")
     if cohort_rule == "labels" and (quality is None or minimum_terminal_decline is None):
         raise ValueError(
-            "Label cohort requires input quality and a default decline threshold; per-setpoint durations override it"
+            "Label cohort requires input quality and a default decline threshold; "
+            "per-setpoint durations override it"
         )
     if cohort_rule == "observed" and (quality is None or input_rule != "rgb70"):
         raise ValueError("Observed cohort requires RGB/DINO and interpolation quality")
@@ -558,97 +557,39 @@ def screen_admission(settings_path, *, dataset=None, camera_role="front", defini
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=(PROJECT / "dataset"))
-    parser.add_argument(
-        "--decisions",
-        type=Path,
-        required=True,
-        help="Full saved without_trunc candidate decisions (CSV or parquet)",
+    parser = argparse.ArgumentParser(
+        description="准备正面视觉模型输入：核验输入质量，再按当前规则筛选循环。",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--dataset", type=Path, default=PROJECT / "dataset")
     parser.add_argument(
-        "--output",
-        type=Path,
-        default=(PROJECT / "output/90_复现材料/02_循环筛选/统一队列规则与名单"),
+        "--decisions", type=Path, required=True, help="完整候选 COP，CSV 或 Parquet"
     )
-    parser.add_argument("--audit-inputs", action="store_true")
+    parser.add_argument("--output", type=Path, required=True, help="新的结果目录")
     parser.add_argument(
-        "--figures",
-        action="store_true",
-        help="Render admitted cycles with the shared effective COP renderer",
+        "--audit-inputs", action="store_true", help="生成质量记录；需要原图及 DINO 特征"
     )
-    parser.add_argument(
-        "--dataset-figures",
-        action="store_true",
-        help="Publish paired training and reviewable RB failure figures in Dataset",
-    )
-    parser.add_argument(
-        "--redraw-figures",
-        action="store_true",
-        help="Refresh published COP figures; retain existing cycle overviews",
-    )
-    parser.add_argument(
-        "--rb-early-review-rule", choices=["strict", "all_cycles"], default="all_cycles"
-    )
-    parser.add_argument(
-        "--exclude-cycles",
-        nargs="+",
-        default=[],
-        help="Explicitly exclude named cycles without changing their data",
-    )
-    parser.add_argument(
-        "--near-set-rule",
-        choices=["exact", "connected"],
-        default="exact",
-        help="exact: 离散近优点（默认）；connected: 桥接首末近优点间空隙的历史标签规则；绘图不改变此选择",
-    )
-    parser.add_argument("--feature-caches", type=Path, nargs="+")
-    parser.add_argument("--legacy-run", type=Path)
-    parser.add_argument("--n-jobs", type=int, default=6)
-    parser.add_argument(
-        "--quality",
-        type=Path,
-        help="Audited quality_metrics.csv; independent Gates A/B replace legacy admission",
-    )
-    parser.add_argument(
-        "--include-rb", action="store_true", help="Apply the same eligibility criteria to RB cycles"
-    )
-    parser.add_argument(
-        "--minimum-terminal-decline",
-        type=float,
-        help="Additional strict decline from peak at actual preparation, e.g. 0.05",
-    )
-    parser.add_argument("--rb-minimum-terminal-decline", type=float)
-    parser.add_argument("--maximum-interpolated-fraction", type=float, default=0.30)
-    parser.add_argument(
-        "--input-rule", choices=["historical", "near70", "rgb70"], default="historical"
-    )
-    parser.add_argument(
-        "--cohort-rule",
-        choices=["reward_complete", "labels", "observed"],
-        default="reward_complete",
-    )
-    parser.add_argument(
-        "--maximum-per-setpoint",
-        type=int,
-        help="Retain strict cycles, then balance additions across experiments up to this cap",
-    )
-    parser.add_argument(
-        "--post-near-minutes-by-setpoint",
-        type=json.loads,
-        help='JSON map, e.g. {"50":5,"60":18}; observation-end minus first near point replaces decline at these setpoints',
-    )
+    parser.add_argument("--quality", type=Path, help="核验生成的 quality_metrics.csv；筛选时必需")
+    parser.add_argument("--exclude-cycles", nargs="+", default=[], help="人工确认后排除的循环")
+    parser.add_argument("--n-jobs", type=int, default=6, help="输入质量核验的并行进程数")
     return parser
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.near_set_rule == "connected" and not args.quality:
-        parser.error("--near-set-rule connected requires --quality to rebuild labels")
+    if args.n_jobs < 1:
+        parser.error("--n-jobs 必须为正整数")
+    if not args.audit_inputs and args.quality is None:
+        parser.error("筛选需要 --quality；首次准备请先使用 --audit-inputs")
     from output_layout import prepare_output
 
     prepare_output(args, training=False)
+    print(f"Dataset: {args.dataset.resolve()}\nCandidates: {args.decisions.resolve()}", flush=True)
+    if args.quality is not None:
+        print(f"Quality: {args.quality.resolve()}", flush=True)
+    if args.output.exists():
+        raise FileExistsError(f"结果目录已存在，请使用新目录：{args.output}")
     decisions = (
         pd.read_parquet(args.decisions)
         if args.decisions.suffix == ".parquet"
@@ -656,42 +597,11 @@ def main(argv=None):
     )
     loader = DatasetLoader(args.dataset)
     catalog = loader.list_cycles()
-    screening = screen_cv_cycles(
-        decisions,
-        catalog,
-        quality=pd.read_csv(args.quality) if args.quality else None,
-        exclude_rb=not args.include_rb,
-        minimum_terminal_decline=args.minimum_terminal_decline,
-        rb_minimum_terminal_decline=args.rb_minimum_terminal_decline,
-        input_rule=args.input_rule,
-        maximum_per_setpoint=args.maximum_per_setpoint,
-        post_near_minutes_by_setpoint=args.post_near_minutes_by_setpoint,
-        cohort_rule=args.cohort_rule,
-        maximum_interpolated_fraction=args.maximum_interpolated_fraction,
-        excluded_cycles=args.exclude_cycles,
-        action_inputs=args.quality.parent / "decision_inputs.parquet" if args.quality else None,
-    )
-    if args.dataset_figures:
-        from dataset_tools.training_data import publish_cycle_figures
-
-        publish_cycle_figures(
-            args.dataset,
-            decisions,
-            screening,
-            n_jobs=args.n_jobs,
-            near_set_rule=args.near_set_rule,
-            early_review_rule=args.rb_early_review_rule,
-            redraw=args.redraw_figures,
-        )
-    screening["setpoint_c"] = screening.cycle_name.map(
-        decisions.groupby("cycle_name").water_temperature_setpoint.median()
-    )
-    screening["source"] = str(args.decisions.resolve())
-    args.output.mkdir(parents=True, exist_ok=True)
-    screening.to_csv(args.output / "cycle_screening.csv", index=False)
     if args.audit_inputs:
         from image_models.admission import audit_inputs
 
+        # Check the full candidate population before inspecting RGB or feature quality.
+        screen_cv_cycles(decisions, catalog, exclude_rb=False)
         for key in ["candidate_defrost_time", "t_RB", "stable_heating_start"]:
             decisions[key] = pd.to_datetime(decisions[key], format="mixed")
         reference = calculate_cycle_cop(decisions, effective=True)
@@ -699,199 +609,43 @@ def main(argv=None):
             reference,
             catalog,
             args.dataset,
-            args.feature_caches or [args.dataset / "image_DINO_feature"],
+            [args.dataset / "image_DINO_feature"],
             args.output,
             args.n_jobs,
-            args.legacy_run,
         )
         return
-    screening.loc[screening.selected].to_csv(args.output / "cohort.csv", index=False)
-    if args.cohort_rule == "labels":
-        screening.loc[screening.selected_evaluation].to_csv(
-            args.output / "evaluation_cohort.csv", index=False
-        )
-    if args.near_set_rule == "connected":
-        from image_models.labels import label_actions
 
-        names = set(screening.loc[screening.selected, "cycle_name"])
-        reference = calculate_cycle_cop(
-            decisions.loc[decisions.cycle_name.isin(names)], effective=True
-        )
-        reference["candidate_defrost_time"] = pd.to_datetime(
-            reference.candidate_defrost_time, format="mixed"
-        )
-        ends = screening.set_index("cycle_name").end_time
-        reference["on_action_grid"] = legal_quality_actions(
-            reference
-        ) & reference.candidate_defrost_time.lt(reference.cycle_name.map(ends))
-        labels, intervals = label_actions(
-            reference, label_rule="stopping_latch", near_set_rule="connected"
-        )
-        inputs = pd.read_parquet(args.quality.parent / "decision_inputs.parquet")
-        keys = ["cycle_name", "candidate_defrost_time"]
-        # Input validity remains independent of the inferred connected labels.
-        overlap = [name for name in inputs if name in labels and name not in keys]
-        labels = labels.merge(
-            inputs.drop(columns=overlap), on=keys, how="left", validate="one_to_one"
-        )
-        labels["input_valid"] = labels.input_valid.fillna(False)
-        labels["train_mask"] &= labels.input_valid
-        labels.to_parquet(args.output / "decision_inputs.parquet", index=False)
-        reference.to_parquet(args.output / "reference.parquet", index=False)
-        intervals.to_csv(args.output / "near_optimal_intervals.csv", index=False)
-    if args.figures or (args.output / "candidate_decisions.csv").is_file():
-        names = set(screening.loc[screening.selected, "cycle_name"])
-        plotted = decisions.loc[decisions.cycle_name.isin(names)].copy()
-        for column in plotted:
-            if column.endswith(("_time", "_start", "_end")) or column in {"t_star", "t_RB"}:
-                plotted[column] = pd.to_datetime(plotted[column], format="mixed")
-        plotted.to_csv(args.output / "candidate_decisions.csv", index=False)
-    for name in args.exclude_cycles:
-        if name in set(screening.cycle_name):
-            (args.output / f"cycle_{int(name.rsplit('_', 1)[-1]):03d}.png").unlink(missing_ok=True)
-    if args.figures:
-        from joblib import Parallel, delayed, parallel_config
-
-        from plots.defrost_decision import render_current_decision_cycle
-
-        with parallel_config(backend="loky", n_jobs=args.n_jobs, inner_max_num_threads=1):
-            Parallel(verbose=5)(
-                delayed(render_current_decision_cycle)(
-                    curve,
-                    loader,
-                    args.output / f"cycle_{int(name.rsplit('_', 1)[-1]):03d}.png",
-                    near_set_rule=args.near_set_rule,
-                )
-                for name, curve in plotted.groupby("cycle_name", sort=True)
-            )
-    if args.quality:
-        (args.output / "admission_settings.json").write_text(
-            json.dumps(
-                dict(
-                    limits=input_quality_limits(
-                        args.input_rule, args.maximum_interpolated_fraction
-                    ),
-                    input_rule=args.input_rule,
-                    exclude_rb=not args.include_rb,
-                    minimum_terminal_decline=args.minimum_terminal_decline,
-                    rb_minimum_terminal_decline=args.rb_minimum_terminal_decline,
-                    maximum_per_setpoint=args.maximum_per_setpoint,
-                    post_near_minutes_by_setpoint=args.post_near_minutes_by_setpoint,
-                    cohort_rule=args.cohort_rule,
-                    excluded_cycles=args.exclude_cycles,
-                    near_set_rule=args.near_set_rule,
-                    near_set_definition=(
-                        "连片近优: connect first-to-last legal 1% near point; bridged labels are inferred, COP validity unchanged"
-                        if args.near_set_rule == "connected"
-                        else "exact supported 1% near set"
-                    ),
-                    action_start="accounting start + 30 s; existing grid; before preparation or recording end when preparation is absent",
-                    selection=(
-                        f"RGB/DINO >=70%; full-cycle is_interpolated <={100 * args.maximum_interpolated_fraction:g}%; exact terminal COP <99% peak; same cohort for held-out replay"
-                        if args.cohort_rule == "observed"
-                        else "train: input + near-label support + last valid observed COP decline; evaluation: train + full reward gates"
-                        if args.cohort_rule == "labels"
-                        else "input + full reward gates + requested terminal decline"
-                    ),
-                    input="front RGB -> frozen DINO -> backward <=30s -> unchanged frequency features; no Harmony/reward mask",
-                    reward=(
-                        "diagnostic only; actual selected COP and RB support determine metric coverage"
-                        if args.cohort_rule == "observed"
-                        else "all legal grid heat/electricity/COP valid; actual endpoint and RB valid; model extrapolation is annotation only"
-                    ),
-                    decisions=str(args.decisions.resolve()),
-                    dataset=str(args.dataset.resolve()),
-                    quality=str(args.quality.resolve()),
-                ),
-                indent=2,
-            )
-        )
-        print(screening.groupby(["gate_a", "gate_b"]).size().to_string())
-        print(
-            "Admitted:",
-            int(screening.selected.sum()),
-            "cycles;",
-            screening.loc[screening.selected, "experiment_id"].nunique(),
-            "experiments",
-        )
-        condition_counts = (
-            screening.assign(quality_pass=screening.gate_a & screening.gate_b)
-            .groupby(["setpoint_c", "baseline_cycle"], dropna=False)
-            .agg(
-                total=("cycle_name", "size"),
-                quality_pass=("quality_pass", "sum"),
-                selected=("selected", "sum"),
-            )
-        )
-        if args.minimum_terminal_decline is not None:
-            condition_counts["terminal_decline_pass"] = screening.groupby(
-                ["setpoint_c", "baseline_cycle"], dropna=False
-            ).terminal_decline_pass.sum()
-        if args.cohort_rule == "labels":
-            condition_counts = screening.groupby(
-                ["setpoint_c", "baseline_cycle"], dropna=False
-            ).agg(
-                total=("cycle_name", "size"),
-                input_pass=("gate_a", "sum"),
-                label_pass=("label_valid", "sum"),
-                observed_decline_pass=("observed_terminal_decline_pass", "sum"),
-                train=("selected_train", "sum"),
-                evaluation=("selected_evaluation", "sum"),
-            )
-        elif args.cohort_rule == "observed":
-            condition_counts = screening.groupby(
-                ["setpoint_c", "baseline_cycle"], dropna=False
-            ).agg(
-                total=("cycle_name", "size"),
-                input_pass=("gate_a", "sum"),
-                terminal_decline_pass=("long_enough", "sum"),
-                selected=("selected", "sum"),
-            )
-        condition_counts.to_csv(args.output / "condition_counts.csv")
-        if args.cohort_rule == "observed":
-            print(condition_counts.to_string())
-            return
-        screening.loc[~screening.gate_b].to_csv(args.output / "reward_failures.csv", index=False)
-        failures = (
-            screening.loc[~screening.gate_b, ["cycle_name", "gate_b_reasons"]]
-            .assign(reason=lambda x: x.gate_b_reasons.str.split(";"))
-            .explode("reason")
-        )
-        failures.groupby("reason").agg(
-            count=("cycle_name", "size"),
-            cycles=("cycle_name", lambda x: ",".join(str(int(n.rsplit("_", 1)[1])) for n in x)),
-        ).to_csv(args.output / "reward_failure_reasons.csv")
-        print(condition_counts.to_string())
-        return
-    counts = []
-    for rule in ["long_enough"]:
-        column = screening[rule]
-        counts.append(
-            dict(
-                rule=rule,
-                total=len(screening),
-                passed=int(column.eq(True).sum()),
-                failed=int(column.eq(False).sum()),
-                unknown=int(column.isna().sum()),
-            )
-        )
-    combined = screening.long_enough
-    counts.append(
-        dict(
-            rule="selected",
-            total=len(screening),
-            passed=int(combined.eq(True).sum()),
-            failed=int(combined.eq(False).sum()),
-            unknown=int(combined.isna().sum()),
-        )
+    # The published model uses one screening rule for training and evaluation.
+    settings = dict(
+        input_rule="rgb70",
+        cohort_rule="observed",
+        exclude_rb=False,
+        minimum_terminal_decline=None,
+        maximum_interpolated_fraction=0.30,
+        excluded_cycles=args.exclude_cycles,
     )
-    counts = pd.DataFrame(counts)
-    counts.to_csv(args.output / "counts.csv", index=False)
-    print(counts.to_string(index=False))
-    print(
-        "Selected endpoint sources:",
-        screening.loc[screening.selected, "end_source"].value_counts().to_dict(),
+    screening = screen_cv_cycles(
+        decisions,
+        catalog,
+        quality=pd.read_csv(args.quality),
+        **settings,
     )
+    settings["limits"] = input_quality_limits(settings["input_rule"])
+    settings.update(
+        near_set_rule="exact",
+        decisions=str(args.decisions.resolve()),
+        dataset=str(args.dataset.resolve()),
+        quality=str(args.quality.resolve()),
+    )
+    args.output.mkdir(parents=True)
+    screening.to_csv(args.output / "cycle_screening.csv", index=False)
+    selected = screening.loc[screening.selected]
+    selected.to_csv(args.output / "cohort.csv", index=False)
+    (args.output / "admission_settings.json").write_text(
+        json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
+    )
+    print(f"Admitted: {len(selected)} cycles; {selected.experiment_id.nunique()} experiments")
+    print(f"Results: {args.output.resolve()}")
 
 
 def screen_published_cycles(dataset, camera_role="front", *, definition=None):
