@@ -2,7 +2,8 @@
 \documentclass[UTF8,11pt,a4paper,fontset=fandol]{ctexart}
 \usepackage[margin=24mm]{geometry}
 \usepackage{amsmath,amssymb,booktabs,tabularx,longtable,array}
-\usepackage{fvextra,xcolor,xurl,hyperref,enumitem,float,needspace}
+\usepackage{fvextra,xcolor,xurl,hyperref,enumitem,float,needspace,graphicx}
+\graphicspath{{docs/figures/}{figures/}}
 \setlist{beginpenalty=10000,midpenalty=1000}
 \setlist[itemize]{leftmargin=2em,itemsep=3pt,topsep=5pt}
 \setlist[enumerate]{leftmargin=2em,itemsep=4pt,topsep=5pt}
@@ -18,11 +19,11 @@
 \newcommand{\code}[1]{\nolinkurl{#1}}
 \title{基于视觉的热泵除霜时机优化\\[0.4em]\large 演示原型技术文档}
 \author{项目：Deforesting}
-\date{2026年11月8日}
+\date{2026年11月9日}
 \begin{document}
 \maketitle
 \begin{abstract}
-本原型以循环有效 COP 为能效目标，融合视觉与运行条件预测除霜时机。流程分为数据预处理、除霜电耗模型、COP 与最优时机、视觉决策模型四个阶段，均可独立验收。本文先说明方法与验证结果，再给出输入、命令、输出及代码索引。冻结演示使用已保存特征和权重，无需原图。
+本原型以循环有效 COP 为能效目标，融合视觉与运行条件预测除霜时机。数据预处理、电耗预测、COP 与最优时机、视觉决策四个阶段可独立验收。本文说明方法、验证结果与代码用法；冻结回放直接读取特征和权重，无需原图。
 \end{abstract}
 
 \subsection*{按需要阅读}
@@ -37,30 +38,23 @@
 \bottomrule
 \end{tabularx}
 
-\subsection*{快速演示}
+\subsection*{快速演示：复现报告案例}
 \begin{enumerate}
-\item \textbf{放好文件。}按第\ref{sec:files}节放置数值 Dataset、DINO 特征和正面冻结权重。GitHub 仅提供源码、测试和说明。
-\item \textbf{运行。}在项目根目录执行；已有环境可跳过第一行。
+\item \textbf{准备。}按第\ref{sec:files}节放好数据和留出权重；GitHub 仅提供源码与说明。
+\item \textbf{运行。}在项目根目录执行；已有环境跳过第一行。
 \end{enumerate}
 \begin{Code}
 uv sync --extra ml --extra dev
-uv run --no-sync python main_defrosting_model.py
+run='output/90_复现材料/01_视觉模型训练/六机位_正面_LSTM'
+fold=front_exp_20260727_seed42
+uv run --no-sync python main_defrosting_model.py evaluate \
+  --checkpoint "$run/checkpoints/$fold/$fold.pkl" \
+  --experiments exp_20260727
 \end{Code}
 \begin{enumerate}[start=3]
-\item \textbf{核对结果。}默认回放实验 \code{exp_20260920}，不重新训练。
+\item \textbf{核对。}打开终端输出目录中的 \path{cycle_metrics.csv}，找到 \code{frost_cycle_000043}：提升 7.8107\%，近优命中 True。结果与案例图见第\ref{sec:demo}节。
 \end{enumerate}
-\begin{center}
-\begin{tabular}{lll}
-\toprule
-循环 & 触发时刻 & 策略 COP／RB COP \\
-\midrule
-\code{frost_cycle_000327} & 16:46:14 & 1.794667／1.781829 \\
-\bottomrule
-\end{tabular}
-\end{center}
-\textbf{结果位置：}终端打印的\texttt{temp/test/frozen\_model\_<时间>/}。先看 \path{cycle_metrics.csv}。
-
-\noindent 源码：\url{https://github.com/Cru1sin/Deforesting}，\code{main} 为演示原型。
+\noindent 源码：\url{https://github.com/Cru1sin/Deforesting}。
 \newpage
 \section{研究问题与总体方法}
 \label{sec:overview}
@@ -509,39 +503,47 @@ LSTM25＋FiLM 捕获约 82.17\% 的理想提升空间，种子间波动约 0.51 
 \end{itemize}
 这与 PPT 第 27 页的记忆对照结论一致；替代结构均通过共享训练路径进入评价。
 
-\subsection{冻结演示的可复现结果}
+\subsection{最大相对提升循环的留出评价}
 \label{sec:demo}
-2026 年 11 月 8 日使用当前入口重新运行正面冻结权重，结果见表\ref{tab:demo}。输入实验为 \code{exp_20260920}，循环为 \code{frost_cycle_000327}。
+在上述 101 个循环中，按三种子的平均相对 RB 改善率排序，\code{frost_cycle_000043} 最高，为 \textbf{7.8114\%}。该循环来自 \code{exp_20260727}；以下固定使用种子 42，读取排除了该实验的正面 LSTM25＋FiLM 权重。2026 年 11 月 9 日通过当前入口回放，得到表\ref{tab:demo}的结果。
+
+本节展示提升最大的案例，用于说明决策过程；总体表现仍以表\ref{tab:models}的跨实验汇总为准。
 \begin{table}[H]
-\centering\caption{默认冻结演示结果}\label{tab:demo}
+\centering\caption{循环 000043 的留出回放结果（种子 42）}\label{tab:demo}
 \begin{tabularx}{\textwidth}{YY}
 \toprule
 指标 & 结果 \\
 \midrule
-模型触发时刻 & 2026-09-20 16:46:14 \\
-模型触发 COP & 1.794667 \\
-RB 时刻与 COP & 17:27:41；1.781829 \\
-冻结参考最优时刻与 COP & 16:36:14；1.800238 \\
-相对 RB 的 COP 改善 & 0.7205\% \\
+模型触发时刻与 COP & 12:16:12；1.863701 \\
+RB 时刻与 COP & 11:38:52；1.728679 \\
+冻结参考最优时刻与 COP & 12:18:12；1.864633 \\
+相对 RB 的 COP 改善 & 7.8107\% \\
 近优命中 & True \\
 回退／输入缺失 & False／False \\
 \bottomrule
 \end{tabularx}
 \end{table}
 
-\begin{table}[H]
-\centering\caption{同一循环重新计算 COP 的结果}\label{tab:recomputed-cop}
-\begin{tabularx}{\textwidth}{YY}
-\toprule
-阶段三：候选搜索 & 结果 \\
-\midrule
-最优时刻／COP & 16:36:04／1.800238 \\
-连续近优区间 & 16:24:24--17:16:54 \\
-相对 RB 改善 & 1.0331\% \\
-\bottomrule
-\end{tabularx}
-\end{table}
-两张表对应不同任务：表\ref{tab:demo}是阶段四的模型预测，使用已发布参考曲线；表\ref{tab:recomputed-cop}是阶段三重新计算后，在本次候选设置下得到的参考最优。重拟合 Ridge 或重算 COP 不会自动改写冻结视觉标签。
+\clearpage
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth,height=0.88\textheight,keepaspectratio]{frost_cycle_000043.png}
+\caption{循环 000043 的运行过程。沿共同时间轴核对频率、温度、供热与电耗记录，以及恢复、稳定制热、准备和除霜边界；这些记录是后续 COP 计算的测量依据。}
+\label{fig:case-measurements}
+\end{figure}
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth,height=0.86\textheight,keepaspectratio]{frost_cycle_000043_effective_cop.png}
+\caption{循环 000043 的候选 COP 与除霜时机。图中比较 RB 与离线参考最优；模型比 RB 晚 37 分 20 秒触发，距冻结参考峰值 2 分钟，详见表\ref{tab:demo}。本图沿用 Dataset 候选结果，模型评价使用已发布参考曲线。霜态辅助坐标采用原生 Harmony＋Slingshot，不作为模型输入。}
+\label{fig:case-cop}
+\end{figure}
+\begin{figure}[p]
+\centering
+\includegraphics[width=\textwidth,height=0.85\textheight,keepaspectratio]{frost_cycle_000043_rgb_panel.png}
+\caption{循环 000043 的多机位照片与覆盖记录。按列查看各阶段照片、按行比较机位，为运行过程提供视觉对照；本次模型使用正面机位的冻结 DINO 特征。}
+\label{fig:case-rgb}
+\end{figure}
+\clearpage
 
 \subsection{霜态与最优时机的补充分析}
 PPT 第 11--13 页用共同霜态坐标检验跨工况统一阈值：不同工况的近优霜态存在差异，因此进一步采用视觉与运行条件联合决策。该分析属于补充，不是主流程的前置步骤。
@@ -562,6 +564,7 @@ PPT 第 11--13 页用共同霜态坐标检验跨工况统一阈值：不同工�
 \item \textbf{运行位置：}以下命令均在项目根目录执行；先安装 uv。
 \item \textbf{路径：}默认路径以项目根目录为准，显式相对路径按当前工作目录解释。
 \item \textbf{交付范围：}GitHub 提供源码与说明；Dataset、DINO 和权重另附。冻结评价与再训练使用已有特征，无需 GPU 特征提取。
+\item \textbf{报告案例：}另附首页命令中的 \code{front_exp_20260727_seed42.pkl}，并保留 \code{run} 目录下的 \path{training/settings.json}。该权重排除了 \code{exp_20260727}；下列部署权重用于后期实验。
 \end{itemize}
 
 \textbf{文件按预设位置放置：}
@@ -616,7 +619,7 @@ uv run --no-sync python -m pytest tests/test_public_entrypoints.py -q
 \begin{Code}
 uv run --no-sync python validate_dataset.py
 \end{Code}
-\textbf{先看终端：}显示 \code{dataset valid} 表示数值结构检查通过。随后打开 \path{dataset/cycles_RB/frost_cycle_000327.csv}，按下表核验时间网格、阶段和处理字段。
+\textbf{先看终端：}显示 \code{dataset valid} 表示数值结构检查通过。随后打开 \path{dataset/cycles/frost_cycle_000043.csv}，按下表核验时间网格、阶段和处理字段。
 \begin{table}[H]
 \centering\caption{测量表的核验顺序}
 \begin{tabularx}{\textwidth}{p{56mm}Y}
@@ -684,7 +687,7 @@ uv run --no-sync python defrosting_electricity_model.py \
 \textbf{输入：}默认 Dataset、冻结 Ridge、\path{dataset/priors/rb_reference.csv}。RB 规则见 \path{RB_RULES_FROZEN.md}。
 \begin{Code}
 uv run --no-sync python optimal_defrost_time.py \
-  --cycles frost_cycle_000327 \
+  --cycles frost_cycle_000043 \
   --output temp/test/cop_acceptance --overwrite
 \end{Code}
 \textbf{输出目录：}\path{temp/test/cop_acceptance/}。
@@ -730,14 +733,10 @@ uv run --no-sync python optimal_defrost_time.py \
 \code{--overwrite} 允许更新本次测试目录；省略时保护已有结果。普通计算只写结果目录，不更新 Dataset，无需绘图或发布参数。
 
 \subsection{阶段四：视觉决策模型}
-\textbf{输入：}完整已发布动作与标签、DINO 与运行特征、正面冻结权重。
+\textbf{输入：}完整已发布动作与标签、DINO 与运行特征，以及首页命令指定的正面留出权重。
 
 \Needspace{7\baselineskip}
-\textbf{默认验收：}运行文首无参数命令；程序每次创建新的时间目录。需要固定本次输出位置时执行：
-\begin{Code}
-uv run --no-sync python main_defrosting_model.py evaluate \
-  --experiments exp_20260920 --output temp/test/visual_acceptance
-\end{Code}
+\textbf{复现报告案例：}运行首页命令，每次自动创建新的时间目录。需要固定结果位置时，在命令末尾追加 \code{--output temp/test/visual_acceptance}。无参数运行则使用默认部署权重评价后期实验，与本报告的留出案例用途不同。
 \textbf{先看 \path{cycle_metrics.csv}：}
 \begin{table}[H]
 \centering\caption{视觉评价字段}
@@ -904,11 +903,11 @@ COP 入口 & \path{optimal_defrost_time.py} & 读取模型与 RB、计算、保�
 \item \textbf{正式模型实验：}\texttt{output/90\_复现材料/01\_视觉模型训练/}。
 \item \textbf{临时验证：}\path{temp/test/}。
 \item \textbf{开发期模型比较表：}\texttt{output/02\_模型与消融/网络模型比较\_三种子/典型模型性能比较.csv}。
-\item \textbf{冻结权重：}保留第\ref{sec:files}节的固定相对位置。
+\item \textbf{冻结权重：}部署权重保留第\ref{sec:files}节的位置；案例留出权重与训练设置按首页命令的目录交付。
 \end{itemize}
 
 \section{结论}
-本原型用循环有效 COP 将除霜电耗与有效供热统一到同一评价尺度，并以视觉和运行条件预测近优停止时机。四阶段之间通过明确的数据文件衔接，使数据处理、电耗预测、候选搜索和冻结模型评价可以分别验收。默认演示已复现模型触发、RB 比较及近优命中；进一步使用时，可沿相同入口扩展到完整后期测试集或新增实验，保持测量定义、标签来源和实验划分一致。
+本原型用循环有效 COP 将除霜电耗与有效供热统一到同一评价尺度，并以视觉和运行条件预测近优停止时机。四阶段通过数据文件衔接，可分别验收；循环 000043 的留出回放进一步展示了运行记录、候选 COP 与模型决策的对应关系。扩展到后期测试或新增实验时，沿用相同入口，并保持测量定义、标签来源和实验划分一致。
 
 \begin{thebibliography}{9}
 \bibitem{slides} 倪爽爽. 基于视觉的热泵除霜时机优化. 项目汇报材料：\textit{美的-1021-ShuangshuangNi.pdf}，29 页，封面日期 2026-10-10.

@@ -23,4 +23,4 @@ mkdir -p temp/test/technical_document
 latexmk -xelatex -outdir=temp/test/technical_document docs/technical_report.tex
 ```
 
-PDF 位于 `temp/test/technical_document/technical_report.pdf`。编译不读取实验数据。
+PDF 位于 `temp/test/technical_document/technical_report.pdf`。编译需要 [figures](figures/README.md) 中的三张案例图，不执行数据处理或模型计算；图片随本地报告交付，不上传 GitHub。
