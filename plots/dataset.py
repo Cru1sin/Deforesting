@@ -151,7 +151,6 @@ def render_effective_cop_assets(
                 curve,
                 loader,
                 dataset_dir / targets[name],
-                near_set_rule="connected",
                 frost_frames=frost.get(name, frames.iloc[:0]),
             )
             for name, curve in decisions.loc[decisions.cycle_name.isin(targets)].groupby(

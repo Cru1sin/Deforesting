@@ -66,6 +66,7 @@ def summarize_decisions(decisions):
                 "COP_eff_selected": best,
                 "COP_eff_RB": rb_cop,
                 "COP_relative_change_pct": 100 * (best / rb_cop - 1) if rb_cop > 0 else np.nan,
+                "near_optimal_interval_rule": first.get("near_optimal_interval_rule"),
                 "time_difference_minutes": (optimum_time - rb_time).total_seconds() / 60,
                 **{col: first[col] for col in curve if col.startswith("cycle_cop_basin_")},
             }

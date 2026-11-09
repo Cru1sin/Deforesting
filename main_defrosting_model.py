@@ -2,12 +2,12 @@
 
 输入：Dataset 已发布的候选 COP、监督标签、7 项运行特征和 384 维冻结 DINO 特征；无需原图。
 主流程：循环筛选 → 按实验划分 → 特征输入和拼接 → 时序模型 → 除霜概率预测。
-train：训练 LSTM（宽度 25、FiLM、固定 60 轮），输出权重和后期实验评价。
+train：训练 LSTM（宽度 25、FiLM、固定 60 轮），输出权重和独立测试集评价。
 evaluate：读取指定冻结权重，输出逐循环触发时刻、COP、RB 对比及近优命中。
 直接运行默认执行冻结演示；Dataset、权重、实验与本次输出目录均有预设。
 两种命令均只写 --output；训练不重新计算电耗模型、候选 COP 或 RB 规则。
-当前冻结配方沿用已发布标签：首末近优点之间构造 CDF 目标，循环等权训练；
-预测累计停止概率首次达到 0.5 时触发。此训练目标不等同于 COP 的峰值连续区间。
+预设训练使用已有标签：连续近优区间内构造线性增加的 CDF 目标，循环等权训练；
+预测累计停止概率首次达到 0.5 时触发。
 """
 
 import argparse
@@ -30,8 +30,8 @@ def get_args(argv=None):
     tasks = parser.add_subparsers(dest="task", required=True)
     train = tasks.add_parser(
         "train",
-        help="训练固定配方并回放后期实验",
-        description="读取已发布输入，固定轮数训练并回放后期实验。默认正面 LSTM25 + FiLM，60 轮。输出训练记录、权重与测试指标。",
+        help="训练模型并评价独立测试集",
+        description="读取已有输入，固定轮数训练并评价独立测试集。默认正面 LSTM25 + FiLM，60 轮。输出训练记录、权重与测试指标。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     evaluate = tasks.add_parser(
@@ -76,7 +76,7 @@ def get_args(argv=None):
     network.add_argument(
         "--standard-through",
         default="exp_20260910",
-        help="Last development experiment; all later experiments are test only",
+        help="数据集的最后一个实验；之后的实验仅用于独立测试",
     )
     evaluate.add_argument(
         "--checkpoint",

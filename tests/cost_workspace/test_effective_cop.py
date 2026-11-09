@@ -208,7 +208,7 @@ def test_first_cycle_can_use_observed_running_without_recovery(
     assert record["boundaries"]["stable_heating_start"] is None
 
 
-def test_action_grid_constrains_optimum_without_changing_support_or_basin():
+def test_action_grid_constrains_optimum_and_interval_without_changing_support():
     from defrost_decision.performance_objectives import add_single_objective_optima
 
     rows = pd.DataFrame(
@@ -224,6 +224,32 @@ def test_action_grid_constrains_optimum_without_changing_support_or_basin():
     assert result.cycle_cop_t_star.eq(rows.candidate_defrost_time.iloc[3]).all()
     assert result.cycle_cop_eligible.all()
     assert result.cycle_cop_basin_1pct_start.eq(rows.candidate_defrost_time.iloc[0]).all()
+
+
+def test_near_optimal_interval_spans_dips_and_keeps_objective_support_separate():
+    from defrost_decision.performance_objectives import add_single_objective_optima
+
+    times = pd.date_range("2026-01-01", periods=7, freq="30s")
+    rows = pd.DataFrame(
+        {
+            "candidate_defrost_time": times,
+            "cycle_cop": [2.5, 1.99, 2.0, 1.97, float("nan"), 1.995, 2.4],
+            "cycle_cop_eligible": [True, True, True, True, False, True, False],
+            "other": [12.0, 9.0, 9.0, 10.0, 9.99, 9.0, 9.0],
+            "other_eligible": True,
+        }
+    )
+    result = add_single_objective_optima(
+        rows, names=("cycle_cop", "other"), selection_mask=pd.Series([False] + [True] * 6)
+    )
+    assert result.cycle_cop_t_star.eq(times[2]).all()
+    assert result.cycle_cop_basin_1pct_start.eq(times[1]).all()
+    assert result.cycle_cop_basin_1pct_end.eq(times[5]).all()
+    assert result.cycle_cop_basin_1pct_width_minutes.eq(2).all()
+    assert result.other_t_star.eq(times[3]).all()
+    assert result.other_basin_1pct_start.eq(times[3]).all()
+    assert result.other_basin_1pct_end.eq(times[4]).all()
+    pd.testing.assert_frame_equal(result[rows.columns], rows)
 
 
 def test_current_prefix_needs_only_three_input_channels_and_heat_electricity(monkeypatch):

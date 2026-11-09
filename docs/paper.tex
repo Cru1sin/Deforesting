@@ -1,0 +1,653 @@
+% !TeX program = xelatex
+\documentclass[UTF8,11pt,a4paper,fontset=fandol]{ctexart}
+\usepackage[margin=24mm]{geometry}
+\usepackage{amsmath,amssymb,booktabs,tabularx,longtable,array}
+\usepackage{xcolor,xurl,enumitem,float,needspace,graphicx}
+\usepackage[section]{placeins}
+\usepackage{multirow}
+\usepackage{hyperref}
+\graphicspath{{docs/figures/}{figures/}}
+\setlist{beginpenalty=10000,midpenalty=1000}
+\setlist[itemize]{leftmargin=2em,itemsep=3pt,topsep=5pt}
+\setlist[enumerate]{leftmargin=2em,itemsep=4pt,topsep=5pt}
+\clubpenalty=10000
+\widowpenalty=10000
+\raggedbottom
+\hypersetup{colorlinks=true,linkcolor=blue!45!black,urlcolor=blue!45!black,citecolor=blue!45!black}
+\setlength{\emergencystretch}{2em}
+\setlength{\parskip}{0.25em}
+\renewcommand{\arraystretch}{1.25}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\title{基于视觉的热泵除霜时机优化}
+\author{}
+\date{}
+\begin{document}
+\maketitle
+\begin{abstract}
+本文研究如何利用霜层图像与运行状态，学习以有效供热 COP 为依据的热泵除霜触发策略。通过实验实机供热、能耗数据和预测除霜能耗计算不同时刻的有效供热 COP，确定连续近优区间，并据此训练基于DINOv2的融合LSTM 与 FiLM 的视觉决策模型。在 29 个实验、101 个循环的跨实验评价中，模型相对规则除霜策略（RB）的平均 COP 提高 1.19\%，理想改善空间捕获率为 $82.17\pm0.51$\%；86 个循环获得正收益。结果表明，以有效供热 COP 为目标融合视觉与运行条件，能够获得相对 RB 的能效收益，并兼顾较高的平均收益与较小的性能波动。
+\end{abstract}
+\noindent\textbf{关键词：}空气源热泵；除霜时机；有效供热 COP；视觉决策；LSTM
+
+\section{引言}
+\label{sec:overview}
+热泵结霜会改变供热效率，而除霜本身消耗电能。因此，除霜时机的选择既要考虑当前霜层状态，也要考虑继续制热能否提高有效供热与总能耗之比。较早除霜时，单次除霜能耗由较少的供热量分摊；持续制热虽然可以摊薄这部分能耗，但结霜和运行调节也可能降低后续效率。
+
+已有研究基于供热能量损失确定除霜启动时刻\cite{wang2020}，也利用深度图像识别实现按需除霜控制\cite{chen2022}。图像能够反映霜层外观，但外观变化并不直接给出循环能效；相同霜层状态下，运行频率、水温和已经持续的制热时间也可能不同。由此需要将视觉状态与运行条件联系到同一个能效目标。
+
+本文研究能否利用霜层图像与当前运行状态，学习以有效供热 COP 为依据的除霜触发策略，并在跨实验评价中优于既有规则策略。首先定义供热与能耗的计量边界，通过预测除霜能耗计算不同时刻的有效供热 COP；随后确定连续近优区间，训练模型根据视觉与运行序列输出触发概率；最后与规则除霜策略比较，检验能效收益、模型稳定性及运行行为。COP 是优化与评价目标，连续近优区间提供训练监督，模型直接输出停止概率。
+
+\section{方法}
+\label{sec:methodology}
+\subsection{问题定义与有效供热 COP}
+\label{sec:problem}
+研究目标是在结霜过程中选择除霜时刻，使有效供热与总能耗之比提高。为比较不同时刻，先明确实验系统、循环边界及各部分供热和能耗的计量方式。
+
+实验在隔热环境舱内进行：空气源热泵供热，风机盘管模拟用户侧散热，RGB 相机记录蒸发器进风面的霜层，机组传感器采集系统同步记录压缩机频率、温度、功率和运行状态。图\ref{fig:setup}给出平台组成；机组传感器数据用于计算能效，图像用于建立可观测霜层与性能之间的联系。
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.46\textheight,keepaspectratio]{experiment_setup.png}
+\caption{实验平台与测量系统。环境舱提供结霜环境，水侧循环与风机盘管构成供热负载；相机和运行通道分别记录外观变化与热泵状态，为同一循环的图像、供热和能耗提供对应证据。}
+\label{fig:setup}
+\end{figure}
+
+一个循环依次包括\textbf{恢复、稳定制热、除霜准备、除霜}。各阶段的边界决定供热和能耗从哪里累计。
+\begin{table}[H]
+\centering\caption{循环边界与符号}
+\begin{tabularx}{\textwidth}{p{20mm}Y}
+\toprule
+符号 & 含义 \\
+\midrule
+$t_0$ & 当前循环的制热起点 \\
+$t_r$ & 恢复结束，即稳定制热起点 \\
+$t_p$ & 实际除霜准备起点 \\
+$t_d$、$t_e$ & 正式除霜开始、结束 \\
+$t$ & 待比较的除霜候选时刻；取值满足 $t\leq t_p$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+运行通道统一到 1 s 时间网格，连续量在内部缺口线性插值，供热功率等通道采用过去 60 s 的时间加权均值。循环边界先由控制状态识别，再用于限定积分与平滑范围；具体判据及处理公式见附录\ref{sec:preprocessing}。
+
+有效供热从稳定制热起点 $t_r$ 累计，实测能耗从循环起点 $t_0$ 累计，预测除霜能耗记为 $\widehat E_{\mathrm{prep+D}}(t)$，包含准备与正式除霜两阶段。令 $\dot Q_{\mathrm{processed}}$ 为平滑后的供热功率，$P_{\mathrm{total}}$ 为机组总电功率，两者单位均为 kW，则
+\begin{align}
+Q_{\mathrm{use}}(t)&=\frac{1}{3600}\int_{t_r}^{t}\dot Q_{\mathrm{processed}}(\tau)\,\mathrm d\tau,\\
+E_{\mathrm{meas}}(t)&=\frac{1}{3600}\int_{t_0}^{t}P_{\mathrm{total}}(\tau)\,\mathrm d\tau,\\
+C(t)=COP_{\mathrm{eff}}(t)&=\frac{Q_{\mathrm{use}}(t)}{E_{\mathrm{meas}}(t)+\widehat E_{\mathrm{prep+D}}(t)}.
+\label{eq:cop}
+\end{align}
+\begin{table}[H]
+\centering\caption{COP 的计量范围}
+\begin{tabularx}{\textwidth}{p{31mm}Y}
+\toprule
+项目 & 当前定义 \\
+\midrule
+有效供热 & 稳定制热阶段的已平滑供热 \\
+实测能耗 & 当前恢复阶段＋制热阶段 \\
+预测能耗 & 候选除霜时刻对应的准备＋除霜能耗 \\
+零供热约定 & 恢复阶段的供热量一部分用于抵消准备除霜及正式除霜阶段的吸热量, 剩下的部分认为是废热, 因此净热量视作0 \\
+单位 & 分子、分母均为 kWh；COP 无量纲 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+随着制热持续，累计供热可以分摊单次除霜能耗；当供热的相对增幅低于总能耗的相对增幅时，有效供热 COP 下降。因此，最优时机取决于继续制热的收益与相应除霜能耗的共同变化。式\eqref{eq:cop}中的供热和已发生能耗来自实测，尚未发生的除霜能耗由模型预测。
+
+\subsection{除霜能耗预测与连续近优区间}
+\label{sec:cop}
+图\ref{fig:cop-workflow}给出有效供热 COP 的构建流程。比较不同除霜时刻时，已累计的供热与能耗可以直接读取，而此时开始除霜所需的能耗需要预测。图中平滑公式对应完整 60 s 窗口，边界处不足 60 s 时按已有时长归一化。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.65\textheight,keepaspectratio]{cop_workflow.png}
+\caption{由累积供热、实测能耗与预测除霜能耗构建有效供热 COP 流程}
+\label{fig:cop-workflow}
+\end{figure}
+
+\subsubsection{除霜能耗预测}
+\label{sec:ridge}
+Ridge 以除霜准备前的运行状态预测准备与正式除霜的总能耗，单位为 kWh。模型以准备起点之前的运行状态为输入，具体采用以下三项特征：
+\begin{table}[H]
+\centering\caption{Ridge 的三项输入}
+\begin{tabularx}{\textwidth}{p{30mm}p{16mm}Y}
+\toprule
+输入 & 单位 & 取值方式 \\
+\midrule
+压缩机实际频率 & Hz & 动作前最近有效观测，距动作不超过 30 s \\
+环境温度 & $^\circ$C & 前 60 s 的中位数 \\
+盘管温度 & $^\circ$C & 最近已平滑值，距动作不超过 30 s；不重复平滑 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+三项输入在前 60 s 内\textbf{各需至少 48 个有效秒}。
+
+设 $P_{\mathrm{total}}$ 为机组总电功率，单位 kW。能耗监督量为
+\begin{equation}
+E_{\mathrm{prep+D}}=\frac{1}{3600}\left[
+\int_{t_p}^{t_d}P_{\mathrm{total}}(\tau)\,\mathrm d\tau+
+\int_{t_d}^{t_e}P_{\mathrm{total}}(\tau)\,\mathrm d\tau\right],
+\label{eq:event}
+\end{equation}
+积分采用预处理后的测量数据，相邻阶段采用左闭右开边界，结果单位为 kWh。只有准备、除霜两阶段的积分均有效，且三项输入满足上述覆盖要求时，事件才进入拟合；这一准入过程独立于视觉循环筛选。
+
+三项输入用训练集的均值和标准差标准化为 $\boldsymbol z\in\mathbb R^3$，模型为
+\begin{equation}
+\widehat E_{\mathrm{prep+D}}(t)=\beta_0+\boldsymbol\beta^\top\boldsymbol z(t).
+\label{eq:ridge}
+\end{equation}
+为避免事件较多的实验主导拟合，令训练事件数为 $n$、实验数为 $G$、事件 $j$ 所属实验的事件数为 $n_{g(j)}$，设置权重 $w_j=n/(G n_{g(j)})$。Ridge 求解
+\begin{equation}
+\min_{\beta_0,\boldsymbol\beta}\sum_{j=1}^{n}w_j
+\bigl(E_j-\beta_0-\boldsymbol\beta^\top\boldsymbol z_j\bigr)^2
++\alpha\lVert\boldsymbol\beta\rVert_2^2.
+\end{equation}
+这样，每个实验的总权重相同，标准化也使用相同实验权重；截距不受正则项惩罚。
+
+\subsubsection{最优时刻与连续近优区间}
+将预测除霜能耗代入式\eqref{eq:cop}后，在有效时间范围内逐点计算 COP。搜索范围从 $\max(t_r+1\ \mathrm{s},t_0+5\ \mathrm{min})$ 到实际准备起点，同时纳入准备起点和范围内的 RB 时刻。
+
+\textbf{参与比较的时刻须满足：}
+\begin{itemize}
+\item 累计测量有效，状态特征覆盖充分，预测能耗可用。
+\item 总能耗大于零，累计有效供热大于 0.01 kWh，预测除霜能耗大于零。
+\end{itemize}
+超出 Ridge 训练域的预测作为外推结果单独识别，仍纳入满足上述条件的候选范围。
+
+设可比较时刻的集合为 $\mathcal T$，最优时刻与参考 COP 为
+\begin{equation}
+t^*=\arg\max_{t\in\mathcal T}C(t),\qquad C^*=C(t^*).
+\end{equation}
+最优时刻并列时取最早时刻。进一步将覆盖所有满足 $C(t)\geq0.99C^*$ 的有效可选时刻的最小时间区间定义为\textbf{连续近优区间}：
+\begin{equation}
+\mathcal I=\left[\min_{t\in\mathcal T,\,C(t)\geq0.99C^*}t,\;
+\max_{t\in\mathcal T,\,C(t)\geq0.99C^*}t\right].
+\end{equation}
+该区间包含 COP 峰值，内部允许出现低于近优阈值的时段，不因局部下降而拆分。区间用于描述除霜时间范围；具体触发时刻的近优命中仍按其 COP 是否达到 $0.99C^*$ 判断，无效候选不参与选点与命中评价。
+
+连续近优区间将近优时刻所覆盖的时间范围用于监督，使训练目标从单一峰值时刻扩展为停止时间分布。模型在整个有效序列上学习累计停止概率，具体目标见第\ref{sec:supervision}节。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.55\textheight,keepaspectratio]{cop_example.png}
+\caption{典型有效供热 COP 曲线及决策参照。沿时间比较 RB、峰值和连续近优区间，可以观察触发时刻与高效运行时段的关系。}
+\label{fig:cop-example}
+\end{figure}
+
+\subsection{视觉引导的除霜决策}
+\label{sec:model}
+图\ref{fig:model-flow}展示模型如何将当前可用的视觉与运行信息转换为触发概率。连续近优区间由有效供热 COP 确定，用于训练监督；预测时，网络沿时间读取输入并递推停止概率。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.65\textheight,keepaspectratio]{model_flow.png}
+\caption{视觉决策模型的总体流程。视觉与运行特征经 LSTM 和 FiLM 生成条件停止概率，再累计得到触发概率；训练采用近优时间范围构建的 CDF 目标与循环等权损失。}
+\label{fig:model-flow}
+\end{figure}
+
+\subsubsection{视觉与运行输入}
+\begin{itemize}
+\item \textbf{视觉输入：}冻结 DINOv2\cite{dinov2} 提取的 384 维特征 $\boldsymbol v_k$，训练决策模型时不更新 DINOv2。
+\item \textbf{图像预处理：}图像缩放、中心裁剪为 $224\times224$，按 ImageNet 均值与标准差归一化。
+\end{itemize}
+
+在视觉特征之外，模型同时读取表\ref{tab:inputs}中的七项运行特征，组成 $\boldsymbol c_k\in\mathbb R^7$。其中，实际频率余量以 100 Hz 为参照，短时和长时调频采用设定频率差。
+\begin{table}[H]
+\centering\caption{七项运行特征}\label{tab:inputs}
+\begin{tabularx}{\textwidth}{p{31mm}Y}
+\toprule
+特征 & 定义 \\
+\midrule
+实际频率余量 & $m_k=\max(100-f_{\mathrm{actual},k},0)/100$ \\
+短时调频 & $f_{\mathrm{set}}(t_k)-f_{\mathrm{set}}(t_k-60\mathrm{s})$ \\
+长时调频 & $f_{\mathrm{set}}(t_k)-f_{\mathrm{set}}(t_k-300\mathrm{s})$ \\
+设定温度 & 当前设定水温，$^\circ$C \\
+实际出水温度 & 当前出水温度，$^\circ$C \\
+循环时长 & $(t_k-t_0)/60$，min \\
+余量变化 & $\max_{j\leq k}m_j-m_k$，在有效输入上计算 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+两类特征标准化后，按\textbf{7 维运行特征＋384 维视觉特征}拼接为 391 维输入。标准化参数由训练数据确定，并在评价时保持不变。
+
+\subsubsection{LSTM 与 FiLM 条件停止概率}
+上述输入按 30 s 间隔组成序列，网络依次完成以下三个步骤：
+\begin{enumerate}
+\item \textbf{LSTM 编码历史：}采用 LSTM\cite{lstm} 处理视觉与运行序列，隐藏宽度为 25。
+\item \textbf{FiLM 调节特征：}通过 FiLM\cite{film}，由当前运行条件生成缩放和偏移，调节隐藏特征。
+\item \textbf{输出停止概率：}线性层与 Sigmoid 给出当前动作的条件停止概率。
+\end{enumerate}
+单层、单向 LSTM 的计算如下。$\bar{\boldsymbol c}_k$、$\bar{\boldsymbol v}_k$ 为标准化输入，$\boldsymbol x_k=[\bar{\boldsymbol c}_k;\bar{\boldsymbol v}_k]\in\mathbb R^{391}$。
+\begin{align}
+(\boldsymbol h_k,\boldsymbol s_k)&=\operatorname{LSTM}(\boldsymbol x_k,\boldsymbol h_{k-1},\boldsymbol s_{k-1}),\\
+[\boldsymbol\gamma_k;\boldsymbol\beta_k]&=W_F\bar{\boldsymbol c}_k+\boldsymbol b_F,\\
+\tilde{\boldsymbol h}_k&=(1+\boldsymbol\gamma_k)\odot\boldsymbol h_k+\boldsymbol\beta_k,\\
+p_k&=\sigma(\boldsymbol w^\top\tilde{\boldsymbol h}_k+b).
+\end{align}
+式中 $\boldsymbol h_k$、$\boldsymbol s_k$ 是隐藏状态和细胞状态，$\boldsymbol\gamma_k$、$\boldsymbol\beta_k$ 是缩放和偏移，均为 25 维；$W_F\in\mathbb R^{50\times7}$。$\odot$ 表示逐元素相乘，$\sigma$ 为 Sigmoid。图\ref{fig:lstm-film}中的 $D_v$ 表示训练时的视觉 Dropout，评价时不改变输入。
+
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.65\textheight,keepaspectratio]{lstm_film.png}
+\caption{LSTM 与 FiLM 的计算关系。（A）单层单向 LSTM 编码输入历史；（B）同一时刻的运行条件生成缩放与偏移，调节 LSTM 隐藏特征。}
+\label{fig:lstm-film}
+\end{figure}
+
+
+\subsubsection{累计停止概率与训练监督}
+\label{sec:supervision}
+$p_k$ 表示此前尚未停止时、在当前有效动作停止的条件概率。将各动作的条件概率累积为 $F_k$ 后，以其首次达到阈值的时刻触发除霜：
+\begin{equation}
+F_k=1-\prod_{j=1}^{k}(1-p_j),\qquad
+\hat t=\min\{t_k:F_k\geq0.5\}.
+\label{eq:trigger}
+\end{equation}
+\begin{itemize}
+\item 无效输入不产生新的停止概率。
+\item 全序列未达到触发阈值时，评价以实际准备时刻作为替代决策，并单独统计此类循环。
+\end{itemize}
+
+为了训练累计停止概率 $F_k$，在视觉动作网格上依据各循环的近优标签确定连续近优区间，记为
+\begin{equation}
+\mathcal I_i=[t_{i,L},t_{i,U}].
+\end{equation}
+其中 $t_{i,L}$、$t_{i,U}$ 为区间边界。以区间内的均匀时间分布构造监督目标，其 CDF 在区间开始前为 0，在区间内线性增加，到区间结束时达到 1：
+\begin{equation}
+Y_i(t)=\begin{cases}
+0,&t<t_{i,L},\\
+\dfrac{t-t_{i,L}}{t_{i,U}-t_{i,L}},&t_{i,L}\leq t\leq t_{i,U},\\
+1,&t>t_{i,U}.
+\end{cases}
+\label{eq:target}
+\end{equation}
+训练时用二元交叉熵比较预测 $F_{ik}$ 与目标 $Y_{ik}$，并使各循环等权。设训练循环数为 $N$，循环 $i$ 的有效训练动作数为 $K_i$，损失为
+\begin{equation}
+\mathcal L=-\frac1N\sum_{i=1}^N\frac1{K_i}\sum_{k=1}^{K_i}
+\bigl[Y_{ik}\log F_{ik}+(1-Y_{ik})\log(1-F_{ik})\bigr].
+\end{equation}
+先对循环内动作取平均，再对循环取平均，避免长循环因动作更多而获得更大权重。模型拟合该 CDF，并按式\eqref{eq:trigger}确定触发时刻。
+
+\section{实验设置}
+\label{sec:experiments}
+\subsection{数据集与循环筛选}
+实验数据分别用于除霜能耗预测和视觉决策。能耗样本按第\ref{sec:ridge}节的输入覆盖与阶段积分条件纳入；视觉循环先依据完整 COP 曲线及循环边界筛选，再检查图像、特征覆盖和插值比例，具体条件如下。所有工况采用同一筛选规则。
+
+\begin{table}[H]
+\centering\caption{视觉循环准入条件}
+\begin{tabularx}{\textwidth}{p{44mm}Y}
+\toprule
+检查项 & 要求 \\
+\midrule
+循环结束时的 COP & 低于循环峰值的 99\%；取实际准备起点，无准备起点时取记录终点 \\
+RGB 覆盖率 & 不低于 70\% \\
+DINO 特征覆盖率 & 不低于 70\% \\
+整循环插值比例 & 不高于 30\% \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+图\ref{fig:frost-data}给出筛选过程：359 个循环经循环结束时的 COP 条件筛选后保留 124 个，图像与特征覆盖检查后保留 103 个，再按插值比例筛选，最终得到 29 个实验、101 个循环。其中，50、55 和 60\,$^\circ$C 三种出水设定温度分别对应 23、48 和 30 个循环。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{frost_data_overview.pdf}
+\caption{循环筛选过程与工况组成。（a）各筛选阶段保留的循环数；（b）三种出水设定温度下的循环数。}
+\label{fig:frost-data}
+\end{figure}
+
+各类样本规模见表\ref{tab:split}。独立测试集包含改变风机盘管档位后的实验，用于补充考察室内侧条件变化下的表现；主要结论以数据集上的跨实验评价为依据。运行测量统一为 1 s 时间网格，视觉特征按 30 s 间隔输入模型。
+
+\begin{table}[H]
+\centering\caption{实验数据概况}\label{tab:split}
+\begin{tabularx}{\textwidth}{p{30mm}rp{20mm}Y}
+\toprule
+数据用途 & 实验数 & 样本数 & 说明 \\
+\midrule
+能耗模型数据集 & 47 & 287 事件 & 用于 Ridge 拟合与跨实验留出验证 \\
+视觉模型数据集 & 29 & 101 循环 & 截至 2026-09-10 的实验，用于训练与跨实验评价 \\
+视觉模型测试集 & 6 & 12 循环 & 独立实验，用于室内侧条件变化下的补充测试 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+图\ref{fig:cop-curves}展示筛选后各循环的 COP 曲线。各循环的峰值位置与近优范围不同，反映了运行过程和能效变化的差异。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.81\textheight,keepaspectratio]{cop_curves.png}
+\caption{29 个实验、101 个循环的候选 COP 曲线。横轴按各循环的持续时间归一化，颜色表示运行频率，范围约为 51--102 Hz。}
+\label{fig:cop-curves}
+\end{figure}
+
+\subsection{实验划分与模型训练}
+\subsubsection{Ridge 留一验证}
+Ridge 采用按实验留一交叉验证，评价对未参与拟合实验的能耗预测能力。同一实验的全部事件作为一组，具体过程如下：
+\begin{enumerate}
+\item \textbf{留出评价实验。}每次留出一个实验，其余实验用于模型训练与参数选择。
+\item \textbf{选择正则强度。}在其余实验内部再次按实验留一验证，比较 $\alpha\in\{0.1,1,10,100\}$，选择验证实验平均均方误差最低的值；每次拟合的标准化参数均由相应训练数据计算。
+\item \textbf{预测并汇总。}按选定的正则强度拟合模型，预测外层留出实验的除霜能耗；遍历全部实验后，汇总留出预测误差。
+\end{enumerate}
+
+已有实验的 COP 计算使用排除该实验后拟合的 Ridge 模型。完成评价后，在全部训练实验上选择正则强度并重新拟合，固定最终参数用于后续实验的除霜能耗预测。
+
+\subsubsection{视觉模型划分与训练设置}
+视觉决策采用 LSTM25＋FiLM 模型，以实验为单位划分数据。数据集评价采用按实验留一交叉验证：每次将一个实验的全部循环作为评价集，其余实验用于训练；内部验证实验从训练部分划分，用于确定训练轮数。各实验的留出结果汇总后计算评价指标。
+
+独立测试使用在数据集全部准入循环上训练 60 轮的模型，训练设置见表\ref{tab:training}。测试集不参与模型、训练轮数或触发阈值的选择。测试时固定网络权重和标准化参数，每个循环开始时重置 LSTM 状态与累计停止概率，再沿时间读取视觉及运行特征，按式\eqref{eq:trigger}确定触发时刻。
+
+\begin{table}[H]
+\centering\caption{最终模型训练设置}\label{tab:training}
+\begin{tabularx}{\textwidth}{YY}
+\toprule
+设置 & 参数取值 \\
+\midrule
+网络 & 单层 LSTM，隐藏宽度 25，FiLM 开启 \\
+训练轮数 & 60 轮 \\
+优化器 & AdamW；学习率 0.003，权重衰减 0.0001 \\
+批大小 & 每批 8 个循环 \\
+Dropout & 视觉输入与输出各 0.2；循环内共享掩码 \\
+初始条件停止概率 & 0.01，对应输出偏置为 $\log(0.01/0.99)$ \\
+触发 & 累计停止概率首次达到 0.5 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{RB 基准}
+本文以基于运行状态与计时条件的规则除霜策略（RB）作为比较基准，通过历史运行记录回放规则，将首次满足触发条件的时刻记为 $t_{\mathrm{RB}}$。RB 与模型采用相同的供热、能耗计量边界及 Ridge 能耗模型，分别计算对应触发时刻的有效供热 COP，以评价除霜时机调整带来的能效差异。观测结束时仍未触发的循环按右删失处理。完整规则见附录\ref{sec:rb-rules}。
+
+\subsection{评价指标}
+以模型触发时刻对应的有效供热 COP 评价决策性能，并与 RB 及参考最优值比较。循环 $i$ 相对 RB 的改善率为
+\begin{equation}
+g_i=100\frac{C_i^{\mathrm{model}}-C_i^{\mathrm{RB}}}{C_i^{\mathrm{RB}}}\ \%,
+\end{equation}
+近优命中定义为 $C_i^{\mathrm{model}}\geq0.99C_i^*$；缺少有效 COP 的循环不判定为近优命中，其数量单独统计。
+
+总体改善及理想改善空间捕获率，先在模型、RB、参考最优均可评价的配对循环集合 $S$ 上求平均 COP，再计算：
+\begin{align}
+G&=100\frac{\bar C_S^{\mathrm{model}}-\bar C_S^{\mathrm{RB}}}{\bar C_S^{\mathrm{RB}}}\ \%,\\
+H_{\mathrm{RB}}&=100\frac{\bar C_S^{\mathrm{model}}-\bar C_S^{\mathrm{RB}}}{\bar C_S^*-\bar C_S^{\mathrm{RB}}}\ \%.
+\end{align}
+可改善空间为零时，捕获率不定义。近优命中率分别以全部准入循环和可评价循环为分母，并报告配对循环数。
+
+\section{结果}
+\label{sec:results}
+\subsection{除霜能耗预测验证}
+三输入 Ridge 能够根据除霜前状态预测能耗。47 个实验、287 次除霜的留出评价中，平均绝对误差为 3.42 Wh，均方根误差为 4.16 Wh，$R^2=0.877$，平均偏差（预测减实测）为 0.177 Wh，见图\ref{fig:ridge-validation}（a）。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.65\textheight,keepaspectratio]{ridge_validation.png}
+\caption{三输入 Ridge 的留出预测验证。（a）准备及除霜能耗，287 个事件、47 个实验；（b）循环总能耗，277 个完整事件、47 个实验，由除霜能耗加上相应循环的实测恢复及制热能耗得到。}
+\label{fig:ridge-validation}
+\end{figure}
+
+加入实测恢复及制热能耗后，277 个完整循环的总能耗绝对相对误差中位数约为 0.05\%，95 分位约为 0.27\%。图\ref{fig:ridge-validation}（b）的预测总量和实测总量共享这部分实测能耗，因此除霜能耗的预测误差由图（a）单独反映。
+
+\subsection{RB 的改善空间}
+在 101 个循环中，RB 的平均 COP 为 1.9408，参考最优平均值为 1.9689，按平均 COP 计算的理想改善空间为 1.45\%。图\ref{fig:rb-headroom}说明这一空间分布并不均匀：55 个循环的逐循环改善空间不超过 1\%，其余 46 个循环保留了更大的调整余地。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.60\textheight,keepaspectratio]{rb_headroom.png}
+\caption{RB 相对参考最优的改善空间。逐循环空间分为不超过 1\%、1--2\%、2--3\%、大于 3\% 四档，分别有 55、23、12、11 个循环；50、55、60\,$^\circ$C 设定温度下，按平均 COP 计算的空间分别为 1.35\%、1.80\%、0.99\%。}
+\label{fig:rb-headroom}
+\end{figure}
+
+
+\FloatBarrier
+
+\subsection{视觉决策模型性能分析}
+\label{sec:components}
+MLP、GRU 和 LSTM 使用相同的视觉与运行输入、实验划分及内部验证选轮规则。网络及清零记忆对照采用 101 个循环的跨实验评价，宽度与输入组件对照采用 99 个循环的内部两折验证。
+
+MLP、GRU、LSTM 及清零记忆对照均采用三个随机种子（42、1010、2026）重复训练，报告均值与标准差；逐循环分析先对各次训练结果取平均。
+
+图\ref{fig:model-evidence}将决策轨迹、网络比较、组件对照与学习曲线放在同一图中，以下分别讨论。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.68\textheight,keepaspectratio]{model_evidence.png}
+\caption{模型决策与结构验证。（a）相对 RB 的 COP 增量最大与距参考最优差距最大的循环，分别为 000011 和 000012；（b）模型比较与内部验证宽度筛选；（c）组件对照；（d）内部验证损失的中位数与四分位范围。宽度与组件指标来自内部验证。}
+\label{fig:model-evidence}
+\end{figure}
+
+\subsubsection{决策轨迹}
+图\ref{fig:model-evidence}（a）给出两个循环的有效供热 COP 与累计停止概率。循环 000011 中，模型触发时刻较 RB 更接近 COP 峰值，平均 COP 增量为 0.1496；循环 000012 中，模型触发晚于近优范围，平均 COP 增量为 $-0.0443$。两者说明触发概率对应的时刻及其在 COP 曲线上的位置共同决定决策收益。
+
+\subsubsection{网络结构与宽度}
+跨实验评价中，LSTM、GRU 和 MLP 的理想改善空间捕获率分别为 $82.17\pm0.51$\%、$81.89\pm1.35$\% 和 $78.22\pm3.42$\%，见图\ref{fig:model-evidence}（b）。LSTM 与 GRU 的平均收益接近，LSTM 的性能波动较小。隐藏宽度由 25 增加至 32 时，内部验证指标变化较小，因此采用宽度 25。
+
+\subsubsection{组件对照}
+图\ref{fig:model-evidence}（c）中，去除视觉输入、运行条件或 FiLM 后，捕获率均低于相应完整模型，支持两类输入及条件调节的作用。清零 LSTM 记忆后，跨实验评价的捕获率为 $83.08\pm1.03$\%。在输入已包含循环时长、调频历史且保留累计停止概率的条件下，长期递归记忆的额外收益有限，完整模型的性能波动较小。
+
+\subsubsection{训练过程}
+图\ref{fig:model-evidence}（d）给出内部验证损失随训练轮数的变化。GRU 和 LSTM 的损失较快下降并趋于稳定，MLP 在后续轮次出现回升；验证曲线用于选择训练轮数。
+
+\subsubsection{多模型性能比较}
+图\ref{fig:models-all}汇总各模型的已有结果，其中早期模型采用单次训练结果，MLP、GRU 和 LSTM 采用重复训练的平均结果。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth,height=0.55\textheight,keepaspectratio]{model_comparison_history.png}
+\caption{全部循环的多模型性能瀑布图比较。纵轴为理想改善空间捕获率，台阶标示相邻模型的指标差；较高值表示在该评价范围内实现了更多相对 RB 的潜在收益。}
+\label{fig:models-all}
+\end{figure}
+
+\subsection{逐循环运行分析}
+相较于 RB，模型的稳定制热时长平均增加 14.62 min，预测的单次准备及除霜能耗平均增加 4.00 Wh。共有 85 个循环同时出现制热时长增加和预测除霜能耗增加。这表明，延后除霜虽可能增加单次能耗，额外获得的有效供热仍可能提高有效供热 COP。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.78\textheight,keepaspectratio]{operation_results.pdf}
+\caption{101 个循环相对 RB 的能效与运行量变化。（a）COP 改善；（b）稳定制热时长变化；（c）准备及除霜预测能耗变化；（d）制热时长与预测能耗的关系。各点及柱为重复训练的均值，误差线表示最小值至最大值；（a）--（c）按各指标的平均相对变化排序。能耗变化由 Ridge 对两种触发状态的预测值计算。}
+\label{fig:operation-results}
+\end{figure}
+
+图\ref{fig:operation-results}进一步给出这些变化在循环间的分布。89 个循环的稳定制热时长增加，87 个循环的预测除霜能耗增加；稳定制热时长的逐循环相对增幅平均为 31.59\%。逐循环 COP 相对提升的均值为 1.21\%，最大值为 7.81\%。因此，模型收益主要体现在供热与能耗的综合改善，而不要求每次除霜能耗都降低。
+
+\FloatBarrier
+\subsection{机位与独立测试}
+正面机位的理想改善空间捕获率在数据集范围为 85.02\%，在独立测试集为 86.20\%；六机位测试集结果处于 84.71\%--91.21\%，说明多个观测位置均可提供用于决策的图像信息。图\ref{fig:cameras}比较机位视野及其对应性能。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth,height=0.62\textheight,keepaspectratio]{camera_comparison.png}
+\caption{六机位的视野与性能比较。上方为机位位置及拍摄距离，下方为数据集和测试集的理想改善空间捕获率。数据集中极端视角可评价 95 个循环，其余机位为 96 个；测试集各机位均为 12 个循环。}
+\label{fig:cameras}
+\end{figure}
+
+机位比较采用固定初始化，以及各机位共同具备输入的 27 个实验、96 个循环，极端视角有 95 个可评价循环；测试集为相同的 6 个实验、12 个循环。机位同时改变视野、遮挡和距离，因而性能差异反映这些因素的共同影响。
+
+\section{讨论}
+\label{sec:discussion}
+\subsection{从能效目标到触发策略}
+有效供热 COP 将继续制热所获得的供热量与相应能耗放在同一尺度上。连续近优区间将近优时刻所覆盖的时间范围作为监督依据，使模型学习触发过程，而不必精确复现每个循环的峰值时刻。CDF 目标在区间内逐步增加，配合累计停止概率形成随时间推进的除霜决策。
+
+稳定制热时长增加的结果说明，能效改善可以与更充分地利用制热阶段同时发生。在这一过程中，单次除霜能耗可能升高，因此判断时机是否合适，应依据有效供热 COP，而不是仅比较触发早晚或单次能耗。
+
+\subsection{视觉与运行条件的互补作用}
+视觉特征描述霜层外观，运行条件则补充频率、水温及持续时间等信息。FiLM 根据运行条件调节视觉与序列特征，使相似外观能够对应不同的触发状态。附录\ref{sec:frost-appendix}的霜层分析也表明，50\,$^\circ$C 工况的近优等级低于 55 和 60\,$^\circ$C，支持在霜层信息之外保留运行条件。
+
+模型比较中，LSTM25＋FiLM 的平均收益较高且性能波动较小。清零递归记忆后仍保持相近的平均收益，表明在保留当前输入和累计停止概率时，递归记忆的额外收益有限。
+
+\section{结论}
+本文提出融合视觉与运行条件的除霜时机预测方法，以有效供热 COP 构建训练监督。主要结论如下：
+\begin{enumerate}
+\item \textbf{融合决策提高了循环能效并延长稳定制热。}在 29 个实验、101 个循环的跨实验留一评价中，模型相对 RB 的平均 COP 提高 1.19\%；86 个循环获得正收益，15 个循环出现负收益。逐循环相对提升的均值为 1.21\%，最大值为 7.81\%；稳定制热时长的逐循环相对增幅平均为 31.59\%。
+\item \textbf{LSTM25＋FiLM 兼顾收益与稳定性。}相对于 RB 的 1.45\% 理想改善空间，模型实现了其中的 $82.17\pm0.51$\%，并在所比较的 MLP、GRU 和 LSTM 中兼顾较高的平均收益与较小的性能波动。
+\item \textbf{近优霜层等级随工况变化。}补充分析表明，等级 10 和 11 分别覆盖 87.13\% 循环的近优候选时刻；分工况统计时，50\,$^\circ$C 下的覆盖率峰值对应等级 8，55 和 60\,$^\circ$C 下对应等级 11，支持结合视觉状态与运行条件选择除霜时机。
+\end{enumerate}
+
+\begin{thebibliography}{9}
+\small
+\bibitem{wang2020} Wang W, Zhang S, Li Z, et al. Determination of the optimal defrosting initiating time point for an ASHP unit based on the minimum loss coefficient in the nominal output heating energy. Energy, 2020. doi: \url{https://doi.org/10.1016/j.energy.2019.116505}.
+\bibitem{chen2022} Chen S, Chen K, Zhu X, Jin X, Du Z. Deep learning-based image recognition method for on-demand defrosting control to save energy in commercial energy systems. Applied Energy, 2022. doi: \url{https://doi.org/10.1016/j.apenergy.2022.119702}.
+\bibitem{dinov2} Oquab M, Darcet T, Moutakanni T, et al. DINOv2: Learning robust visual features without supervision. arXiv:2304.07193, 2023.
+\bibitem{lstm} Hochreiter S, Schmidhuber J. Long short-term memory. Neural Computation, 1997, 9(8): 1735--1780.
+\bibitem{film} Perez E, Strub F, de Vries H, Dumoulin V, Courville A. FiLM: Visual reasoning with a general conditioning layer. arXiv:1709.07871, 2017.
+\end{thebibliography}
+
+\clearpage
+\appendix
+\numberwithin{figure}{section}
+\numberwithin{table}{section}
+\numberwithin{equation}{section}
+\renewcommand{\thefigure}{\Alph{section}\arabic{figure}}
+\renewcommand{\thetable}{\Alph{section}\arabic{table}}
+\renewcommand{\theequation}{\Alph{section}\arabic{equation}}
+\section{霜层等级识别}
+\label{sec:frost-appendix}
+本附录围绕结霜图像、霜层等级与循环 COP 的关系展开，先建立可比较的视觉状态，再分析不同工况下的近优范围，为视觉与运行条件的融合提供补充依据。
+
+\subsection{方法}
+\subsubsection{总体思路}
+图\ref{fig:frost-workflow}给出从结霜图像到除霜标签的总体思路：将图像表示为连续霜态坐标，把各循环的 COP 近优范围映射到霜态上，再根据跨循环覆盖情况分析统一阈值及其二分类标签。图中流程用于说明这三者的关系；下文采用 16 级霜层划分展开分析。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{frost_workflow.png}
+\caption{结霜图像、近优霜态范围与阈值标签的总体关系。}
+\label{fig:frost-workflow}
+\end{figure}
+
+\subsubsection{特征提取与霜层等级构建}
+图\ref{fig:frost-method}展示霜层等级的构建过程。选取稳定制热至除霜准备前的正面图像，由冻结的 DINOv2 提取 384 维图像块平均特征，经 L2 归一化后，用 PCA 降至 30 维。随后，Harmony 以实验为批次，在局部相似图像之间估计并扣除实验相关的特征偏移，使不同实验的霜层外观能够在共同空间中比较。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{frost_method.png}
+\caption{DINOv2 特征提取、PCA 降维、Harmony 校正与有序霜层等级构建。下方代表图像展示等级变化对应的外观差异。}
+\label{fig:frost-method}
+\end{figure}
+
+在原生 Harmony 校正后的全局空间进行七簇 K-means 聚类，以各循环首帧投票最多的簇为起点，由 Slingshot 最小生成树确定簇的连接次序。再沿视觉坐标细分为 15 个代表位置，并增加一个末端观测位置，构成 16 级的轨迹参照。相邻代表位置的弧长中点作为等级边界。
+
+下文图\ref{fig:frost-coverage}和图\ref{fig:frost-cop}采用该轨迹上的离线序列估计：结合完整循环的图像，在连续观测段内约束霜态坐标的变化速率，以减少相邻帧跳变。速率上限取其他实验相邻图像变化速率的 90\% 分位数，再将估计坐标转换为 1--16 级。该过程只使用图像与时间信息，COP 用于后续能效分析。
+
+\subsubsection{近优覆盖率与归一化 COP}
+沿用正文的 1\% 近优标准，将满足 $C_i(t)\geq0.99C_i^*$ 的候选时刻对应到霜层等级。对于等级 $g$，覆盖率定义为
+\begin{equation}
+R(g)=\frac{1}{N}\sum_{i=1}^{N}\mathbf{1}\!\left\{\exists t:\ g_i(t)=g,\ C_i(t)\geq0.99C_i^*\right\},
+\end{equation}
+其中 $N$ 为所分析工况的循环数。它表示在该等级出现近优候选的循环比例，用于比较统一等级能够覆盖的范围；最大覆盖等级对应图\ref{fig:frost-workflow}中的阈值选择思路。
+
+为进一步比较能效水平，先用各循环的候选最大 COP 对自身曲线归一化，再计算同一等级内的平均值，最后在具有该等级观测的循环之间等权平均。覆盖率回答“多少循环在该等级具有近优时机”，平均归一化 COP 则描述这些观测的能效水平，二者分别统计。
+
+\subsection{识别结果}
+\subsubsection{数据概况}
+霜层分析沿用正文筛选后的 101 个循环，筛选过程与工况组成见图\ref{fig:frost-data}。共 24,433 帧正面图像用于分析，前 30 个主成分保留 93.98\% 的特征方差；各循环的 COP 总览见图\ref{fig:cop-curves}。
+
+\subsubsection{近优霜层范围及覆盖率}
+图\ref{fig:frost-coverage}按工况展示近优霜层范围、覆盖率及代表图像。每列上方比较各循环的近优等级分布，中间统计同一等级的跨循环覆盖情况，下方给出最高覆盖等级附近的图像。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{frost_coverage.png}
+\caption{不同工况下的近优霜层范围与覆盖率。各列依次为 50、55、60\,$^\circ$C 及全部循环；覆盖率分母分别为 23、48、30 和 101。代表图像用于对应等级与霜层外观。}
+\label{fig:frost-coverage}
+\end{figure}
+
+50\,$^\circ$C 工况的覆盖率在等级 8 最高，为 91.3\%（21/23）；55 和 60\,$^\circ$C 工况均在等级 11 最高，分别为 97.9\%（47/48）和 93.3\%（28/30）。合并全部循环后，等级 10、11 的覆盖率均为 87.1\%（88/101）。因此，统一等级可以覆盖较多循环的近优时机，而分工况的覆盖率峰值位置有所不同。
+
+\subsubsection{平均归一化 COP 与霜层等级}
+图\ref{fig:frost-cop}进一步比较各等级的平均归一化 COP。曲线先升高后降低，说明较高能效集中在一定霜层范围内。灰色曲线表示参与该等级统计的循环数，虚线表示 0.99 的近优参考水平。
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{frost_cop.png}
+\caption{不同工况下的平均归一化 COP 与霜层等级。各等级先在循环内平均，再对有观测的循环等权平均；右轴为相应循环数。下方图像对应平均值最高的等级。}
+\label{fig:frost-cop}
+\end{figure}
+
+50\,$^\circ$C 工况的均值在等级 9 最高，为 99.51\%（20/23 个循环有观测）；55 和 60\,$^\circ$C 工况均在等级 11 最高，分别为 99.66\%（47/48）和 99.56\%（29/30）。全部循环的均值在等级 10 最高，为 99.47\%（95/101）。与覆盖率结果共同观察，50\,$^\circ$C 工况的较高能效对应相对较低的霜层等级。
+
+\subsection{讨论}
+霜层等级将不同循环的图像组织到共同的视觉尺度上，使外观变化能够与能效联系起来。近优覆盖率反映统一等级的适用范围，平均归一化 COP 则补充了能效水平，两项结果共同表明：霜层状态与除霜时机相关，但对应的较优范围随工况变化。
+
+各等级的样本覆盖不同，高等级尤其依赖实际达到该状态的循环，因此均值应结合图中的循环数理解。现有等级描述的是全局图像特征，尚无独立的霜厚或霜质量标定；离线序列估计使用完整循环记录。其作用是解释视觉状态与能效的关系，主模型仍结合当时可用的视觉特征和运行条件作出决策。
+
+\subsection{结论}
+图像特征经降维、实验间偏移校正和有序轨迹构建后，可用于描述霜层等级。全部循环中，等级 10、11 分别覆盖约 87.1\% 循环的近优候选时刻；分工况比较表明，50\,$^\circ$C 的近优霜层等级低于 55 和 60\,$^\circ$C。霜层等级提供了有效的状态信息，而运行条件有助于进一步区分适宜的除霜时机。
+
+\clearpage
+\section{循环识别与数据预处理}
+\label{sec:preprocessing}
+\subsection{循环边界识别}
+\textbf{先识别边界，再平滑测量。}识别使用原始时间戳和控制状态，分三步进行：
+\begin{enumerate}
+\item \textbf{识别除霜事件。}除霜开关采用 20 s 去抖；缺失状态仅在两端一致、间隔不超过 5 s 时补齐。停机还需结合运行模式判断，未知状态不作为关闭状态。
+\item \textbf{识别恢复结束。}根据设定频率由持续升频转入正常调节的过程确认，判据见表\ref{tab:recovery}。记录不足时保留缺失边界。
+\item \textbf{识别除霜准备。}在正式除霜前 120 s 内，寻找设定频率首次下降至少 10 Hz 的卸载指令。
+\end{enumerate}
+\begin{table}[H]
+\centering\caption{恢复阶段结束的判定条件}\label{tab:recovery}
+\begin{tabularx}{\textwidth}{p{30mm}Y}
+\toprule
+观察内容 & 判据 \\
+\midrule
+启动状态 & 先观察不高于 42 Hz 的频率 \\
+稳定指令状态 & 每个状态至少有 3 个观测 \\
+升频参考 & 至少 3 个控制间隔；参考速率不低于 1 Hz/min \\
+正常调节 & 当前及后续调频速率降至既有参考的约四分之一，并考虑采样间隔不确定性 \\
+证据连续性 & 确认记录中的缺口超过 30 s 时，不确认边界 \\
+边界位置 & 定位在转变开始；后续记录用于确认 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+上述判据通过控制状态转变定位恢复结束，并用后续记录确认边界。恢复边界确认及插值使用完整记录。
+
+
+\subsection{通道匹配、线性插值与平滑}
+确定循环与阶段边界后，再将不同通道整理为统一时间网格上的测量。具体处理步骤如下：
+\begin{enumerate}
+\item \textbf{通道匹配。}统一设备通道名称、单位和缩放；环境传感器按时间匹配。
+\item \textbf{对齐与补值。}构建 1 s 网格，按通道聚合；连续量在内部缺口线性插值，离散控制量前值保持。
+\item \textbf{平滑。}供热功率、蒸发压力 Pe、盘管温度 T3 采用过去 60 s 时间加权均值。
+\end{enumerate}
+
+对于循环内部两个有效观测 $(t_a,x_a)$ 和 $(t_b,x_b)$，连续通道在两者之间按时间插值：
+\begin{equation}
+\hat x(t)=x_a+\frac{t-t_a}{t_b-t_a}(x_b-x_a),\qquad t_a<t<t_b.
+\end{equation}
+完成补值后，对需要平滑的通道计算时间加权均值：
+\begin{equation}
+\bar x(t)=\frac{1}{t-a(t)}\int_{a(t)}^t\hat x(\tau)\,\mathrm d\tau,
+\qquad a(t)=\max(t-60\ \mathrm{s},t_{\mathrm{stage}}).
+\label{eq:smooth}
+\end{equation}
+其中 $t_{\mathrm{stage}}$ 为当前阶段起点。计算在循环和阶段边界重置窗口，首个观测保留自身值；连续量两端缺失不外推。
+
+数据质量评价区分实测与插值样本，并结合观测覆盖情况判断测量有效性。
+
+\clearpage
+\section{RB 完整触发规则}
+\label{sec:rb-rules}
+RB 的触发条件见表\ref{tab:rb-cases}。$T_4$ 为环境温度，$T_w$ 为出水温度，$T_3$ 为盘管温度，$T_{3o}$ 为控制器给出的盘管温度记录参考；$T_1,T_2$ 分别为控制器的 DefTim1、DefTim2 计时值，单位为分钟。本研究采用 Condition 1 及 Condition 2 中的 Case 1--5、Case 7，未启用 Case 8 超时规则。表中三个 $T_1$ 条件依次对应 $T_w\geq35$、$25\leq T_w<35$ 和 $T_w<25\,{}^\circ$C。
+
+\begin{table}[htbp]
+\centering\footnotesize
+\setlength{\tabcolsep}{3pt}
+\caption{RB 除霜触发规则（温度：$^\circ$C；时间：min）}\label{tab:rb-cases}
+\begin{tabularx}{\textwidth}{p{14mm}p{8mm}p{18mm}p{32mm}p{11mm}Yp{16mm}}
+\toprule
+Condition & Case & 环境温度 & $T_1$ 条件 & $T_2$ & 盘管温度条件 & 持续时间 \\
+\midrule
+1 & & 不限 & $>35$ & $\geq6$ & $T_3\leq-1$，且过去 50--600 s 的最高有效 $T_3$ 比当前值至少高 $2\,{}^\circ$C & 即时触发 \\
+\midrule
+\multirow{7}{*}{2} & 1 & $T_4\geq-2$ & $\geq40$ / $\geq35$ / $\geq30$ & $\geq6$ & $T_3<T_{3o}-3$ & 20 s \\
+ & 2 & $-5\leq T_4<-2$ & $\geq40$ / $\geq38$ / $\geq33$ & $\geq6$ & $T_3<T_{3o}-5$ & 20 s \\
+ & 3 & $-8\leq T_4<-5$ & $\geq80$ / $\geq60$ / $\geq40$ & $\geq6$ & $T_3<T_{3o}-5$ & 20 s \\
+ & 4 & $-10\leq T_4<-8$ & $\geq90$ / $\geq70$ / $\geq50$ & $\geq6$ & $T_3<T_4-5$ & 20 s \\
+ & 5 & $T_4<-10$ & $\geq150$ / $\geq120$ / $\geq90$ & $\geq6$ & $T_3<T_4-5$ & 20 s \\
+ & 7 & 不限 & $\geq30$ & 无要求 & $T_3\leq-10$，且 $T_3\leq0.8T_4-12$ & 均持续 20 s \\
+ & 8 & 不限 & $\geq150$ & 无要求 & 无要求 & 即时触发 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+考虑逐秒采样误差，计时条件允许 1 s 容差。温度持续条件采用以下任一判据：20 s 窗内当前值及全部有效观测均满足条件，且缺测不超过 3 s；或连续 19 个采样点满足条件。两项容差不叠加。
+
+\end{document}

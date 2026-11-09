@@ -338,6 +338,171 @@ def main():
     print(f"Published external-condition figure and source data: {output}", flush=True)
 
 
+def stopping_change_source(metrics, decision_view):
+    """Summarize the saved cycle metrics with the original three-seed definitions."""
+    frequency = decision_view == "frequency"
+    joint = decision_view == "heating_electricity"
+    heating = decision_view == "heating" or joint
+    power = decision_view == "power"
+    electricity = decision_view in ("electricity", "power") or joint
+    if power:
+        metrics = metrics.loc[metrics.power_duration_available.eq(True)].copy()
+    if frequency:
+        metrics = metrics.copy()
+        durations = metrics[["cycle_duration_minutes", "rb_cycle_duration_minutes"]]
+        if not np.isfinite(durations).all().all() or not durations.gt(0).all().all():
+            raise ValueError("Equivalent trigger rates require positive paired intervals")
+        metrics["rate_reduction_per_hour"] = (
+            60 / metrics.rb_cycle_duration_minutes - 60 / metrics.cycle_duration_minutes
+        )
+        metrics["rate_reduction_pct"] = 100 * (
+            1 - metrics.rb_cycle_duration_minutes / metrics.cycle_duration_minutes
+        )
+    if heating:
+        metrics = metrics.copy()
+        durations = metrics[["heating_duration_minutes", "rb_heating_duration_minutes"]]
+        if not np.isfinite(durations).all().all() or not durations.gt(0).all().all():
+            raise ValueError("Stable-heating comparison requires positive paired durations")
+        metrics["stable_heating_increase_minutes"] = (
+            metrics.heating_duration_minutes - metrics.rb_heating_duration_minutes
+        )
+        metrics["stable_heating_increase_pct"] = (
+            100
+            * metrics.stable_heating_increase_minutes
+            / metrics.rb_heating_duration_minutes
+        )
+    metric_names = (
+        ["stable_heating_increase_minutes", "stable_heating_increase_pct"]
+        if heating
+        else ["rate_reduction_per_hour", "rate_reduction_pct"]
+        if frequency
+        else ["delta_cop", "gain_vs_rb_pct"]
+    )
+    figure_name = (
+        "Fig2b_ranked_stable_heating_increase"
+        if heating
+        else "Fig2b_ranked_frequency_reduction"
+        if frequency
+        else "Fig2a_ranked_cycle_gains"
+    )
+    if electricity:
+        metrics = metrics.copy()
+        metrics["defrost_electricity_change_wh"] = (
+            1000 * metrics.defrost_electricity_change_kwh
+        )
+        metric_names = ["defrost_electricity_change_wh", "defrost_electricity_change_pct"]
+        figure_name = "Fig2c_ranked_defrost_electricity_change"
+    if power:
+        metric_names = ["defrost_mean_power_change_w", "defrost_mean_power_change_pct"]
+        figure_name = "Fig2d_ranked_defrost_mean_power_change"
+    if joint:
+        metric_names = [
+            "stable_heating_increase_pct",
+            "defrost_electricity_change_pct",
+            "stable_heating_increase_minutes",
+            "defrost_electricity_change_wh",
+        ]
+        figure_name = "Fig2e_heating_electricity_relationship"
+    # Use the saved per-cycle relative metric; denominators differ across cycles.
+    assert metrics.rb_cop.gt(0).all()
+    assert np.allclose(metrics.delta_cop, metrics.selected_cop - metrics.rb_cop)
+    assert np.allclose(metrics.gain_vs_rb_pct, 100 * metrics.delta_cop / metrics.rb_cop)
+    assert metrics.groupby("cycle_name").rb_cop.nunique().eq(1).all()
+    tables = []
+    for metric in metric_names:
+        values = metrics.pivot(index="cycle_name", columns="seed", values=metric)
+        assert set(values.columns) == {42, 2026, 1010} and values.notna().all().all()
+        table = pd.DataFrame(
+            {
+                f"mean_{metric}": values.mean(axis=1),
+                f"minimum_{metric}": values.min(axis=1),
+                f"maximum_{metric}": values.max(axis=1),
+            }
+        )
+        tables.append(table.join(values.add_prefix(f"{metric}_seed_")))
+    source = pd.concat(tables, axis=1).reset_index()
+    source = source.sort_values([f"mean_{metric_names[1]}", "cycle_name"]).reset_index(
+        drop=True
+    )
+    source["rank"] = np.arange(1, len(source) + 1)
+    return source, metric_names, figure_name
+
+
+def plot_stopping_change(axis, source, metric_names, decision_view):
+    """Draw one comparison on supplied axes for both standalone and combined figures."""
+    color, pale = "#436B85", "#B4CDDA"
+    if decision_view == "heating_electricity":
+        x = source.mean_stable_heating_increase_pct
+        y = source.mean_defrost_electricity_change_pct
+        axis.errorbar(
+            x, y,
+            xerr=np.vstack([x - source.minimum_stable_heating_increase_pct,
+                            source.maximum_stable_heating_increase_pct - x]).clip(min=0),
+            yerr=np.vstack([y - source.minimum_defrost_electricity_change_pct,
+                            source.maximum_defrost_electricity_change_pct - y]).clip(min=0),
+            fmt="o", color=color, markersize=3, markeredgewidth=0.3,
+            markeredgecolor="white", ecolor=pale, elinewidth=0.6,
+        )
+        axis.axhline(0, color="0.55", lw=0.6, ls="--")
+        axis.axvline(0, color="0.55", lw=0.6, ls="--")
+        axis.set(xlabel="Heating duration change (%)",
+                 ylabel="Predicted event electricity\nchange (%)")
+        axis.margins(x=0.08, y=0.12)
+        axes = [axis]
+    else:
+        right = axis.twinx()
+        right.spines["right"].set_visible(True)
+        axis.set_zorder(right.get_zorder() + 1)
+        axis.patch.set_visible(False)
+        labels = {
+            "gains": ("COP change", "COP change (%)"),
+            "heating": ("Heating duration change (min)", "Heating duration change (%)"),
+            "electricity": ("Predicted event electricity\nchange (Wh)",
+                            "Predicted event electricity\nchange (%)"),
+            "frequency": ("Trigger rate reduction (events/h)", "Trigger rate reduction (%)"),
+            "power": ("Predicted mean power change (W)", "Predicted mean power change (%)"),
+        }[decision_view]
+        maxima = [source[f"maximum_{metric}"].max() for metric in metric_names]
+        lower = min(0, *(source[f"minimum_{metric}"].min() / maximum
+                        for metric, maximum in zip(metric_names, maxima, strict=True))) - 0.06
+        # Separate absolute/relative scales are aligned at zero, not converted units.
+        for index, (current, metric, maximum, label) in enumerate(
+            zip([axis, right], metric_names, maxima, labels, strict=True)
+        ):
+            current.set_ylim(lower * maximum, 1.25 * maximum)
+            current.set_ylabel(label, color="black", labelpad=4)
+            current.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4))
+            current.vlines(source["rank"], source[f"minimum_{metric}"],
+                           source[f"maximum_{metric}"], color=color if index == 0 else pale,
+                           alpha=0.65, lw=0.6, zorder=2)
+            if index == 0:
+                current.scatter(source["rank"], source[f"mean_{metric}"], s=9,
+                                color=color, edgecolors="white", linewidths=0.2, zorder=3)
+            else:
+                current.bar(source["rank"], source[f"mean_{metric}"],
+                            width=0.7, color=pale, edgecolor="none", zorder=1)
+        axis.axhline(0, color="0.45", lw=0.6, zorder=1)
+        axis.set(xlim=(0, len(source) + 1),
+                 xticks=[1, 25, 50, 75, len(source)], xlabel="Cycle rank")
+        axis.legend(handles=[
+            Line2D([], [], marker="o", lw=0, color=color, markersize=3,
+                   label="Absolute (left)"),
+            Line2D([], [], marker="s", lw=0, color=pale, markersize=4,
+                   label="Relative (right)"),
+        ], loc="upper left", ncol=2, frameon=False, fontsize=7.5,
+           handletextpad=0.3, columnspacing=0.8, borderaxespad=0.2)
+        axes = [axis, right]
+    for current in axes:
+        current.tick_params(axis="both", colors="black", length=3, width=0.6)
+        current.xaxis.label.set_color("black")
+        current.yaxis.label.set_color("black")
+        current.xaxis.get_offset_text().set_color("black")
+        current.yaxis.get_offset_text().set_color("black")
+        for spine in current.spines.values():
+            spine.set_color("black")
+    return axes
+
+
 def render_stopping_results(output: Path, *, figures=None, decision_view="triptych") -> None:
     """Publication figures from one shared saved evaluation, not new COP formulas."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -419,378 +584,31 @@ def render_stopping_results(output: Path, *, figures=None, decision_view="tripty
         }
     ):
         if decision_view in (
-            "gains",
-            "frequency",
-            "heating",
-            "electricity",
-            "power",
-            "heating_electricity",
+            "gains", "frequency", "heating", "electricity", "power", "heating_electricity",
+            "operations",
         ):
-            from matplotlib.lines import Line2D
-
-            frequency = decision_view == "frequency"
-            joint = decision_view == "heating_electricity"
-            heating = decision_view == "heating" or joint
-            power = decision_view == "power"
-            electricity = decision_view in ("electricity", "power") or joint
-            if power:
-                metrics = metrics.loc[metrics.power_duration_available.eq(True)].copy()
-            if frequency:
-                metrics = metrics.copy()
-                durations = metrics[["cycle_duration_minutes", "rb_cycle_duration_minutes"]]
-                if not np.isfinite(durations).all().all() or not durations.gt(0).all().all():
-                    raise ValueError("Equivalent trigger rates require positive paired intervals")
-                metrics["rate_reduction_per_hour"] = (
-                    60 / metrics.rb_cycle_duration_minutes - 60 / metrics.cycle_duration_minutes
-                )
-                metrics["rate_reduction_pct"] = 100 * (
-                    1 - metrics.rb_cycle_duration_minutes / metrics.cycle_duration_minutes
-                )
-            if heating:
-                metrics = metrics.copy()
-                durations = metrics[["heating_duration_minutes", "rb_heating_duration_minutes"]]
-                if not np.isfinite(durations).all().all() or not durations.gt(0).all().all():
-                    raise ValueError("Stable-heating comparison requires positive paired durations")
-                metrics["stable_heating_increase_minutes"] = (
-                    metrics.heating_duration_minutes - metrics.rb_heating_duration_minutes
-                )
-                metrics["stable_heating_increase_pct"] = (
-                    100
-                    * metrics.stable_heating_increase_minutes
-                    / metrics.rb_heating_duration_minutes
-                )
-            metric_names = (
-                ["stable_heating_increase_minutes", "stable_heating_increase_pct"]
-                if heating
-                else ["rate_reduction_per_hour", "rate_reduction_pct"]
-                if frequency
-                else ["delta_cop", "gain_vs_rb_pct"]
-            )
-            figure_name = (
-                "Fig2b_ranked_stable_heating_increase"
-                if heating
-                else "Fig2b_ranked_frequency_reduction"
-                if frequency
-                else "Fig2a_ranked_cycle_gains"
-            )
-            if electricity:
-                metrics = metrics.copy()
-                metrics["defrost_electricity_change_wh"] = (
-                    1000 * metrics.defrost_electricity_change_kwh
-                )
-                metric_names = ["defrost_electricity_change_wh", "defrost_electricity_change_pct"]
-                figure_name = "Fig2c_ranked_defrost_electricity_change"
-            if power:
-                metric_names = ["defrost_mean_power_change_w", "defrost_mean_power_change_pct"]
-                figure_name = "Fig2d_ranked_defrost_mean_power_change"
-            if joint:
-                metric_names = [
-                    "stable_heating_increase_pct",
-                    "defrost_electricity_change_pct",
-                    "stable_heating_increase_minutes",
-                    "defrost_electricity_change_wh",
-                ]
-                figure_name = "Fig2e_heating_electricity_relationship"
-            # Use the saved per-cycle relative metric; denominators differ across cycles.
-            assert metrics.rb_cop.gt(0).all()
-            assert np.allclose(metrics.delta_cop, metrics.selected_cop - metrics.rb_cop)
-            assert np.allclose(metrics.gain_vs_rb_pct, 100 * metrics.delta_cop / metrics.rb_cop)
-            assert metrics.groupby("cycle_name").rb_cop.nunique().eq(1).all()
-            tables = []
-            for metric in metric_names:
-                values = metrics.pivot(index="cycle_name", columns="seed", values=metric)
-                assert set(values.columns) == {42, 2026, 1010} and values.notna().all().all()
-                table = pd.DataFrame(
-                    {
-                        f"mean_{metric}": values.mean(axis=1),
-                        f"minimum_{metric}": values.min(axis=1),
-                        f"maximum_{metric}": values.max(axis=1),
-                    }
-                )
-                tables.append(table.join(values.add_prefix(f"{metric}_seed_")))
-            source = pd.concat(tables, axis=1).reset_index()
-            source = source.sort_values([f"mean_{metric_names[1]}", "cycle_name"]).reset_index(
-                drop=True
-            )
-            source["rank"] = np.arange(1, len(source) + 1)
-            source.to_csv(output / f"{figure_name}.csv", index=False)
-            if joint:
-                x = source.mean_stable_heating_increase_pct
-                y = source.mean_defrost_electricity_change_pct
-                figure, axis = plt.subplots(figsize=(183 / 25.4, 97 / 25.4))
-                figure.subplots_adjust(left=0.11, right=0.97, bottom=0.17, top=0.74)
-                axis.axhline(0, color="#8E989F", lw=0.7, ls=(0, (3, 3)), zorder=0)
-                axis.axvline(0, color="#8E989F", lw=0.7, ls=(0, (3, 3)), zorder=0)
-                xerr = np.vstack(
-                    [
-                        x - source.minimum_stable_heating_increase_pct,
-                        source.maximum_stable_heating_increase_pct - x,
-                    ]
-                )
-                yerr = np.vstack(
-                    [
-                        y - source.minimum_defrost_electricity_change_pct,
-                        source.maximum_defrost_electricity_change_pct - y,
-                    ]
-                )
-                assert xerr.min() >= -1e-10 and yerr.min() >= -1e-10
-                axis.errorbar(
-                    x,
-                    y,
-                    xerr=xerr.clip(min=0),
-                    yerr=yerr.clip(min=0),
-                    fmt="none",
-                    ecolor="#B4CDDA",
-                    elinewidth=0.6,
-                    zorder=1,
-                )
-                axis.scatter(
-                    x, y, s=18, color=model_color, edgecolors="white", linewidths=0.35, zorder=2
-                )
-                axis.set(
-                    xlabel="Stable-heating duration increase relative to RB (%)",
-                    ylabel="Predicted defrost electricity change relative to RB (%)",
-                )
-                axis.margins(x=0.07, y=0.10)
-                axis.tick_params(length=3, width=0.6)
-                both_increase = int((x.gt(0) & y.gt(0)).sum())
-                figure.text(
-                    0.11,
-                    0.95,
-                    "LSTM + FiLM: stable heating and predicted defrost electricity",
-                    fontsize=9,
-                    fontweight="bold",
-                )
-                figure.text(
-                    0.11,
-                    0.885,
-                    f"{both_increase}/{len(source)} cycles: longer stable heating and higher predicted event electricity",
-                    fontsize=7.5,
-                    color="#606A73",
-                )
-                handles = [
-                    Line2D(
-                        [],
-                        [],
-                        marker="o",
-                        linestyle="none",
-                        color=model_color,
-                        markersize=4,
-                        label="Cycle mean (3 seeds)",
-                    ),
-                    Line2D([], [], color="#B4CDDA", lw=1, label="Min–max across 3 seeds"),
-                ]
-                figure.legend(
-                    handles=handles,
-                    loc="upper left",
-                    bbox_to_anchor=(0.11, 0.835),
-                    ncol=2,
-                    frameon=False,
-                    fontsize=7,
-                    handletextpad=0.6,
-                    columnspacing=2,
-                    borderaxespad=0,
-                )
-                save(figure, figure_name, None, formats=("png",))
-                return
-            figure, left = plt.subplots(figsize=(183 / 25.4, 88 / 25.4))
-            figure.subplots_adjust(left=0.10, right=0.90, bottom=0.17, top=0.77)
-            right = left.twinx()
-            right.spines["right"].set_visible(True)
-            right.spines["top"].set_visible(False)
-            colors = [model_color, "#7DA6BC"]
-            left.set_zorder(right.get_zorder() + 1)
-            left.patch.set_visible(False)
-            maxima = [source[f"maximum_{metric}"].max() for metric in metric_names]
-            # Independent scales share zero; the percentage is never an axis conversion.
-            lower_ratio = (
-                min(
-                    0,
-                    *(
-                        source[f"minimum_{metric}"].min() / maximum
-                        for metric, maximum in zip(metric_names, maxima)
-                    ),
-                )
-                - 0.06
-            )
-            axis_labels = (
-                [
-                    "Stable-heating duration increase (min)",
-                    "Stable-heating duration increase relative to RB (%)",
-                ]
-                if heating
-                else [
-                    "Equivalent trigger rate reduction (events/hour)",
-                    "Relative trigger rate reduction (%)",
-                ]
-                if frequency
-                else ["COP improvement (Model − RB)", "COP improvement relative to RB (%)"]
-            )
-            if electricity:
-                axis_labels = [
-                    "Predicted defrost electricity change (Wh)",
-                    "Predicted defrost electricity change relative to RB (%)",
-                ]
-            if power:
-                axis_labels = [
-                    "Estimated mean defrost power change (W)",
-                    "Estimated mean defrost power change relative to RB (%)",
-                ]
-            for index, (axis, metric, color, maximum, label) in enumerate(
-                zip([left, right], metric_names, colors, maxima, axis_labels)
-            ):
-                axis.set_ylim(lower_ratio * maximum, 1.10 * maximum)
-                axis.set_ylabel(label, color=color, labelpad=8)
-                axis.tick_params(axis="y", colors=color, length=3, width=0.6)
-                axis.spines["left" if index == 0 else "right"].set_color(color)
-                axis.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5))
-                ranks = source["rank"]
-                axis.vlines(
-                    ranks,
-                    source[f"minimum_{metric}"],
-                    source[f"maximum_{metric}"],
-                    color=color,
-                    alpha=0.50,
-                    lw=0.65,
-                    zorder=2,
-                )
-                if index == 0:
-                    axis.scatter(
-                        ranks,
-                        source[f"mean_{metric}"],
-                        s=12,
-                        facecolors=color,
-                        edgecolors="white",
-                        linewidths=0.25,
-                        zorder=3,
-                    )
-                else:
-                    axis.bar(
-                        ranks,
-                        source[f"mean_{metric}"],
-                        width=0.70,
-                        color="#B4CDDA"
-                        if electricity
-                        else np.where(source[f"mean_{metric}"].ge(0), "#B4CDDA", "#DCB49E"),
-                        edgecolor="none",
-                        zorder=1,
-                    )
-            left.axhline(0, color="#7B838A", lw=0.7, zorder=1)
-            left.set(
-                xlim=(0, len(source) + 1),
-                xticks=[1, 25, 50, 75, len(source)],
-                xlabel="Cycles ranked by mean percentage change in estimated mean defrost power"
-                if power
-                else "Cycles ranked by mean percentage change in predicted defrost electricity"
-                if electricity
-                else "Cycles ranked by mean percentage increase in stable-heating duration"
-                if heating
-                else "Cycles ranked by mean percentage reduction in equivalent trigger rate"
-                if frequency
-                else "Cycles ranked by mean percentage COP improvement",
-            )
-            left.tick_params(axis="x", length=3, width=0.6)
-            means = [source[f"mean_{metric}"].mean() for metric in metric_names]
-            absolute_label = (
-                f"Duration increase (mean {means[0]:+.2f} min)"
-                if heating
-                else ("Absolute reduction" if frequency else "Absolute improvement")
-                + f" (mean {means[0]:+.4f})"
-            )
-            relative_label = (
-                "Relative increase"
-                if heating
-                else "Relative reduction"
-                if frequency
-                else "Relative improvement"
-            ) + f" (mean {means[1]:+.2f}%)"
-            if electricity:
-                absolute_label = f"Absolute change (mean {means[0]:+.2f} Wh)"
-                relative_label = f"Relative change (mean {means[1]:+.2f}%)"
-            if power:
-                absolute_label = f"Absolute change (mean {means[0]:+.1f} W)"
-            handles = [
-                Line2D(
-                    [], [], marker="o", lw=0, color=colors[0], markersize=3.5, label=absolute_label
-                ),
-                Line2D(
-                    [], [], marker="s", lw=0, color="#B4CDDA", markersize=5, label=relative_label
-                ),
-            ]
-            figure.legend(
-                handles=handles,
-                loc="upper left",
-                bbox_to_anchor=(0.10, 0.87),
-                ncol=2,
-                frameon=False,
-                fontsize=7,
-                handletextpad=0.5,
-                columnspacing=1.8,
-                borderaxespad=0,
-            )
-            figure.text(
-                0.10,
-                0.95,
-                "LSTM + FiLM: estimated mean defrost power change"
-                if power
-                else "LSTM + FiLM: predicted defrost electricity change"
-                if electricity
-                else "LSTM + FiLM: stable-heating duration increase"
-                if heating
-                else "LSTM + FiLM: equivalent defrost trigger rate reduction"
-                if frequency
-                else "LSTM + FiLM: cycle-level COP improvement",
-                fontsize=9,
-                fontweight="bold",
-            )
-            mean_values = source[f"mean_{metric_names[0]}"]
-            figure.text(
-                0.10,
-                0.895,
-                f"{mean_values.gt(0).sum()} increased • {mean_values.lt(0).sum()} decreased • {mean_values.eq(0).sum()} unchanged"
-                if electricity
-                else f"{mean_values.gt(0).sum()} longer • {mean_values.lt(0).sum()} shorter"
-                if heating
-                else f"{mean_values.gt(0).sum()} lower • {mean_values.lt(0).sum()} higher"
-                if frequency
-                else f"{mean_values.gt(0).sum()} improved • {mean_values.lt(0).sum()} worsened",
-                fontsize=7,
-                color="#606A73",
-            )
-            left.text(
-                0.025,
-                0.95,
-                "Points / bars: means; vertical lines: min–max across 3 seeds",
-                transform=left.transAxes,
-                fontsize=6.5,
-                color="#606A73",
-                va="top",
-            )
-            if power:
-                figure.text(
-                    0.10,
-                    0.035,
-                    f"Fixed observed preparation-to-defrost-end duration per cycle for both decisions; {len(source)} cycles with valid durations.",
-                    fontsize=6,
-                    color="#606A73",
-                )
-            elif electricity:
-                figure.text(
-                    0.10,
-                    0.035,
-                    "Model − RB; preparation through defrost end. Auxiliary prediction metric; assess alongside COP and heating duration.",
-                    fontsize=6,
-                    color="#606A73",
-                )
-            if frequency:
-                figure.text(
-                    0.10,
-                    0.035,
-                    "Equivalent rate = 60 / cycle-start-to-trigger interval (min); excludes subsequent preparation and defrost.",
-                    fontsize=6,
-                    color="#606A73",
-                )
-            save(figure, figure_name, None)
+            views = ["gains", "heating", "electricity", "heating_electricity"]
+            titles = ["COP improvement", "Stable-heating duration",
+                      "Predicted event electricity", "Duration and electricity"]
+            combined = decision_view == "operations"
+            if combined:
+                plt.rcParams["font.size"] = 8.5
+                figure, axes = plt.subplots(2, 2, figsize=(7.2, 5.0), layout="constrained")
+                figure.get_layout_engine().set(w_pad=0.08, h_pad=0.05, wspace=0.04, hspace=0.08)
+                axes = axes.flat
+            else:
+                figure, axis = plt.subplots(figsize=(7.2, 3.5), layout="constrained")
+                axes = [axis]
+                views = [decision_view]
+            for index, (axis, view) in enumerate(zip(axes, views, strict=True)):
+                source, metric_names, figure_name = stopping_change_source(metrics, view)
+                source.to_csv(output / f"{figure_name}.csv", index=False)
+                plot_stopping_change(axis, source, metric_names, view)
+                if combined:
+                    axis.set_title(f"({chr(97 + index)}) {titles[index]}",
+                                   loc="left", fontsize=9, fontweight="bold", pad=7)
+            name = "operation_results" if combined else figure_name
+            save(figure, name, None, formats=("png", "pdf"))
             return
         if decision_view == "paired":
             seeds = [s for s in [42, 2026, 1010] if s in metrics.seed.unique()]

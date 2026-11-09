@@ -343,6 +343,8 @@ def render_frost_overlap(
     available_only=False,
     grade_scale="reference",
     render_cohorts=None,
+    dataset=None,
+    experiment_end=None,
 ):
     """Current COP and native grades through the shared two-panel overlap template."""
     from dataset_tools import DatasetLoader
@@ -365,6 +367,7 @@ def render_frost_overlap(
                 "slingshot",
                 "mst_polyline",
                 "mst_guided_visual_segments",
+                "offline_rate_constrained_polyline",
             ]
         ).all()
     ):
@@ -389,6 +392,8 @@ def render_frost_overlap(
                 "Vertex grades support native Slingshot coverage and observed COP without images"
             )
         geometry_source = Path(settings.get("geometry_source", progression.parent))
+        if not geometry_source.is_absolute():
+            geometry_source = PROJECT / geometry_source
         vertices = pd.read_csv(geometry_source / "trajectory_vertices.csv").phase.to_numpy()
         frames["reference_index"] = vertex_grades(frames.visual_frost_score, vertices)
         output.mkdir(parents=True, exist_ok=True)
@@ -403,6 +408,8 @@ def render_frost_overlap(
         source_label = (
             f"Native Harmony + Slingshot MST · {len(vertices)} visual grades · arc midpoints"
         )
+        if settings.get("method") == "offline_fixed_grid_rate_constrained_least_squares":
+            source_label += " · offline sequence estimate"
         (output / "run_settings.json").write_text(
             json.dumps(
                 dict(
@@ -416,35 +423,47 @@ def render_frost_overlap(
             )
             + "\n"
         )
-    decisions = pd.read_csv(source / "candidate_decisions.csv", low_memory=False)
-    source_settings = json.loads((source / "run_settings.json").read_text())
-    quality = None
-    options = {}
-    if admission_settings is not None:
-        admission = json.loads(admission_settings.read_text())
-        assert (
-            Path(admission["decisions"]).resolve() == (source / "candidate_decisions.csv").resolve()
-        )
-        quality = pd.read_csv(admission["quality"])
-        options = {
-            key: admission[key]
-            for key in [
-                "exclude_rb",
-                "minimum_terminal_decline",
-                "rb_minimum_terminal_decline",
-                "input_rule",
-                "cohort_rule",
-                "excluded_cycles",
-                "maximum_per_setpoint",
-                "post_near_minutes_by_setpoint",
+    if dataset is not None:
+        from image_models.cycle_selection import screen_published_cycles
+
+        loader = DatasetLoader(dataset)
+        screening = screen_published_cycles(dataset, "front")
+        decisions, _, _ = loader.load_screening_inputs("front")
+        if experiment_end is not None:
+            screening = screening.loc[screening.experiment_id.le(experiment_end)].copy()
+        missing = set(screening.loc[screening.selected, "cycle_name"]) - set(frames.cycle_name)
+        if missing:
+            raise ValueError(f"Saved frost trajectory is missing selected cycles: {sorted(missing)}")
+    else:
+        decisions = pd.read_csv(source / "candidate_decisions.csv", low_memory=False)
+        source_settings = json.loads((source / "run_settings.json").read_text())
+        quality = None
+        options = {}
+        if admission_settings is not None:
+            admission = json.loads(admission_settings.read_text())
+            assert (
+                Path(admission["decisions"]).resolve() == (source / "candidate_decisions.csv").resolve()
+            )
+            quality = pd.read_csv(admission["quality"])
+            options = {
+                key: admission[key]
+                for key in [
+                    "exclude_rb",
+                    "minimum_terminal_decline",
+                    "rb_minimum_terminal_decline",
+                    "input_rule",
+                    "cohort_rule",
+                    "excluded_cycles",
+                    "maximum_per_setpoint",
+                    "post_near_minutes_by_setpoint",
+                ]
+                if key in admission
+            }
+            options["maximum_interpolated_fraction"] = admission["limits"][
+                "maximum_interpolated_fraction"
             ]
-            if key in admission
-        }
-        options["maximum_interpolated_fraction"] = admission["limits"][
-            "maximum_interpolated_fraction"
-        ]
-    loader = DatasetLoader(Path(source_settings["dataset"]))
-    screening = screen_cv_cycles(decisions, loader.list_cycles(), quality=quality, **options)
+        loader = DatasetLoader(Path(source_settings["dataset"]))
+        screening = screen_cv_cycles(decisions, loader.list_cycles(), quality=quality, **options)
     output.mkdir(parents=True, exist_ok=True)
     screening.to_csv(output / "cycle_screening.csv", index=False)
     names = set(screening.loc[screening.selected, "cycle_name"])

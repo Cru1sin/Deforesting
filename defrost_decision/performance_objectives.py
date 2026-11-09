@@ -80,18 +80,13 @@ def calculate_cycle_cop(
     )
 
 
-def _connected_basin(
+def _near_optimal_interval(
     result: pd.DataFrame, name: str, optimum: int, eligible: pd.Series, percent: int
 ) -> tuple[pd.Timestamp, pd.Timestamp, float]:
     values = result[name]
     threshold = float(values.iloc[optimum]) - abs(float(values.iloc[optimum])) * percent / 100
-    within = eligible & values.ge(threshold)
-    left = right = optimum
-    while left and bool(within.iloc[left - 1]):
-        left -= 1
-    while right + 1 < len(result) and bool(within.iloc[right + 1]):
-        right += 1
-    start, end = result.loc[[left, right], "candidate_defrost_time"].map(pd.Timestamp)
+    times = pd.to_datetime(result.loc[eligible & values.ge(threshold), "candidate_defrost_time"])
+    start, end = times.min(), times.max()
     return start, end, (end - start).total_seconds() / 60
 
 
@@ -101,8 +96,13 @@ def add_single_objective_optima(
     *,
     selection_mask=None,
 ) -> pd.DataFrame:
-    """Add each objective's own optimum and connected near-optimal basins."""
+    """Select each objective and cover its near-optimal actions with one interval.
+
+    Interior dips or invalid measurements do not split the interval; they retain
+    their original values and eligibility. Boundaries use only selectable actions.
+    """
     result = objectives.copy()
+    result["near_optimal_interval_rule"] = "cover_all_near_optimal_actions"
     for name in names:
         result[f"{name}_t_star"] = pd.NaT
         for percent in (1, 2, 5):
@@ -118,7 +118,7 @@ def add_single_objective_optima(
         )
         result[f"{name}_t_star"] = result.loc[optimum, "candidate_defrost_time"]
         for percent in (1, 2, 5):
-            start, end, width = _connected_basin(result, name, optimum, eligible, percent)
+            start, end, width = _near_optimal_interval(result, name, optimum, selectable, percent)
             result[f"{name}_basin_{percent}pct_start"] = start
             result[f"{name}_basin_{percent}pct_end"] = end
             result[f"{name}_basin_{percent}pct_width_minutes"] = width

@@ -6,6 +6,52 @@ import pandas as pd
 import pytest
 
 
+def test_operation_panels_preserve_seed_ranges_and_black_axes(tmp_path, monkeypatch):
+    from matplotlib.colors import to_rgba
+    from matplotlib.figure import Figure
+    from plots.external_policy import render_stopping_results
+
+    rows = []
+    for cycle in range(101):
+        for seed, delta in [(42, -0.02), (1010, 0.04), (2026, 0.10)]:
+            rows.append(dict(
+                cycle_name=f"cycle_{cycle:03d}", seed=seed,
+                rb_cop=2.0, selected_cop=2.0 + delta,
+                delta_cop=delta, gain_vs_rb_pct=50 * delta,
+                rb_heating_duration_minutes=40.0,
+                heating_duration_minutes=40.0 + 100 * delta,
+                defrost_electricity_change_kwh=delta / 10,
+                defrost_electricity_change_pct=100 * delta,
+            ))
+    pd.DataFrame(rows).to_csv(tmp_path / "cycle_results.csv", index=False)
+    figures = []
+    monkeypatch.setattr(Figure, "savefig", lambda fig, *a, **kw: figures.append(fig))
+    render_stopping_results(tmp_path, decision_view="operations")
+    figure = figures[0]
+    assert len(figure.axes) == 7  # Four panels, three with a second y-axis.
+    assert [ax.get_title(loc="left")[:3] for ax in figure.axes[:4]] == [
+        "(a)", "(b)", "(c)", "(d)"
+    ]
+    for axis in figure.axes[:4]:
+        assert 1.05 <= axis.bbox.width / axis.bbox.height <= 1.6
+    for axis in figure.axes:
+        labels = [axis.xaxis.label, axis.yaxis.label,
+                  *axis.get_xticklabels(), *axis.get_yticklabels()]
+        assert all(to_rgba(label.get_color()) == to_rgba("black") for label in labels)
+        assert all(spine.get_edgecolor() == to_rgba("black")
+                   for spine in axis.spines.values())
+    source = pd.read_csv(tmp_path / "Fig2e_heating_electricity_relationship.csv")
+    assert len(source) == 101
+    for metric, expected in [
+        ("stable_heating_increase_minutes", [4.0, -2.0, 10.0]),
+        ("stable_heating_increase_pct", [10.0, -5.0, 25.0]),
+        ("defrost_electricity_change_wh", [4.0, -2.0, 10.0]),
+        ("defrost_electricity_change_pct", [4.0, -2.0, 10.0]),
+    ]:
+        for statistic, value in zip(["mean", "minimum", "maximum"], expected):
+            np.testing.assert_allclose(source[f"{statistic}_{metric}"], value)
+
+
 def test_camera_diagnostics_preserve_cop_ratios_and_disconnected_near_sets(tmp_path, monkeypatch):
     import pickle
     from types import SimpleNamespace
@@ -271,7 +317,7 @@ import matplotlib.pyplot as plt
 from plots.defrost_decision import match_decision_rgb_images
 
 
-def test_effective_screening_plot_counts_extrapolated_max_and_disjoint_near_sets(
+def test_effective_screening_plot_counts_extrapolated_max_and_continuous_intervals(
     monkeypatch, tmp_path
 ):
     import plots.defrost_decision as renderer
@@ -355,8 +401,10 @@ def test_effective_screening_plot_counts_extrapolated_max_and_disjoint_near_sets
     right = _plot_effective_cop_panel(
         ax, plotted, times[0], [], full_near_sets=captured["full_near_sets"]
     )
-    # Each 1/2/5% set has two components separated by a low-COP point.
-    assert len(ax.patches) == 6
+    # Each interval spans the low-COP point between the two qualifying times.
+    assert len(ax.patches) == 3
+    assert plotted.cycle_cop_basin_1pct_start.eq(times[1]).all()
+    assert plotted.cycle_cop_basin_1pct_end.eq(times[3]).all()
     assert np.nanmax(right.lines[1].get_ydata()) == pytest.approx(100.0)
     assert np.nanmax(right.lines[0].get_ydata()) == pytest.approx(99.5)
     assert right.lines[1].get_linestyle() == "--"  # Extrapolation remains dashed.
@@ -367,7 +415,7 @@ def test_effective_screening_plot_counts_extrapolated_max_and_disjoint_near_sets
         ax, plotted, times[0], [], full_near_sets=True, connected_near_sets=True
     )
     assert len(ax.patches) == 3  # One connected interval for each 1/2/5% band.
-    assert all("连片近优" in patch.get_label() for patch in ax.patches)
+    assert all("连续近优区间" in patch.get_label() for patch in ax.patches)
     assert not plotted.cycle_cop_eligible.iloc[2]  # Shading never imputes a COP value.
     plt.close(fig)
 

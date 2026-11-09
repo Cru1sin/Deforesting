@@ -52,7 +52,7 @@ def load_native_frost_frames(progression=DEFAULT_FROST_PROGRESSION):
 
 
 def render_current_decision_cycle(
-    decisions, loader, output_path, *, images=None, near_set_rule="exact", frost_frames=None
+    decisions, loader, output_path, *, images=None, frost_frames=None
 ):
     from defrost_decision.performance_objectives import calculate_cycle_cop, select_cycle_optimum
 
@@ -93,8 +93,7 @@ def render_current_decision_cycle(
             else "Effective heating COP maximum"
         ),
         parallel_curve=decisions,
-        full_near_sets=True,
-        connected_near_sets=near_set_rule == "connected",
+        full_near_sets=False,
         frost_frames=frost_frames,
     )
 
@@ -551,8 +550,12 @@ def _plot_effective_cop_panel(
                 alpha=alpha,
                 label=(
                     (
-                        f"连片近优 ({percent}%)"
-                        if connected_near_sets
+                        f"连续近优区间 ({percent}%)"
+                        if connected_near_sets or (
+                            not full_near_sets
+                            and first.get("near_optimal_interval_rule")
+                            == "cover_all_near_optimal_actions"
+                        )
                         else f"Within {percent}% of best COP"
                     )
                     if span_index == 0

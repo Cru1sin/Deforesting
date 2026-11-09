@@ -2,7 +2,7 @@
 
 数据预处理 → 除霜电耗模型 → COP 与最优时机 → 视觉决策模型。四个阶段可使用已有输入独立验收。
 
-[中文技术文档（LaTeX）](docs/technical_report.tex) 说明研究方法、四阶段操作与结果判读；[编译方法](docs/README.md)。
+[论文（LaTeX）](docs/paper.tex) 说明研究方法与实验结果；[技术报告（LaTeX）](docs/technical_report.tex) 提供快速演示、四阶段操作与结果判读。[编译方法](docs/README.md)。
 
 **GitHub 仓库仅含源码、测试与说明，不含 Dataset、DINO 特征或模型权重。** 下述演示需要另行放好交付数据；只有源码时可先阅读各阶段或运行不依赖真实数据的测试。
 
@@ -81,7 +81,7 @@ uv run --no-sync python optimal_defrost_time.py --cycles frost_cycle_000327 \
 | `t_star`、`COP_eff_selected` | 最优时刻 **16:36:04**，COP **1.800238** |
 | `t_RB`、`COP_eff_RB` | RB 时刻 **17:27:41**，COP **1.781830** |
 | `COP_relative_change_pct` | 相对 RB 的 COP 提升，约 **1.0331%** |
-| `cycle_cop_basin_1pct_start/end` | 连续近优区间 **16:24:24–17:16:54** |
+| `cycle_cop_basin_1pct_start/end` | 连续近优区间 **16:24:24–17:24:34** |
 
 再看同目录 `candidate_decisions.csv`：每行一个候选时刻。用 `cycle_cop_eligible` 与 `on_action_grid` 判断可选点，`is_selected` 标记最终选点。
 
@@ -97,17 +97,27 @@ uv run --no-sync python optimal_defrost_time.py --cycles frost_cycle_000327 \
 | `checkpoint_summary.csv` | 当前权重的评价汇总 |
 | `cycle_screening.csv` | 请求实验中各循环是否准入及原因 |
 
-当前示例相对 RB 提升约 **0.7205%**。第三阶段给出参考最优时刻，第四阶段给出模型预测时刻，二者不必相同。视觉 CDF 在首末近优点间过渡，与 COP 峰值连续区间分开定义。
+当前示例相对 RB 提升约 **0.7205%**。第三阶段给出参考最优时刻，第四阶段给出模型预测时刻，二者不必相同。视觉 CDF 在已发布动作网格的连续近优区间内由 0 线性增加到 1。
 
 更换权重或实验：`python main_defrosting_model.py evaluate --checkpoint <权重> --experiments <实验>`。机位自动读取，训练实验重叠或显式机位错配会拒绝评价。
 
 重新训练才执行 `uv run --no-sync python main_defrosting_model.py train`，默认输出 `output/90_复现材料/01_视觉模型训练/主模型/`。[模型、默认配置与支线](image_models/README.md)。
 
+## 霜层等级分析（补充）
+
+读取已保存的原生 Harmony＋Slingshot 轨迹与离线序列估计，重新计算近优覆盖率和平均归一化 COP：
+
+```bash
+uv run --no-sync python -m image_models.frost_grades
+```
+
+默认读取数据集与交付轨迹，结果写入终端显示的 `temp/test/frost_grades_<时间>/`。先看 `maximum_overlap_all.csv`（等级 10、11 各覆盖 88/101 个循环）和 `observed_normalized_cop_support.csv`（总体最高均值为 99.47%，等级 10）。加 `--plot` 可绘制统计图，无需原图。方法、输入与结果说明见技术报告的“霜层等级分析”。
+
 ## 交付与路径
 
 - `dataset/`：三个根级元数据文件、`cycles/`、`cycles_RB/`、`cycles_original/`、完整 `training_data/`、`image_DINO_feature/`、`priors/rb_reference.csv`、所需 Ridge 模型。
 - 权重：保留首部链接中的相对位置。Dataset 和权重需另附，Git 源码不包含完整数据。
-- 结霜图像只交付 DINO 特征；不打包 `images/`、照片索引、原图链接或外接盘内容。不能只复制一个演示循环，Loader 会读取该机位完整发布输入。
+- 结霜图像只交付 DINO 特征（视觉决策的 CLS 与霜层分析的图像块平均特征）；不打包 `images/`、照片索引、原图链接或外接盘内容。不能只复制一个演示循环，Loader 会读取该机位完整发布输入。
 - 默认路径以项目根目录为准；显式相对路径以当前工作目录为准。主入口打印实际目标，`--output` 指定本次目录。
 
 ## 继续读哪里
@@ -123,4 +133,4 @@ uv run --no-sync python optimal_defrost_time.py --cycles frost_cycle_000327 \
 | [tests](tests/README.md)、[tools](tools/README.md) | 自动测试、研究核验与结果维护 |
 | [Dataset](dataset/README.md)、[数据格式](DATASET_FORMAT.md)、[科学定义](docs/README.md) | 文件含义、发布步骤与公式 |
 
-霜态与最优时机的关系属于补充分析，不是主线。`research/` 保存论文和汇报，`archive/` 保存旧工程材料；两者及 `temp/` 均不属于演示必需内容。
+霜层等级与最优时机的关系属于补充分析，不是主线。`research/` 保存论文和汇报，`archive/` 保存旧工程材料；两者及 `temp/` 均不属于演示必需内容。

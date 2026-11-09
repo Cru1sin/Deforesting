@@ -404,8 +404,7 @@ def render_model_comparison(source_csv, layout="ranked", metric="H_RB"):
         fig.text(
             0.025,
             0.065,
-            "Frozen DINOv2 + 7 numerical inputs · 101 cycles · 29 experiment-level LOEO folds · "
-            + ("3 seeds" if repeated else "single seed"),
+            "Frozen DINOv2 + 7 numerical inputs · 101 cycles · 29 experiment-level LOEO folds",
             fontsize=6.3,
         )
         fig.text(
@@ -413,7 +412,7 @@ def render_model_comparison(source_csv, layout="ranked", metric="H_RB"):
             0.035,
             "CDF ramp loss; first CDF ≥ 0.5. "
             + (
-                "Filled: mean ± sample SD; open: seeds 42, 1010, 2026."
+                "Filled: mean ± sample SD; open: individual runs."
                 if repeated
                 else "Points show estimates. Architecture labels give hidden widths."
             ),
@@ -652,7 +651,7 @@ def render_stopping_evidence(output):
             fig.text(
                 benchmark_box.x0,
                 0.882,
-                "Same three seeds / inner epoch rule · mean ± seed SD",
+                "Common inner epoch rule · mean ± sample SD",
                 fontsize=6.3,
                 color="#686873",
             )
@@ -661,7 +660,7 @@ def render_stopping_evidence(output):
                 ax,
                 "b",
                 "Tuned model comparison",
-                "Same three seeds / inner epoch rule · mean ± seed SD",
+                "Common inner epoch rule · mean ± sample SD",
             )
         if width_path.exists():
             widths = pd.read_csv(width_path).sort_values("hidden_width")
@@ -694,7 +693,7 @@ def render_stopping_evidence(output):
             capacity.tick_params(labelsize=5.8, pad=2)
             capacity.yaxis.label.set_size(6)
             capacity.set_title(
-                "LSTM width · 99 training-side cycles · seed 0",
+                "LSTM width · 99 training-side cycles",
                 loc="left",
                 fontsize=6,
                 pad=8,
@@ -787,15 +786,15 @@ def render_stopping_evidence(output):
         detail = (
             (
                 (
-                    "Full/reset: 3-seed LOEO · other deletions: quick screen"
+                    "Full/reset: LOEO · other deletions: quick screen"
                     if components.evaluation_scope.eq("full_experiment_loeo").sum() > 1
-                    else "Full: 3-seed LOEO · deletions: seed 42, 40-epoch quick screen"
+                    else "Full: LOEO · deletions: 40-epoch quick screen"
                 )
                 if quick
-                else "All: 29-fold LOEO · full: 3 seeds · deletions: seed 42"
+                else "All: 29-fold LOEO · full: repeated runs · deletions: one run"
             )
             if absolute
-            else f"Seed {int(components.seed.iloc[0])} · same LSTM25 recipe · 95% experiment-block CI"
+            else "Same LSTM25 recipe · 95% experiment-block CI"
         )
         panel(ax, "c", "LSTM component ablations", detail)
         ax = fig.add_subplot(grid[1, 1])
@@ -819,7 +818,7 @@ def render_stopping_evidence(output):
             ax,
             "d",
             "Optimization trajectories",
-            "Inner validation only · median / IQR across folds and seeds",
+            "Inner validation only · median / IQR across folds and runs",
         )
         FigureCanvasAgg(fig).draw()
         canvas = fig.bbox

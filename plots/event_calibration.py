@@ -179,7 +179,7 @@ def render_calibration_figures(
                     1,
                     len(targets),
                     squeeze=False,
-                    figsize=((89 if len(targets) == 1 else 183) / 25.4, 85 / 25.4),
+                    figsize=((89 if len(targets) == 1 else 183) / 25.4, 110 / 25.4),
                 )
                 for index, (target, axis) in enumerate(zip(targets, axes[0], strict=True)):
                     valid = rows.dropna(subset=[target, f"predicted_{target}"])
@@ -263,15 +263,14 @@ def render_calibration_figures(
                             f"\n95th percentile = {100 * relative.quantile(0.95):.2f}%"
                         )
                     axis.text(
-                        0.97,
-                        0.03,
+                        0.5,
+                        -0.24,
                         annotation,
                         transform=axis.transAxes,
-                        va="bottom",
-                        ha="right",
+                        va="top",
+                        ha="center",
                         fontsize=6.5,
-                        linespacing=1.5,
-                        bbox=dict(facecolor="white", edgecolor="none", pad=2),
+                        linespacing=1.25,
                     )
                 figure.legend(
                     *axes[0, 0].get_legend_handles_labels(),
@@ -281,7 +280,7 @@ def render_calibration_figures(
                     fontsize=7,
                     bbox_to_anchor=(0.5, 0),
                 )
-                figure.subplots_adjust(left=0.09, right=0.98, top=0.86, bottom=0.23, wspace=0.35)
+                figure.subplots_adjust(left=0.09, right=0.98, top=0.86, bottom=0.38, wspace=0.35)
                 _export(
                     figure,
                     output / f"event_calibration_{panel}",

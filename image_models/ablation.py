@@ -740,7 +740,7 @@ def publication_results(
         )
         metrics["delta_cop"] = metrics.selected_cop - metrics.rb_cop
         metrics["rb_regret_pct"] = 100 * (1 - metrics.rb_cop / metrics.optimal_cop)
-        if decision_view in ("electricity", "power", "heating_electricity"):
+        if decision_view in ("electricity", "power", "heating_electricity", "operations"):
             from image_models.policy import predicted_defrost_electricity_metrics
 
             reference = pd.read_parquet(
@@ -767,6 +767,7 @@ def publication_results(
             "electricity": "Fig2c_ranked_defrost_electricity_change",
             "power": "Fig2d_ranked_defrost_mean_power_change",
             "heating_electricity": "Fig2e_heating_electricity_relationship",
+            "operations": "operation_results",
             "triptych": "Fig2_decision_benefit",
         }[decision_view]
         render_stopping_results(output, figures=[figure_name], decision_view=decision_view)
@@ -1245,6 +1246,7 @@ def main():
             "electricity",
             "power",
             "heating_electricity",
+            "operations",
         ],
         default="triptych",
     )
